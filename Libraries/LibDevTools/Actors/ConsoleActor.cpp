@@ -75,6 +75,27 @@ void ConsoleActor::handle_message(Message const& message)
         return;
     }
 
+    // [Non-standard] TH8 script evaluation via DevTools console.
+    if (message.type == "evaluateTH8Async"sv) {
+        auto text = get_required_parameter<String>(message, "text"sv);
+        if (!text.has_value())
+            return;
+
+        auto result_id = MUST(String::formatted("{}-{}", name(), m_execution_id++));
+
+        response.set("resultID"sv, result_id);
+        send_response(message, move(response));
+
+        if (auto tab = m_tab.strong_ref()) {
+            devtools().delegate().evaluate_th8(tab->description(), *text,
+                async_handler({}, [result_id, input = *text](auto&, auto result, auto& response) {
+                    received_console_result(response, move(result_id), move(input), move(result));
+                }));
+        }
+
+        return;
+    }
+
     send_unrecognized_packet_type_error(message);
 }
 

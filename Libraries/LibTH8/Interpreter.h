@@ -1,0 +1,71 @@
+/*
+ * Copyright (c) 2026, Joe Mistachkin <joe@mistachkin.com>
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+
+#pragma once
+
+#include <AK/Error.h>
+#include <AK/Noncopyable.h>
+#include <AK/NonnullOwnPtr.h>
+#include <AK/StringView.h>
+#include <th8.h>
+
+namespace TH8 {
+
+class Interpreter {
+    AK_MAKE_NONCOPYABLE(Interpreter);
+    AK_MAKE_NONMOVABLE(Interpreter);
+
+public:
+    static ErrorOr<NonnullOwnPtr<Interpreter>> create(Th8_Platform const&);
+    ~Interpreter();
+
+    Th8_Interp* raw() { return m_interp; }
+    Th8_Interp const* raw() const { return m_interp; }
+
+    int evaluate(StringView script, StringView name = {});
+    StringView result_string() const;
+
+    void set_step_limit(i64 limit);
+    i64 step_limit() const;
+
+    void set_memory_limit(size_t limit);
+    size_t memory_limit() const;
+
+    void freeze();
+    void thaw();
+
+    bool is_canceled() const;
+    void cancel(StringView message = {});
+    void reset_cancel();
+
+    int create_command(StringView name, Th8_CommandProc proc, void* context,
+        void (*destructor)(Th8_Interp*, void*) = nullptr,
+        void* (*copy)(Th8_Interp*, void*) = nullptr);
+
+    int set_variable(StringView name, StringView value);
+    int get_variable(StringView name);
+    bool variable_exists(StringView name);
+
+    // Script debugging.
+    int set_debug_callback(Th8_DebugProc callback, void* context);
+    int set_breakpoint(StringView script, int line);
+    int clear_breakpoint(int breakpoint_id);
+    int clear_all_breakpoints();
+    int set_step_mode(int mode);
+    int step_mode() const;
+    int frame_count() const;
+    int frame_info(int frame_index, char const** proc_name, size_t* proc_length,
+        char const** script_name, size_t* script_length, int* line) const;
+    int eval_at_frame(int frame_index, StringView script);
+    bool is_suspended() const;
+
+private:
+    explicit Interpreter(Th8_Interp*);
+
+    Th8_Interp* m_interp;
+};
+
+}

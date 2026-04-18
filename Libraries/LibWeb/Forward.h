@@ -701,6 +701,8 @@ class BrowsingContext;
 class BrowsingContextGroup;
 class CanvasRenderingContext2D;
 class ClassicScript;
+class TH8Context;
+class TH8Script;
 class CloseEvent;
 class CloseWatcher;
 class CloseWatcherManager;

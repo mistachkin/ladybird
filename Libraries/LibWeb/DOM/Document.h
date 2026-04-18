@@ -568,6 +568,10 @@ public:
     GC::Ptr<HTML::HTMLScriptElement> current_script() const { return m_current_script.ptr(); }
     void set_current_script(Badge<HTML::HTMLScriptElement>, GC::Ptr<HTML::HTMLScriptElement> script) { m_current_script = move(script); }
 
+    // [Non-standard] TH8 scripting language support.
+    HTML::TH8Context& ensure_th8_context();
+    GC::Ptr<HTML::TH8Context> th8_context() const { return m_th8_context; }
+
     u32 ignore_destructive_writes_counter() const { return m_ignore_destructive_writes_counter; }
     void increment_ignore_destructive_writes_counter() { m_ignore_destructive_writes_counter++; }
     void decrement_ignore_destructive_writes_counter() { m_ignore_destructive_writes_counter--; }
@@ -1261,6 +1265,9 @@ private:
 
     GC::Ptr<DOMImplementation> m_implementation;
     GC::Ptr<HTML::HTMLScriptElement> m_current_script;
+
+    // [Non-standard] TH8 scripting language context.
+    GC::Ptr<HTML::TH8Context> m_th8_context;
 
     bool m_should_invalidate_styles_on_attribute_changes { true };
 

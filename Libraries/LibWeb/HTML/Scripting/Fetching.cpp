@@ -29,6 +29,7 @@
 #include <LibWeb/HTML/HTMLScriptElement.h>
 #include <LibWeb/HTML/PotentialCORSRequest.h>
 #include <LibWeb/HTML/Scripting/ClassicScript.h>
+#include <LibWeb/HTML/Scripting/TH8Script.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Scripting/Fetching.h>
 #include <LibWeb/HTML/Scripting/ModuleScript.h>
@@ -459,6 +460,43 @@ void fetch_classic_script(GC::Ref<HTMLScriptElement> element, URL::URL const& ur
             // 8. Run onComplete given script.
             on_complete->function()(script);
         }
+    };
+
+    Fetch::Fetching::fetch(element->realm(), request, Fetch::Infrastructure::FetchAlgorithms::create(vm, move(fetch_algorithms_input)));
+}
+
+// [Non-standard] Fetch a TH8 script.
+// Structurally identical to fetch_classic_script but creates a TH8Script from the fetched source text
+// instead of a ClassicScript. No off-thread parsing is needed since TH8 evaluates at run-time.
+void fetch_th8_script(GC::Ref<HTMLScriptElement> element, URL::URL const& url, EnvironmentSettingsObject& settings_object, ScriptFetchOptions options, CORSSettingAttribute cors_setting, String character_encoding, OnFetchScriptComplete on_complete)
+{
+    auto& realm = element->realm();
+    auto& vm = realm.vm();
+
+    auto request = create_potential_CORS_request(vm, url, Fetch::Infrastructure::Request::Destination::Script, cors_setting);
+    request->set_client(&settings_object);
+    request->set_initiator_type(Fetch::Infrastructure::Request::InitiatorType::Script);
+    set_up_classic_script_request(*request, options);
+
+    Fetch::Infrastructure::FetchAlgorithms::Input fetch_algorithms_input {};
+    fetch_algorithms_input.process_response_consume_body = [&settings_object, character_encoding = move(character_encoding), on_complete = move(on_complete)](auto response, auto body_bytes) {
+        response = response->unsafe_response();
+
+        if (body_bytes.template has<Empty>() || body_bytes.template has<Fetch::Infrastructure::FetchAlgorithms::ConsumeBodyFailureTag>() || !Fetch::Infrastructure::is_ok_status(response->status())) {
+            on_complete->function()(nullptr);
+            return;
+        }
+
+        auto potential_mime_type_for_encoding = Fetch::Infrastructure::extract_mime_type(response->header_list());
+        auto extracted_character_encoding = Fetch::Infrastructure::legacy_extract_an_encoding(potential_mime_type_for_encoding, character_encoding);
+
+        auto fallback_decoder = TextCodec::decoder_for(extracted_character_encoding);
+        VERIFY(fallback_decoder.has_value());
+        auto source_text = TextCodec::convert_input_to_utf8_using_given_decoder_unless_there_is_a_byte_order_mark(*fallback_decoder, body_bytes.template get<ByteBuffer>()).release_value_but_fixme_should_propagate_errors();
+
+        auto response_url = response->url().value_or({});
+        auto script = TH8Script::create(response_url.to_byte_string(), source_text, settings_object, response_url);
+        on_complete->function()(script);
     };
 
     Fetch::Fetching::fetch(element->realm(), request, Fetch::Infrastructure::FetchAlgorithms::create(vm, move(fetch_algorithms_input)));

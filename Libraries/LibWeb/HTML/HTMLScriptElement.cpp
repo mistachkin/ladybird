@@ -19,6 +19,7 @@
 #include <LibWeb/HTML/HTMLScriptElement.h>
 #include <LibWeb/HTML/Scripting/ClassicScript.h>
 #include <LibWeb/HTML/Scripting/Fetching.h>
+#include <LibWeb/HTML/Scripting/TH8Script.h>
 #include <LibWeb/HTML/Scripting/ImportMapParseResult.h>
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/HTML/Window.h>
@@ -187,6 +188,23 @@ void HTMLScriptElement::execute_script()
         // 1. Register an import map given el's relevant global object and el's result.
         m_result.get<GC::Ref<ImportMapParseResult>>()->register_import_map(as<Window>(relevant_global_object(*this)));
     }
+    // [Non-standard] -> "th8"
+    else if (m_script_type == ScriptType::TH8) {
+        auto old_current_script = document->current_script();
+        if (!is<DOM::ShadowRoot>(root()))
+            document->set_current_script({}, this);
+        else
+            document->set_current_script({}, nullptr);
+
+        if (m_from_an_external_file)
+            dbgln_if(HTML_SCRIPT_DEBUG, "HTMLScriptElement: Running TH8 script {}", attribute(HTML::AttributeNames::src).value_or(String {}));
+        else
+            dbgln_if(HTML_SCRIPT_DEBUG, "HTMLScriptElement: Running inline TH8 script");
+
+        (void)as<TH8Script>(*m_result.get<GC::Ref<Script>>()).run();
+
+        document->set_current_script({}, old_current_script);
+    }
 
     // 7. Decrement the ignore-destructive-writes counter of document, if it was incremented in the earlier step.
     if (incremented_destructive_writes_counter)
@@ -271,6 +289,12 @@ void HTMLScriptElement::prepare_script()
     else if (script_block_type.equals_ignoring_ascii_case("importmap"sv)) {
         // then set el's type to "importmap".
         m_script_type = ScriptType::ImportMap;
+    }
+    // [Non-standard] TH8 scripting language support.
+    else if (script_block_type.equals_ignoring_ascii_case("text/th8"sv)
+        || script_block_type.equals_ignoring_ascii_case("text/tcl"sv)
+        || script_block_type.equals_ignoring_ascii_case("th8"sv)) {
+        m_script_type = ScriptType::TH8;
     }
     // FIXME: 13. Otherwise, if the script block's type string is an ASCII case-insensitive match for the string "speculationrules", then set el's type to "speculationrules".
     // 14. Otherwise, return. (No script is executed, and el's type is left as null.)
@@ -468,6 +492,12 @@ void HTMLScriptElement::prepare_script()
             // Fetch a classic script given url, settings object, options, classic script CORS setting, encoding, and onComplete.
             fetch_classic_script(*this, *url, settings_object, move(options), classic_script_cors_setting, encoding.release_value(), on_complete);
         }
+        // [Non-standard] -> "th8"
+        // Fetch the TH8 script source. Uses the same transport as classic scripts but creates
+        // a TH8Script instead of a ClassicScript from the fetched body.
+        else if (m_script_type == ScriptType::TH8) {
+            fetch_th8_script(*this, *url, settings_object, move(options), classic_script_cors_setting, encoding.release_value(), on_complete);
+        }
         // -> "module"
         else if (m_script_type == ScriptType::Module) {
             // If el does not have an integrity attribute, then set options's integrity metadata to the result of resolving a module integrity metadata with url and settings object.
@@ -535,11 +565,17 @@ void HTMLScriptElement::prepare_script()
             // 2. Mark as ready el given result.
             mark_as_ready(Result(move(result)));
         }
+        // [Non-standard] -> "th8"
+        else if (m_script_type == ScriptType::TH8) {
+            auto script = TH8Script::create(m_document->url().to_byte_string(), source_text_utf8, settings_object, base_url);
+            mark_as_ready(Result(move(script)));
+        }
         // FIXME: -> "speculationrules"
     }
 
     // 36. If el's type is "classic" and el has a src attribute, or el's type is "module":
-    if ((m_script_type == ScriptType::Classic && has_attribute(HTML::AttributeNames::src)) || m_script_type == ScriptType::Module) {
+    // [Non-standard] Also include TH8 external scripts.
+    if ((m_script_type == ScriptType::Classic && has_attribute(HTML::AttributeNames::src)) || m_script_type == ScriptType::Module || (m_script_type == ScriptType::TH8 && has_attribute(HTML::AttributeNames::src))) {
         // 1. Assert: el's result is "uninitialized".
         // FIXME: I believe this step to be a spec bug, and it should be removed: https://github.com/whatwg/html/issues/8534
 

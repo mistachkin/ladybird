@@ -156,6 +156,7 @@
 #include <LibWeb/HTML/Scripting/ClassicScript.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Scripting/ExceptionReporter.h>
+#include <LibWeb/HTML/Scripting/TH8Context.h>
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/HTML/Scripting/WindowEnvironmentSettingsObject.h>
 #include <LibWeb/HTML/SharedResourceRequest.h>
@@ -667,6 +668,7 @@ void Document::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_autofocus_candidates);
     visitor.visit(m_implementation);
     visitor.visit(m_current_script);
+    visitor.visit(m_th8_context);
     visitor.visit(m_associated_inert_template_document);
     visitor.visit(m_appropriate_template_contents_owner_document);
     visitor.visit(m_pending_parsing_blocking_script);
@@ -4007,6 +4009,13 @@ DOMImplementation* Document::implementation()
     if (!m_implementation)
         m_implementation = DOMImplementation::create(*this);
     return m_implementation;
+}
+
+HTML::TH8Context& Document::ensure_th8_context()
+{
+    if (!m_th8_context)
+        m_th8_context = HTML::TH8Context::create(heap(), *this);
+    return *m_th8_context;
 }
 
 // https://html.spec.whatwg.org/multipage/interaction.html#dom-document-hasfocus
