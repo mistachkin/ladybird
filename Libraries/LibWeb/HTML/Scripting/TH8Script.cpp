@@ -44,7 +44,7 @@ JS::Completion TH8Script::run(RethrowErrors rethrow_errors)
         return JS::normal_completion(JS::js_undefined());
 
     // Get or create the document's TH8 interpreter context.
-    auto* responsible_document = settings.responsible_document();
+    auto responsible_document = settings.responsible_document();
     if (!responsible_document)
         return JS::normal_completion(JS::js_undefined());
 

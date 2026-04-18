@@ -15,7 +15,7 @@ namespace Web::HTML {
 
 GC_DEFINE_ALLOCATOR(TH8Context);
 
-GC::Ref<TH8Context> TH8Context::create(JS::Heap& heap, DOM::Document& document)
+GC::Ref<TH8Context> TH8Context::create(GC::Heap& heap, DOM::Document& document)
 {
     return heap.allocate<TH8Context>(document);
 }
@@ -30,8 +30,8 @@ TH8Context::~TH8Context() = default;
 
 void TH8Context::initialize_interpreter()
 {
-    auto platform = TH8::create_web_content_platform();
-    auto interpreter_or_error = TH8::Interpreter::create(platform);
+    auto platform = ::TH8::create_web_content_platform();
+    auto interpreter_or_error = ::TH8::Interpreter::create(platform);
     if (interpreter_or_error.is_error()) {
         dbgln("TH8Context: Failed to create interpreter: {}", interpreter_or_error.error());
         return;
@@ -40,8 +40,8 @@ void TH8Context::initialize_interpreter()
     m_interpreter = interpreter_or_error.release_value();
 
     // Apply default resource limits for web content.
-    m_interpreter->set_step_limit(TH8::default_step_limit);
-    m_interpreter->set_memory_limit(TH8::default_memory_limit);
+    m_interpreter->set_step_limit(::TH8::default_step_limit);
+    m_interpreter->set_memory_limit(::TH8::default_memory_limit);
 
     // Create the handle table for DOM object references.
     m_handle_table = make<Web::TH8::HandleTable>(m_document->heap());

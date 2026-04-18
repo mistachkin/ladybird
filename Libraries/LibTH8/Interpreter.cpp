@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/ByteString.h>
 #include <LibTH8/Interpreter.h>
 
 namespace TH8 {
@@ -108,12 +109,12 @@ void Interpreter::reset_cancel()
 
 int Interpreter::create_command(StringView name, Th8_CommandProc proc, void* context,
     void (*destructor)(Th8_Interp*, void*),
-    void* (*copy)(Th8_Interp*, void*))
+    th8_uint64_t* token)
 {
     // Th8_CreateCommand expects a null-terminated string for the command name.
     // StringView may not be null-terminated, so we need a ByteString copy.
     auto name_string = ByteString(name);
-    return Th8_CreateCommand(m_interp, name_string.characters(), proc, context, destructor, copy);
+    return Th8_CreateCommand(m_interp, name_string.characters(), proc, context, destructor, token);
 }
 
 int Interpreter::set_variable(StringView name, StringView value)
@@ -161,7 +162,7 @@ int Interpreter::preload_signing_key(StringView snk_key_blob)
     // Load the .snk key blob into an Th8_RsaKey, then preload it.
     Th8_RsaKey* key = nullptr;
     int rc = Th8_RsaKeyLoad(m_interp,
-        snk_key_blob.characters_without_null_termination(),
+        reinterpret_cast<unsigned char const*>(snk_key_blob.characters_without_null_termination()),
         snk_key_blob.length(), &key);
     if (rc != TH8_OK || !key)
         return TH8_ERROR;

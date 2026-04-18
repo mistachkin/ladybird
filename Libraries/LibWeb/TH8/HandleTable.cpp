@@ -15,25 +15,10 @@ HandleTable::HandleTable(GC::Heap& heap)
 
 ByteString HandleTable::make_handle_string(Bindings::PlatformObject& object, u64 id)
 {
-    auto const* name = object.interface_name();
-    // Use first few chars of interface name as prefix for readability.
-    StringView prefix = "obj"sv;
-    if (name) {
-        StringView full_name { name, strlen(name) };
-        if (full_name.contains("Document"sv))
-            prefix = "doc"sv;
-        else if (full_name.contains("Element"sv))
-            prefix = "elem"sv;
-        else if (full_name.contains("Text"sv))
-            prefix = "text"sv;
-        else if (full_name.contains("Event"sv))
-            prefix = "evt"sv;
-        else if (full_name.contains("Node"sv))
-            prefix = "node"sv;
-        else if (full_name.contains("Window"sv))
-            prefix = "win"sv;
-    }
-    return ByteString::formatted("{}{}", prefix, id);
+    (void)object;
+    // Simple numeric handle — the prefix is determined by the object type
+    // but for simplicity we use a uniform "obj" prefix.
+    return ByteString::formatted("obj{}", id);
 }
 
 ByteString HandleTable::register_handle(Bindings::PlatformObject& object)

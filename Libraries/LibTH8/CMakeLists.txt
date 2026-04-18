@@ -16,7 +16,8 @@ target_include_directories(LibTH8 PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/Vendor>
     $<INSTALL_INTERFACE:include>
 )
-target_link_libraries(LibTH8 PRIVATE LibCore)
+find_package(OpenSSL REQUIRED)
+target_link_libraries(LibTH8 PRIVATE LibCore OpenSSL::SSL OpenSSL::Crypto)
 
 # -----------------------------------------------------------------------
 # TH8 feature configuration for web content scripting.

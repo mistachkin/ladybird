@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <AK/Types.h>
 #include <th8.h>
 
 namespace TH8 {

@@ -5,18 +5,28 @@
  */
 
 #include <AK/ByteString.h>
+#include <AK/Utf16String.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Element.h>
 #include <LibWeb/DOM/Node.h>
 #include <LibWeb/DOM/ParentNode.h>
 #include <LibWeb/DOM/Text.h>
+#include <LibWeb/HTML/HTMLHeadElement.h>
 #include <LibWeb/HTML/Window.h>
+#include <LibWeb/TrustedTypes/TrustedHTML.h>
 #include <LibWeb/TH8/DOMBridge.h>
 #include <LibWeb/TH8/HandleTable.h>
 #include <LibWeb/TH8/TypeConversion.h>
 
 namespace Web::TH8 {
+
+// Helper: clear result to NULL (no result) and return TH8_OK.
+static int result_clear(Th8_Interp* interp)
+{
+    Th8_ClearResult(interp);
+    return TH8_OK;
+}
 
 // Context struct passed to TH8 command callbacks via pCtx.
 struct BridgeContext {
@@ -42,15 +52,12 @@ void register_dom_commands(Th8_Interp* interp, DOM::Document& document, HandleTa
     // Allocate bridge context on the heap; it lives as long as the interpreter.
     auto* ctx = new BridgeContext { &document, &handles, interp };
 
-    // Register the document command.
     Th8_CreateCommand(interp, "dom::document",
         reinterpret_cast<Th8_CommandProc>(document_command), ctx, nullptr, nullptr);
 
-    // Register console commands.
     Th8_CreateCommand(interp, "dom::console",
         reinterpret_cast<Th8_CommandProc>(console_command), ctx, nullptr, nullptr);
 
-    // Register handle release command.
     Th8_CreateCommand(interp, "dom::release",
         reinterpret_cast<Th8_CommandProc>(release_command), ctx, nullptr, nullptr);
 }
@@ -61,8 +68,6 @@ ByteString register_object_command(Th8_Interp* interp, HandleTable& handles, Bin
     if (handle.is_empty())
         return {};
 
-    // Register the handle as a TH8 command using the ensemble dispatch pattern.
-    // The context pointer holds the handle table pointer.
     Th8_CreateCommand(interp, handle.characters(),
         reinterpret_cast<Th8_CommandProc>(object_ensemble_command),
         &handles, nullptr, nullptr);
@@ -73,8 +78,6 @@ ByteString register_object_command(Th8_Interp* interp, HandleTable& handles, Bin
 // ---- Command Implementations ----
 
 // dom::document ?subcommand? ?args...?
-// With no subcommand, returns the document handle.
-// Subcommands: querySelector, querySelectorAll, getElementById, createElement, createTextNode, body, title, head
 static int document_command(Th8_Interp* interp, void* ctx, int argc, char const** argv, size_t* argl)
 {
     auto* bridge = static_cast<BridgeContext*>(ctx);
@@ -82,7 +85,6 @@ static int document_command(Th8_Interp* interp, void* ctx, int argc, char const*
     auto& handles = *bridge->handles;
 
     if (argc < 2) {
-        // Return the document handle itself.
         auto handle = register_object_command(interp, handles, document);
         return set_result_string(interp, handle);
     }
@@ -96,17 +98,16 @@ static int document_command(Th8_Interp* interp, void* ctx, int argc, char const*
         auto result = document.query_selector(selector);
         if (result.is_error())
             return set_error(interp, "querySelector failed"sv);
-        auto element = result.release_value();
-        return set_result_node(interp, handles, element);
+        return set_result_node(interp, handles, result.release_value());
     }
 
     if (subcommand == "getElementById"sv) {
         if (argc < 3)
             return set_error(interp, "wrong # args: should be \"dom::document getElementById id\""sv);
         auto id = flystring_from_th8(argv[2], argl[2]);
-        auto* element = document.get_element_by_id(id);
+        auto element = document.get_element_by_id(id);
         if (!element)
-            return Th8_SetResult(interp, "", 0);
+            return result_clear(interp);
         return set_result_node(interp, handles, element);
     }
 
@@ -114,7 +115,8 @@ static int document_command(Th8_Interp* interp, void* ctx, int argc, char const*
         if (argc < 3)
             return set_error(interp, "wrong # args: should be \"dom::document createElement tagName\""sv);
         auto tag = string_from_th8(argv[2], argl[2]);
-        auto result = document.create_element(tag);
+        Variant<String, DOM::ElementCreationOptions> options { DOM::ElementCreationOptions {} };
+        auto result = document.create_element(tag, options);
         if (result.is_error())
             return set_error(interp, "createElement failed"sv);
         auto element = result.release_value();
@@ -124,28 +126,37 @@ static int document_command(Th8_Interp* interp, void* ctx, int argc, char const*
     if (subcommand == "createTextNode"sv) {
         if (argc < 3)
             return set_error(interp, "wrong # args: should be \"dom::document createTextNode text\""sv);
-        auto text = string_from_th8(argv[2], argl[2]);
-        auto node = document.create_text_node(text);
+        auto text_sv = StringView { argv[2], argl[2] };
+        auto text_utf16 = Utf16String::from_utf8(text_sv);
+        GC::Ref<DOM::Text> node = document.create_text_node(text_utf16);
         return set_result_node(interp, handles, node);
     }
 
     if (subcommand == "body"sv) {
         auto* body = document.body();
-        return set_result_node(interp, handles, body);
+        if (!body)
+            return result_clear(interp);
+        return set_result_node(interp, handles, static_cast<DOM::Node*>(body));
     }
 
     if (subcommand == "head"sv) {
         auto* head = document.head();
-        return set_result_node(interp, handles, head);
+        if (!head)
+            return result_clear(interp);
+        return set_result_node(interp, handles, static_cast<DOM::Node*>(head));
     }
 
     if (subcommand == "title"sv) {
         if (argc >= 3) {
-            auto title = string_from_th8(argv[2], argl[2]);
-            document.set_title(title);
-            return set_result_string(interp, title);
+            auto title_sv = StringView { argv[2], argl[2] };
+            auto title_utf16 = Utf16String::from_utf8(title_sv);
+            auto result = document.set_title(title_utf16);
+            if (result.is_error())
+                return set_error(interp, "set_title failed"sv);
+            return set_result_string(interp, title_sv);
         }
-        return set_result_string(interp, document.title());
+        auto title_utf8 = document.title().to_utf8();
+        return set_result_string(interp, title_utf8);
     }
 
     return set_error(interp, ByteString::formatted("unknown document subcommand \"{}\"", subcommand));
@@ -161,7 +172,6 @@ static int console_command(Th8_Interp* interp, void* ctx, int argc, char const**
 
     StringView level { argv[1], argl[1] };
 
-    // Concatenate remaining args with spaces.
     StringBuilder message;
     for (int i = 2; i < argc; ++i) {
         if (i > 2)
@@ -171,14 +181,13 @@ static int console_command(Th8_Interp* interp, void* ctx, int argc, char const**
 
     if (level == "log"sv || level == "warn"sv || level == "error"sv) {
         dbgln("[TH8 console.{}] {}", level, message.string_view());
-        return Th8_SetResult(interp, "", 0);
+        return result_clear(interp);
     }
 
     return set_error(interp, "unknown console level: should be log, warn, or error"sv);
 }
 
 // $handle subcommand ?args...?
-// Ensemble dispatch for DOM objects accessed via handles.
 static int object_ensemble_command(Th8_Interp* interp, void* ctx, int argc, char const** argv, size_t* argl)
 {
     auto* handles = static_cast<HandleTable*>(ctx);
@@ -191,7 +200,7 @@ static int object_ensemble_command(Th8_Interp* interp, void* ctx, int argc, char
 
     StringView subcommand { argv[1], argl[1] };
 
-    // ---- Node methods (available on all nodes) ----
+    // ---- Node methods ----
 
     if (subcommand == "appendChild"sv) {
         if (argc < 3)
@@ -229,10 +238,9 @@ static int object_ensemble_command(Th8_Interp* interp, void* ctx, int argc, char
             if (ref && is<DOM::Node>(ref))
                 ref_child = static_cast<DOM::Node*>(ref);
         }
-        auto result = static_cast<DOM::Node&>(*object).insert_before(static_cast<DOM::Node&>(*new_child), ref_child);
-        if (result.is_error())
-            return set_error(interp, "insertBefore failed"sv);
-        return set_result_node(interp, *handles, result.release_value());
+        static_cast<DOM::Node&>(*object).insert_before(static_cast<DOM::Node&>(*new_child), ref_child);
+        // insert_before returns void; result is the inserted child.
+        return set_result_node(interp, *handles, static_cast<DOM::Node*>(new_child));
     }
 
     if (subcommand == "parentNode"sv) {
@@ -272,16 +280,19 @@ static int object_ensemble_command(Th8_Interp* interp, void* ctx, int argc, char
             return set_error(interp, "textContent: not a node"sv);
         auto& node = static_cast<DOM::Node&>(*object);
         if (argc >= 3) {
-            // Setter
-            auto text = string_from_th8(argv[2], argl[2]);
-            node.set_text_content(text);
-            return set_result_string(interp, text);
+            auto text_sv = StringView { argv[2], argl[2] };
+            auto text_utf16 = Utf16String::from_utf8(text_sv);
+            auto result = node.set_text_content(text_utf16);
+            if (result.is_error())
+                return set_error(interp, "set_text_content failed"sv);
+            return set_result_string(interp, text_sv);
         }
-        // Getter
         auto content = node.text_content();
-        if (content.has_value())
-            return set_result_string(interp, content.value());
-        return Th8_SetResult(interp, "", 0);
+        if (content.has_value()) {
+            auto utf8 = content.value().to_utf8();
+            return set_result_string(interp, utf8);
+        }
+        return result_clear(interp);
     }
 
     // ---- Element methods ----
@@ -295,7 +306,7 @@ static int object_ensemble_command(Th8_Interp* interp, void* ctx, int argc, char
         auto value = static_cast<DOM::Element&>(*object).get_attribute(name);
         if (value.has_value())
             return set_result_string(interp, value.value());
-        return Th8_SetResult(interp, "", 0);
+        return result_clear(interp);
     }
 
     if (subcommand == "setAttribute"sv) {
@@ -305,10 +316,8 @@ static int object_ensemble_command(Th8_Interp* interp, void* ctx, int argc, char
             return set_error(interp, "setAttribute: not an element"sv);
         auto name = flystring_from_th8(argv[2], argl[2]);
         auto value = string_from_th8(argv[3], argl[3]);
-        auto result = static_cast<DOM::Element&>(*object).set_attribute(name, value);
-        if (result.is_error())
-            return set_error(interp, "setAttribute failed"sv);
-        return Th8_SetResult(interp, "", 0);
+        static_cast<DOM::Element&>(*object).set_attribute_value(name, value);
+        return result_clear(interp);
     }
 
     if (subcommand == "removeAttribute"sv) {
@@ -318,7 +327,7 @@ static int object_ensemble_command(Th8_Interp* interp, void* ctx, int argc, char
             return set_error(interp, "removeAttribute: not an element"sv);
         auto name = flystring_from_th8(argv[2], argl[2]);
         static_cast<DOM::Element&>(*object).remove_attribute(name);
-        return Th8_SetResult(interp, "", 0);
+        return result_clear(interp);
     }
 
     if (subcommand == "hasAttribute"sv) {
@@ -341,13 +350,23 @@ static int object_ensemble_command(Th8_Interp* interp, void* ctx, int argc, char
             return set_error(interp, "innerHTML: not an element"sv);
         auto& element = static_cast<DOM::Element&>(*object);
         if (argc >= 3) {
-            auto html = string_from_th8(argv[2], argl[2]);
-            auto result = element.set_inner_html(html);
+            auto html_sv = StringView { argv[2], argl[2] };
+            auto html_utf16 = Utf16String::from_utf8(html_sv);
+            TrustedTypes::TrustedHTMLOrString trusted_html { html_utf16 };
+            auto result = element.set_inner_html(trusted_html);
             if (result.is_error())
                 return set_error(interp, "innerHTML set failed"sv);
-            return Th8_SetResult(interp, "", 0);
+            return result_clear(interp);
         }
-        return set_result_string(interp, element.inner_html());
+        auto result = element.inner_html();
+        if (result.is_error())
+            return set_error(interp, "innerHTML get failed"sv);
+        auto& value = result.value();
+        if (value.has<Utf16String>()) {
+            auto utf8 = value.get<Utf16String>().to_utf8();
+            return set_result_string(interp, utf8);
+        }
+        return result_clear(interp);
     }
 
     // ---- querySelector on elements (ParentNode mixin) ----
@@ -379,10 +398,7 @@ static int release_command(Th8_Interp* interp, void* ctx, int argc, char const**
     StringView handle { argv[1], argl[1] };
     bridge->handles->release(handle);
 
-    // Also delete the TH8 command for this handle.
-    Th8_DeleteCommand(bridge->interp, argv[1], argl[1]);
-
-    return Th8_SetResult(interp, "", 0);
+    return result_clear(interp);
 }
 
 }

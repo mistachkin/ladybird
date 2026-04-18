@@ -75,6 +75,10 @@
 #ifndef TH8_H
 #define TH8_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * Feature test macros -- must be before ANY system #include.
  *
@@ -3096,6 +3100,20 @@ TH8_API void Th8_SetResultStatic(Th8_Interp *interp,
     const char *z, size_t n);
 
 /*
+ * Th8_ClearResult --
+ *	Reset the interpreter result to NULL (no result).  Frees any
+ *	previously allocated result string.  After this call,
+ *	Th8_GetResult returns "" with length 0, but internally the
+ *	result pointer is NULL — semantically distinct from an empty
+ *	string set by Th8_SetResult(interp, "", 0).
+ *
+ *	This is the idiomatic way for commands that produce no
+ *	meaningful return value (e.g., DOM mutations) to leave the
+ *	interpreter in a clean state.
+ */
+TH8_API void Th8_ClearResult(Th8_Interp *interp);
+
+/*
  * Th8_GetResult --
  *	Return a pointer to the current interpreter result string.
  *	If pN is non-NULL, *pN is set to the byte length.  The returned
@@ -3916,10 +3934,45 @@ TH8_API const char *Th8_GetBasePath(void);
  */
 
 /*
- * Hash table types and API -- defined in th8_hash.h, which is
- * designed to be usable independently by non-TH8 projects.
+ * Hash table types and API.
+ *
+ * When th8_hash.h has already been included (e.g., in the multi-file
+ * build), TH8_HASH_H is defined and we skip the inline definitions.
+ * When th8.h is the only header (amalgamation or embedder), we
+ * define the types and API here.
  */
-#include "th8_hash.h"
+
+#ifndef TH8_HASH_H
+#define TH8_HASH_H
+
+#define TH8_HASH_SIZE		257
+
+typedef struct Th8_Hash      Th8_Hash;
+typedef struct Th8_HashEntry Th8_HashEntry;
+
+struct Th8_Hash {
+    Th8_HashEntry *aBucket[TH8_HASH_SIZE];
+};
+
+struct Th8_HashEntry {
+    th8_int64_t nVersion;	/* Struct version (must be first). */
+    void *pData;		/* User data pointer. */
+    char *zKey;			/* Key string (owned). */
+    size_t nKey;		/* Byte length of key. */
+    Th8_HashEntry *pNext;	/* Internal use only. */
+};
+
+TH8_API Th8_Hash *Th8_HashNew(Th8_Interp *interp);
+TH8_API void Th8_HashDelete(Th8_Interp *interp, Th8_Hash *pHash);
+TH8_API void Th8_HashIterate(Th8_Interp *interp, Th8_Hash *pHash,
+    int (*xCallback)(Th8_HashEntry *, void *), void *pCtx);
+TH8_API Th8_HashEntry *Th8_HashFind(Th8_Interp *interp,
+    Th8_Hash *pHash, const char *zKey, size_t nKey, int op);
+TH8_API void Th8_HashRemove(Th8_Interp *interp,
+    Th8_Hash *pHash, const char *zKey, size_t nKey);
+TH8_API void th8SeedHash(Th8_Platform *pPlatform);
+
+#endif /* TH8_HASH_H */
 
 /*
  * Th8_GetPackageHash --
@@ -4728,5 +4781,9 @@ TH8_API void Th8_EmitTrace(Th8_Interp *interp, const char *zFmt, ...);
  *	Return non-zero if the named environment variable exists.
  */
 TH8_API int Th8_DoesEnvExist(Th8_Interp *interp, const char *zName);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* TH8_H */

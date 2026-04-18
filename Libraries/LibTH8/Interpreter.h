@@ -43,7 +43,7 @@ public:
 
     int create_command(StringView name, Th8_CommandProc proc, void* context,
         void (*destructor)(Th8_Interp*, void*) = nullptr,
-        void* (*copy)(Th8_Interp*, void*) = nullptr);
+        th8_uint64_t* token = nullptr);
 
     int set_variable(StringView name, StringView value);
     int get_variable(StringView name);
