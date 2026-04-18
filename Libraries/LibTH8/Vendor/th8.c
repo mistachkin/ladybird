@@ -36,8 +36,8 @@
 
 #ifndef TH8_VERSION_GEN_H
 #define TH8_VERSION_GEN_H
-#define TH8_SOURCE_ID       "f1823eaaddfc95c4"
-#define TH8_SOURCE_DATETIME "2026-04-18 01:43:34"
+#define TH8_SOURCE_ID       "eab6d9f28136748a"
+#define TH8_SOURCE_DATETIME "2026-04-18 11:13:56"
 #define TH8_SOURCE_TAGS     "trunk"
 #define TH8_SOURCE_VCS      "fossil"
 #define TH8_PATCHLEVEL      "1.0.0"
@@ -959,6 +959,17 @@ struct Th8_Interp {
 				   Created lazily by SetPlatformContext. */
 
     /*
+     * Script debugging.
+     */
+
+    Th8_DebugProc xDebug;	/* Debug callback (NULL = no debugging). */
+    void *pDebugCtx;		/* Debug callback client data. */
+    int nStepMode;		/* TH8_STEP_* mode. */
+    int nStepDepth;		/* Frame depth when stepping began. */
+    Th8_Hash *paBreakpoints;	/* Breakpoint table (lazy). */
+    int nNextBreakpointId;	/* Auto-incrementing breakpoint ID. */
+
+    /*
      * Binary loading gate.
      */
 
@@ -1209,11 +1220,15 @@ struct Th8_Interp {
 /*
  * th8_plat.h -- Platform type definitions for TH8.
  *
- * Provides the Th8_Mutex typedef and forward declarations for the
- * platform wrapper functions that live in th8_plat.c.  This header
- * is included by th8.h BEFORE the Th8_Platform struct definition
- * so that Th8_Mutex is available as a concrete type for the
- * xMutexInit callback signature.
+ * Provides the Th8_PlatformMutex typedef.  This header is
+ * optionally included by implementation files (th8_plat.c,
+ * th8_core.c, etc.) BEFORE th8.h to make Th8_Mutex resolve
+ * to the concrete platform mutex type.
+ *
+ * When th8_plat.h is NOT included (amalgamation or embedder
+ * context), th8.h defines Th8_Mutex as void, making the mutex
+ * callbacks take void* pointers.  This avoids pulling
+ * <pthread.h> or <windows.h> into the public header.
  *
  * Copyright (c) 2026 by Joe Mistachkin.  All rights reserved.
  *
@@ -1243,7 +1258,7 @@ struct Th8_Interp {
     * Windows), so always use pthread_mutex_t.
     */
 #  include <pthread.h>
-   typedef pthread_mutex_t Th8_Mutex;
+   typedef pthread_mutex_t Th8_PlatformMutex;
 #elif defined(_WIN32) || defined(WIN32)
    /*
     * Inline CRITICAL_SECTION layout to avoid pulling in <windows.h>
@@ -1257,13 +1272,13 @@ struct Th8_Interp {
        void  *OwningThread;
        void  *LockSemaphore;
        void  *SpinCount;
-   } Th8_Mutex;
+   } Th8_PlatformMutex;
 #elif defined(__APPLE__) || defined(__linux__) || defined(__unix__)
 #  include <pthread.h>
-   typedef pthread_mutex_t Th8_Mutex;
+   typedef pthread_mutex_t Th8_PlatformMutex;
 #else
    /* Fallback: opaque pointer, platform must provide implementation */
-   typedef struct { void *_opaque; } Th8_Mutex;
+   typedef struct { void *_opaque; } Th8_PlatformMutex;
 #endif
 
 /*
@@ -1273,37 +1288,8 @@ struct Th8_Interp {
  */
 
 /*
- *----------------------------------------------------------------------
- *
- * TH8_TRACE_ERR --
- *
- *	Debug-only macro that emits a trace message including the
- *	source file, line number, a caller-supplied message, and the
- *	platform-specific system error code (errno on POSIX,
- *	GetLastError on Win32).
- *
- *	The error code is captured at the call site (in the macro
- *	expansion) before any subsequent function call can clobber it.
- *
- *	In release builds the macro expands to nothing.
- *
- * Usage:
- *	TH8_TRACE_ERR(interp, "mutex init failed");
- *	TH8_TRACE_ERR(NULL, "early init failed");
- *
- *----------------------------------------------------------------------
+ * TH8_TRACE_ERR is now defined in th8.h (uses only public APIs).
  */
-
-#ifdef TH8_DEBUG
-#  define TH8_TRACE_ERR(interp, msg) \
-       Th8_EmitTrace((Th8_Interp *)(interp), "%s:%d: %s (os_error=%d)", \
-                     __FILE__, __LINE__, (msg), \
-                     Th8_GetLastError((void *)(interp)))
-#else
-#  define TH8_TRACE_ERR(interp, msg) \
-       ((void)(interp), (void)(msg))
-#endif
-
 
 #endif /* TH8_PLAT_H */
 
@@ -1815,6 +1801,25 @@ typedef struct Th8StubsTable {
     int (*th8_Freeze)(Th8_Interp *interp);
     int (*th8_Thaw)(Th8_Interp *interp);
     int (*th8_IsSuspended)(Th8_Interp *interp);
+    int (*th8_SetDebugCallback)(Th8_Interp *interp,
+    Th8_DebugProc xDebug, void *pCtx);
+    int (*th8_SetBreakpoint)(Th8_Interp *interp,
+    const char *zScript, size_t nScript,
+    int nLine, int *pBreakpointId);
+    int (*th8_ClearBreakpoint)(Th8_Interp *interp,
+    int breakpointId);
+    int (*th8_ClearAllBreakpoints)(Th8_Interp *interp);
+    int (*th8_SetStepMode)(Th8_Interp *interp, int mode);
+    int (*th8_GetStepMode)(Th8_Interp *interp);
+    int (*th8_GetFrameCount)(Th8_Interp *interp);
+    int (*th8_GetFrameInfo)(Th8_Interp *interp,
+    int frameIndex,
+    const char **pzProc, size_t *pnProc,
+    const char **pzScript, size_t *pnScript,
+    int *pnLine);
+    int (*th8_EvalAtFrame)(Th8_Interp *interp,
+    int frameIndex,
+    const char *zScript, size_t nScript);
     int (*th8_CoroCreate)(Th8_Interp *interp,
     const char *zName, size_t nName,
     const char *zBody, size_t nBody);
@@ -2576,6 +2581,15 @@ extern const Th8StubsTable *th8StubsPtr;
 #define Th8_Freeze  (th8StubsPtr->th8_Freeze)
 #define Th8_Thaw  (th8StubsPtr->th8_Thaw)
 #define Th8_IsSuspended  (th8StubsPtr->th8_IsSuspended)
+#define Th8_SetDebugCallback  (th8StubsPtr->th8_SetDebugCallback)
+#define Th8_SetBreakpoint  (th8StubsPtr->th8_SetBreakpoint)
+#define Th8_ClearBreakpoint  (th8StubsPtr->th8_ClearBreakpoint)
+#define Th8_ClearAllBreakpoints  (th8StubsPtr->th8_ClearAllBreakpoints)
+#define Th8_SetStepMode  (th8StubsPtr->th8_SetStepMode)
+#define Th8_GetStepMode  (th8StubsPtr->th8_GetStepMode)
+#define Th8_GetFrameCount  (th8StubsPtr->th8_GetFrameCount)
+#define Th8_GetFrameInfo  (th8StubsPtr->th8_GetFrameInfo)
+#define Th8_EvalAtFrame  (th8StubsPtr->th8_EvalAtFrame)
 #define Th8_CoroCreate  (th8StubsPtr->th8_CoroCreate)
 #define Th8_CoroYield  (th8StubsPtr->th8_CoroYield)
 #define Th8_Eval  (th8StubsPtr->th8_Eval)
@@ -5258,6 +5272,7 @@ th8RegisterMathFuncs(Th8_Interp *interp)
  * this file, and for a DISCLAIMER OF ALL WARRANTIES.
  */
 
+/* amalgamation: th8_plat.h already included */
 #include "th8.h"
 /* amalgamation: th8_int.h already included */
 /* amalgamation: th8_int_core.h already included */
@@ -6414,6 +6429,7 @@ th8BufferFree(
 #  endif
 #endif
 
+/* amalgamation: th8_plat.h already included */
 #include "th8.h"
 /* amalgamation: th8_int.h already included */
 /* amalgamation: th8_int_core.h already included */
@@ -6445,6 +6461,9 @@ extern Th8_Platform th8GlobalPlatform;
 
 /* Forward declaration for secondary-index cleanup. */
 static void th8RemoveCmdTokenEntry(Th8_Interp *, Th8_Command *);
+
+/* Forward declaration for debug check (used in Th8_Ready). */
+static int th8DebugCheck(Th8_Interp *);
 
 
 /*
@@ -9189,6 +9208,17 @@ Th8_Ready(
     if (Th8_IsSuspended(interp)) {
 	return TH8_SUSPEND;
     }
+
+    /*
+     * Debug check: if a debug callback is installed, check for
+     * breakpoints and step mode.  Zero overhead when xDebug is NULL.
+     */
+
+    if (interp->xDebug) {
+	int dbgRc = th8DebugCheck(interp);
+	if (dbgRc != TH8_OK) return dbgRc;
+    }
+
     if (th8Step(interp) != TH8_OK) {
 	return TH8_ERROR;
     }
@@ -10153,6 +10183,311 @@ Th8_IsSuspended(
 {
     th8MemBarrier(interp);
     return Th8_IntCmpXchg(interp, &interp->bSuspended, 0, 0) != 0;
+}
+
+
+/*
+ *======================================================================
+ *
+ * Script Debugging.
+ *
+ *======================================================================
+ */
+
+
+/*
+ *----------------------------------------------------------------------
+ *
+ * th8DebugCheck --
+ *
+ *	Called from Th8_Ready when a debug callback is installed.
+ *	Determines whether to fire the callback based on step mode
+ *	and breakpoint table.
+ *
+ *----------------------------------------------------------------------
+ */
+
+static int
+th8DebugCheck(Th8_Interp *interp)
+{
+    int nLine = Th8_GetLine(interp);
+    int nDepth = th8GetFrameLevel(interp);
+    const char *zScript;
+    size_t nScript = 0;
+    int event = 0;
+
+    zScript = Th8_GetSourceName(interp, &nScript);
+
+    /*
+     * Check step mode.
+     */
+
+    switch (interp->nStepMode) {
+    case TH8_STEP_INTO:
+	event = TH8_DEBUG_STEP;
+	break;
+    case TH8_STEP_OVER:
+	if (nDepth <= interp->nStepDepth) {
+	    event = TH8_DEBUG_STEP;
+	}
+	break;
+    case TH8_STEP_OUT:
+	if (nDepth < interp->nStepDepth) {
+	    event = TH8_DEBUG_STEP;
+	}
+	break;
+    }
+
+    /*
+     * Check breakpoint table (if no step event already pending).
+     */
+
+    if (!event && interp->paBreakpoints && zScript && nLine > 0) {
+	/*
+	 * Build a key from script name + NUL + line number bytes.
+	 */
+
+	char zKey[512];
+	size_t nKey;
+
+	if (nScript < sizeof(zKey) - 5) {
+	    Th8_Memcpy(interp, zKey, zScript, nScript);
+	    zKey[nScript] = '\0';
+	    zKey[nScript + 1] = (char)(nLine & 0xff);
+	    zKey[nScript + 2] = (char)((nLine >> 8) & 0xff);
+	    zKey[nScript + 3] = (char)((nLine >> 16) & 0xff);
+	    zKey[nScript + 4] = (char)((nLine >> 24) & 0xff);
+	    nKey = nScript + 5;
+
+	    if (Th8_HashFind(interp, interp->paBreakpoints,
+		    zKey, nKey, 0) != NULL) {
+		event = TH8_DEBUG_BREAKPOINT;
+	    }
+	}
+    }
+
+    if (!event) return TH8_OK;
+
+    /*
+     * Fire the debug callback.
+     */
+
+    {
+	int dbgRc = interp->xDebug(interp, event,
+		zScript, nScript, nLine, nDepth,
+		interp->pDebugCtx);
+
+	if (dbgRc == TH8_BREAK) {
+	    Th8_Freeze(interp);
+	    return TH8_SUSPEND;
+	}
+	return dbgRc;
+    }
+}
+
+
+TH8_API int
+Th8_SetDebugCallback(
+    Th8_Interp *interp,
+    Th8_DebugProc xDebug,
+    void *pCtx)
+{
+    if (!interp) return TH8_ERROR;
+    interp->xDebug = xDebug;
+    interp->pDebugCtx = pCtx;
+    return TH8_OK;
+}
+
+
+TH8_API int
+Th8_SetStepMode(
+    Th8_Interp *interp,
+    int mode)
+{
+    if (!interp) return TH8_ERROR;
+    interp->nStepMode = mode;
+    interp->nStepDepth = th8GetFrameLevel(interp);
+    return TH8_OK;
+}
+
+
+TH8_API int
+Th8_GetStepMode(
+    Th8_Interp *interp)
+{
+    if (!interp) return TH8_STEP_NONE;
+    return interp->nStepMode;
+}
+
+
+TH8_API int
+Th8_SetBreakpoint(
+    Th8_Interp *interp,
+    const char *zScript,
+    size_t nScript,
+    int nLine,
+    int *pBreakpointId)
+{
+    Th8_HashEntry *pEntry;
+    char zKey[512];
+    size_t nKey;
+    int id;
+
+    if (!interp || !zScript || nLine < 1) return TH8_ERROR;
+    if (nScript >= sizeof(zKey) - 5) return TH8_ERROR;
+
+    if (!interp->paBreakpoints) {
+	interp->paBreakpoints = Th8_HashNew(interp);
+	if (!interp->paBreakpoints) return TH8_ERROR;
+    }
+
+    Th8_Memcpy(interp, zKey, zScript, nScript);
+    zKey[nScript] = '\0';
+    zKey[nScript + 1] = (char)(nLine & 0xff);
+    zKey[nScript + 2] = (char)((nLine >> 8) & 0xff);
+    zKey[nScript + 3] = (char)((nLine >> 16) & 0xff);
+    zKey[nScript + 4] = (char)((nLine >> 24) & 0xff);
+    nKey = nScript + 5;
+
+    pEntry = Th8_HashFind(interp, interp->paBreakpoints,
+	    zKey, nKey, 1);
+    if (!pEntry) return TH8_ERROR;
+
+    id = ++(interp->nNextBreakpointId);
+    pEntry->pData = (void *)(size_t)id;
+
+    if (pBreakpointId) *pBreakpointId = id;
+    return TH8_OK;
+}
+
+
+TH8_API int
+Th8_ClearBreakpoint(
+    Th8_Interp *interp,
+    int breakpointId)
+{
+    if (!interp || !interp->paBreakpoints) return TH8_ERROR;
+
+    /*
+     * Iterate to find the entry with the matching ID, then
+     * remove it.  This is O(N) but breakpoint counts are small.
+     */
+
+    {
+	Th8_HashEntry *pFound = NULL;
+
+	/* Manual iteration to find and remove. */
+	int i;
+	for (i = 0; i < 257 /* TH8_HASH_SIZE */; i++) {
+	    Th8_HashEntry *p = interp->paBreakpoints->aBucket[i];
+	    while (p) {
+		if ((int)(size_t)p->pData == breakpointId) {
+		    pFound = p;
+		    break;
+		}
+		p = p->pNext;
+	    }
+	    if (pFound) break;
+	}
+
+	if (pFound) {
+	    Th8_HashRemove(interp, interp->paBreakpoints,
+		    pFound->zKey, pFound->nKey);
+	    return TH8_OK;
+	}
+    }
+
+    return TH8_ERROR;
+}
+
+
+TH8_API int
+Th8_ClearAllBreakpoints(
+    Th8_Interp *interp)
+{
+    if (!interp) return TH8_ERROR;
+
+    if (interp->paBreakpoints) {
+	Th8_HashDelete(interp, interp->paBreakpoints);
+	interp->paBreakpoints = NULL;
+    }
+    return TH8_OK;
+}
+
+
+TH8_API int
+Th8_GetFrameCount(
+    Th8_Interp *interp)
+{
+    if (!interp) return 0;
+    return th8GetFrameLevel(interp) + 1;
+}
+
+
+TH8_API int
+Th8_GetFrameInfo(
+    Th8_Interp *interp,
+    int frameIndex,
+    const char **pzProc,
+    size_t *pnProc,
+    const char **pzScript,
+    size_t *pnScript,
+    int *pnLine)
+{
+    int nLevel;
+    int targetLevel;
+    int argc = 0;
+    const char **argv = NULL;
+    size_t *argl = NULL;
+
+    if (!interp) return TH8_ERROR;
+
+    nLevel = th8GetFrameLevel(interp);
+    targetLevel = nLevel - frameIndex;
+    if (targetLevel < 0) return TH8_ERROR;
+
+    if (pzProc) {
+	if (Th8_GetFrameObjv(interp, targetLevel,
+		&argc, &argv, &argl) == TH8_OK
+		&& argc > 0 && argv && argv[0]) {
+	    *pzProc = argv[0];
+	    if (pnProc) *pnProc = argl[0];
+	} else {
+	    *pzProc = "";
+	    if (pnProc) *pnProc = 0;
+	}
+    }
+
+    if (pzScript) {
+	*pzScript = Th8_GetSourceName(interp, pnScript);
+    }
+
+    if (pnLine) {
+	*pnLine = Th8_GetLine(interp);
+    }
+
+    return TH8_OK;
+}
+
+
+TH8_API int
+Th8_EvalAtFrame(
+    Th8_Interp *interp,
+    int frameIndex,
+    const char *zScript,
+    size_t nScript)
+{
+    int nLevel;
+    int targetLevel;
+
+    if (!interp) return TH8_ERROR;
+
+    nLevel = th8GetFrameLevel(interp);
+    targetLevel = nLevel - frameIndex;
+    if (targetLevel < 0) return TH8_ERROR;
+
+    return Th8_Eval(interp, targetLevel, zScript, nScript,
+	    NULL, 0);
 }
 
 
@@ -19560,6 +19895,11 @@ Th8_DeleteInterp(
 	interp->paCallbackCtx = 0;
     }
 
+    if (interp->paBreakpoints) {
+	Th8_HashDelete(interp, interp->paBreakpoints);
+	interp->paBreakpoints = 0;
+    }
+
     /*
      * STEP 7: Notify the platform that this interpreter is
      * being deleted.  The platform can release per-interpreter
@@ -20033,6 +20373,7 @@ Th8_DoesEnvExist(
  * this file, and for a DISCLAIMER OF ALL WARRANTIES.
  */
 
+/* amalgamation: th8_plat.h already included */
 #include "th8.h"
 /* amalgamation: th8_int.h already included */
 /* amalgamation: th8_int_core.h already included */
@@ -22050,6 +22391,7 @@ cleanup:
  * this file, and for a DISCLAIMER OF ALL WARRANTIES.
  */
 
+/* amalgamation: th8_plat.h already included */
 #include "th8.h"
 /* amalgamation: th8_int.h already included */
 /* amalgamation: th8_int_core.h already included */
@@ -22500,6 +22842,7 @@ Th8_SetPreLoadCallback(
  * this file, and for a DISCLAIMER OF ALL WARRANTIES.
  */
 
+/* amalgamation: th8_plat.h already included */
 #include "th8.h"
 /* amalgamation: th8_int.h already included */
 /* amalgamation: th8_int_core.h already included */
@@ -24111,6 +24454,7 @@ th8ParseVarName(
  * this file, and for a DISCLAIMER OF ALL WARRANTIES.
  */
 
+/* amalgamation: th8_plat.h already included */
 #include "th8.h"
 /* amalgamation: th8_int.h already included */
 /* amalgamation: th8_int_core.h already included */
@@ -45549,6 +45893,15 @@ const Th8StubsTable th8StubsTableData = {
     Th8_Freeze,
     Th8_Thaw,
     Th8_IsSuspended,
+    Th8_SetDebugCallback,
+    Th8_SetBreakpoint,
+    Th8_ClearBreakpoint,
+    Th8_ClearAllBreakpoints,
+    Th8_SetStepMode,
+    Th8_GetStepMode,
+    Th8_GetFrameCount,
+    Th8_GetFrameInfo,
+    Th8_EvalAtFrame,
     Th8_CoroCreate,
     Th8_CoroYield,
     Th8_Eval,
@@ -50665,6 +51018,339 @@ th8test_kv_cmd(
 }
 
 
+/*
+ *----------------------------------------------------------------------
+ *
+ * Debug test support.
+ *
+ * ::th8testlib::debug subcommand ?args?
+ *
+ *   callback install     -- Install a debug callback that captures events
+ *   callback remove      -- Remove the debug callback
+ *   callback events      -- Return captured events as a list
+ *   callback clear       -- Clear captured events
+ *   breakpoint set script line -- Set breakpoint, return ID
+ *   breakpoint clear id  -- Clear breakpoint by ID
+ *   breakpoint clearall  -- Clear all breakpoints
+ *   step mode            -- Set step mode (none/into/over/out)
+ *   step get             -- Get current step mode
+ *   frames count         -- Get frame count
+ *   frames info index    -- Get frame info at index
+ *   eval index script    -- Evaluate script at frame index
+ *
+ *----------------------------------------------------------------------
+ */
+
+#define TH8_DEBUG_MAX_EVENTS 256
+
+typedef struct {
+    int event;
+    int nLine;
+    int nDepth;
+} Th8DebugEvent;
+
+static Th8DebugEvent th8test_debug_events[TH8_DEBUG_MAX_EVENTS];
+static int th8test_debug_event_count = 0;
+static int th8test_debug_break_on_bp = 1;
+
+static int
+th8test_debug_callback(
+    Th8_Interp *interp,
+    int event,
+    const char *zScript,
+    size_t nScript,
+    int nLine,
+    int nDepth,
+    void *pCtx)
+{
+    (void)interp; (void)zScript; (void)nScript; (void)pCtx;
+
+    if (th8test_debug_event_count < TH8_DEBUG_MAX_EVENTS) {
+	th8test_debug_events[th8test_debug_event_count].event = event;
+	th8test_debug_events[th8test_debug_event_count].nLine = nLine;
+	th8test_debug_events[th8test_debug_event_count].nDepth = nDepth;
+	th8test_debug_event_count++;
+    }
+
+    /*
+     * On breakpoint, return TH8_BREAK to freeze the interpreter.
+     */
+
+    if (event == TH8_DEBUG_BREAKPOINT && th8test_debug_break_on_bp) {
+	return TH8_BREAK;
+    }
+
+    return TH8_OK;
+}
+
+
+static int
+th8test_debug_cmd(
+    Th8_Interp *interp,
+    void *ctx,
+    int argc,
+    const char **argv,
+    size_t *argl)
+{
+    (void)ctx;
+
+    if (argc < 3) {
+	return Th8_WrongNumArgs(interp,
+		"th8testlib::debug subcommand arg ?args?");
+    }
+
+    /*
+     * callback install / remove / events / clear
+     */
+
+    if (argl[1] == 8 && memcmp(argv[1], "callback", 8) == 0) {
+
+	if (argl[2] == 7 && memcmp(argv[2], "install", 7) == 0) {
+	    th8test_debug_event_count = 0;
+	    th8test_debug_break_on_bp = 1;
+	    return Th8_SetDebugCallback(interp,
+		    th8test_debug_callback, NULL);
+	}
+
+	if (argl[2] == 6 && memcmp(argv[2], "remove", 6) == 0) {
+	    return Th8_SetDebugCallback(interp, NULL, NULL);
+	}
+
+	if (argl[2] == 6 && memcmp(argv[2], "events", 6) == 0) {
+	    char *zList = NULL;
+	    size_t nList = 0;
+	    int i;
+	    char zBuf[32];
+
+	    for (i = 0; i < th8test_debug_event_count; i++) {
+		char *z;
+		z = th8test_i64toa(
+			(th8_int64_t)th8test_debug_events[i].event,
+			zBuf, sizeof(zBuf));
+		Th8_ListAppend(interp, &zList, &nList,
+			z, TH8_NOLEN);
+		z = th8test_i64toa(
+			(th8_int64_t)th8test_debug_events[i].nLine,
+			zBuf, sizeof(zBuf));
+		Th8_ListAppend(interp, &zList, &nList,
+			z, TH8_NOLEN);
+		z = th8test_i64toa(
+			(th8_int64_t)th8test_debug_events[i].nDepth,
+			zBuf, sizeof(zBuf));
+		Th8_ListAppend(interp, &zList, &nList,
+			z, TH8_NOLEN);
+	    }
+	    if (zList) {
+		Th8_SetResult(interp, zList, nList);
+		Th8_Free(interp, zList);
+	    } else {
+		Th8_SetResultStatic(interp, "", 0);
+	    }
+	    return TH8_OK;
+	}
+
+	if (argl[2] == 5 && memcmp(argv[2], "clear", 5) == 0) {
+	    th8test_debug_event_count = 0;
+	    return TH8_OK;
+	}
+
+	if (argl[2] == 5 && memcmp(argv[2], "count", 5) == 0) {
+	    Th8_SetResultInt(interp, th8test_debug_event_count);
+	    return TH8_OK;
+	}
+
+	if (argl[2] == 7 && memcmp(argv[2], "nobreak", 7) == 0) {
+	    th8test_debug_break_on_bp = 0;
+	    return TH8_OK;
+	}
+
+	Th8_SetResultStatic(interp,
+		"debug callback: unknown subcommand", TH8_NOLEN);
+	return TH8_ERROR;
+    }
+
+    /*
+     * breakpoint set script line / clear id / clearall
+     */
+
+    if (argl[1] == 10
+	    && memcmp(argv[1], "breakpoint", 10) == 0) {
+
+	if (argl[2] == 3 && memcmp(argv[2], "set", 3) == 0) {
+	    int nLine;
+	    int bpId = 0;
+
+	    if (argc != 5) {
+		return Th8_WrongNumArgs(interp,
+			"debug breakpoint set script line");
+	    }
+	    if (Th8_ToInt(interp, argv[4], argl[4],
+		    &nLine) != TH8_OK) {
+		return TH8_ERROR;
+	    }
+	    if (Th8_SetBreakpoint(interp,
+		    argv[3], argl[3], nLine,
+		    &bpId) != TH8_OK) {
+		return TH8_ERROR;
+	    }
+	    Th8_SetResultInt(interp, bpId);
+	    return TH8_OK;
+	}
+
+	if (argl[2] == 5 && memcmp(argv[2], "clear", 5) == 0) {
+	    int bpId;
+
+	    if (argc != 4) {
+		return Th8_WrongNumArgs(interp,
+			"debug breakpoint clear id");
+	    }
+	    if (Th8_ToInt(interp, argv[3], argl[3],
+		    &bpId) != TH8_OK) {
+		return TH8_ERROR;
+	    }
+	    return Th8_ClearBreakpoint(interp, bpId);
+	}
+
+	if (argl[2] == 8
+		&& memcmp(argv[2], "clearall", 8) == 0) {
+	    return Th8_ClearAllBreakpoints(interp);
+	}
+
+	Th8_SetResultStatic(interp,
+		"debug breakpoint: unknown subcommand",
+		TH8_NOLEN);
+	return TH8_ERROR;
+    }
+
+    /*
+     * step mode / step get
+     */
+
+    if (argl[1] == 4 && memcmp(argv[1], "step", 4) == 0) {
+
+	if (argc == 3) {
+	    int mode = TH8_STEP_NONE;
+
+	    if (argl[2] == 4
+		    && memcmp(argv[2], "none", 4) == 0) {
+		mode = TH8_STEP_NONE;
+	    } else if (argl[2] == 4
+		    && memcmp(argv[2], "into", 4) == 0) {
+		mode = TH8_STEP_INTO;
+	    } else if (argl[2] == 4
+		    && memcmp(argv[2], "over", 4) == 0) {
+		mode = TH8_STEP_OVER;
+	    } else if (argl[2] == 3
+		    && memcmp(argv[2], "out", 3) == 0) {
+		mode = TH8_STEP_OUT;
+	    } else if (argl[2] == 3
+		    && memcmp(argv[2], "get", 3) == 0) {
+		Th8_SetResultInt(interp,
+			Th8_GetStepMode(interp));
+		return TH8_OK;
+	    } else {
+		Th8_SetResultStatic(interp,
+			"debug step: use none/into/over/out/get",
+			TH8_NOLEN);
+		return TH8_ERROR;
+	    }
+	    return Th8_SetStepMode(interp, mode);
+	}
+
+	Th8_SetResultStatic(interp,
+		"debug step: requires mode argument",
+		TH8_NOLEN);
+	return TH8_ERROR;
+    }
+
+    /*
+     * frames count / frames info index
+     */
+
+    if (argl[1] == 6 && memcmp(argv[1], "frames", 6) == 0) {
+
+	if (argl[2] == 5 && memcmp(argv[2], "count", 5) == 0) {
+	    Th8_SetResultInt(interp,
+		    Th8_GetFrameCount(interp));
+	    return TH8_OK;
+	}
+
+	if (argl[2] == 4 && memcmp(argv[2], "info", 4) == 0) {
+	    int idx;
+	    const char *zProc = NULL;
+	    size_t nProc = 0;
+	    const char *zScript = NULL;
+	    size_t nScript = 0;
+	    int nLine = 0;
+	    char *zList = NULL;
+	    size_t nList = 0;
+	    char zBuf[32];
+	    char *z;
+
+	    if (argc != 4) {
+		return Th8_WrongNumArgs(interp,
+			"debug frames info index");
+	    }
+	    if (Th8_ToInt(interp, argv[3], argl[3],
+		    &idx) != TH8_OK) {
+		return TH8_ERROR;
+	    }
+	    if (Th8_GetFrameInfo(interp, idx,
+		    &zProc, &nProc,
+		    &zScript, &nScript,
+		    &nLine) != TH8_OK) {
+		Th8_SetResultStatic(interp,
+			"debug frames info: invalid index",
+			TH8_NOLEN);
+		return TH8_ERROR;
+	    }
+
+	    Th8_ListAppend(interp, &zList, &nList,
+		    zProc ? zProc : "", nProc);
+	    Th8_ListAppend(interp, &zList, &nList,
+		    zScript ? zScript : "", nScript);
+	    z = th8test_i64toa((th8_int64_t)nLine,
+		    zBuf, sizeof(zBuf));
+	    Th8_ListAppend(interp, &zList, &nList,
+		    z, TH8_NOLEN);
+
+	    if (zList) {
+		Th8_SetResult(interp, zList, nList);
+		Th8_Free(interp, zList);
+	    }
+	    return TH8_OK;
+	}
+
+	Th8_SetResultStatic(interp,
+		"debug frames: unknown subcommand", TH8_NOLEN);
+	return TH8_ERROR;
+    }
+
+    /*
+     * eval index script
+     */
+
+    if (argl[1] == 4 && memcmp(argv[1], "eval", 4) == 0) {
+	int idx;
+
+	if (argc != 4) {
+	    return Th8_WrongNumArgs(interp,
+		    "debug eval frameIndex script");
+	}
+	if (Th8_ToInt(interp, argv[2], argl[2],
+		&idx) != TH8_OK) {
+	    return TH8_ERROR;
+	}
+	return Th8_EvalAtFrame(interp, idx,
+		argv[3], argl[3]);
+    }
+
+    Th8_SetResultStatic(interp,
+	    "debug: unknown subcommand", TH8_NOLEN);
+    return TH8_ERROR;
+}
+
+
 TESTLIB_EXPORT int
 Th8test_Init(
     Th8_Interp *interp)
@@ -50802,6 +51488,10 @@ Th8test_Init(
     Th8_CreateCommand(interp,
 	    "::th8testlib::kv",
 	    th8test_kv_cmd, 0, 0, 0);
+
+    Th8_CreateCommand(interp,
+	    "::th8testlib::debug",
+	    th8test_debug_cmd, 0, 0, 0);
 
     /*
      * Register a test-only math function "test_echo" that
@@ -63113,6 +63803,7 @@ cleanup:
  * this file, and for a DISCLAIMER OF ALL WARRANTIES.
  */
 
+/* amalgamation: th8_plat.h already included */
 #include "th8.h"
 /* amalgamation: th8_int.h already included */
 
@@ -66125,6 +66816,7 @@ Th8_GetLibcPlatform(void)
  * this file, and for a DISCLAIMER OF ALL WARRANTIES.
  */
 
+/* amalgamation: th8_plat.h already included */
 #include "th8.h"
 /* amalgamation: th8_int.h already included */
 

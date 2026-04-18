@@ -368,20 +368,6 @@
 /*
  *----------------------------------------------------------------------
  *
- * Safe arithmetic macros --
- *
- *	Overflow-checked operations for security-critical contexts.
- *	TH8_SAFE_MUL_SIZE / TH8_SAFE_ADD_SIZE return 1 on overflow.
- *	Used by allocation size calculations to prevent wraparound.
- *
- *----------------------------------------------------------------------
- */
-
-#include "th8_plat.h"
-
-/*
- *----------------------------------------------------------------------
- *
  * Value / Token type codes --
  *
  *	Every value in TH8 is a Th8_Value.  When eType is
@@ -570,6 +556,57 @@ struct Th8_Parse {
 /*
  *----------------------------------------------------------------------
  *
+ * Th8_Mutex --
+ *
+ *	Dual-mode mutex type for the platform callback signatures.
+ *
+ *	Implementation files (th8_core.c, th8_plat.c, etc.) include
+ *	th8_plat.h BEFORE th8.h.  This defines TH8_PLAT_H and
+ *	provides the concrete Th8_PlatformMutex typedef (which is
+ *	pthread_mutex_t on POSIX, an inline CRITICAL_SECTION layout
+ *	on Win32, etc.).  In this mode, Th8_Mutex resolves to
+ *	Th8_PlatformMutex, giving the implementation full type safety.
+ *
+ *	Embedders and the amalgamation include ONLY th8.h (without
+ *	th8_plat.h).  In this mode, Th8_Mutex resolves to void,
+ *	making the mutex callbacks accept void* pointers.  This
+ *	avoids pulling <pthread.h> or <windows.h> into the public
+ *	header, keeping th8.h free of platform-specific system
+ *	headers.
+ *
+ *	The callbacks (xMutexNew, xMutexFree, xMutexEnter,
+ *	xMutexLeave) operate on Th8_Mutex* regardless of mode.
+ *	The embedder casts void* to their concrete mutex type
+ *	inside their callback implementations.
+ *
+ *----------------------------------------------------------------------
+ */
+
+#if defined(TH8_PLAT_H)
+#  define Th8_Mutex		Th8_PlatformMutex
+#else
+#  define Th8_Mutex		void
+#endif
+
+/*
+ * TH8_TRACE_ERR -- Debug-only trace macro.  Emits file, line, message,
+ * and the platform error code via Th8_EmitTrace + Th8_GetLastError.
+ * Uses only public API functions.  Expands to nothing in release builds.
+ */
+
+#ifdef TH8_DEBUG
+#  define TH8_TRACE_ERR(interp, msg) \
+       Th8_EmitTrace((Th8_Interp *)(interp), "%s:%d: %s (os_error=%d)", \
+                     __FILE__, __LINE__, (msg), \
+                     Th8_GetLastError((void *)(interp)))
+#else
+#  define TH8_TRACE_ERR(interp, msg) \
+       ((void)(interp), (void)(msg))
+#endif
+
+/*
+ *----------------------------------------------------------------------
+ *
  * Th8_Platform --
  *
  *	Platform abstraction table.  All interactions between TH8 and
@@ -590,8 +627,8 @@ struct Th8_Parse {
 
 /* Forward declaration for use in callback signatures. */
 typedef struct Th8_Interp Th8_Interp;
-
 typedef struct Th8_Platform Th8_Platform;
+
 struct Th8_Platform {
     th8_int64_t nVersion;	/* Struct version (must be first). */
 
