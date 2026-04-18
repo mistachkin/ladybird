@@ -62,10 +62,61 @@ NullIO (blocks all I/O) + Libc (memory) + macOS (zone alloc) + POSIX (mutex, tim
 `Th8_MergePlatform()` fills NULL slots only, so NullIO stubs take precedence over POSIX I/O callbacks. This means:
 - File read/write: blocked (NullIO returns empty/error)
 - Dynamic loading: blocked
-- stdin/stdout: blocked
+- stdin/stdout: blocked (puts/gets available but routed to NullIO no-ops)
 - Memory allocation: allowed (via libc malloc with TH8 limit enforcement)
 - Mutexes: allowed (for thread safety)
 - Time: allowed (for clock commands)
+
+### Compile-time feature selection
+
+The CMakeLists.txt enables only the features needed for browser scripting:
+
+**Enabled:**
+- `TH8_ENABLE_EXPRESSIONS` -- math, comparisons, boolean logic
+- `TH8_ENABLE_VARIABLES` -- set, unset, global, upvar, array
+- `TH8_ENABLE_REGEXP` -- regular expressions for text processing
+- `TH8_PLUGIN_CONTROL` -- if, switch, catch, try, return, break, continue
+- `TH8_PLUGIN_EXPRESSIONS` -- expr command
+- `TH8_PLUGIN_FORMATTING` -- format, scan
+- `TH8_PLUGIN_INTROSPECTION` -- info (for debugging), pid
+- `TH8_PLUGIN_IO` -- puts, gets (routed to NullIO; available for DevTools console)
+- `TH8_PLUGIN_LISTS` -- list, dict, split, join, lsort, lsearch
+- `TH8_PLUGIN_LOOPING` -- for, foreach, while
+- `TH8_PLUGIN_MANAGEMENT` -- namespace, rename, interp cancel
+- `TH8_PLUGIN_PROCEDURES` -- proc, apply, nproc, napply, tailcall
+- `TH8_PLUGIN_STRINGS` -- string, concat, base64
+- `TH8_PLUGIN_TIMEKEEPING` -- after (setTimeout equivalent), clock, time
+- `TH8_PLUGIN_VARIABLES` -- variable command
+
+**Deliberately disabled:**
+- `TH8_ENABLE_LOAD` -- binary loading (dlopen) is a security risk
+- `TH8_ENABLE_LIBCURL` -- browser has its own networking
+- `TH8_PLUGIN_EXTENSIBILITY` -- requires TH8_ENABLE_LOAD
+- `TH8_PLUGIN_FILE_SYSTEMS` -- file access blocked by NullIO
+
+### Signed-only script enforcement
+
+TH8's cryptographic script signing integrates naturally with
+Content Security Policy (CSP) concepts:
+
+```
+CSP script-src     <-->  TH8 signed-only policy
+Subresource Integrity  <-->  TH8 .b64sig RSA-SHA512 signature
+CSP nonce/hash     <-->  TH8 public key token
+```
+
+When enabled via `Interpreter::install_signed_only_policy()`,
+only scripts with valid RSA-SHA512 signatures are evaluated.
+The policy callback fires at `PRE_READ` (before parsing) --
+exactly where CSP enforcement happens.
+
+Usage flow:
+1. Page declares a signing key (via HTTP header or meta tag)
+2. `Interpreter::load_signing_key()` registers the trust anchor
+3. `Interpreter::install_signed_only_policy()` enables enforcement
+4. Script evaluation checks for companion `.b64sig` or inline
+   `integrity` attribute
+5. Invalid or missing signatures produce a clean error (not a crash)
 
 ## Adding new DOM commands
 

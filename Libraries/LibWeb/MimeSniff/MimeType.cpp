@@ -31,6 +31,16 @@ bool is_javascript_mime_type_essence_match(StringView string)
     return false;
 }
 
+// [Non-standard] TH8 MIME type essence match.
+bool is_th8_mime_type_essence_match(StringView string)
+{
+    for (auto const& th8_essence : s_th8_mime_type_essence_strings) {
+        if (string.equals_ignoring_ascii_case(th8_essence))
+            return true;
+    }
+    return false;
+}
+
 static bool contains_only_http_quoted_string_token_code_points(StringView string)
 {
     // https://mimesniff.spec.whatwg.org/#http-quoted-string-token-code-point
@@ -333,6 +343,12 @@ bool MimeType::is_scriptable() const
 bool MimeType::is_javascript() const
 {
     return s_javascript_mime_type_essence_strings.contains_slow(essence());
+}
+
+// [Non-standard] TH8 MIME type check.
+bool MimeType::is_th8() const
+{
+    return s_th8_mime_type_essence_strings.contains_slow(essence());
 }
 
 // https://mimesniff.spec.whatwg.org/#json-mime-type

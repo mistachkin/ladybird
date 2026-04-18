@@ -453,6 +453,7 @@ bool can_load_document_with_type(MimeSniff::MimeType const& type)
     if (type.is_xml())
         return true;
     if (type.is_javascript()
+        || type.is_th8()
         || type.is_json()
         || type.essence() == "text/css"_string
         || type.essence() == "text/plain"_string
@@ -511,6 +512,7 @@ GC::Ptr<DOM::Document> load_document(HTML::NavigationParams const& navigation_pa
     // -> "text/plain"
     // -> "text/vtt"
     if (type.is_javascript()
+        || type.is_th8()
         || type.is_json()
         || type.essence() == "text/css"_string
         || type.essence() == "text/plain"_string

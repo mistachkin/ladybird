@@ -637,7 +637,8 @@ static bool type_matches_destination(StringView type, Optional<Fetch::Infrastruc
         ((destination == Audio || destination == Video) && mime_type_record->is_audio_or_video())
 
         // destination is a script-like destination and mimeTypeRecord is a JavaScript MIME type;
-        || (Fetch::Infrastructure::destination_is_script_like(*destination) && mime_type_record->is_javascript())
+        // [Non-standard] Also accept TH8 MIME types for script preloading.
+        || (Fetch::Infrastructure::destination_is_script_like(*destination) && (mime_type_record->is_javascript() || mime_type_record->is_th8()))
 
         // destination is "image" and mimeTypeRecord is an image MIME type;
         || (destination == Image && mime_type_record->is_image())

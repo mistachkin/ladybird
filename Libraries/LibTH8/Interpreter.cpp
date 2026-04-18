@@ -32,8 +32,10 @@ Interpreter::Interpreter(Th8_Interp* interp)
 
 Interpreter::~Interpreter()
 {
-    if (m_interp)
+    if (m_interp) {
+        remove_signed_only_policy();
         Th8_DeleteInterp(m_interp);
+    }
 }
 
 int Interpreter::evaluate(StringView script, StringView name)
@@ -131,6 +133,45 @@ bool Interpreter::variable_exists(StringView name)
 {
     return Th8_ExistsVar(m_interp,
         name.characters_without_null_termination(), name.length()) != 0;
+}
+
+int Interpreter::install_signed_only_policy()
+{
+    void* ctx = nullptr;
+    int rc = Th8_InstallSignedPolicy(m_interp, &ctx);
+    if (rc != TH8_OK)
+        return rc;
+    m_policy_ctx = ctx;
+    return TH8_OK;
+}
+
+void Interpreter::remove_signed_only_policy()
+{
+    if (m_policy_ctx) {
+        Th8_RemoveSignedPolicy(m_interp, m_policy_ctx);
+        m_policy_ctx = nullptr;
+    }
+}
+
+int Interpreter::preload_signing_key(StringView snk_key_blob)
+{
+    if (!m_policy_ctx)
+        return TH8_ERROR;
+
+    // Load the .snk key blob into an Th8_RsaKey, then preload it.
+    Th8_RsaKey* key = nullptr;
+    int rc = Th8_RsaKeyLoad(m_interp,
+        snk_key_blob.characters_without_null_termination(),
+        snk_key_blob.length(), &key);
+    if (rc != TH8_OK || !key)
+        return TH8_ERROR;
+
+    return Th8_PolicyPreloadKey(m_interp, m_policy_ctx, key);
+}
+
+bool Interpreter::is_signed_only() const
+{
+    return m_policy_ctx != nullptr;
 }
 
 int Interpreter::set_debug_callback(Th8_DebugProc callback, void* context)

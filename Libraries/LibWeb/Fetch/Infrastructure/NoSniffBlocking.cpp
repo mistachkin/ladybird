@@ -45,7 +45,8 @@ RequestOrResponseBlocking should_response_to_request_be_blocked_due_to_nosniff(R
     auto const& destination = request.destination();
 
     // 4. If destination is script-like and mimeType is failure or is not a JavaScript MIME type, then return blocked.
-    if (request.destination_is_script_like() && (!mime_type.has_value() || !mime_type->is_javascript()))
+    // [Non-standard] Also allow TH8 MIME types for script-like destinations.
+    if (request.destination_is_script_like() && (!mime_type.has_value() || (!mime_type->is_javascript() && !mime_type->is_th8())))
         return RequestOrResponseBlocking::Blocked;
 
     // 5. If destination is "style" and mimeType is failure or its essence is not "text/css", then return blocked.

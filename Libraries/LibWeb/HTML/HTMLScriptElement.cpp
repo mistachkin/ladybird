@@ -291,7 +291,12 @@ void HTMLScriptElement::prepare_script()
         m_script_type = ScriptType::ImportMap;
     }
     // [Non-standard] TH8 scripting language support.
+    // text/th8         -- unsigned TH8 script
+    // text/th8+signed  -- cryptographically signed TH8 script
+    // text/tcl         -- legacy Tcl content type (treated as TH8)
+    // th8              -- bare type shorthand
     else if (script_block_type.equals_ignoring_ascii_case("text/th8"sv)
+        || script_block_type.equals_ignoring_ascii_case("text/th8+signed"sv)
         || script_block_type.equals_ignoring_ascii_case("text/tcl"sv)
         || script_block_type.equals_ignoring_ascii_case("th8"sv)) {
         m_script_type = ScriptType::TH8;

@@ -49,6 +49,20 @@ public:
     int get_variable(StringView name);
     bool variable_exists(StringView name);
 
+    // Script signing and verification.
+    // When enabled, only scripts with valid RSA-SHA512 signatures
+    // are evaluated.  This maps to Content Security Policy concepts
+    // in the browser -- the signing key acts as a trust anchor.
+    //
+    // Usage:
+    //   interp->install_signed_only_policy();
+    //   interp->preload_signing_key(snk_data);  // .snk key blob
+    //   interp->evaluate(script);               // only signed scripts pass
+    int install_signed_only_policy();
+    void remove_signed_only_policy();
+    int preload_signing_key(StringView snk_key_blob);
+    bool is_signed_only() const;
+
     // Script debugging.
     int set_debug_callback(Th8_DebugProc callback, void* context);
     int set_breakpoint(StringView script, int line);
@@ -66,6 +80,7 @@ private:
     explicit Interpreter(Th8_Interp*);
 
     Th8_Interp* m_interp;
+    void* m_policy_ctx { nullptr };
 };
 
 }
