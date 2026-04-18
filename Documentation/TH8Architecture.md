@@ -112,11 +112,41 @@ exactly where CSP enforcement happens.
 
 Usage flow:
 1. Page declares a signing key (via HTTP header or meta tag)
-2. `Interpreter::load_signing_key()` registers the trust anchor
+2. `Interpreter::preload_signing_key()` registers the trust anchor
 3. `Interpreter::install_signed_only_policy()` enables enforcement
 4. Script evaluation checks for companion `.b64sig` or inline
    `integrity` attribute
 5. Invalid or missing signatures produce a clean error (not a crash)
+
+### No-JavaScript policy
+
+A page can opt into a mode where ONLY signed TH8 scripts execute
+and JavaScript is completely disabled:
+
+```html
+<meta http-equiv="TH8-Script-Policy"
+      content="signed-only; no-javascript">
+```
+
+When active:
+- Classic (`<script>`, `<script type="text/javascript">`) → blocked
+- Module (`<script type="module">`) → blocked
+- TH8 (`<script type="text/th8">`) → allowed
+- Signed TH8 (`<script type="text/th8+signed">`) → allowed
+
+This eliminates the entire JavaScript attack surface (105,000+
+lines of LibJS) from pages that don't need it.  Use cases:
+
+- **Enterprise kiosk applications** where only company-signed
+  scripts should execute
+- **High-security forms** (banking, medical, government) where
+  supply chain attacks via JavaScript dependencies are a risk
+- **IoT dashboards** where a minimal, auditable scripting
+  engine is preferred over a full ES implementation
+
+The policy is opt-in (pages must declare it), per-document
+(doesn't affect other tabs), and enforceable by the browser
+(JavaScript scripts receive an `error` event and do not run).
 
 ## Adding new DOM commands
 

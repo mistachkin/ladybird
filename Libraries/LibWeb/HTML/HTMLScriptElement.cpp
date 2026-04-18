@@ -144,6 +144,18 @@ void HTMLScriptElement::execute_script()
         return;
     }
 
+    // [Non-standard] TH8 signed-only policy enforcement.
+    // When a document has opted into "th8-signed-only; no-javascript" policy,
+    // Classic and Module scripts are blocked to prevent JavaScript from
+    // subverting the TH8 sandbox.
+    if (document->th8_no_javascript_policy()
+        && (m_script_type == ScriptType::Classic || m_script_type == ScriptType::Module)) {
+        dbgln("HTMLScriptElement: Refusing to run JavaScript/module script: "
+              "document has TH8 signed-only no-JavaScript policy active.");
+        dispatch_event(DOM::Event::create(realm(), HTML::EventNames::error));
+        return;
+    }
+
     // 5. If el's from an external file is true, or el's type is "module", then increment document's ignore-destructive-writes counter.
     bool incremented_destructive_writes_counter = false;
     if (m_from_an_external_file || m_script_type == ScriptType::Module) {

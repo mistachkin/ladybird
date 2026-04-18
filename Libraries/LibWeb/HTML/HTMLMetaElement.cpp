@@ -220,6 +220,25 @@ void HTMLMetaElement::inserted()
             policy_list->enforce_policy(policy);
             break;
         }
+        case HttpEquivAttributeState::TH8ScriptPolicy: {
+            // [Non-standard] TH8 signed-only script policy.
+            // <meta http-equiv="TH8-Script-Policy" content="signed-only; no-javascript">
+            //
+            // When set, only signed TH8 scripts may execute.  JavaScript (Classic and
+            // Module scripts) is blocked.  This provides a stronger security posture
+            // than CSP alone: only scripts cryptographically signed by the page
+            // author's key execute, and the entire JavaScript attack surface is removed.
+            auto content = get_attribute_value(AttributeNames::content);
+            if (content.is_empty())
+                break;
+
+            // Check for "no-javascript" directive in the content value.
+            if (content.contains("no-javascript"sv)) {
+                document().set_th8_no_javascript_policy(true);
+                dbgln("HTMLMetaElement: TH8 no-JavaScript policy activated for document.");
+            }
+            break;
+        }
         default:
             dbgln("FIXME: Implement '{}' http-equiv state", get_attribute_value(AttributeNames::http_equiv));
             break;

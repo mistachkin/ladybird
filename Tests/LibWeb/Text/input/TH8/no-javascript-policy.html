@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta http-equiv="TH8-Script-Policy" content="signed-only; no-javascript">
+    <title>TH8 No-JavaScript Policy Test</title>
+</head>
+<body>
+    <h1 id="heading">Initial</h1>
+    <p id="status">pending</p>
+
+    <!-- This JavaScript should be blocked by the no-javascript policy. -->
+    <script type="text/javascript">
+        document.getElementById("heading").textContent = "FAIL: JavaScript executed";
+    </script>
+
+    <!-- This TH8 script should execute normally. -->
+    <script type="text/th8">
+        $document querySelector "#heading" textContent "PASS: TH8 executed"
+        $document querySelector "#status" textContent "th8-active"
+    </script>
+
+    <!-- This JavaScript should also be blocked. -->
+    <script>
+        document.getElementById("status").textContent = "FAIL: default JS executed";
+    </script>
+</body>
+</html>

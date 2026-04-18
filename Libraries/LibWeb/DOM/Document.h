@@ -572,6 +572,15 @@ public:
     HTML::TH8Context& ensure_th8_context();
     GC::Ptr<HTML::TH8Context> th8_context() const { return m_th8_context; }
 
+    // [Non-standard] TH8 signed-only policy.
+    // When set, only signed TH8 scripts may execute; JavaScript and
+    // module scripts are blocked.  Opt-in via:
+    //   <meta http-equiv="TH8-Script-Policy" content="signed-only; no-javascript">
+    // or via HTTP header:
+    //   TH8-Script-Policy: signed-only; no-javascript
+    bool th8_no_javascript_policy() const { return m_th8_no_javascript; }
+    void set_th8_no_javascript_policy(bool value) { m_th8_no_javascript = value; }
+
     u32 ignore_destructive_writes_counter() const { return m_ignore_destructive_writes_counter; }
     void increment_ignore_destructive_writes_counter() { m_ignore_destructive_writes_counter++; }
     void decrement_ignore_destructive_writes_counter() { m_ignore_destructive_writes_counter--; }
@@ -1268,6 +1277,7 @@ private:
 
     // [Non-standard] TH8 scripting language context.
     GC::Ptr<HTML::TH8Context> m_th8_context;
+    bool m_th8_no_javascript { false };
 
     bool m_should_invalidate_styles_on_attribute_changes { true };
 
