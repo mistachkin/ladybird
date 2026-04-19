@@ -1,0 +1,1 @@
+PASS: Multiple TH8 script blocks share state

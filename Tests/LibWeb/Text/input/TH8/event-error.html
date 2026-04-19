@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<body>
+<button id="btn">test</button>
+<div id="result">pending</div>
+<script type="text/th8">
+# Test that errors in event handlers don't crash the browser.
+proc badHandler {event} {
+    error "intentional error in handler"
+}
+
+set doc [dom::document]
+set btn [$doc getElementById "btn"]
+$btn addEventListener click badHandler
+</script>
+<script>
+// Trigger click -- the TH8 handler will error, but the browser
+// should continue normally.
+document.getElementById('btn').click();
+document.getElementById('result').textContent = 'survived';
+println("PASS: browser survives TH8 event handler error");
+</script>
+</body>

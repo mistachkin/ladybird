@@ -1,0 +1,1 @@
+PASS: browser survives TH8 event handler error

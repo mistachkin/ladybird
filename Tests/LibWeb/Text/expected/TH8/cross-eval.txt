@@ -1,0 +1,1 @@
+PASS: TH8 cross-eval returned JS result

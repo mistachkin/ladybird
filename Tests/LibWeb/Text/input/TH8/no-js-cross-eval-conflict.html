@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <!-- Both no-javascript and cross-eval: mutually exclusive.
+         cross-eval should be silently ignored. -->
+    <meta http-equiv="TH8-Script-Policy" content="no-javascript; cross-eval">
+</head>
+<body>
+<div id="result">pending</div>
+
+<!-- JavaScript should be blocked by no-javascript. -->
+<script>
+document.getElementById('result').textContent = 'FAIL: JS ran';
+</script>
+
+<script type="text/th8">
+set doc [dom::document]
+set div [$doc getElementById "result"]
+
+# cross-eval should be blocked because no-javascript takes precedence.
+if {[catch {dom::eval_js "1"} err]} {
+    $div textContent "correct: both blocked"
+} else {
+    $div textContent "FAIL: cross-eval was not blocked"
+}
+</script>
+</body>
+</html>
