@@ -10,7 +10,7 @@
 # Evaluate JavaScript from TH8 via the cross-eval bridge.
 set js_result [dom::eval_js "2 + 2"]
 set doc [dom::document]
-set div [$doc getElementById "result"]
+set div [$doc getElementById result]
 $div textContent "js_result: $js_result"
 </script>
 <script>

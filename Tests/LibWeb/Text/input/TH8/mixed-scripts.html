@@ -10,8 +10,8 @@ document.body.appendChild(jsDiv);
 <script type="text/th8">
 # TH8 reads the JS-created element and modifies it
 set doc [dom::document]
-set elem [$doc getElementById "js-created"]
-$elem setAttribute "data-modified-by" "th8"
+set elem [$doc getElementById js-created]
+$elem setAttribute data-modified-by th8
 $elem textContent "Modified by TH8"
 </script>
 <script>

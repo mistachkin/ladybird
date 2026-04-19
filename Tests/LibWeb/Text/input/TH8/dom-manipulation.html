@@ -3,21 +3,21 @@
 <div id="container"></div>
 <script type="text/th8">
 set doc [dom::document]
-set container [$doc getElementById "container"]
+set container [$doc getElementById container]
 
 # Create and append elements
-set p [$doc createElement "p"]
+set p [$doc createElement p]
 $p textContent "First paragraph"
-$p setAttribute "id" "para1"
+$p setAttribute id para1
 $container appendChild $p
 
-set span [$doc createElement "span"]
+set span [$doc createElement span]
 $span textContent "Nested span"
 $p appendChild $span
 
 # Test innerHTML
-set div [$doc createElement "div"]
-$div setAttribute "id" "html-div"
+set div [$doc createElement div]
+$div setAttribute id html-div
 $div innerHTML "<b>Bold text</b>"
 $container appendChild $div
 </script>

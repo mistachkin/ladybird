@@ -4,7 +4,7 @@
 <div id="result">pending</div>
 <script type="text/th8">
 set doc [dom::document]
-set div [$doc getElementById "result"]
+set div [$doc getElementById result]
 
 # Without the cross-eval policy, this should return an error.
 if {[catch {dom::eval_js "1 + 1"} err]} {

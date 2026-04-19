@@ -5,10 +5,10 @@
 <script type="text/th8">
 # Test that querying the same element twice returns the same handle.
 set doc [dom::document]
-set elem1 [$doc getElementById "target"]
-set elem2 [$doc getElementById "target"]
+set elem1 [$doc getElementById target]
+set elem2 [$doc getElementById target]
 
-set result [$doc getElementById "result"]
+set result [$doc getElementById result]
 
 if {$elem1 eq $elem2} {
     $result textContent "dedup: same"

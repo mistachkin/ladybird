@@ -6,18 +6,18 @@
 <script type="text/th8">
 # Test multiple event listeners on the same element.
 set doc [dom::document]
-set log_div [$doc getElementById "log"]
+set log_div [$doc getElementById log]
 set ::event_log {}
 
 proc handler1 {event} {
-    lappend ::event_log "h1"
+    lappend ::event_log h1
 }
 
 proc handler2 {event} {
-    lappend ::event_log "h2"
+    lappend ::event_log h2
 }
 
-set btn [$doc getElementById "btn"]
+set btn [$doc getElementById btn]
 $btn addEventListener click handler1
 $btn addEventListener click handler2
 </script>
@@ -28,7 +28,7 @@ document.getElementById('btn').click();
 <script type="text/th8">
 # Check that both handlers fired.
 set doc [dom::document]
-set result [$doc getElementById "result"]
+set result [$doc getElementById result]
 set count [llength $::event_log]
 if {$count == 2} {
     $result textContent "both: $::event_log"

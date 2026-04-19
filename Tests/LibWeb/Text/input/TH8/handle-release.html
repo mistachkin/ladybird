@@ -5,7 +5,7 @@
 <script type="text/th8">
 # Test that releasing a handle makes it invalid.
 set doc [dom::document]
-set elem [$doc getElementById "target"]
+set elem [$doc getElementById target]
 
 # The handle should work before release.
 set before [$elem textContent]
@@ -14,7 +14,7 @@ set before [$elem textContent]
 dom::release $elem
 
 # After release, using the handle should fail.
-set result_div [$doc getElementById "result"]
+set result_div [$doc getElementById result]
 if {[catch {$elem textContent} err]} {
     $result_div textContent "released: before=$before"
 } else {

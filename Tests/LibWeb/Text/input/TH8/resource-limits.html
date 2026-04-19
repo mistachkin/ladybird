@@ -6,7 +6,7 @@
 # The TH8 interpreter has step and memory limits set by TH8Context.
 # An infinite loop should be terminated by the step limit.
 set doc [dom::document]
-set div [$doc getElementById "result"]
+set div [$doc getElementById result]
 
 if {[catch {
     # This loop should hit the step limit and be cancelled.

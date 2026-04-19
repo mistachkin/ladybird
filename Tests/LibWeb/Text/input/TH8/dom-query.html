@@ -5,16 +5,16 @@
 set doc [dom::document]
 
 # Test getElementById
-set elem [$doc getElementById "target"]
+set elem [$doc getElementById target]
 set tag [$elem tagName]
 set text [$elem textContent]
 
 # Test querySelector
-set elem2 [$doc querySelector ".test-class"]
-set has_class [$elem2 hasAttribute "class"]
+set elem2 [$doc querySelector .test-class]
+set has_class [$elem2 hasAttribute class]
 
 # Test getAttribute
-set class_val [$elem getAttribute "class"]
+set class_val [$elem getAttribute class]
 </script>
 <script>
 let target = document.getElementById('target');

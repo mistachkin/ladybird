@@ -7,12 +7,12 @@
 proc handleClick {event} {
     set type [dict get $event type]
     set doc [dom::document]
-    set result [$doc getElementById "result"]
+    set result [$doc getElementById result]
     $result textContent "clicked: $type"
 }
 
 set doc [dom::document]
-set btn [$doc getElementById "btn"]
+set btn [$doc getElementById btn]
 $btn addEventListener click handleClick
 </script>
 <script>
