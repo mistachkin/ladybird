@@ -581,6 +581,14 @@ public:
     bool th8_no_javascript_policy() const { return m_th8_no_javascript; }
     void set_th8_no_javascript_policy(bool value) { m_th8_no_javascript = value; }
 
+    // [Non-standard] TH8 cross-eval policy.
+    // When set, TH8 scripts may evaluate JavaScript via dom::eval_js
+    // and JavaScript may call TH8 via window.th8.eval().  Mutually
+    // exclusive with no-javascript.  Opt-in via:
+    //   <meta http-equiv="TH8-Script-Policy" content="cross-eval">
+    bool th8_cross_eval_policy() const { return m_th8_cross_eval; }
+    void set_th8_cross_eval_policy(bool value) { m_th8_cross_eval = value; }
+
     u32 ignore_destructive_writes_counter() const { return m_ignore_destructive_writes_counter; }
     void increment_ignore_destructive_writes_counter() { m_ignore_destructive_writes_counter++; }
     void decrement_ignore_destructive_writes_counter() { m_ignore_destructive_writes_counter--; }
@@ -1278,6 +1286,7 @@ private:
     // [Non-standard] TH8 scripting language context.
     GC::Ptr<HTML::TH8Context> m_th8_context;
     bool m_th8_no_javascript { false };
+    bool m_th8_cross_eval { false };
 
     bool m_should_invalidate_styles_on_attribute_changes { true };
 

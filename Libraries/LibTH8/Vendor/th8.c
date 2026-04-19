@@ -122,8 +122,8 @@
 
 #ifndef TH8_VERSION_GEN_H
 #define TH8_VERSION_GEN_H
-#define TH8_SOURCE_ID       "eab6d9f28136748a"
-#define TH8_SOURCE_DATETIME "2026-04-18 11:13:56"
+#define TH8_SOURCE_ID       "6ab3ed947a9420c6"
+#define TH8_SOURCE_DATETIME "2026-04-18 18:48:31"
 #define TH8_SOURCE_TAGS     "trunk"
 #define TH8_SOURCE_VCS      "fossil"
 #define TH8_PATCHLEVEL      "1.0.0"

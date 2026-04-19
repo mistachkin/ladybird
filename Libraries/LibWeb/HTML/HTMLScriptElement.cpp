@@ -213,7 +213,9 @@ void HTMLScriptElement::execute_script()
         else
             dbgln_if(HTML_SCRIPT_DEBUG, "HTMLScriptElement: Running inline TH8 script");
 
-        (void)as<TH8Script>(*m_result.get<GC::Ref<Script>>()).run();
+        auto& script_ref = *m_result.get<GC::Ref<Script>>();
+        VERIFY(is<TH8Script>(script_ref));
+        (void)as<TH8Script>(script_ref).run();
 
         document->set_current_script({}, old_current_script);
     }

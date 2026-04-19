@@ -221,21 +221,36 @@ void HTMLMetaElement::inserted()
             break;
         }
         case HttpEquivAttributeState::TH8ScriptPolicy: {
-            // [Non-standard] TH8 signed-only script policy.
-            // <meta http-equiv="TH8-Script-Policy" content="signed-only; no-javascript">
+            // [Non-standard] TH8 script policy directives.
+            // <meta http-equiv="TH8-Script-Policy" content="signed-only; no-javascript; cross-eval">
             //
-            // When set, only signed TH8 scripts may execute.  JavaScript (Classic and
-            // Module scripts) is blocked.  This provides a stronger security posture
-            // than CSP alone: only scripts cryptographically signed by the page
-            // author's key execute, and the entire JavaScript attack surface is removed.
+            // Directives (semicolon-separated):
+            //   signed-only   -- only signed TH8 scripts may execute
+            //   no-javascript -- JavaScript (Classic and Module scripts) is blocked
+            //   cross-eval    -- TH8 and JavaScript may call each other
+            //
+            // no-javascript and cross-eval are mutually exclusive.
             auto content = get_attribute_value(AttributeNames::content);
             if (content.is_empty())
                 break;
 
-            // Check for "no-javascript" directive in the content value.
-            if (content.contains("no-javascript"sv)) {
+            bool has_no_js = content.contains("no-javascript"sv);
+            bool has_cross_eval = content.contains("cross-eval"sv);
+
+            if (has_no_js && has_cross_eval) {
+                dbgln("HTMLMetaElement: TH8-Script-Policy: 'no-javascript' and 'cross-eval' "
+                      "are mutually exclusive; ignoring 'cross-eval'.");
+                has_cross_eval = false;
+            }
+
+            if (has_no_js) {
                 document().set_th8_no_javascript_policy(true);
                 dbgln("HTMLMetaElement: TH8 no-JavaScript policy activated for document.");
+            }
+
+            if (has_cross_eval) {
+                document().set_th8_cross_eval_policy(true);
+                dbgln("HTMLMetaElement: TH8 cross-eval policy activated for document.");
             }
             break;
         }
