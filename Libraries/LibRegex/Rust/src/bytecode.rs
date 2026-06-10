@@ -18,7 +18,8 @@
 //! - A set of registers for capture group positions
 //! - A backtrack stack for saving/restoring state
 
-pub use libunicode_rust::character_types::{PropertyKind, ResolvedProperty};
+pub use libunicode_rust::character_types::PropertyKind;
+pub use libunicode_rust::character_types::ResolvedProperty;
 
 /// A named capture group mapping derived from the pattern's named captures.
 /// <https://tc39.es/ecma262/#sec-parsepattern>
@@ -213,6 +214,8 @@ pub enum SimpleMatch {
     BuiltinClass(BuiltinCharacterClass),
     /// Unicode property (\p{...}, \P{...}).
     UnicodeProperty(Box<UnicodePropertyData>),
+    /// Union of two matchers: matches if either alternative matches.
+    Union(Box<SimpleMatch>, Box<SimpleMatch>),
 }
 
 /// A character range for CharClass instructions (u32 code points).

@@ -4,15 +4,18 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Debug.h>
 #include <AK/Error.h>
+#include <AK/NeverDestroyed.h>
+#include <AK/ScopeGuard.h>
 #include <AK/String.h>
-#include <AK/TemporaryChange.h>
 #include <AK/Time.h>
 #include <LibCore/StandardPaths.h>
 #include <LibCore/Timer.h>
 #include <LibGfx/ImageFormats/PNGWriter.h>
 #include <LibGfx/SharedImageBuffer.h>
 #include <LibURL/Parser.h>
+#include <LibWeb/CSS/SystemColor.h>
 #include <LibWeb/Crypto/Crypto.h>
 #include <LibWeb/Infra/Strings.h>
 #include <LibWebView/Application.h>
@@ -27,12 +30,16 @@
 
 namespace WebView {
 
-static HashMap<u64, ViewImplementation*> s_all_views;
+static HashMap<u64, ViewImplementation*>& all_views()
+{
+    static NeverDestroyed<HashMap<u64, ViewImplementation*>> views;
+    return *views;
+}
 static u64 s_view_count = 1; // This has to start at 1 for Firefox DevTools.
 
 void ViewImplementation::for_each_view(Function<IterationDecision(ViewImplementation&)> callback)
 {
-    for (auto& view : s_all_views) {
+    for (auto& view : all_views()) {
         if (callback(*view.value) == IterationDecision::Break)
             break;
     }
@@ -40,7 +47,7 @@ void ViewImplementation::for_each_view(Function<IterationDecision(ViewImplementa
 
 Optional<ViewImplementation&> ViewImplementation::find_view_by_id(u64 id)
 {
-    if (auto view = s_all_views.get(id); view.has_value())
+    if (auto view = all_views().get(id); view.has_value())
         return *view.value();
     return {};
 }
@@ -49,7 +56,7 @@ ViewImplementation::ViewImplementation()
     : m_document_cookie_version_buffer(Core::create_shared_version_buffer())
     , m_view_id(s_view_count++)
 {
-    s_all_views.set(m_view_id, this);
+    all_views().set(m_view_id, this);
 
     initialize_context_menus();
 
@@ -71,7 +78,7 @@ ViewImplementation::ViewImplementation()
 
 ViewImplementation::~ViewImplementation()
 {
-    s_all_views.remove(m_view_id);
+    all_views().remove(m_view_id);
 
     if (m_client_state.client)
         m_client_state.client->unregister_view(m_client_state.page_index);
@@ -100,8 +107,12 @@ void ViewImplementation::set_url(URL::URL url)
     if (m_url == url)
         return;
 
+    auto previous_host = current_host();
     m_url = move(url);
     update_bookmark_action();
+
+    if (current_host() != previous_host)
+        apply_zoom_for_current_host();
 }
 
 void ViewImplementation::set_favicon(Badge<WebContentClient>, Gfx::Bitmap const& favicon)
@@ -115,7 +126,8 @@ void ViewImplementation::set_favicon(Badge<WebContentClient>, Gfx::Bitmap const&
 
     if (m_favicon_base64_png.has_value()) {
         Application::bookmark_store().update_favicon(m_url, *m_favicon_base64_png);
-        Application::history_store().update_favicon(m_url, *m_favicon_base64_png);
+        if (!m_should_suppress_history_for_current_load)
+            Application::history_store().update_favicon(m_url, *m_favicon_base64_png);
     }
 
     if (on_favicon_change)
@@ -124,6 +136,12 @@ void ViewImplementation::set_favicon(Badge<WebContentClient>, Gfx::Bitmap const&
 
 void ViewImplementation::create_new_process_for_cross_site_navigation(URL::URL const& url)
 {
+    if (m_client_state.has_usable_bitmap) {
+        // Keep showing the old page until the new WebContent process paints its first frame.
+        m_backup_shared_image_buffer = move(m_client_state.front_bitmap.shared_image_buffer);
+        m_backup_bitmap_size = m_client_state.front_bitmap.last_painted_size;
+    }
+
     if (m_client_state.client) {
         m_client_state.client->unregister_view(m_client_state.page_index);
     }
@@ -134,8 +152,6 @@ void ViewImplementation::create_new_process_for_cross_site_navigation(URL::URL c
     if (on_web_content_process_change_for_cross_site_navigation)
         on_web_content_process_change_for_cross_site_navigation();
 
-    // Don't keep a stale backup bitmap around.
-    m_backup_shared_image_buffer = nullptr;
     handle_resize();
 
     load(url);
@@ -143,16 +159,22 @@ void ViewImplementation::create_new_process_for_cross_site_navigation(URL::URL c
 
 void ViewImplementation::server_did_paint(Badge<WebContentClient>, i32 bitmap_id, Gfx::IntSize size)
 {
+    bool did_swap_bitmap = false;
     if (m_client_state.back_bitmap.id == bitmap_id) {
         m_client_state.has_usable_bitmap = true;
         m_client_state.back_bitmap.last_painted_size = size.to_type<Web::DevicePixels>();
         swap(m_client_state.back_bitmap, m_client_state.front_bitmap);
         m_backup_shared_image_buffer = nullptr;
-        if (on_ready_to_paint)
-            on_ready_to_paint();
+        did_swap_bitmap = true;
     }
 
-    client().async_ready_to_paint(page_id());
+    dbgln_if(COMPOSITOR_DEBUG, "[Compositor] UI received presented bitmap {} for page {} size={}x{} did_swap={} front={} back={}",
+        bitmap_id, page_id(), size.width(), size.height(), did_swap_bitmap, m_client_state.front_bitmap.id, m_client_state.back_bitmap.id);
+
+    client().notify_presented_bitmap_ready_to_paint(page_id(), bitmap_id);
+
+    if (did_swap_bitmap && on_ready_to_paint)
+        on_ready_to_paint();
 }
 
 void ViewImplementation::set_window_position(Gfx::IntPoint position)
@@ -172,19 +194,34 @@ void ViewImplementation::did_update_window_rect()
 
 void ViewImplementation::set_system_visibility_state(Web::HTML::VisibilityState visibility_state)
 {
+    if (m_system_visibility_state == visibility_state)
+        return;
+
     m_system_visibility_state = visibility_state;
     client().async_set_system_visibility_state(m_client_state.page_index, m_system_visibility_state);
 }
 
 void ViewImplementation::load(URL::URL const& url)
 {
+    m_should_suppress_history_for_current_load = false;
+    m_should_suppress_history_for_next_load = false;
     set_url(url);
     client().async_load_url(page_id(), url);
 }
 
 void ViewImplementation::load_html(StringView html)
 {
+    m_should_suppress_history_for_current_load = false;
+    m_should_suppress_history_for_next_load = false;
     client().async_load_html(page_id(), html);
+}
+
+void ViewImplementation::load_crash_page_html(StringView html, URL::URL const& crashed_url)
+{
+    m_should_suppress_history_for_current_load = true;
+    m_should_suppress_history_for_next_load = true;
+    set_url(crashed_url);
+    client().async_load_html_with_url(page_id(), html, crashed_url);
 }
 
 void ViewImplementation::load_navigation_error_page(StringView text)
@@ -192,7 +229,7 @@ void ViewImplementation::load_navigation_error_page(StringView text)
     auto message = MUST(String::formatted("Failed to load \"{}\"", text));
 
     StringBuilder builder;
-    builder.appendff(ERROR_HTML_HEADER, ERROR_SVG, message);
+    builder.appendff(ERROR_HTML_HEADER, ""sv, ERROR_SVG, message);
     builder.append("<p>If you were trying to enter a search query, please enable search in <a href=\"about:settings#search\">settings</a>.</p>"sv);
     builder.append(ERROR_HTML_FOOTER);
     load_html(builder.string_view());
@@ -200,11 +237,15 @@ void ViewImplementation::load_navigation_error_page(StringView text)
 
 void ViewImplementation::reload()
 {
+    m_should_suppress_history_for_current_load = false;
+    m_should_suppress_history_for_next_load = false;
     client().async_reload(page_id());
 }
 
 void ViewImplementation::traverse_the_history_by_delta(int delta)
 {
+    m_should_suppress_history_for_current_load = false;
+    m_should_suppress_history_for_next_load = false;
     client().async_traverse_the_history_by_delta(page_id(), delta);
 }
 
@@ -214,6 +255,7 @@ void ViewImplementation::zoom_in()
         return;
     m_zoom_level = round_to<int>((m_zoom_level + ZOOM_STEP) * 100) / 100.0;
     update_zoom();
+    Application::settings().set_zoom_for_host(current_host(), m_zoom_level);
 }
 
 void ViewImplementation::zoom_out()
@@ -222,6 +264,7 @@ void ViewImplementation::zoom_out()
         return;
     m_zoom_level = round_to<int>((m_zoom_level - ZOOM_STEP) * 100) / 100.0;
     update_zoom();
+    Application::settings().set_zoom_for_host(current_host(), m_zoom_level);
 }
 
 void ViewImplementation::set_zoom(double zoom_level)
@@ -235,10 +278,45 @@ void ViewImplementation::reset_zoom()
     m_zoom_level = 1.0;
     update_zoom();
     client().async_reset_zoom(m_client_state.page_index);
+    Application::settings().set_zoom_for_host(current_host(), m_zoom_level);
 }
 
 void ViewImplementation::enqueue_input_event(Web::InputEvent event)
 {
+    auto* mouse_event = event.get_pointer<Web::MouseEvent>();
+    if (mouse_event && mouse_event->type == Web::MouseEvent::Type::MouseWheel) {
+        mouse_event->wheel_delta_x /= zoom_level();
+        mouse_event->wheel_delta_y /= zoom_level();
+    }
+
+    if (Application::web_content_options().enable_async_scrolling == EnableAsyncScrolling::Yes
+        && m_client_state.has_usable_bitmap
+        && mouse_event) {
+        if (mouse_event->type == Web::MouseEvent::Type::MouseWheel) {
+            auto wheel_delta_x = mouse_event->wheel_delta_x;
+            auto wheel_delta_y = mouse_event->wheel_delta_y;
+            if (mouse_event->modifiers & Web::UIEvents::KeyModifier::Mod_Shift)
+                swap(wheel_delta_x, wheel_delta_y);
+
+            auto device_pixels_per_css_pixel = static_cast<float>(device_pixel_ratio() * zoom_level());
+            auto position = Gfx::FloatPoint {
+                static_cast<float>(mouse_event->position.x().value()),
+                static_cast<float>(mouse_event->position.y().value()),
+            };
+            auto delta_in_device_pixels = Gfx::FloatPoint { wheel_delta_x, wheel_delta_y }.scaled(device_pixels_per_css_pixel);
+            dbgln_if(COMPOSITOR_DEBUG, "[Compositor] UI attempting compositor wheel bypass for page {} at {},{} device delta {},{}",
+                m_client_state.page_index, position.x(), position.y(), delta_in_device_pixels.x(), delta_in_device_pixels.y());
+            if (client().send_async_scroll_to_compositor(m_client_state.page_index, position, delta_in_device_pixels))
+                mouse_event->async_scroll_performed_default_action = true;
+            dbgln_if(COMPOSITOR_DEBUG, "[Compositor] UI compositor wheel bypass result for page {}: {}",
+                m_client_state.page_index, mouse_event->async_scroll_performed_default_action ? "accepted"sv : "rejected"sv);
+        } else if (client().handle_mouse_event_in_compositor(m_client_state.page_index, *mouse_event)) {
+            dbgln_if(COMPOSITOR_DEBUG, "[Compositor] UI compositor handled mouse event for page {} at {},{}",
+                m_client_state.page_index, mouse_event->position.x().value(), mouse_event->position.y().value());
+            return;
+        }
+    }
+
     // Send the next event over to the WebContent to be handled by JS. We'll later get a message to say whether JS
     // prevented the default event behavior, at which point we either discard or handle that event, and then try to
     // process the next one.
@@ -249,7 +327,7 @@ void ViewImplementation::enqueue_input_event(Web::InputEvent event)
             client().async_key_event(m_client_state.page_index, event.clone_without_browser_data());
         },
         [this](Web::MouseEvent const& event) {
-            client().async_mouse_event(m_client_state.page_index, event.clone_without_browser_data());
+            client().dispatch_mouse_event_to_web_content(m_client_state.page_index, event);
         },
         [this](Web::DragEvent& event) {
             auto cloned_event = event.clone_without_browser_data();
@@ -285,6 +363,9 @@ void ViewImplementation::did_finish_handling_input_event(Badge<WebContentClient>
 
 void ViewImplementation::set_preferred_color_scheme(Web::CSS::PreferredColorScheme color_scheme)
 {
+    m_preferred_color_scheme = color_scheme;
+    set_page_background_color(preferred_canvas_background_color());
+
     client().async_set_preferred_color_scheme(page_id(), color_scheme);
 }
 
@@ -341,6 +422,11 @@ ByteString ViewImplementation::selected_text()
     return client().get_selected_text(page_id());
 }
 
+ByteString ViewImplementation::cut_selected_text()
+{
+    return client().cut_selected_text(page_id());
+}
+
 Optional<String> ViewImplementation::selected_text_with_whitespace_collapsed()
 {
     auto selected_text = MUST(Web::Infra::strip_and_collapse_whitespace(this->selected_text()));
@@ -389,9 +475,128 @@ void ViewImplementation::get_hovered_node_id()
     client().async_get_hovered_node_id(page_id());
 }
 
-void ViewImplementation::inspect_dom_node(Web::UniqueNodeID node_id, DOMNodeProperties::Type property_type, Optional<Web::CSS::PseudoElement> pseudo_element)
+void ViewImplementation::start_node_picker(DevTools::DevToolsDelegate::OnNodePickerEvent on_node_picker_event)
 {
-    client().async_inspect_dom_node(page_id(), property_type, node_id, pseudo_element);
+    m_node_picker_active = true;
+    m_node_picker_hovered_node_id.clear();
+    m_pending_node_picker_requests.clear();
+    m_on_node_picker_event = move(on_node_picker_event);
+}
+
+void ViewImplementation::stop_node_picker()
+{
+    if (!m_node_picker_active)
+        return;
+
+    clear_node_picker();
+    m_node_picker_active = false;
+    m_pending_node_picker_requests.clear();
+    m_on_node_picker_event = nullptr;
+}
+
+void ViewImplementation::clear_node_picker()
+{
+    m_node_picker_hovered_node_id.clear();
+    clear_highlighted_dom_node();
+}
+
+void ViewImplementation::node_picker_hover(Web::DevicePixelPoint position)
+{
+    request_node_picker_hit_test(NodePickerRequestType::Hovered, position);
+}
+
+void ViewImplementation::node_picker_pick(Web::DevicePixelPoint position)
+{
+    request_node_picker_hit_test(NodePickerRequestType::Picked, position);
+}
+
+void ViewImplementation::node_picker_preview(Web::DevicePixelPoint position)
+{
+    request_node_picker_hit_test(NodePickerRequestType::Previewed, position);
+}
+
+void ViewImplementation::node_picker_cancel()
+{
+    if (!m_node_picker_active)
+        return;
+
+    if (m_on_node_picker_event) {
+        m_on_node_picker_event({
+            .type = DevTools::DevToolsDelegate::NodePickerEvent::Type::Canceled,
+            .node_id = {},
+        });
+    }
+}
+
+void ViewImplementation::request_node_picker_hit_test(NodePickerRequestType type, Web::DevicePixelPoint position)
+{
+    if (!m_node_picker_active)
+        return;
+
+    auto request_id = m_next_node_picker_request_id++;
+    m_pending_node_picker_requests.set(request_id, type);
+    client().async_get_node_id_at_position(page_id(), request_id, position);
+}
+
+void ViewImplementation::did_receive_node_picker_hit_test(u64 request_id, Web::UniqueNodeID node_id)
+{
+    auto request_type = m_pending_node_picker_requests.take(request_id);
+    if (!request_type.has_value() || !m_node_picker_active)
+        return;
+
+    if (*request_type == NodePickerRequestType::Hovered) {
+        if (node_id == m_node_picker_hovered_node_id.value_or(0))
+            return;
+
+        m_node_picker_hovered_node_id = node_id;
+        if (node_id == 0) {
+            clear_node_picker();
+            return;
+        }
+    } else if (node_id == 0) {
+        return;
+    }
+
+    if (!m_on_node_picker_event)
+        return;
+
+    DevTools::DevToolsDelegate::NodePickerEvent::Type event_type;
+    switch (*request_type) {
+    case NodePickerRequestType::Hovered:
+        event_type = DevTools::DevToolsDelegate::NodePickerEvent::Type::Hovered;
+        break;
+    case NodePickerRequestType::Picked:
+        event_type = DevTools::DevToolsDelegate::NodePickerEvent::Type::Picked;
+        break;
+    case NodePickerRequestType::Previewed:
+        event_type = DevTools::DevToolsDelegate::NodePickerEvent::Type::Previewed;
+        break;
+    }
+
+    m_on_node_picker_event({
+        .type = event_type,
+        .node_id = node_id,
+    });
+}
+
+void ViewImplementation::inspect_dom_node(Web::UniqueNodeID node_id, DOMNodeProperties::Type property_type, Optional<Web::CSS::PseudoElement> pseudo_element, JsonValue options)
+{
+    client().async_inspect_dom_node(page_id(), property_type, node_id, pseudo_element, move(options));
+}
+
+void ViewImplementation::inspect_grid_layouts(Web::UniqueNodeID root_node_id)
+{
+    client().async_inspect_grid_layouts(page_id(), root_node_id);
+}
+
+void ViewImplementation::inspect_current_grid(Web::UniqueNodeID node_id)
+{
+    client().async_inspect_current_grid(page_id(), node_id);
+}
+
+void ViewImplementation::inspect_current_flexbox(Web::UniqueNodeID node_id, bool only_look_at_parents)
+{
+    client().async_inspect_current_flexbox(page_id(), node_id, only_look_at_parents);
 }
 
 void ViewImplementation::clear_inspected_dom_node()
@@ -407,6 +612,26 @@ void ViewImplementation::highlight_dom_node(Web::UniqueNodeID node_id, Optional<
 void ViewImplementation::clear_highlighted_dom_node()
 {
     highlight_dom_node(0, {});
+}
+
+void ViewImplementation::highlight_flexbox(Web::UniqueNodeID node_id, JsonValue options)
+{
+    client().async_highlight_flexbox(page_id(), node_id, move(options));
+}
+
+void ViewImplementation::clear_flexbox_highlight(Web::UniqueNodeID node_id)
+{
+    client().async_clear_flexbox_highlight(page_id(), node_id);
+}
+
+void ViewImplementation::highlight_grid(Web::UniqueNodeID node_id, JsonValue options)
+{
+    client().async_highlight_grid(page_id(), node_id, move(options));
+}
+
+void ViewImplementation::clear_grid_highlight(Web::UniqueNodeID node_id)
+{
+    client().async_clear_grid_highlight(page_id(), node_id);
 }
 
 void ViewImplementation::set_listen_for_dom_mutations(bool listen_for_dom_mutations)
@@ -501,6 +726,11 @@ void ViewImplementation::debug_request(ByteString const& request, ByteString con
     client().async_debug_request(page_id(), request, argument);
 }
 
+void ViewImplementation::set_content_blockers(Core::AnonymousBuffer const& patterns)
+{
+    client().async_set_content_blockers(page_id(), patterns);
+}
+
 void ViewImplementation::run_javascript(String const& js_source)
 {
     client().async_run_javascript(page_id(), js_source);
@@ -561,6 +791,34 @@ void ViewImplementation::paste_text_from_clipboard()
     client().async_paste(page_id(), Application::the().clipboard_text());
 }
 
+void ViewImplementation::set_marked_text_from_input_method(Utf16String const& text)
+{
+    client().async_set_marked_text_from_input_method(page_id(), text);
+}
+
+void ViewImplementation::commit_text_from_input_method(Utf16String const& text)
+{
+    client().async_commit_text_from_input_method(page_id(), text);
+}
+
+void ViewImplementation::unmark_text_from_input_method()
+{
+    client().async_unmark_text_from_input_method(page_id());
+}
+
+Optional<Web::DevicePixelRect> ViewImplementation::get_input_caret_rect()
+{
+    // Returns the most-recent caret position pushed by WebContent (see set_input_caret_rect). Deliberately makes no
+    // synchronous IPC request: This is read from inside AppKit text-input callbacks — where blocking can re-enter the
+    // run loop and deadlock the input method.
+    return m_input_caret_rect;
+}
+
+void ViewImplementation::set_input_caret_rect(Badge<WebContentClient>, Optional<Web::DevicePixelRect> rect)
+{
+    m_input_caret_rect = rect;
+}
+
 void ViewImplementation::retrieved_clipboard_entries(u64 request_id, ReadonlySpan<Web::Clipboard::SystemClipboardItem> items)
 {
     client().async_retrieved_clipboard_entries(page_id(), request_id, items);
@@ -602,8 +860,43 @@ void ViewImplementation::did_update_navigation_buttons_state(Badge<WebContentCli
     m_navigate_forward_action->set_enabled(forward_enabled);
 }
 
+void ViewImplementation::did_change_needs_beforeunload_check(Badge<WebContentClient>, bool needs_beforeunload_check)
+{
+    m_needs_beforeunload_check = needs_beforeunload_check;
+}
+
+void ViewImplementation::did_change_background_color(Badge<WebContentClient>, Gfx::Color color)
+{
+    set_page_background_color(color);
+}
+
+void ViewImplementation::set_page_background_color_to_system_canvas(bool dark)
+{
+    auto color_scheme = dark ? Web::CSS::PreferredColorScheme::Dark : Web::CSS::PreferredColorScheme::Light;
+    m_system_canvas_background_color = Web::CSS::SystemColor::canvas(color_scheme);
+    set_page_background_color(preferred_canvas_background_color());
+}
+
+void ViewImplementation::set_page_background_color(Gfx::Color color)
+{
+    m_page_background_color = color;
+    if (on_page_background_color_change)
+        on_page_background_color_change(m_page_background_color);
+}
+
+Gfx::Color ViewImplementation::preferred_canvas_background_color() const
+{
+    if (m_preferred_color_scheme == Web::CSS::PreferredColorScheme::Dark)
+        return Web::CSS::SystemColor::canvas(Web::CSS::PreferredColorScheme::Dark);
+    if (m_preferred_color_scheme == Web::CSS::PreferredColorScheme::Light)
+        return Web::CSS::SystemColor::canvas(Web::CSS::PreferredColorScheme::Light);
+    return m_system_canvas_background_color;
+}
+
 void ViewImplementation::did_allocate_backing_stores(Badge<WebContentClient>, i32 front_bitmap_id, Gfx::SharedImage front_backing_store, i32 back_bitmap_id, Gfx::SharedImage back_backing_store)
 {
+    dbgln_if(COMPOSITOR_DEBUG, "[Compositor] UI installing backing stores for page {} front={} back={} had_usable_bitmap={}",
+        page_id(), front_bitmap_id, back_bitmap_id, m_client_state.has_usable_bitmap);
     if (m_client_state.has_usable_bitmap) {
         // NOTE: We keep the outgoing front bitmap as a backup so we have something to paint until we get a new one.
         m_backup_shared_image_buffer = move(m_client_state.front_bitmap.shared_image_buffer);
@@ -628,13 +921,33 @@ void ViewImplementation::update_zoom()
     client().async_set_zoom_level(m_client_state.page_index, m_zoom_level);
 }
 
+String ViewImplementation::current_host() const
+{
+    if (!m_url.host().has_value())
+        return {};
+    return m_url.serialized_host();
+}
+
+void ViewImplementation::apply_zoom_for_current_host()
+{
+    auto& settings = Application::settings();
+    auto zoom_level = settings.zoom_for_host(current_host()).value_or(settings.default_zoom_level_factor());
+    if (zoom_level == m_zoom_level)
+        return;
+    m_zoom_level = zoom_level;
+    update_zoom();
+}
+
 void ViewImplementation::handle_resize()
 {
     client().async_set_viewport(page_id(), viewport_size(), m_device_pixel_ratio, m_is_fullscreen);
+    Application::the().update_compositor_viewport(client().compositor_context_id_for_page(page_id()), viewport_size().to_type<int>(), Web::Compositor::WindowResizingInProgress::Yes);
 }
 
 void ViewImplementation::initialize_client(CreateNewClient create_new_client)
 {
+    m_needs_beforeunload_check = true;
+
     if (create_new_client == CreateNewClient::Yes) {
         m_client_state = {};
 
@@ -650,6 +963,8 @@ void ViewImplementation::initialize_client(CreateNewClient create_new_client)
     client().async_set_viewport(m_client_state.page_index, viewport_size(), m_device_pixel_ratio, m_is_fullscreen);
     client().async_set_maximum_frames_per_second(m_client_state.page_index, m_maximum_frames_per_second);
     client().async_set_system_visibility_state(m_client_state.page_index, m_system_visibility_state);
+    auto compositor_context_id = client().compositor_context_id_for_page(m_client_state.page_index);
+    Application::the().update_compositor_viewport(compositor_context_id, viewport_size().to_type<int>());
     client().async_set_document_cookie_version_buffer(m_client_state.page_index, m_document_cookie_version_buffer);
 
     if (auto webdriver_endpoint = Application::browser_options().webdriver_endpoint; webdriver_endpoint.has_value())
@@ -707,17 +1022,23 @@ void ViewImplementation::handle_web_content_process_crash(LoadErrorPage load_err
         auto escaped_url = escape_html_entities(m_url.serialize());
 
         StringBuilder builder;
-        builder.appendff(ERROR_HTML_HEADER, CRASH_ERROR_SVG, "Ladybird flew off-course!"sv);
+        builder.appendff(ERROR_HTML_HEADER, NO_FALLBACK_FAVICON_LINK, CRASH_ERROR_SVG, "Ladybird flew off-course!"sv);
         builder.appendff("<p>The web page <a href=\"{}\">{}</a> has crashed.<br><br>You can reload the page to try again.</p>", escaped_url, escaped_url);
         builder.append(ERROR_HTML_FOOTER);
-        load_html(builder.string_view());
+        load_crash_page_html(builder.string_view(), m_url);
     }
 }
 
 void ViewImplementation::default_zoom_level_factor_changed()
 {
-    auto const default_zoom_level_factor = Application::settings().default_zoom_level_factor();
-    set_zoom(default_zoom_level_factor);
+    apply_zoom_for_current_host();
+}
+
+void ViewImplementation::zoom_per_host_changed(StringView host)
+{
+    if (current_host() != host)
+        return;
+    apply_zoom_for_current_host();
 }
 
 void ViewImplementation::languages_changed()
@@ -769,8 +1090,13 @@ static ErrorOr<LexicalPath> save_screenshot(Gfx::Bitmap const* bitmap)
     if (!bitmap)
         return Error::from_string_literal("Failed to take a screenshot");
 
-    auto file = AK::UnixDateTime::now().to_byte_string("screenshot-%Y-%m-%d-%H-%M-%S.png"sv);
-    auto path = TRY(Application::the().path_for_downloaded_file(file));
+    auto path = TRY([] -> ErrorOr<LexicalPath> {
+        if (auto const& screenshot_path = Application::browser_options().screenshot_path; screenshot_path.has_value())
+            return LexicalPath { *screenshot_path };
+
+        auto file = AK::UnixDateTime::now().to_byte_string("screenshot-%Y-%m-%d-%H-%M-%S.png"sv);
+        return Application::the().path_for_downloaded_file(file);
+    }());
 
     auto encoded = TRY(Gfx::PNGWriter::encode(*bitmap));
 
@@ -899,12 +1225,6 @@ void ViewImplementation::set_user_style_sheet(String const& source)
     client().async_set_user_style(page_id(), source);
 }
 
-void ViewImplementation::use_native_user_style_sheet()
-{
-    extern String native_stylesheet_source;
-    set_user_style_sheet(native_stylesheet_source);
-}
-
 void ViewImplementation::initialize_context_menus()
 {
     auto& application = Application::the();
@@ -970,6 +1290,9 @@ void ViewImplementation::initialize_context_menus()
 
     m_open_in_new_tab_action = Action::create("Open in New Tab"sv, ActionID::OpenInNewTab, [this]() {
         Application::the().open_url_in_new_tab(m_context_menu_url, Web::HTML::ActivateTab::No);
+    });
+    m_open_in_new_window_action = Action::create("Open in New Window"sv, ActionID::OpenInNewWindow, [this]() {
+        Application::the().open_url_in_new_window(m_context_menu_url);
     });
     m_copy_url_action = Action::create("Copy URL"sv, ActionID::CopyURL, [this]() {
         Application::the().insert_clipboard_entry({ url_text_to_copy(m_context_menu_url), "text/plain"_string });
@@ -1039,6 +1362,7 @@ void ViewImplementation::initialize_context_menus()
     m_page_context_menu->add_action(*m_navigate_forward_action);
     m_page_context_menu->add_action(application.reload_action());
     m_page_context_menu->add_separator();
+    m_page_context_menu->add_action(application.cut_selection_action());
     m_page_context_menu->add_action(application.copy_selection_action());
     m_page_context_menu->add_action(application.paste_action());
     m_page_context_menu->add_action(application.select_all_action());
@@ -1052,6 +1376,7 @@ void ViewImplementation::initialize_context_menus()
 
     m_link_context_menu = Menu::create("Link Context Menu"sv);
     m_link_context_menu->add_action(*m_open_in_new_tab_action);
+    m_link_context_menu->add_action(*m_open_in_new_window_action);
     m_link_context_menu->add_action(*m_copy_url_action);
 
     m_image_context_menu = Menu::create("Image Context Menu"sv);
@@ -1081,12 +1406,18 @@ void ViewImplementation::initialize_context_menus()
     m_media_context_menu->add_action(*m_copy_url_action);
 }
 
-void ViewImplementation::did_request_page_context_menu(Badge<WebContentClient>, Gfx::IntPoint content_position)
+void ViewImplementation::did_request_page_context_menu(Badge<WebContentClient>, Gfx::IntPoint content_position, Web::ContextMenuForInputEventsTarget for_input_events_target)
 {
-    auto const& search_engine = Application::settings().search_engine();
+    auto& cut_selection_action = Application::the().cut_selection_action();
+    cut_selection_action.set_visible(for_input_events_target == Web::ContextMenuForInputEventsTarget::Yes);
 
-    auto selected_text = search_engine.has_value() ? selected_text_with_whitespace_collapsed() : OptionalNone {};
-    TemporaryChange change_url { m_search_text, move(selected_text) };
+    auto const& search_engine = Application::settings().search_engine();
+    m_search_text = search_engine.has_value() ? selected_text_with_whitespace_collapsed() : OptionalNone {};
+
+    ScopeGuard guard { [&]() {
+        cut_selection_action.set_visible(true);
+        m_search_text.clear();
+    } };
 
     if (m_search_text.has_value()) {
         m_search_selected_text_action->set_text(search_engine->format_search_query_for_display(*m_search_text));
@@ -1177,7 +1508,24 @@ void ViewImplementation::remove_navigation_listener(u64 listener_id)
 
 void ViewImplementation::request_close()
 {
-    client().async_request_close(page_id());
+    if (needs_beforeunload_check()) {
+        client().async_request_close(page_id());
+        return;
+    }
+
+    client().request_close(page_id());
+}
+
+Function<void()> ViewImplementation::prepare_for_immediate_close()
+{
+    VERIFY(!needs_beforeunload_check());
+
+    auto client = m_client_state.client;
+    auto page_id = m_client_state.page_index;
+    client->prepare_for_detached_close(page_id);
+    return [client = move(client), page_id] {
+        client->async_request_close(page_id);
+    };
 }
 
 }

@@ -10,6 +10,7 @@
 #include <AK/HashMap.h>
 #include <LibGC/Ptr.h>
 #include <LibGfx/ColorSpace.h>
+#include <LibGfx/DecodedImageFrame.h>
 #include <LibGfx/Forward.h>
 #include <LibWeb/HTML/DecodedImageData.h>
 
@@ -35,7 +36,7 @@ public:
     virtual ~AnimatedDecodedImageData() override;
     virtual void finalize() override;
 
-    virtual RefPtr<Gfx::ImmutableBitmap> bitmap(size_t frame_index, Gfx::IntSize = {}) const override;
+    virtual Optional<Gfx::DecodedImageFrame> frame(size_t frame_index, Gfx::IntSize = {}) const override;
     virtual int frame_duration(size_t frame_index) const override;
 
     virtual size_t frame_count() const override { return m_frame_count; }
@@ -47,7 +48,7 @@ public:
     virtual Optional<CSSPixelFraction> intrinsic_aspect_ratio() const override;
 
     virtual Optional<Gfx::IntRect> frame_rect(size_t frame_index) const override;
-    virtual void paint(DisplayListRecordingContext&, size_t frame_index, Gfx::IntRect dst_rect, Gfx::IntRect clip_rect, Gfx::ScalingMode) const override;
+    virtual void paint(DisplayListRecordingContext&, size_t frame_index, Gfx::IntRect dst_rect, Gfx::ScalingMode) const override;
 
     virtual size_t notify_frame_advanced(size_t caller_frame_index) override;
 
@@ -66,7 +67,7 @@ private:
 
     struct BufferSlot {
         Optional<u32> frame_index;
-        RefPtr<Gfx::ImmutableBitmap> bitmap;
+        Optional<Gfx::DecodedImageFrame> frame;
         u64 generation { 0 };
     };
 
@@ -77,6 +78,8 @@ private:
         Gfx::IntSize,
         Gfx::ColorSpace,
         Vector<u32> durations);
+
+    virtual size_t external_memory_size() const override;
 
     BufferSlot const* find_slot(u32 frame_index) const;
     BufferSlot& evict_oldest_slot();
@@ -90,7 +93,7 @@ private:
     Vector<u32> m_durations;
 
     Array<BufferSlot, BUFFER_POOL_SIZE> m_buffer_slots;
-    mutable RefPtr<Gfx::ImmutableBitmap> m_last_displayed_bitmap;
+    mutable Optional<Gfx::DecodedImageFrame> m_last_displayed_frame;
     u64 m_write_generation { 0 };
     bool m_request_in_flight { false };
     u32 m_current_frame_index { 0 };

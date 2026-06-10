@@ -12,6 +12,7 @@ set(SOURCES
     Bytecode/PropertyKeyTable.cpp
     Bytecode/RegexTable.cpp
     Bytecode/StringTable.cpp
+    Bytecode/Validator.cpp
     Console.cpp
     Contrib/Test262/262Object.cpp
     Contrib/Test262/AgentObject.cpp
@@ -63,12 +64,12 @@ set(SOURCES
     Runtime/ClassConstruction.cpp
     Runtime/ClassFieldDefinition.cpp
     Runtime/Completion.cpp
-    Runtime/CompletionCell.cpp
     Runtime/ConsoleObjectPrototype.cpp
     Runtime/ConsoleObject.cpp
     Runtime/DataView.cpp
     Runtime/DataViewConstructor.cpp
     Runtime/DataViewPrototype.cpp
+    Runtime/DescriptorArray.cpp
     Runtime/Date.cpp
     Runtime/DateConstructor.cpp
     Runtime/DatePrototype.cpp
@@ -78,6 +79,7 @@ set(SOURCES
     Runtime/DisposableStackPrototype.cpp
     Runtime/ECMAScriptFunctionObject.cpp
     Runtime/Environment.cpp
+    Runtime/EnvironmentShape.cpp
     Runtime/Error.cpp
     Runtime/ErrorConstructor.cpp
     Runtime/ErrorData.cpp
@@ -269,7 +271,7 @@ set(GENERATED_SOURCES Bytecode/Op.cpp)
 
 ladybird_lib(LibJS js EXPLICIT_SYMBOL_EXPORT)
 
-target_link_libraries(LibJS PRIVATE LibCore LibCrypto LibFileSystem LibRegex LibSyntax LibGC simdjson::simdjson)
+target_link_libraries(LibJS PRIVATE LibCore LibCrypto LibFileSystem LibRegex LibSyntax LibTextCodec LibGC simdjson::simdjson)
 
 # Link LibUnicode publicly to ensure ICU data (which is in libicudata.a) is available in any process using LibJS.
 target_link_libraries(LibJS PUBLIC LibUnicode)
@@ -311,6 +313,14 @@ if(NOT BUILD_SHARED_LIBS)
         COMMENT "Merging Rust archive into LibJS"
     )
     file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/rust_merge_tmp)
+
+    # POST_BUILD steps don't track inputs, so when libjs_rust.a changes ninja
+    # leaves liblagom-js.a alone and the merged archive ends up with stale
+    # Rust objects. Force the C++ FFI bridge file to depend on the Rust
+    # archive: when it changes, RustIntegration.cpp recompiles, LibJS gets
+    # re-archived, and POST_BUILD re-merges the fresh Rust objects.
+    get_target_property(_libjs_rust_lib libjs_rust IMPORTED_LOCATION)
+    set_property(SOURCE RustIntegration.cpp APPEND PROPERTY OBJECT_DEPENDS ${_libjs_rust_lib})
 endif()
 
 # AsmInterpreter: generate platform-specific assembly from DSL
@@ -385,6 +395,12 @@ if (DEFINED ASMINT_ARCH)
     endif()
 
     set(ASMINT_EXTRA_FLAGS "")
+    if (CMAKE_BUILD_TYPE STREQUAL "Debug"
+        OR ENABLE_ADDRESS_SANITIZER
+        OR ENABLE_MEMORY_SANITIZER
+        OR ENABLE_UNDEFINED_SANITIZER)
+        list(APPEND ASMINT_EXTRA_FLAGS "--enable-assertions")
+    endif()
     # All Apple Silicon chips are ARMv8.5+ which includes FEAT_JSCVT.
     if ("${ASMINT_ARCH}" STREQUAL "aarch64" AND APPLE)
         list(APPEND ASMINT_EXTRA_FLAGS "--has-jscvt")

@@ -35,8 +35,6 @@ HTMLBodyElement::~HTMLBodyElement() = default;
 void HTMLBodyElement::visit_edges(Visitor& visitor)
 {
     Base::visit_edges(visitor);
-    if (m_background_style_value)
-        m_background_style_value->visit_edges(visitor);
 }
 
 void HTMLBodyElement::initialize(JS::Realm& realm)
@@ -77,8 +75,8 @@ void HTMLBodyElement::apply_presentational_hints(Vector<CSS::StyleProperty>& pro
             if (color.has_value())
                 properties.append({ .property_id = CSS::PropertyID::Color, .value = CSS::ColorStyleValue::create_from_color(color.value(), CSS::ColorSyntax::Legacy) });
         } else if (name == HTML::AttributeNames::background) {
-            VERIFY(m_background_style_value);
-            properties.append({ .property_id = CSS::PropertyID::BackgroundImage, .value = CSS::StyleValueList::create({ *m_background_style_value }, CSS::StyleValueList::Separator::Comma) });
+            if (m_background_style_value)
+                properties.append({ .property_id = CSS::PropertyID::BackgroundImage, .value = CSS::StyleValueList::create({ *m_background_style_value }, CSS::StyleValueList::Separator::Comma) });
         }
     });
 
@@ -136,6 +134,7 @@ void HTMLBodyElement::attribute_changed(FlyString const& name, Optional<String> 
             document().set_visited_link_color(color.value());
     } else if (name == HTML::AttributeNames::background) {
         // https://html.spec.whatwg.org/multipage/rendering.html#the-page:attr-background
+        m_background_style_value = nullptr;
         if (auto maybe_background_url = document().encoding_parse_url(value.value_or(String {})); maybe_background_url.has_value()) {
             m_background_style_value = CSS::ImageStyleValue::create(maybe_background_url.value());
             m_background_style_value->on_animate = [this] {

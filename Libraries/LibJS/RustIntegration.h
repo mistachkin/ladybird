@@ -6,13 +6,18 @@
 
 #pragma once
 
+#include <AK/ByteBuffer.h>
 #include <AK/HashTable.h>
 #include <AK/NonnullRefPtr.h>
 #include <AK/Optional.h>
 #include <AK/Result.h>
+#include <AK/Span.h>
 #include <AK/Utf16FlyString.h>
+#include <LibCore/Forward.h>
+#include <LibCore/ImmutableBytes.h>
 #include <LibGC/Ptr.h>
 #include <LibGC/Root.h>
+#include <LibJS/DecodedBytecodeCache.h>
 #include <LibJS/ModuleEntry.h>
 #include <LibJS/ParserError.h>
 #include <LibJS/Runtime/AbstractOperations.h>
@@ -26,21 +31,19 @@ namespace JS::FFI {
 
 struct ParsedProgram;
 struct CompiledProgram;
+struct CompiledFunction;
+struct DecodedBytecodeCacheBlob;
 
 }
 
 namespace JS::RustIntegration {
-
-enum class ProgramType : u8 {
-    Script = 0,
-    Module = 1,
-};
 
 // Result type for compile_script().
 // NB: Uses GC::Root to prevent collection while the result is in transit
 //     between compile_script() and the Script constructor.
 struct ScriptResult {
     GC::Root<Bytecode::Executable> executable;
+    Vector<GC::Root<SharedFunctionInstanceData>> shared_function_data;
     bool is_strict_mode { false };
     Vector<Utf16FlyString> lexical_names;
     Vector<Utf16FlyString> var_names;
@@ -81,17 +84,18 @@ struct ModuleResult {
     };
     Vector<FunctionToInitialize> functions_to_initialize;
     GC::Root<Bytecode::Executable> executable;
+    Vector<GC::Root<SharedFunctionInstanceData>> shared_function_data;
     GC::Root<SharedFunctionInstanceData> tla_shared_data;
 };
-
-// Check if the Rust pipeline is available for off-thread parsing.
-JS_API bool rust_pipeline_available();
 
 // Parse a program (script or module) without GC interaction. Thread-safe.
 JS_API FFI::ParsedProgram* parse_program(u16 const* utf16_data, size_t length_in_code_units, ProgramType type, size_t line_number_offset = 0);
 
 // Compile a parsed program to bytecode without touching the VM or GC. Thread-safe.
 JS_API FFI::CompiledProgram* compile_parsed_program_off_thread(FFI::ParsedProgram* parsed, size_t length_in_code_units);
+
+// Fully compile a parsed program to bytecode without touching the VM or GC. Thread-safe.
+JS_API FFI::CompiledProgram* compile_parsed_program_fully_off_thread(FFI::ParsedProgram* parsed, size_t length_in_code_units);
 
 // Check if a parsed program has errors. Does not consume the program.
 JS_API bool parsed_program_has_errors(FFI::ParsedProgram const*);
@@ -101,6 +105,46 @@ JS_API void free_parsed_program(FFI::ParsedProgram*);
 
 // Free a compiled program without materializing it.
 JS_API void free_compiled_program(FFI::CompiledProgram*);
+
+// Serialize a fully compiled program into a versioned bytecode cache blob.
+JS_API ByteBuffer serialize_compiled_program_for_bytecode_cache(FFI::CompiledProgram const&, ProgramType, ReadonlyBytes source_hash);
+
+// Decode an ImmutableBytes-backed bytecode cache blob into a parser-free cache handle.
+// The returned blob can be validated off-thread before main-thread materialization.
+JS_API FFI::DecodedBytecodeCacheBlob* decode_bytecode_cache_blob(Core::ImmutableBytes, ProgramType, ReadonlyBytes source_hash, Core::EventLoop&);
+
+// Validate a decoded bytecode cache blob before materialization. Thread-safe.
+JS_API bool validate_decoded_bytecode_cache_blob(FFI::DecodedBytecodeCacheBlob*, size_t source_length);
+
+// Free a decoded bytecode cache blob.
+JS_API void free_decoded_bytecode_cache_blob(FFI::DecodedBytecodeCacheBlob*);
+
+// Materialize a decoded script bytecode cache. Must be called on the main thread.
+JS_API Optional<Result<ScriptResult, Vector<ParserError>>> materialize_bytecode_cache_script(DecodedBytecodeCache&, NonnullRefPtr<SourceCode const> source_code, Realm&);
+
+// Materialize a decoded module bytecode cache. Must be called on the main thread.
+JS_API Optional<Result<ModuleResult, Vector<ParserError>>> materialize_bytecode_cache_module(DecodedBytecodeCache&, NonnullRefPtr<SourceCode const> source_code, Realm&);
+
+struct ModuleBytecodeCacheInstallResult {
+    GC::Root<Bytecode::Executable> executable;
+    GC::Root<Bytecode::Executable> top_level_await_executable;
+};
+
+// Try to install a decoded script bytecode cache into an existing script executable tree.
+// Must be called on the main thread.
+JS_API GC::Ptr<Bytecode::Executable> try_install_bytecode_cache_script(DecodedBytecodeCache&, NonnullRefPtr<SourceCode const> source_code, Realm&, Bytecode::Executable& existing_executable, ReadonlySpan<SharedFunctionInstanceData*> existing_shared_function_data);
+
+// Install a decoded script bytecode cache produced by the current process.
+// Must be called on the main thread.
+JS_API GC::Ref<Bytecode::Executable> install_generated_bytecode_cache_script(DecodedBytecodeCache&, NonnullRefPtr<SourceCode const> source_code, Realm&, Bytecode::Executable& existing_executable, ReadonlySpan<SharedFunctionInstanceData*> existing_shared_function_data);
+
+// Try to install a decoded module bytecode cache into an existing module executable tree.
+// Must be called on the main thread.
+JS_API Optional<ModuleBytecodeCacheInstallResult> try_install_bytecode_cache_module(DecodedBytecodeCache&, NonnullRefPtr<SourceCode const> source_code, Realm&, Bytecode::Executable* existing_executable, ReadonlySpan<SharedFunctionInstanceData*> existing_shared_function_data, SharedFunctionInstanceData* existing_top_level_await_shared_data);
+
+// Install a decoded module bytecode cache produced by the current process.
+// Must be called on the main thread.
+JS_API ModuleBytecodeCacheInstallResult install_generated_bytecode_cache_module(DecodedBytecodeCache&, NonnullRefPtr<SourceCode const> source_code, Realm&, Bytecode::Executable* existing_executable, ReadonlySpan<SharedFunctionInstanceData*> existing_shared_function_data, SharedFunctionInstanceData* existing_top_level_await_shared_data);
 
 // Compile a previously parsed script. Must be called on the main thread.
 // Consumes and frees the Rust ParsedProgram.
@@ -146,6 +190,18 @@ Optional<Vector<GC::Root<SharedFunctionInstanceData>>> compile_builtin_file(
 // Compile a function body for lazy compilation.
 // Returns nullptr if Rust is not available or the SFD doesn't use Rust compilation.
 GC::Ptr<Bytecode::Executable> compile_function(VM& vm, SharedFunctionInstanceData& shared_data, bool builtin_abstract_operations_enabled);
+
+JS_API void* clone_function_ast(void const*);
+JS_API FFI::CompiledFunction* compile_function_off_thread(void* function_ast, size_t length_in_code_units, bool builtin_abstract_operations_enabled);
+// Attach a previously compiled function for lazy materialization.
+JS_API void materialize_compiled_function(FFI::CompiledFunction*, VM&, SourceCode const&, SharedFunctionInstanceData&);
+JS_API void free_compiled_function(FFI::CompiledFunction*);
+
+// Free a Rust decoded bytecode cache executable pointer. No-op if null.
+void free_cached_bytecode_executable(void*);
+
+// Free a Rust precompiled bytecode executable pointer. No-op if null.
+void free_precompiled_bytecode_executable(void*);
 
 // Free a Rust function AST pointer. No-op if Rust is not available.
 void free_function_ast(void* ast);

@@ -108,7 +108,7 @@ static NonnullRefPtr<Core::Promise<NonnullRefPtr<Gfx::Typeface const>>> load_vec
         }
 
         auto prepared = prepared_font_data.release_value();
-        auto result = try_load_vector_font(prepared.data, prepared.mime_type_essence);
+        auto result = Gfx::Typeface::try_load_from_anonymous_buffer(move(prepared));
         if (result.is_error()) {
             promise->reject(result.release_error());
             return;
@@ -123,7 +123,7 @@ static NonnullRefPtr<Core::Promise<NonnullRefPtr<Gfx::Typeface const>>> load_vec
 GC_DEFINE_ALLOCATOR(FontFace);
 
 // https://drafts.csswg.org/css-font-loading/#font-face-constructor
-GC::Ref<FontFace> FontFace::construct_impl(JS::Realm& realm, String family, FontFaceSource source, FontFaceDescriptors const& descriptors)
+GC::Ref<FontFace> FontFace::construct_impl(JS::Realm& realm, String family, FontFaceSource source, Bindings::FontFaceDescriptors const& descriptors)
 {
     auto& vm = realm.vm();
 
@@ -177,8 +177,7 @@ GC::Ref<FontFace> FontFace::construct_impl(JS::Realm& realm, String family, Font
         font_face->m_urls = ParsedFontFace::sources_from_style_value(*parsed_source);
         font_face->m_urls.remove_all_matching(is_unsupported_source);
     } else {
-        auto buffer_source = source.get<GC::Root<WebIDL::BufferSource>>();
-        auto maybe_buffer = WebIDL::get_buffer_source_copy(buffer_source->raw_object());
+        auto maybe_buffer = WebIDL::get_buffer_source_copy(source.downcast<WebIDL::BufferSourceVariant>());
         if (maybe_buffer.is_error()) {
             VERIFY(maybe_buffer.error().code() == ENOMEM);
             auto throw_completion = vm.throw_completion<JS::InternalError>(vm.error_message(JS::VM::ErrorMessage::OutOfMemory));
@@ -295,13 +294,9 @@ void FontFace::reparse_connected_css_font_face_rule_descriptors()
 {
     auto const& descriptors = m_css_font_face_rule->descriptors();
 
-    ComputationContext computation_context {
-        .length_resolution_context = Length::ResolutionContext::for_document(*descriptors->parent_rule()->parent_style_sheet()->owning_document())
-    };
-
     set_family_impl(*descriptors->descriptor(DescriptorNameAndID::from_id(DescriptorID::FontFamily)));
-    set_style_impl(*descriptors->descriptor_or_initial_value(DescriptorNameAndID::from_id(DescriptorID::FontStyle))->absolutized(computation_context));
-    set_weight_impl(*descriptors->descriptor_or_initial_value(DescriptorNameAndID::from_id(DescriptorID::FontWeight))->absolutized(computation_context));
+    set_style_impl(*descriptors->descriptor_or_initial_value(DescriptorNameAndID::from_id(DescriptorID::FontStyle)));
+    set_weight_impl(*descriptors->descriptor_or_initial_value(DescriptorNameAndID::from_id(DescriptorID::FontWeight)));
     set_stretch_impl(*descriptors->descriptor_or_initial_value(DescriptorNameAndID::from_id(DescriptorID::FontWidth)));
     set_unicode_range_impl(*descriptors->descriptor_or_initial_value(DescriptorNameAndID::from_id(DescriptorID::UnicodeRange)));
     set_feature_settings_impl(*descriptors->descriptor_or_initial_value(DescriptorNameAndID::from_id(DescriptorID::FontFeatureSettings)));
@@ -384,6 +379,18 @@ Optional<FontComputer&> FontFace::font_computer() const
         if (auto* window = as_if<HTML::Window>(global))
             return window->associated_document().font_computer();
     }
+    return {};
+}
+
+Optional<ComputationContext> FontFace::computation_context() const
+{
+    if (m_css_font_face_rule) {
+        if (auto document = m_css_font_face_rule->descriptors()->parent_rule()->parent_style_sheet()->owning_document())
+            return ComputationContext { .length_resolution_context = Length::ResolutionContext::for_document(*document) };
+    }
+    auto& global = HTML::relevant_global_object(*this);
+    if (auto* window = as_if<HTML::Window>(global))
+        return ComputationContext { .length_resolution_context = Length::ResolutionContext::for_document(window->associated_document()) };
     return {};
 }
 
@@ -471,8 +478,10 @@ WebIDL::ExceptionOr<void> FontFace::set_style(String const& string)
 
 void FontFace::set_style_impl(NonnullRefPtr<StyleValue const> const& value)
 {
-    m_style = value->to_string(SerializationMode::Normal);
-    m_cached_slope = compute_slope(*value);
+    auto context = computation_context();
+    NonnullRefPtr<StyleValue const> absolutized_value = context.has_value() ? value->absolutized(*context) : value;
+    m_style = absolutized_value->to_string(SerializationMode::Normal);
+    m_cached_slope = compute_slope(*absolutized_value);
 }
 
 // https://drafts.csswg.org/css-font-loading/#dom-fontface-weight
@@ -506,8 +515,10 @@ WebIDL::ExceptionOr<void> FontFace::set_weight(String const& string)
 
 void FontFace::set_weight_impl(NonnullRefPtr<StyleValue const> const& value)
 {
-    m_weight = value->to_string(SerializationMode::Normal);
-    m_cached_weight_range = compute_weight_range(*value);
+    auto context = computation_context();
+    NonnullRefPtr<StyleValue const> absolutized_value = context.has_value() ? value->absolutized(*context) : value;
+    m_weight = absolutized_value->to_string(SerializationMode::Normal);
+    m_cached_weight_range = compute_weight_range(*absolutized_value);
 }
 
 // https://drafts.csswg.org/css-font-loading/#dom-fontface-stretch
@@ -542,8 +553,10 @@ WebIDL::ExceptionOr<void> FontFace::set_stretch(String const& string)
 
 void FontFace::set_stretch_impl(NonnullRefPtr<StyleValue const> const& value)
 {
-    m_stretch = value->to_string(SerializationMode::Normal);
-    m_cached_width = compute_width(*value);
+    auto context = computation_context();
+    NonnullRefPtr<StyleValue const> absolutized_value = context.has_value() ? value->absolutized(*context) : value;
+    m_stretch = absolutized_value->to_string(SerializationMode::Normal);
+    m_cached_width = compute_width(*absolutized_value);
 }
 
 // https://drafts.csswg.org/css-font-loading/#dom-fontface-unicoderange

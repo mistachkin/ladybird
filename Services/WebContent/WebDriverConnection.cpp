@@ -11,6 +11,7 @@
 #include <AK/JsonObject.h>
 #include <AK/JsonValue.h>
 #include <AK/LexicalPath.h>
+#include <AK/NeverDestroyed.h>
 #include <AK/Time.h>
 #include <AK/Vector.h>
 #include <LibCore/File.h>
@@ -19,6 +20,7 @@
 #else
 #    include <LibIPC/TransportBootstrapMach.h>
 #endif
+#include <LibGC/Timer.h>
 #include <LibHTTP/Cookie/Cookie.h>
 #include <LibHTTP/Cookie/ParsedCookie.h>
 #include <LibIPC/Transport.h>
@@ -63,7 +65,6 @@
 #include <LibWeb/WebDriver/Actions.h>
 #include <LibWeb/WebDriver/Contexts.h>
 #include <LibWeb/WebDriver/ElementReference.h>
-#include <LibWeb/WebDriver/HeapTimer.h>
 #include <LibWeb/WebDriver/InputState.h>
 #include <LibWeb/WebDriver/JSON.h>
 #include <LibWeb/WebDriver/Properties.h>
@@ -129,7 +130,7 @@ static Gfx::IntRect compute_window_rect(Web::Page const& page)
 static void scroll_element_into_view(Web::DOM::Element& element)
 {
     // 1. Let options be the following ScrollIntoViewOptions:
-    Web::DOM::ScrollIntoViewOptions options {};
+    Web::Bindings::ScrollIntoViewOptions options {};
     // "behavior"
     //     "instant"
     options.behavior = Web::Bindings::ScrollBehavior::Instant;
@@ -383,7 +384,7 @@ Messages::WebDriverClient::BackResponse WebDriverConnection::back()
         auto timeout = m_timeouts_configuration.page_load_timeout;
 
         // 4. Let timer be a new timer.
-        auto timer = realm.create<Web::WebDriver::HeapTimer>();
+        auto timer = realm.heap().allocate<GC::Timer>();
 
         auto on_complete = GC::create_function(realm.heap(), [this, timer]() {
             timer->stop();
@@ -457,7 +458,7 @@ Messages::WebDriverClient::ForwardResponse WebDriverConnection::forward()
         auto timeout = m_timeouts_configuration.page_load_timeout;
 
         // 4. Let timer be a new timer.
-        auto timer = realm.create<Web::WebDriver::HeapTimer>();
+        auto timer = realm.heap().allocate<GC::Timer>();
 
         auto on_complete = GC::create_function(realm.heap(), [this, timer]() {
             timer->stop();
@@ -1410,7 +1411,7 @@ Messages::WebDriverClient::GetElementCssValueResponse WebDriverConnection::get_e
             document->update_style();
 
             // computed value of parameter URL variables["property name"] from element's style declarations.
-            if (auto property = Web::CSS::PropertyNameAndID::from_name(name); property.has_value()) {
+            if (auto property = Web::CSS::PropertyNameAndID::from_name(Utf16FlyString::from_utf8(name)); property.has_value()) {
                 if (property->is_custom_property()) {
                     if (auto data = element->custom_property_data({}); data) {
                         if (auto const* style_property = data->get(property->name()))
@@ -2083,11 +2084,8 @@ Messages::WebDriverClient::GetSourceResponse WebDriverConnection::get_source()
 // 13.2.1 Execute Script, https://w3c.github.io/webdriver/#dfn-execute-script
 Messages::WebDriverClient::ExecuteScriptResponse WebDriverConnection::execute_script(JsonValue payload)
 {
-    auto* window = current_browsing_context().active_window();
-    auto& vm = window->vm();
-
     // 1. Let body and arguments be the result of trying to extract the script arguments from a request with argument parameters.
-    auto [body, arguments] = TRY(extract_the_script_arguments_from_a_request(vm, payload));
+    auto [body, arguments] = TRY(extract_the_script_arguments_from_a_request(payload));
 
     // 2. If the current browsing context is no longer open, return error with error code no such window.
     TRY(ensure_current_browsing_context_is_open());
@@ -2113,11 +2111,8 @@ Messages::WebDriverClient::ExecuteScriptResponse WebDriverConnection::execute_sc
 // 13.2.2 Execute Async Script, https://w3c.github.io/webdriver/#dfn-execute-async-script
 Messages::WebDriverClient::ExecuteAsyncScriptResponse WebDriverConnection::execute_async_script(JsonValue payload)
 {
-    auto* window = current_browsing_context().active_window();
-    auto& vm = window->vm();
-
     // 1. Let body and arguments by the result of trying to extract the script arguments from a request with argument parameters.
-    auto [body, arguments] = TRY(extract_the_script_arguments_from_a_request(vm, payload));
+    auto [body, arguments] = TRY(extract_the_script_arguments_from_a_request(payload));
 
     // 2. If the current browsing context is no longer open, return error with error code no such window.
     TRY(ensure_current_browsing_context_is_open());
@@ -2673,11 +2668,11 @@ ErrorOr<void, Web::WebDriver::Error> WebDriverConnection::ensure_current_top_lev
 // https://w3c.github.io/webdriver/#dfn-get-the-prompt-handler
 Web::WebDriver::PromptHandlerConfiguration WebDriverConnection::get_the_prompt_handler(Web::WebDriver::PromptType type) const
 {
-    static Web::WebDriver::UserPromptHandler::ValueType empty_user_prompt_handler;
+    static NeverDestroyed<Web::WebDriver::UserPromptHandler::ValueType> empty_user_prompt_handler;
     auto const& user_prompt_handler = Web::WebDriver::user_prompt_handler();
 
     // 1. If the user prompt handler is null, let handlers be an empty map. Otherwise let handlers be user prompt handler.
-    auto const& handlers = user_prompt_handler.has_value() ? *user_prompt_handler : empty_user_prompt_handler;
+    auto const& handlers = user_prompt_handler.has_value() ? *user_prompt_handler : *empty_user_prompt_handler;
 
     // 2. If handlers contains type return handlers[type].
     if (auto handler = handlers.get(type); handler.has_value())
@@ -2819,7 +2814,7 @@ void WebDriverConnection::wait_for_navigation_to_complete(OnNavigationComplete o
 
     // 3. Start a timer. If this algorithm has not completed before timer reaches the session’s session page load timeout
     //    in milliseconds, return an error with error code timeout.
-    m_navigation_timer = realm.create<Web::WebDriver::HeapTimer>();
+    m_navigation_timer = realm.heap().allocate<GC::Timer>();
 
     // 4. If there is an ongoing attempt to navigate the current browsing context that has not yet matured, wait for
     //    navigation to mature.
@@ -2937,7 +2932,7 @@ void WebDriverConnection::wait_for_visibility_state(GC::Ref<GC::Function<void()>
         return;
     }
 
-    auto timer = realm.create<Web::WebDriver::HeapTimer>();
+    auto timer = realm.heap().allocate<GC::Timer>();
     m_document_observer = realm.create<Web::DOM::DocumentObserver>(realm, *document);
 
     m_document_observer->set_document_visibility_state_observer([timer, target_visibility_state](Web::HTML::VisibilityState visibility_state) {
@@ -2964,7 +2959,7 @@ public:
         String selector,
         WebDriverConnection::GetStartNode get_start_node,
         WebDriverConnection::OnFindComplete on_complete,
-        GC::Ref<Web::WebDriver::HeapTimer> timer)
+        GC::Ref<GC::Timer> timer)
         : m_browsing_context(browsing_context)
         , m_location_strategy(location_strategy)
         , m_selector(move(selector))
@@ -3035,7 +3030,7 @@ private:
     WebDriverConnection::GetStartNode m_get_start_node;
     WebDriverConnection::OnFindComplete m_on_complete;
 
-    GC::Ref<Web::WebDriver::HeapTimer> m_timer;
+    GC::Ref<GC::Timer> m_timer;
 };
 
 GC_DEFINE_ALLOCATOR(ElementLocator);
@@ -3052,7 +3047,7 @@ void WebDriverConnection::find(Web::WebDriver::LocationStrategy location_strateg
     auto timeout = m_timeouts_configuration.implicit_wait_timeout;
 
     // 4. Let timer be a new timer.
-    auto timer = realm.create<Web::WebDriver::HeapTimer>();
+    auto timer = realm.heap().allocate<GC::Timer>();
 
     auto wrapped_on_complete = GC::create_function(realm.heap(), [this, on_complete, timer](Web::WebDriver::Response result) {
         m_element_locator = nullptr;
@@ -3076,7 +3071,7 @@ void WebDriverConnection::find(Web::WebDriver::LocationStrategy location_strateg
 }
 
 // https://w3c.github.io/webdriver/#dfn-extract-the-script-arguments-from-a-request
-ErrorOr<WebDriverConnection::ScriptArguments, Web::WebDriver::Error> WebDriverConnection::extract_the_script_arguments_from_a_request(JS::VM& vm, JsonValue const& payload)
+ErrorOr<WebDriverConnection::ScriptArguments, Web::WebDriver::Error> WebDriverConnection::extract_the_script_arguments_from_a_request(JsonValue const& payload)
 {
     // Creating JSON objects below requires an execution context.
     Web::HTML::TemporaryExecutionContext execution_context { current_browsing_context().active_document()->realm() };
@@ -3090,7 +3085,7 @@ ErrorOr<WebDriverConnection::ScriptArguments, Web::WebDriver::Error> WebDriverCo
     auto const& args = *TRY(Web::WebDriver::get_property<JsonArray const*>(payload, "args"sv));
 
     // 5. Let arguments be the result of calling the JSON deserialize algorithm with arguments args.
-    GC::RootVector<JS::Value> arguments { vm.heap() };
+    GC::RootVector<JS::Value> arguments;
     auto& browsing_context = current_browsing_context();
 
     TRY(args.try_for_each([&](JsonValue const& arg) -> ErrorOr<void, Web::WebDriver::Error> {

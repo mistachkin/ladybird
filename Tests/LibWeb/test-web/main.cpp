@@ -2,25 +2,27 @@
  * Copyright (c) 2022, Dex♪ <dexes.ttp@gmail.com>
  * Copyright (c) 2023-2025, Tim Flynn <trflynn89@ladybird.org>
  * Copyright (c) 2023, Andreas Kling <andreas@ladybird.org>
- * Copyright (c) 2023-2024, Sam Atkins <sam@ladybird.org>
+ * Copyright (c) 2023-2026, Sam Atkins <sam@ladybird.org>
  * Copyright (c) 2025, Jelle Raaijmakers <jelle@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #include "Application.h"
+#include "Collection.h"
 #include "Debug.h"
 #include "Display.h"
 #include "TestRunCapture.h"
 #include "TestWeb.h"
 #include "TestWebView.h"
+#include "Variants.h"
 
 #include <AK/ByteBuffer.h>
 #include <AK/Enumerate.h>
 #include <AK/Function.h>
 #include <AK/LexicalPath.h>
 #include <AK/NumberFormat.h>
-#include <AK/QuickSort.h>
+#include <AK/Platform.h>
 #include <AK/Random.h>
 #include <AK/ScopeGuard.h>
 #include <AK/Span.h>
@@ -31,7 +33,6 @@
 #include <LibCore/File.h>
 #include <LibCore/MappedFile.h>
 #include <LibCore/Process.h>
-#include <LibCore/StandardPaths.h>
 #include <LibCore/Timer.h>
 #include <LibDiff/Format.h>
 #include <LibDiff/Generator.h>
@@ -52,6 +53,7 @@ namespace TestWeb {
 
 static Vector<ViewDisplayState> s_view_display_states;
 static Vector<Function<void()>> s_view_run_next_test;
+static HashMap<WebView::ViewImplementation const*, size_t> s_view_index_by_view;
 
 static RefPtr<Core::Promise<Empty>> s_all_tests_complete;
 static Vector<ByteString> s_skipped_tests;
@@ -75,12 +77,6 @@ static ErrorOr<ByteString> prepare_output_path(Test const& test)
     auto base_path = LexicalPath::join(app.results_directory, test.safe_relative_path);
     TRY(Core::Directory::create(base_path.dirname(), Core::Directory::CreateDirectories::Yes));
     return base_path.string();
-}
-
-static bool is_valid_test_name(StringView test_name)
-{
-    auto valid_test_file_suffixes = { ".htm"sv, ".html"sv, ".svg"sv, ".xhtml"sv, ".xht"sv, ".pdf"sv };
-    return AK::any_of(valid_test_file_suffixes, [&](auto suffix) { return test_name.ends_with(suffix); });
 }
 
 static ErrorOr<ByteString> real_path_for_test_input(ByteString const& path)
@@ -120,6 +116,11 @@ static ErrorOr<void> add_config_paths(StringView test_root_path, Vector<ByteStri
     return {};
 }
 
+static ByteString unique_localhost_hostname(StringView prefix)
+{
+    return ByteString::formatted("{}-{}.localhost", prefix, generate_random_uuid().to_byte_string());
+}
+
 static ErrorOr<void> load_test_config(StringView test_root_path)
 {
     auto config_path = LexicalPath::join(test_root_path, "TestConfig.ini"sv);
@@ -146,94 +147,89 @@ static ErrorOr<void> load_test_config(StringView test_root_path)
     return {};
 }
 
-static ErrorOr<void> collect_dump_tests(Application const& app, Vector<Test>& tests, StringView path, StringView trail, TestMode mode)
+static ErrorOr<void> skip_async_scrolling_tests_unless_enabled(Application const& app)
 {
-    Core::DirIterator it(ByteString::formatted("{}/input/{}", path, trail), Core::DirIterator::Flags::SkipDots);
+    if (WebView::Application::web_content_options().enable_async_scrolling == WebView::EnableAsyncScrolling::Yes)
+        return {};
 
-    while (it.has_next()) {
-        auto name = it.next_path();
-        auto input_path = TRY(FileSystem::real_path(ByteString::formatted("{}/input/{}/{}", path, trail, name)));
+    auto path = LexicalPath::join(app.test_root_path, "Text/input/async-scrolling/"sv).string();
+    if (!FileSystem::exists(path))
+        return {};
+    return enumerate_test_files_recursively(path, s_skipped_tests);
+}
 
-        if (FileSystem::is_directory(input_path)) {
-            TRY(collect_dump_tests(app, tests, path, ByteString::formatted("{}/{}", trail, name), mode));
-            continue;
+static void log_active_test_views(StringView reason)
+{
+    outln();
+    outln("test-web: {}", reason);
+    outln("test-web: active views:");
+
+    auto now = UnixDateTime::now();
+    WebView::ViewImplementation::for_each_view([&](WebView::ViewImplementation const& view) {
+        pid_t pid = 0;
+        if (auto view_index = s_view_index_by_view.get(&view); view_index.has_value() && *view_index < s_view_display_states.size())
+            pid = s_view_display_states[*view_index].pid;
+
+        out("  - View {} (pid {}): ", view.view_id(), pid);
+
+        auto maybe_index = s_current_test_index_by_view.get(&view);
+        if (maybe_index.has_value() && s_run_context) {
+            auto const& test = s_run_context->tests[*maybe_index];
+            outln("{} (duration: {})", test.relative_path, human_readable_time(now - test.start_time));
+        } else {
+            outln("{} (no active test)", view.url());
         }
 
-        if (!is_valid_test_name(name))
-            continue;
+        return IterationDecision::Continue;
+    });
+    outln();
+}
 
-        auto expectation_path = ByteString::formatted("{}/expected/{}/{}.txt", path, trail, LexicalPath::title(name));
-        auto relative_path = LexicalPath::relative_path(input_path, app.test_root_path).release_value();
-        tests.append({ mode, input_path, move(expectation_path), relative_path, relative_path });
-    }
+static ErrorOr<void> write_harness_status(StringView reason)
+{
+    auto& app = Application::the();
+    auto& display = Display::the();
+    auto status_path = LexicalPath::join(app.results_directory, "harness-status.txt"sv).string();
+    auto status_file = TRY(Core::File::open(status_path, Core::File::OpenMode::Write | Core::File::OpenMode::Truncate));
+
+    TRY(status_file->write_formatted("reason: {}\n", reason));
+    TRY(status_file->write_formatted("completed: {}/{}\n", display.completed_tests, total_tests()));
+    TRY(status_file->write_formatted("pass: {}\n", display.pass_count));
+    TRY(status_file->write_formatted("fail: {}\n", display.fail_count));
+    TRY(status_file->write_formatted("timeout: {}\n", display.timeout_count));
+    TRY(status_file->write_formatted("crashed: {}\n", display.crashed_count));
+    TRY(status_file->write_formatted("skipped: {}\n", display.skipped_count));
+    if (s_run_context)
+        TRY(status_file->write_formatted("remaining: {}\n", s_run_context->tests_remaining));
+
+    TRY(status_file->write_until_depleted("active views:\n"sv.bytes()));
+
+    auto now = UnixDateTime::now();
+    WebView::ViewImplementation::for_each_view([&](WebView::ViewImplementation const& view) {
+        pid_t pid = 0;
+        if (auto view_index = s_view_index_by_view.get(&view); view_index.has_value() && *view_index < s_view_display_states.size())
+            pid = s_view_display_states[*view_index].pid;
+
+        (void)status_file->write_formatted("  - View {} (pid {}): ", view.view_id(), pid);
+
+        auto maybe_index = s_current_test_index_by_view.get(&view);
+        if (maybe_index.has_value() && s_run_context) {
+            auto const& test = s_run_context->tests[*maybe_index];
+            (void)status_file->write_formatted("{} (duration: {})\n", test.relative_path, human_readable_time(now - test.start_time));
+        } else {
+            (void)status_file->write_formatted("{} (no active test)\n", view.url());
+        }
+
+        return IterationDecision::Continue;
+    });
 
     return {};
 }
 
-static ErrorOr<void> collect_ref_tests(Application const& app, Vector<Test>& tests, StringView path, StringView trail)
+static void try_write_harness_status(StringView reason)
 {
-    Core::DirIterator it(ByteString::formatted("{}/input/{}", path, trail), Core::DirIterator::Flags::SkipDots);
-    while (it.has_next()) {
-        auto name = it.next_path();
-        auto input_path = TRY(FileSystem::real_path(ByteString::formatted("{}/input/{}/{}", path, trail, name)));
-
-        if (FileSystem::is_directory(input_path)) {
-            TRY(collect_ref_tests(app, tests, path, ByteString::formatted("{}/{}", trail, name)));
-            continue;
-        }
-
-        if (!is_valid_test_name(name))
-            continue;
-
-        auto relative_path = LexicalPath::relative_path(input_path, app.test_root_path).release_value();
-        tests.append({ TestMode::Ref, input_path, {}, relative_path, relative_path });
-    }
-
-    return {};
-}
-
-static ErrorOr<void> collect_screenshot_tests(Application const& app, Vector<Test>& tests, StringView path, StringView trail)
-{
-    Core::DirIterator it(ByteString::formatted("{}/input/{}", path, trail), Core::DirIterator::Flags::SkipDots);
-    while (it.has_next()) {
-        auto name = it.next_path();
-        auto input_path = TRY(FileSystem::real_path(ByteString::formatted("{}/input/{}/{}", path, trail, name)));
-
-        if (FileSystem::is_directory(input_path)) {
-            TRY(collect_screenshot_tests(app, tests, path, ByteString::formatted("{}/{}", trail, name)));
-            continue;
-        }
-
-        if (!is_valid_test_name(name))
-            continue;
-
-        auto expectation_path = ByteString::formatted("{}/expected/{}/{}.png", path, trail, LexicalPath::title(name));
-        auto relative_path = LexicalPath::relative_path(input_path, app.test_root_path).release_value();
-        tests.append({ TestMode::Screenshot, input_path, move(expectation_path), relative_path, relative_path });
-    }
-
-    return {};
-}
-
-static ErrorOr<void> collect_crash_tests(Application const& app, Vector<Test>& tests, StringView path, StringView trail)
-{
-    Core::DirIterator it(ByteString::formatted("{}/{}", path, trail), Core::DirIterator::Flags::SkipDots);
-    while (it.has_next()) {
-        auto name = it.next_path();
-        auto input_path = TRY(FileSystem::real_path(ByteString::formatted("{}/{}/{}", path, trail, name)));
-
-        if (FileSystem::is_directory(input_path)) {
-            TRY(collect_crash_tests(app, tests, path, ByteString::formatted("{}/{}", trail, name)));
-            continue;
-        }
-        if (!is_valid_test_name(name))
-            continue;
-
-        auto relative_path = LexicalPath::relative_path(input_path, app.test_root_path).release_value();
-        tests.append({ TestMode::Crash, input_path, {}, relative_path, relative_path });
-    }
-
-    return {};
+    if (auto result = write_harness_status(reason); result.is_error())
+        warnln("Failed to write test-web harness status: {}", result.error());
 }
 
 static String generate_wait_for_test_string(StringView wait_class, StringView on_finish_script = ""sv)
@@ -276,12 +272,32 @@ static auto wait_for_reftest_completion = generate_wait_for_test_string("reftest
 
 // For PDF tests: by the time this runs (after on_load_finish), ladybirdpdf has already fired
 // and openPdf() is in progress; initializedPromise lets us hook in at the right moment.
-// Text mode uses the page count; Layout mode ignores the signalTestIsDone argument.
+// This script ensures we wait until the text and annotation layers are rendered for the first page.
+// pdf.js renders pages lazily, so only those pages visible in the viewport are rendered. We currently fail for PDFs
+// with more than one page, as we don't currently guarantee rendering of all pages.
 static auto const wait_for_pdf_done = R"(
 window.PDFViewerApplication.initializedPromise.then(() => {
-    window.PDFViewerApplication.eventBus.on('pagesloaded', () => {
-        internals.signalTestIsDone(`Pages: ${window.PDFViewerApplication.pagesCount}`);
+    const eventBus = window.PDFViewerApplication.eventBus;
+    let pagesCount = null;
+    let textRendered = false;
+    let annotationRendered = false;
+    const checkDone = () => {
+        if (pagesCount !== null && textRendered && annotationRendered) {
+            internals.signalTestIsDone(`Pages: ${pagesCount}`);
+        }
+    };
+    eventBus.on("pagesloaded", evt => {
+        pagesCount = evt.pagesCount;
+        if (pagesCount !== 1) {
+            const message = `PDF tests must use a single-page PDF (got ${pagesCount} pages).`;
+            document.body.replaceChildren(document.createTextNode(message));
+            internals.signalTestIsDone(`Pages: ${pagesCount}`);
+            return;
+        }
+        checkDone();
     });
+    eventBus.on("textlayerrendered", evt => { if (evt.pageNumber === 1) { textRendered = true; checkDone(); } });
+    eventBus.on("annotationlayerrendered", evt => { if (evt.pageNumber === 1) { annotationRendered = true; checkDone(); } });
 });
 )"_string;
 
@@ -420,47 +436,6 @@ pre { margin: 0; padding: 16px; font-family: ui-monospace, monospace; font-size:
     return {};
 }
 
-static void expand_test_with_variants(TestRunContext& context, size_t base_test_index, ReadonlySpan<String> variants)
-{
-    VERIFY(!variants.is_empty());
-
-    context.tests.ensure_capacity(context.tests.size() + variants.size());
-    auto const& base_test = context.tests[base_test_index];
-
-    for (auto const& variant : variants) {
-        Test variant_test;
-        variant_test.mode = base_test.mode;
-        variant_test.run_index = base_test.run_index;
-        variant_test.total_runs = base_test.total_runs;
-        variant_test.input_path = base_test.input_path;
-        variant_test.variant = variant;
-
-        // relative_path uses '?' for display, safe_relative_path uses '@' for filesystem
-        auto variant_suffix = StringView { variant }.substring_view(1);
-        variant_test.relative_path = ByteString::formatted("{}?{}", base_test.relative_path, variant_suffix);
-        variant_test.safe_relative_path = ByteString::formatted("{}@{}", base_test.safe_relative_path, variant_suffix);
-
-        // Expected file: test@variant_suffix.txt
-        auto dir = LexicalPath::dirname(base_test.expectation_path);
-        auto title = LexicalPath::title(LexicalPath::basename(base_test.input_path));
-        if (dir.is_empty())
-            variant_test.expectation_path = ByteString::formatted("{}@{}.txt", title, variant_suffix);
-        else
-            variant_test.expectation_path = ByteString::formatted("{}/{}@{}.txt", dir, title, variant_suffix);
-
-        // Set the index before appending so it matches the position in the vector
-        variant_test.index = context.tests.size();
-        context.tests.unchecked_append(move(variant_test));
-    }
-
-    // Add variants.size() because the original test will decrement tests_remaining when
-    // it completes as Expanded, and each variant will also decrement when it completes.
-    context.tests_remaining += variants.size();
-
-    // For display, add (variants.size() - 1) since Expanded tests don't count in s_completed_tests
-    context.total_tests += variants.size() - 1;
-}
-
 static void run_dump_test(TestWebView& view, TestRunContext& context, Test& test, URL::URL const& url)
 {
     auto test_index = test.index;
@@ -540,48 +515,15 @@ static void run_dump_test(TestWebView& view, TestRunContext& context, Test& test
             });
         };
     } else if (test.mode == TestMode::Text) {
-        // Set up variant detection callback.
-        view.on_test_variant_metadata = [&view, &context, test_index, on_test_complete](JsonValue metadata) {
-            // Verify this IPC response is for the current test on this view (use index to avoid dangling pointer issues)
-            auto current_index = s_current_test_index_by_view.get(&view);
-            if (!current_index.has_value() || *current_index != test_index)
-                return;
-
-            auto& test = context.tests[test_index];
-            if (test.variant.has_value())
-                return;
-
-            auto const& variants_array = metadata.as_array();
-
-            if (!variants_array.is_empty()) {
-                Vector<String> variants;
-                variants.ensure_capacity(variants_array.size());
-                for (auto const& variant : variants_array.values())
-                    variants.unchecked_append(variant.as_string());
-
-                expand_test_with_variants(context, test_index, variants);
-                view.on_test_complete({ test_index, TestResult::Expanded });
-                return;
-            }
-
-            auto& test_after_check = context.tests[test_index];
-            test_after_check.did_check_variants = true;
-            if (test_after_check.did_finish_test)
-                on_test_complete();
-        };
-
-        view.on_load_finish = [&view, &context, test_index, on_test_complete, url](auto const& loaded_url) {
-            // We don't want subframe loads to trigger the test finish.
-            if (!url.equals(loaded_url, URL::ExcludeFragment::Yes))
-                return;
+        view.on_load_finish = [&view, &context, test_index, on_test_complete](auto const& loaded_url) {
+            // page_did_finish_loading is already top-level-only (Document.cpp gates it on navigable->is_traversable()).
+            // We accept *any* top-level URL here — not just the test's original URL; otherwise a test that navigates
+            // away will hang forever — because the original page's load IPC may arrive after the navigation target's
+            // signal, and the URL filter will then mask the load event for the new page, too.
+            (void)loaded_url;
 
             auto& test = context.tests[test_index];
             test.did_finish_loading = true;
-
-            if (!test.variant.has_value())
-                view.run_javascript("internals.loadTestVariants();"_string);
-            else
-                test.did_check_variants = true;
 
             if (test.expectation_path.is_empty()) {
                 auto promise = view.request_internal_page_info(WebView::PageInfoType::Text);
@@ -591,7 +533,7 @@ static void run_dump_test(TestWebView& view, TestRunContext& context, Test& test
                     test.text = text;
                     on_test_complete();
                 });
-            } else if (test.did_finish_test && test.did_check_variants) {
+            } else if (test.did_finish_test) {
                 on_test_complete();
             }
         };
@@ -601,7 +543,7 @@ static void run_dump_test(TestWebView& view, TestRunContext& context, Test& test
             test.text = text;
             test.did_finish_test = true;
 
-            if (test.did_finish_loading && test.did_check_variants)
+            if (test.did_finish_loading)
                 on_test_complete();
         };
     } else if (test.mode == TestMode::Crash) {
@@ -672,15 +614,23 @@ static void run_ref_test(TestWebView& view, TestRunContext& context, Test& test,
 
     auto handle_completed_test = [&view, &context, test_index, url]() -> ErrorOr<TestResult> {
         auto& test = context.tests[test_index];
-        VERIFY(test.ref_test_expectation_type.has_value());
-        auto should_match = test.ref_test_expectation_type == RefTestExpectationType::Match;
-        auto screenshot_matches = fuzzy_screenshot_match(url, view.url(), *test.actual_screenshot,
-            *test.expectation_screenshot, test.fuzzy_matches, should_match);
-        if (should_match == screenshot_matches)
-            return TestResult::Pass;
+        switch (test.ref_test_expectation_type) {
+        case RefTestExpectationType::None:
+            return TestResult::Fail;
+        case RefTestExpectationType::Match:
+        case RefTestExpectationType::Mismatch: {
+            auto should_match = test.ref_test_expectation_type == RefTestExpectationType::Match;
+            auto screenshot_matches = fuzzy_screenshot_match(url, view.url(), *test.actual_screenshot,
+                *test.expectation_screenshot, test.fuzzy_matches, should_match);
+            if (should_match == screenshot_matches)
+                return TestResult::Pass;
 
-        TRY(write_screenshot_failure_results(test, *test.actual_screenshot, *test.expectation_screenshot));
-        return TestResult::Fail;
+            TRY(write_screenshot_failure_results(test, *test.actual_screenshot, *test.expectation_screenshot));
+            return TestResult::Fail;
+        }
+        }
+
+        VERIFY_NOT_REACHED();
     };
 
     auto on_test_complete = [&view, test_index, handle_completed_test]() {
@@ -729,16 +679,12 @@ static void run_ref_test(TestWebView& view, TestRunContext& context, Test& test,
         }
     };
 
-    view.on_reference_test_metadata = [&view, &context, test_index](JsonValue const& metadata) {
+    view.on_reference_test_metadata = [&view, &context, test_index, on_test_complete = move(on_test_complete)](JsonValue const& metadata) {
         auto& test = context.tests[test_index];
         auto metadata_object = metadata.as_object();
 
         auto match_references = metadata_object.get_array("match_references"sv);
         auto mismatch_references = metadata_object.get_array("mismatch_references"sv);
-        if (match_references->is_empty() && mismatch_references->is_empty()) {
-            dbgln("No match or mismatch references in `{}`! Metadata: {}", view.url(), metadata_object.serialized());
-            VERIFY_NOT_REACHED();
-        }
 
         // Read fuzzy configurations.
         test.fuzzy_matches.clear_with_capacity();
@@ -770,17 +716,24 @@ static void run_ref_test(TestWebView& view, TestRunContext& context, Test& test,
 
             test.ref_test_expectation_type = RefTestExpectationType::Match;
             reference_to_load = match_references->at(0).as_string();
-        } else {
+        } else if (!mismatch_references->is_empty()) {
             if (mismatch_references->size() > 1)
                 dbgln("FIXME: Only a single ref test mismatch reference is supported");
 
             test.ref_test_expectation_type = RefTestExpectationType::Mismatch;
             reference_to_load = mismatch_references->at(0).as_string();
         }
-        // Clear flag so we can inject the JS into the reference page.
-        test.ref_test_expectation_url = URL::Parser::basic_parse(reference_to_load).release_value();
-        test.did_inject_js = false;
-        view.load(test.ref_test_expectation_url.value());
+
+        if (test.ref_test_expectation_type == RefTestExpectationType::None) {
+            // Skip loading the expectation page entirely since none was specified
+            warnln("Test '{}' does not specify an expectation file (e.g. '<link rel=\"match\" href=\"...\" />' tag), test will fail.", test.input_path);
+            on_test_complete();
+        } else {
+            // Clear flag so we can inject the JS into the reference page.
+            test.ref_test_expectation_url = URL::Parser::basic_parse(reference_to_load).release_value();
+            test.did_inject_js = false;
+            view.load(test.ref_test_expectation_url.value());
+        }
     };
 
     view.load(url);
@@ -948,7 +901,7 @@ static void run_test(TestWebView& view, TestRunContext& context, size_t test_ind
             VERIFY(echo_server_port.has_value());
             auto relative_path = LexicalPath::relative_path(real_path, app.test_root_path);
             VERIFY(relative_path.has_value());
-            url = URL::Parser::basic_parse(ByteString::formatted("http://localhost:{}/static/{}", echo_server_port.value(), relative_path.value())).release_value();
+            url = URL::Parser::basic_parse(ByteString::formatted("http://{}:{}/static/{}", unique_localhost_hostname("test-web"sv), echo_server_port.value(), relative_path.value())).release_value();
         } else {
             url = URL::create_with_file_scheme(real_path).release_value();
         }
@@ -1044,6 +997,7 @@ static ErrorOr<int> run_tests(Core::AnonymousBuffer const& theme, Web::DevicePix
     auto& display = Display::the();
 
     TRY(load_test_config(app.test_root_path));
+    TRY(skip_async_scrolling_tests_unless_enabled(app));
 
     Vector<Test> tests;
 
@@ -1087,20 +1041,13 @@ static ErrorOr<int> run_tests(Core::AnonymousBuffer const& theme, Web::DevicePix
     for (auto& test : tests) {
         for (auto const& [glob, variant] : explicit_variants) {
             if (test.relative_path.matches(glob, CaseSensitivity::CaseSensitive)) {
-                test.variant = variant;
-                auto variant_suffix = variant.bytes_as_string_view().substring_view(1);
-                test.relative_path = ByteString::formatted("{}?{}", test.relative_path, variant_suffix);
-                test.safe_relative_path = ByteString::formatted("{}@{}", test.safe_relative_path, variant_suffix);
-                auto dir = LexicalPath::dirname(test.expectation_path);
-                auto title = LexicalPath::title(LexicalPath::basename(test.input_path));
-                if (dir.is_empty())
-                    test.expectation_path = ByteString::formatted("{}@{}.txt", title, variant_suffix);
-                else
-                    test.expectation_path = ByteString::formatted("{}/{}@{}.txt", dir, title, variant_suffix);
+                apply_variant_to_test(test, variant);
                 break;
             }
         }
     }
+
+    TRY(expand_tests_with_static_variants(tests, s_skipped_tests));
 
     if (app.shuffle)
         shuffle(tests);
@@ -1162,6 +1109,7 @@ static ErrorOr<int> run_tests(Core::AnonymousBuffer const& theme, Web::DevicePix
     for (auto [i, view] : enumerate(views)) {
         s_view_display_states[i].pid = view->web_content_pid();
         s_view_display_states[i].active = false;
+        s_view_index_by_view.set(view.ptr(), i);
     }
 
     display.begin_run();
@@ -1183,13 +1131,12 @@ static ErrorOr<int> run_tests(Core::AnonymousBuffer const& theme, Web::DevicePix
 
     for (auto [view_id, view] : enumerate(views)) {
         set_ui_callbacks_for_tests(*view, test_run_capture);
-        view->clear_content_filters();
+        view->clear_content_blockers();
 
         auto cleanup_test = [&, view = view.ptr()](size_t test_index, TestResult test_result) {
             view->on_load_finish = {};
             view->on_test_finish = {};
             view->on_reference_test_metadata = {};
-            view->on_test_variant_metadata = {};
             view->on_set_test_timeout = {};
 
             // Disconnect child crash handlers so old child crashes don't affect the next test
@@ -1197,6 +1144,7 @@ static ErrorOr<int> run_tests(Core::AnonymousBuffer const& theme, Web::DevicePix
 
             // Don't try to reset state if WebContent crashed - it's gone
             if (test_result != TestResult::Crashed) {
+                view->clear_content_blockers();
                 view->reset_zoom();
                 view->reset_viewport_size(window_size);
             }
@@ -1233,6 +1181,7 @@ static ErrorOr<int> run_tests(Core::AnonymousBuffer const& theme, Web::DevicePix
 
             // Mark this view as active (for variant wake-up tracking)
             display.on_test_started(view_id, test, view->web_content_pid());
+            try_write_harness_status(ByteString::formatted("running {}", test.relative_path));
 
             // Reset promise and attach completion callback
             view->reset_test_promise();
@@ -1252,18 +1201,20 @@ static ErrorOr<int> run_tests(Core::AnonymousBuffer const& theme, Web::DevicePix
                 if (result.result != TestResult::Crashed)
                     test_run_capture.write_test_output(*view);
 
-                bool const is_non_passing_result = result.result != TestResult::Pass && result.result != TestResult::Expanded;
+                bool const is_non_passing_result = result.result != TestResult::Pass;
                 bool const should_trigger_fail_fast = result.result == TestResult::Fail || result.result == TestResult::Timeout || result.result == TestResult::Crashed;
 
                 if (is_non_passing_result)
                     non_passing_tests.append(result);
 
                 Display::the().on_test_finished(view_id, test, result.result);
+                try_write_harness_status(ByteString::formatted("finished {}: {}", test.relative_path, test_result_to_string(result.result)));
 
                 if (app.fail_fast && !fail_fast_triggered && should_trigger_fail_fast) {
                     fail_fast_triggered = true;
                     auto const pid = view->web_content_pid();
                     Display::the().on_fail_fast(test, result.result, pid);
+                    try_write_harness_status(ByteString::formatted("fail-fast after {}: {}", test.relative_path, test_result_to_string(result.result)));
 
                     if (s_all_tests_complete)
                         s_all_tests_complete->reject(Error::from_string_literal("Fail-fast"));
@@ -1310,7 +1261,21 @@ static ErrorOr<int> run_tests(Core::AnonymousBuffer const& theme, Web::DevicePix
     auto result_or_rejection
         = s_all_tests_complete->await();
     display.clear_live_display();
-    display.print_run_complete(tests, non_passing_tests, result_or_rejection.is_error() ? tests_remaining : 0);
+
+    bool const test_run_stopped_early = result_or_rejection.is_error() || tests_remaining > 0;
+    if (result_or_rejection.is_error()) {
+        auto reason = ByteString::formatted("test run stopped early: {}", result_or_rejection.error());
+        log_active_test_views(reason);
+        try_write_harness_status(reason);
+    } else if (tests_remaining > 0) {
+        auto reason = ByteString::formatted("event loop stopped with {} unfinished tests", tests_remaining);
+        log_active_test_views(reason);
+        try_write_harness_status(reason);
+    } else {
+        try_write_harness_status("completed"sv);
+    }
+
+    display.print_run_complete(tests, non_passing_tests, tests_remaining);
 
     if (app.dump_gc_graph) {
         for (auto& view : views) {
@@ -1326,7 +1291,7 @@ static ErrorOr<int> run_tests(Core::AnonymousBuffer const& theme, Web::DevicePix
     bool has_helper_output = test_run_capture.write_helper_process_output();
 
     // Generate result files (JSON data and HTML index)
-    if (app.quiet || app.verbosity < Application::VERBOSITY_LEVEL_LOG_TEST_OUTPUT || !non_passing_tests.is_empty() || has_helper_output) {
+    if (app.quiet || app.verbosity < Application::VERBOSITY_LEVEL_LOG_TEST_OUTPUT || !non_passing_tests.is_empty() || has_helper_output || test_run_stopped_early) {
         if (auto result = generate_result_files(tests, non_passing_tests); result.is_error())
             warnln("Failed to generate result files: {}", result.error());
         else
@@ -1338,37 +1303,29 @@ static ErrorOr<int> run_tests(Core::AnonymousBuffer const& theme, Web::DevicePix
 
 static void handle_signal(int signal)
 {
-    VERIFY(signal == SIGINT || signal == SIGTERM);
-
     // Quit our event loop. This makes `::exec()` return as soon as possible, and signals to WebView::Application that
     // we should no longer automatically restart processes in `::process_did_exit()`.
     Core::EventLoop::current().quit(0);
 
-    // Report current view statuses
-    dbgln();
-    dbgln("{} received. Active test views:", signal == SIGINT ? "SIGINT"sv : "SIGTERM"sv);
-    dbgln();
+    StringView signal_name = "signal received"sv;
+    if (signal == SIGINT)
+        signal_name = "SIGINT received"sv;
+    else if (signal == SIGTERM)
+        signal_name = "SIGTERM received"sv;
 
-    auto now = UnixDateTime::now();
-    WebView::ViewImplementation::for_each_view([&](WebView::ViewImplementation const& view) {
-        dbg("- View {}: ", view.view_id());
-
-        auto maybe_index = s_current_test_index_by_view.get(&view);
-        if (maybe_index.has_value() && s_run_context) {
-            auto const& test = s_run_context->tests[*maybe_index];
-            dbgln("{} (duration: {})", test.relative_path, human_readable_time(now - test.start_time));
-        } else {
-            dbgln("{} (no active test)", view.url());
-        }
-
-        return IterationDecision::Continue;
-    });
-    dbgln();
+    if (signal == SIGINT || signal == SIGTERM)
+        log_active_test_views(signal_name);
+    else
+        log_active_test_views(ByteString::formatted("signal {} received", signal));
+    try_write_harness_status(signal_name);
 
     // Stop running tests
-    s_all_tests_complete->reject(signal == SIGINT
-            ? Error::from_string_view("SIGINT received"sv)
-            : Error::from_string_view("SIGTERM received"sv));
+    if (signal == SIGINT)
+        s_all_tests_complete->reject(Error::from_string_view("SIGINT received"sv));
+    else if (signal == SIGTERM)
+        s_all_tests_complete->reject(Error::from_string_view("SIGTERM received"sv));
+    else
+        s_all_tests_complete->reject(Error::from_string_literal("Unexpected signal received"));
 }
 
 }
@@ -1387,6 +1344,12 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         warnln("Run once with --rebaseline, or drop --rebaseline when repeating.");
         return 1;
     }
+
+    if (app->test_root_path.is_empty()) {
+        warnln("Error: --test-path must be passed to specify the location of the tests.");
+        return 1;
+    }
+
     Core::EventLoop::register_signal(SIGINT, TestWeb::handle_signal);
     Core::EventLoop::register_signal(SIGTERM, TestWeb::handle_signal);
 
@@ -1395,8 +1358,6 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
 
     auto const& browser_options = TestWeb::Application::browser_options();
     Web::DevicePixelSize window_size { browser_options.window_width, browser_options.window_height };
-
-    VERIFY(!app->test_root_path.is_empty());
 
     app->test_root_path = LexicalPath::absolute_path(TRY(FileSystem::current_working_directory()), app->test_root_path);
 

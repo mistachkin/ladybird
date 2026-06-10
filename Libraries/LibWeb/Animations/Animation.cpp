@@ -225,7 +225,7 @@ WebIDL::ExceptionOr<Optional<TimeValue>> Animation::validate_a_css_numberish_tim
         m_timeline && m_timeline->is_progress_based() &&
 
         // time is not a CSSNumeric value with percent units:
-        (!time.has<GC::Root<CSS::CSSNumericValue>>() || !time.get<GC::Root<CSS::CSSNumericValue>>()->type().matches_percentage())) {
+        (!time.has<GC::Ref<CSS::CSSNumericValue>>() || !time.get<GC::Ref<CSS::CSSNumericValue>>()->type().matches_percentage())) {
         // throw a TypeError.
         // return false;
         return WebIDL::SimpleException {
@@ -240,14 +240,14 @@ WebIDL::ExceptionOr<Optional<TimeValue>> Animation::validate_a_css_numberish_tim
         (!m_timeline || !m_timeline->is_progress_based()) &&
 
         // time is a CSSNumericValue, and
-        time.has<GC::Root<CSS::CSSNumericValue>>() &&
+        time.has<GC::Ref<CSS::CSSNumericValue>>() &&
 
         // the units of time are not duration units:
-        !time.get<GC::Root<CSS::CSSNumericValue>>()->type().matches_time({}) &&
+        !time.get<GC::Ref<CSS::CSSNumericValue>>()->type().matches_time({}) &&
 
         // AD-HOC: While it's not mentioned in the spec WPT also expects us to support CSSNumericValue number value, see
         //         https://github.com/w3c/csswg-drafts/issues/13196
-        !time.get<GC::Root<CSS::CSSNumericValue>>()->type().matches_number({})) {
+        !time.get<GC::Ref<CSS::CSSNumericValue>>()->type().matches_number({})) {
         // throw a TypeError.
         // return false.
         return WebIDL::SimpleException {
@@ -266,7 +266,7 @@ WebIDL::ExceptionOr<Optional<TimeValue>> Animation::validate_a_css_numberish_tim
 
     // FIXME: Figure out which element we should use for this, for now we just use the document element of the current
     //        window
-    return TimeValue::from_css_numberish(time.downcast<double, GC::Root<CSS::CSSNumericValue>>(), DOM::AbstractElement { *as<HTML::Window>(realm().global_object()).associated_document().document_element() });
+    return TimeValue::from_css_numberish(time.downcast<double, GC::Ref<CSS::CSSNumericValue>>(), DOM::AbstractElement { *as<HTML::Window>(realm().global_object()).associated_document().document_element() });
 
     VERIFY_NOT_REACHED();
 }
@@ -658,7 +658,7 @@ void Animation::cancel(ShouldInvalidate should_invalidate)
         // 8. Let timeline time be the current time of the timeline with which animation is associated. If animation is
         //    not associated with an active timeline, let timeline time be an unresolved time value.
         // 9. Set cancelEvent’s timelineTime to timeline time. If timeline time is unresolved, set it to null.
-        AnimationPlaybackEventInit init;
+        Bindings::AnimationPlaybackEventInit init;
         init.timeline_time = m_timeline && !m_timeline->is_inactive() ? NullableCSSNumberish { m_timeline->current_time()->as_css_numberish(realm) } : NullableCSSNumberish { Empty {} };
         auto cancel_event = AnimationPlaybackEvent::create(realm, HTML::EventNames::cancel, init);
 
@@ -1330,7 +1330,7 @@ void Animation::update_finished_state(DidSeek did_seek, SynchronouslyNotify sync
             // 6. Set finishEvent’s timelineTime attribute to the current time of the timeline with which animation is
             //    associated. If animation is not associated with a timeline, or the timeline is inactive, let
             //    timelineTime be null.
-            AnimationPlaybackEventInit init;
+            Bindings::AnimationPlaybackEventInit init;
             init.current_time = current_time()->as_css_numberish(realm);
             if (m_timeline && !m_timeline->is_inactive())
                 init.timeline_time = m_timeline->current_time()->as_css_numberish(realm);

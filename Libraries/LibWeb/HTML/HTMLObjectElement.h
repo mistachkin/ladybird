@@ -44,6 +44,12 @@ public:
     // https://html.spec.whatwg.org/multipage/forms.html#category-listed
     virtual bool is_listed() const override { return true; }
 
+    // ^EventTarget
+    virtual bool is_focusable() const override
+    {
+        return meets_focusable_area_rendering_requirements();
+    }
+
     virtual void visit_edges(Cell::Visitor&) override;
 
 private:
@@ -56,7 +62,7 @@ private:
     virtual bool is_presentational_hint(FlyString const&) const override;
     virtual void apply_presentational_hints(Vector<CSS::StyleProperty>&) const override;
 
-    virtual GC::Ptr<Layout::Node> create_layout_node(GC::Ref<CSS::ComputedProperties>) override;
+    virtual RefPtr<Layout::Node> create_layout_node(CSS::ComputedProperties const&) override;
     virtual void adjust_computed_style(CSS::ComputedProperties&) override;
 
     bool has_ancestor_media_element_or_object_element_not_showing_fallback_content() const;
@@ -80,7 +86,7 @@ private:
     virtual Optional<CSSPixels> intrinsic_width() const override;
     virtual Optional<CSSPixels> intrinsic_height() const override;
     virtual Optional<CSSPixelFraction> intrinsic_aspect_ratio() const override;
-    virtual RefPtr<Gfx::ImmutableBitmap> current_image_bitmap_sized(Gfx::IntSize) const override;
+    virtual Optional<Gfx::DecodedImageFrame> current_image_frame_sized(Gfx::IntSize) const override;
     virtual void set_visible_in_viewport(bool) override;
     virtual GC::Ptr<DOM::Element const> to_html_element() const override { return *this; }
     virtual size_t current_frame_index() const override { return 0; }

@@ -20,7 +20,9 @@
 #include <LibWeb/CSS/CounterStyle.h>
 #include <LibWeb/CSS/InvalidationSet.h>
 #include <LibWeb/CSS/Selector.h>
+#include <LibWeb/CSS/SelectorInsights.h>
 #include <LibWeb/CSS/StyleInvalidationData.h>
+#include <LibWeb/CSS/StyleSheetIdentifier.h>
 #include <LibWeb/Forward.h>
 
 namespace Web::CSS {
@@ -30,8 +32,11 @@ class StyleScope;
 struct MatchingRule {
     GC::Ptr<CSSRule const> rule; // Either CSSStyleRule or CSSNestedDeclarations
     GC::Ptr<CSSStyleSheet const> sheet;
+    GC::Ptr<CSSContainerRule const> container_rule;
+    GC::Ptr<CSSRule const> scope_rule; // Either CSSScopeRule or CSSImportRule
     Optional<FlyString> default_namespace;
     Selector const& selector;
+    size_t selector_index { 0 };
     size_t style_sheet_index { 0 };
     size_t rule_index { 0 };
 
@@ -46,7 +51,7 @@ struct MatchingRule {
     SelectorList const& absolutized_selectors() const;
     FlyString const& qualified_layer_name() const;
 
-    void visit_edges(GC::Cell::Visitor&);
+    void visit_edges(GC::Cell::Visitor&) const;
 };
 
 struct RuleCache {
@@ -75,11 +80,6 @@ struct RuleCaches {
     void visit_edges(GC::Cell::Visitor&);
 };
 
-struct SelectorInsights {
-    bool has_has_selectors { false };
-    bool has_has_selectors_with_relative_selector_that_has_sibling_combinator { false };
-};
-
 struct StyleCache : public RefCounted<StyleCache> {
     static NonnullRefPtr<StyleCache> create();
     static NonnullRefPtr<StyleCache> create_for_style_scope(StyleScope&);
@@ -91,6 +91,7 @@ struct StyleCache : public RefCounted<StyleCache> {
     RuleCaches author_rule_cache;
     RuleCaches user_rule_cache;
     RuleCaches user_agent_rule_cache;
+    bool has_size_container_queries { false };
 
     void visit_edges(GC::Cell::Visitor&);
 };
@@ -123,6 +124,8 @@ public:
     [[nodiscard]] RuleCache const& get_pseudo_class_rule_cache(PseudoClass) const;
 
     void for_each_stylesheet(CascadeOrigin, Function<void(CSS::CSSStyleSheet&)> const&) const;
+    static WEB_API void for_each_user_agent_stylesheet(bool include_quirks_mode_stylesheet, Function<void(CSS::CSSStyleSheet&, StyleSheetIdentifier const&)> const&);
+    static Optional<StyleSheetIdentifier> user_agent_style_sheet_identifier(CSS::CSSStyleSheet const&);
     void build_user_style_sheet_if_needed();
 
     void make_rule_cache_for_cascade_origin(CascadeOrigin, StyleCache&);
@@ -136,9 +139,12 @@ public:
     void build_qualified_layer_names_cache(StyleCache&);
 
     [[nodiscard]] bool may_have_has_selectors() const;
+    [[nodiscard]] bool may_have_user_has_selectors() const;
+    [[nodiscard]] bool may_have_user_pseudo_class_selectors(PseudoClass) const;
     [[nodiscard]] bool have_has_selectors() const;
     [[nodiscard]] bool may_have_has_selectors_with_relative_selector_that_has_sibling_combinator() const;
     [[nodiscard]] bool have_has_selectors_with_relative_selector_that_has_sibling_combinator() const;
+    [[nodiscard]] bool have_size_container_queries() const;
 
     void for_each_active_css_style_sheet(Function<void(CSS::CSSStyleSheet&)> const& callback) const;
 

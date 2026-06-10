@@ -6,6 +6,7 @@
 
 #include <LibWeb/Bindings/ElementInternals.h>
 #include <LibWeb/Bindings/Intrinsics.h>
+#include <LibWeb/CSS/Invalidation/FormControlInvalidator.h>
 #include <LibWeb/DOM/ShadowRoot.h>
 #include <LibWeb/FileAPI/File.h>
 #include <LibWeb/HTML/ElementInternals.h>
@@ -60,13 +61,13 @@ WebIDL::ExceptionOr<void> ElementInternals::set_form_value(ElementInternalsFormV
 
     // 3. Set target element's submission value to value if value is not a FormData object, or to a clone of value's entry list otherwise.
     auto submission_value = value.visit(
-        [](GC::Root<FileAPI::File> const& file) -> FormAssociatedElement::FACESubmissionValue {
-            return GC::Ref { *file };
+        [](GC::Ref<FileAPI::File> file) -> FormAssociatedElement::FACESubmissionValue {
+            return file;
         },
         [](String const& string) -> FormAssociatedElement::FACESubmissionValue {
             return string;
         },
-        [](GC::Root<XHR::FormData> const& form_data) -> FormAssociatedElement::FACESubmissionValue {
+        [](GC::Ref<XHR::FormData> form_data) -> FormAssociatedElement::FACESubmissionValue {
             return form_data->entry_list();
         },
         [](Empty const& empty) -> FormAssociatedElement::FACESubmissionValue {
@@ -84,13 +85,13 @@ WebIDL::ExceptionOr<void> ElementInternals::set_form_value(ElementInternalsFormV
     // 6. Otherwise, set element's state to state.
     else {
         auto state_value = state.value().visit(
-            [](GC::Root<FileAPI::File> const& file) -> FormAssociatedElement::FACESubmissionValue {
+            [](GC::Ref<FileAPI::File> file) -> FormAssociatedElement::FACESubmissionValue {
                 return GC::Ref { *file };
             },
             [](String const& string) -> FormAssociatedElement::FACESubmissionValue {
                 return string;
             },
-            [](GC::Root<XHR::FormData> const& form_data) -> FormAssociatedElement::FACESubmissionValue {
+            [](GC::Ref<XHR::FormData> form_data) -> FormAssociatedElement::FACESubmissionValue {
                 return form_data->entry_list();
             },
             [](Empty const& empty) -> FormAssociatedElement::FACESubmissionValue {
@@ -115,8 +116,22 @@ WebIDL::ExceptionOr<GC::Ptr<HTMLFormElement>> ElementInternals::form() const
     return m_target_element->form();
 }
 
+static bool validity_flags_has_one_or_more_true_values(Bindings::ValidityStateFlags const& flags)
+{
+    return flags.value_missing
+        || flags.type_mismatch
+        || flags.pattern_mismatch
+        || flags.too_long
+        || flags.too_short
+        || flags.range_underflow
+        || flags.range_overflow
+        || flags.step_mismatch
+        || flags.bad_input
+        || flags.custom_error;
+}
+
 // https://html.spec.whatwg.org/multipage/custom-elements.html#dom-elementinternals-setvalidity
-WebIDL::ExceptionOr<void> ElementInternals::set_validity(ValidityStateFlags const& flags, Optional<String> message, GC::Ptr<HTMLElement> anchor)
+WebIDL::ExceptionOr<void> ElementInternals::set_validity(Bindings::ValidityStateFlags const& flags, Optional<String> message, GC::Ptr<HTMLElement> anchor)
 {
     // 1. Let element be this's target element.
     auto element = m_target_element;
@@ -126,7 +141,7 @@ WebIDL::ExceptionOr<void> ElementInternals::set_validity(ValidityStateFlags cons
         return WebIDL::NotSupportedError::create(realm(), "Element is not a form-associated custom element"_utf16);
 
     // 3. If flags contains one or more true values and message is not given or is the empty string, then throw a TypeError.
-    if (flags.has_one_or_more_true_values() && (!message.has_value() || message->is_empty())) {
+    if (validity_flags_has_one_or_more_true_values(flags) && (!message.has_value() || message->is_empty())) {
         return WebIDL::SimpleException {
             WebIDL::SimpleExceptionType::TypeError,
             "Invalid flag(s) and empty message"sv
@@ -138,7 +153,7 @@ WebIDL::ExceptionOr<void> ElementInternals::set_validity(ValidityStateFlags cons
 
     // 5. Set element's validation message to the empty string if message is not given or all of element's validity flags are false, or to message otherwise.
     String validation_message;
-    if (message.has_value() && flags.has_one_or_more_true_values())
+    if (message.has_value() && validity_flags_has_one_or_more_true_values(flags))
         validation_message = message.release_value();
 
     element->set_face_validation_message({}, validation_message);
@@ -159,6 +174,9 @@ WebIDL::ExceptionOr<void> ElementInternals::set_validity(ValidityStateFlags cons
 
     // 9. Set element's validation anchor to anchor.
     element->set_face_validation_anchor({}, anchor);
+
+    // AD-HOC: Updating the validity flags changes which validity pseudo-classes match.
+    CSS::Invalidation::invalidate_style_after_validity_change(*element);
     return {};
 }
 

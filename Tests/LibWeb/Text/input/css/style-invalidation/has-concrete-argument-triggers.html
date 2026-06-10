@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+<meta charset="utf-8">
 <script src="../../include.js"></script>
 <script src="structural-matrix.js"></script>
 <style>
@@ -30,12 +31,12 @@
         mutating.classList.add("needle");
         assertEqual("needle target after relevant mutation", readProbe(needleTarget), MATCH);
         assertEqual("other target after unrelated mutation", readProbe(otherTarget), BASE);
-        printPassWithCounters("class mutation invalidates affected :has() rule");
+        printPassWithoutRecomputeCounters("class mutation invalidates affected :has() rule");
 
         resetStyleCounters();
         mutating.classList.add("other");
         assertEqual("other target after relevant mutation", readProbe(otherTarget), MATCH);
-        printPassWithCounters("class mutation still invalidates matching :has() rule");
+        printPassWithoutRecomputeCounters("class mutation still invalidates matching :has() rule");
 
         const style = addStyle(document.head, `.empty-dir-auto-scope .outer:has(.auto:empty) .target { ${MATCH_DECLARATION} }`);
         const fixture = makeElement("section", { className: "empty-dir-auto-scope" });
@@ -52,7 +53,7 @@
         resetStyleCounters();
         text.data = "text";
         assertEqual("dir=auto empty text after mutation", readProbe(target), BASE);
-        printPassWithCounters("dir=auto text mutation invalidates :has(:empty)");
+        printPassWithoutRecomputeCounters("dir=auto text mutation invalidates :has(:empty)");
 
         style.remove();
         fixture.remove();
@@ -71,11 +72,48 @@
             resetStyleCounters();
             mutate(subject);
             assertEqual(`${name} after mutation`, readProbe(target), expectedAfter ? MATCH : BASE);
-            printPassWithCounters(`${name} invalidates :has()`);
+            printPassWithoutRecomputeCounters(`${name} invalidates :has()`);
 
             style.remove();
             fixture.remove();
         }
+
+        function runAttributeCase(name, selector, setup, mutate, expectedAfter) {
+            const scope = `attribute-scope-${name.replaceAll(" ", "-")}`;
+            const style = addStyle(document.head, `.${scope} .anchor:has(${selector}) .target { ${MATCH_DECLARATION} }`);
+            const fixture = makeElement("section", { className: scope });
+            const anchor = makeElement("div", { className: "anchor" });
+            const subject = setup();
+            const target = makeElement("span", { className: "target" });
+            anchor.append(subject, target);
+            fixture.appendChild(anchor);
+            document.body.appendChild(fixture);
+
+            assertEqual(`${name} initial`, readProbe(target), BASE);
+            resetStyleCounters();
+            mutate(subject);
+            assertEqual(`${name} after mutation`, readProbe(target), expectedAfter ? MATCH : BASE);
+            printPassWithoutRecomputeCounters(`${name} invalidates :has()`);
+
+            style.remove();
+            fixture.remove();
+        }
+
+        runAttributeCase(
+            "svg camel-case attribute mutation",
+            "[viewBox]",
+            () => makeSvgElement("svg"),
+            svg => svg.setAttribute("viewBox", "0 0 10 10"),
+            true
+        );
+
+        runAttributeCase(
+            "svg lower-case selector does not match camel-case attribute mutation",
+            "[viewbox]",
+            () => makeSvgElement("svg"),
+            svg => svg.setAttribute("viewBox", "0 0 10 10"),
+            false
+        );
 
         runPseudoClassCase(
             "checked property mutation",

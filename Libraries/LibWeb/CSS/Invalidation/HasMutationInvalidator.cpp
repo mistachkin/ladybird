@@ -4,12 +4,17 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibGC/RootHashMap.h>
+#include <LibGC/RootHashTable.h>
+#include <LibGC/RootVector.h>
 #include <LibWeb/CSS/Invalidation/HasMutationFeatureCollector.h>
 #include <LibWeb/CSS/Invalidation/HasMutationInvalidator.h>
+#include <LibWeb/CSS/Invalidation/InvalidationSetMatcher.h>
 #include <LibWeb/CSS/StyleScope.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Element.h>
 #include <LibWeb/DOM/Node.h>
+#include <LibWeb/DOM/ShadowRoot.h>
 
 namespace Web::CSS::Invalidation {
 
@@ -84,11 +89,11 @@ static bool scope_has_featureless_sensitive_has_selectors(StyleScope const& scop
     return data && data->has_selectors_sensitive_to_featureless_subtree_changes;
 }
 
-void invalidate_element_if_affected_by_has(DOM::Element& element)
+void invalidate_element_if_affected_by_has(DOM::Element& element, DescendantHasInvalidation descendant_has_invalidation)
 {
     if (element.affected_by_has_pseudo_class_in_subject_position())
         element.set_needs_style_update(true);
-    if (element.affected_by_has_pseudo_class_in_non_subject_position())
+    if (descendant_has_invalidation == DescendantHasInvalidation::Yes && element.affected_by_has_pseudo_class_in_non_subject_position())
         element.invalidate_style(DOM::StyleInvalidationReason::Other, { { InvalidationSet::Property::Type::PseudoClass, PseudoClass::Has } }, {});
 }
 
@@ -103,6 +108,16 @@ static bool is_in_subtree_of_has_relative_selector_with_sibling_combinator(DOM::
 {
     return element.in_subtree_of_has_pseudo_class_relative_selector_with_sibling_combinator()
         || element.affected_by_has_pseudo_class_with_relative_selector_that_has_sibling_combinator();
+}
+
+static bool attribute_may_match_mutation_features(Selector::SimpleSelector::Attribute const& attribute, PendingHasInvalidationMutationFeatures const& mutation_features)
+{
+    auto const& attribute_name = attribute.qualified_name.name.name;
+    if (mutation_features.attribute_names.contains(attribute_name))
+        return true;
+
+    auto const& lowercase_attribute_name = attribute.qualified_name.name.lowercase_name;
+    return lowercase_attribute_name != attribute_name && mutation_features.attribute_names.contains(lowercase_attribute_name);
 }
 
 static bool selector_may_match_mutation_features(Selector const& selector, PendingHasInvalidationMutationFeatures const& mutation_features)
@@ -153,7 +168,7 @@ static bool selector_may_match_mutation_features(Selector const& selector, Pendi
                     break;
                 case Selector::SimpleSelector::Type::Attribute:
                     saw_concrete_feature = true;
-                    concrete_feature_found_in_mutation_subtree |= mutation_features.attribute_names.contains(simple_selector.attribute().qualified_name.name.lowercase_name);
+                    concrete_feature_found_in_mutation_subtree |= attribute_may_match_mutation_features(simple_selector.attribute(), mutation_features);
                     break;
                 case Selector::SimpleSelector::Type::PseudoClass: {
                     auto const& pseudo_class = simple_selector.pseudo_class();
@@ -176,15 +191,42 @@ static bool selector_may_match_mutation_features(Selector const& selector, Pendi
                     case PseudoClass::LocalLink:
                     case PseudoClass::Required:
                     case PseudoClass::Optional:
-                        saw_concrete_feature = true;
-                        concrete_feature_found_in_mutation_subtree |= mutation_features.may_affect_pseudo_classes
-                            || mutation_features.pseudo_classes.contains(pseudo_class.type);
-                        break;
                     case PseudoClass::Hover:
                     case PseudoClass::Focus:
                     case PseudoClass::FocusVisible:
                     case PseudoClass::FocusWithin:
                     case PseudoClass::Active:
+                    case PseudoClass::Target:
+                    case PseudoClass::Modal:
+                    case PseudoClass::Open:
+                    case PseudoClass::PopoverOpen:
+                    case PseudoClass::Autofill:
+                    case PseudoClass::Default:
+                    case PseudoClass::Fullscreen:
+                    case PseudoClass::Indeterminate:
+                    case PseudoClass::Invalid:
+                    case PseudoClass::Muted:
+                    case PseudoClass::Paused:
+                    case PseudoClass::Playing:
+                    case PseudoClass::ReadOnly:
+                    case PseudoClass::ReadWrite:
+                    case PseudoClass::Seeking:
+                    case PseudoClass::Stalled:
+                    case PseudoClass::Unchecked:
+                    case PseudoClass::UserInvalid:
+                    case PseudoClass::UserValid:
+                    case PseudoClass::Valid:
+                    case PseudoClass::VolumeLocked:
+                    case PseudoClass::Buffering:
+                    case PseudoClass::HighValue:
+                    case PseudoClass::LowValue:
+                    case PseudoClass::OptimalValue:
+                    case PseudoClass::SuboptimalValue:
+                    case PseudoClass::EvenLessGoodValue:
+                        saw_concrete_feature = true;
+                        concrete_feature_found_in_mutation_subtree |= mutation_features.may_affect_pseudo_classes
+                            || mutation_features.pseudo_classes.contains(pseudo_class.type);
+                        break;
                     case PseudoClass::Not:
                     case PseudoClass::Has:
                     default:
@@ -205,57 +247,6 @@ static bool selector_may_match_mutation_features(Selector const& selector, Pendi
     return visit_selector(selector);
 }
 
-static bool compound_may_match_anchor_ignoring_has(Selector::CompoundSelector const& compound_selector, DOM::Element const& anchor)
-{
-    for (auto const& simple_selector : compound_selector.simple_selectors) {
-        switch (simple_selector.type) {
-        case Selector::SimpleSelector::Type::Universal:
-            break;
-        case Selector::SimpleSelector::Type::Nesting:
-        case Selector::SimpleSelector::Type::Invalid:
-        case Selector::SimpleSelector::Type::PseudoElement:
-            return true;
-        case Selector::SimpleSelector::Type::TagName:
-            if (anchor.local_name() != simple_selector.qualified_name().name.lowercase_name)
-                return false;
-            break;
-        case Selector::SimpleSelector::Type::Id: {
-            auto id = anchor.id();
-            if (!id.has_value() || *id != simple_selector.name())
-                return false;
-            break;
-        }
-        case Selector::SimpleSelector::Type::Class:
-            if (!anchor.class_names().contains_slow(simple_selector.name()))
-                return false;
-            break;
-        case Selector::SimpleSelector::Type::Attribute: {
-            bool has_attribute = false;
-            anchor.for_each_attribute([&](FlyString const& name, String const&) {
-                if (name == simple_selector.attribute().qualified_name.name.lowercase_name)
-                    has_attribute = true;
-            });
-            if (!has_attribute)
-                return false;
-            break;
-        }
-        case Selector::SimpleSelector::Type::PseudoClass:
-            switch (simple_selector.pseudo_class().type) {
-            case PseudoClass::Has:
-                break;
-            case PseudoClass::Root:
-                if (&anchor != anchor.document().document_element())
-                    return false;
-                break;
-            default:
-                return true;
-            }
-            break;
-        }
-    }
-    return true;
-}
-
 static bool has_rule_that_may_be_affected_by_mutation(StyleScope& style_scope, DOM::Element const& anchor, PendingHasInvalidationMutationFeatures const& mutation_features)
 {
     bool found_has_rule = false;
@@ -271,7 +262,7 @@ static bool has_rule_that_may_be_affected_by_mutation(StyleScope& style_scope, D
                         continue;
                     auto const& pseudo_class = simple_selector.pseudo_class();
                     if (pseudo_class.type == PseudoClass::Has) {
-                        if (!compound_may_match_anchor_ignoring_has(compound_selector, anchor))
+                        if (!compound_may_match_element(anchor, compound_selector, PseudoClass::Has))
                             continue;
                         found_has_rule = true;
                         for (auto const& argument_selector : pseudo_class.argument_selector_list) {
@@ -325,21 +316,39 @@ static void invalidate_style_of_elements_affected_by_pending_has_mutations(Style
         style_scope.m_pending_has_invalidations.clear();
     };
 
+    auto& counters = style_scope.document().style_invalidation_counters();
+    if (!style_scope.has_valid_rule_cache())
+        ++counters.has_invalidation_rule_cache_builds;
+
     // It's ok to call have_has_selectors() instead of may_have_has_selectors() here and force
     // rule cache build, because it's going to be built soon anyway, since we could get here
     // only from update_style().
     if (!style_scope.have_has_selectors())
         return;
 
-    auto& counters = style_scope.document().style_invalidation_counters();
     ++counters.has_ancestor_walk_invocations;
 
-    HashTable<GC::Ref<DOM::Element>> elements_already_invalidated_for_has;
-    auto pending_has_invalidations = style_scope.m_pending_has_invalidations;
+    GC::RootHashMap<GC::Ref<DOM::Element>, DescendantHasInvalidation> invalidated_elements;
+    auto invalidate_element = [&](GC::Ref<DOM::Element> element, DescendantHasInvalidation descendant_has_invalidation) {
+        auto previous_invalidation = invalidated_elements.find(element);
+        if (previous_invalidation != invalidated_elements.end()) {
+            if (previous_invalidation->value == DescendantHasInvalidation::Yes
+                || descendant_has_invalidation == DescendantHasInvalidation::No) {
+                return false;
+            }
+        }
+        invalidated_elements.set(element, descendant_has_invalidation);
+        invalidate_element_if_affected_by_has(*element, descendant_has_invalidation);
+        return true;
+    };
+
+    GC::OrderedRootHashMap<GC::Ref<DOM::Node>, PendingHasInvalidationMutationFeatures> pending_has_invalidations;
+    for (auto& [node, features] : style_scope.m_pending_has_invalidations)
+        pending_has_invalidations.set(node, features);
     bool should_scan_ancestor_siblings = style_scope.have_has_selectors_with_relative_selector_that_has_sibling_combinator();
     for (auto& [node, mutation_features] : pending_has_invalidations) {
-        HashTable<GC::Ref<DOM::Element>> elements_skipped_by_has_feature_filter;
-        Vector<GC::Ref<DOM::Element>, 16> has_scope_ancestors;
+        GC::RootHashTable<GC::Ref<DOM::Element>> elements_skipped_by_has_feature_filter;
+        GC::RootVector<GC::Ref<DOM::Element>, 16> has_scope_ancestors;
         bool should_delay_ancestor_sibling_scans = false;
         for (GC::Ptr<DOM::Node> ancestor = node; ancestor; ancestor = ancestor->parent_or_shadow_host()) {
             if (!ancestor->is_element())
@@ -357,17 +366,17 @@ static void invalidate_style_of_elements_affected_by_pending_has_mutations(Style
         }
 
         for (auto element : has_scope_ancestors) {
-            if (elements_already_invalidated_for_has.contains(element))
+            auto previous_invalidation = invalidated_elements.find(element);
+            if (previous_invalidation != invalidated_elements.end() && previous_invalidation->value == DescendantHasInvalidation::Yes)
                 continue;
 
             ++counters.has_ancestor_walk_visits;
             bool can_skip_unchanged_has_fanout = !element->root().is_shadow_root() && !element->assigned_slot_internal() && !element->is_shadow_host();
-            bool should_invalidate_element = true;
-            if (element->affected_by_has_pseudo_class_in_non_subject_position() && can_skip_unchanged_has_fanout)
-                should_invalidate_element = has_rule_that_may_be_affected_by_mutation(style_scope, element, mutation_features);
-            if (should_invalidate_element) {
-                elements_already_invalidated_for_has.set(element);
-                invalidate_element_if_affected_by_has(*element);
+            bool should_invalidate_descendants = element->affected_by_has_pseudo_class_in_non_subject_position();
+            if (should_invalidate_descendants && can_skip_unchanged_has_fanout)
+                should_invalidate_descendants = has_rule_that_may_be_affected_by_mutation(style_scope, element, mutation_features);
+            if (element->affected_by_has_pseudo_class_in_subject_position() || should_invalidate_descendants) {
+                invalidate_element(element, should_invalidate_descendants ? DescendantHasInvalidation::Yes : DescendantHasInvalidation::No);
             } else {
                 elements_skipped_by_has_feature_filter.set(element);
             }
@@ -388,11 +397,10 @@ static void invalidate_style_of_elements_affected_by_pending_has_mutations(Style
                     GC::Ref<DOM::Element> ancestor_sibling = ancestor_sibling_element;
                     if (elements_skipped_by_has_feature_filter.contains(ancestor_sibling))
                         return IterationDecision::Continue;
-                    if (elements_already_invalidated_for_has.set(ancestor_sibling) != AK::HashSetResult::InsertedNewEntry)
+                    if (!invalidate_element(ancestor_sibling, DescendantHasInvalidation::Yes))
                         return IterationDecision::Continue;
 
                     ++counters.has_ancestor_walk_visits;
-                    invalidate_element_if_affected_by_has(*ancestor_sibling);
                 }
                 return IterationDecision::Continue;
             });
@@ -404,6 +412,16 @@ void invalidate_style_for_pending_has_mutations(DOM::Document& document)
 {
     invalidate_style_of_elements_affected_by_pending_has_mutations(document.style_scope());
     document.for_each_shadow_root([&](auto& shadow_root) {
+        bool has_active_style_sheets = false;
+        shadow_root.for_each_active_css_style_sheet([&](auto&) {
+            has_active_style_sheets = true;
+        });
+        if (!has_active_style_sheets) {
+            // Without shadow stylesheets, this scope cannot contain :has() selectors.
+            // Document-level user rules are handled by the document style scope above.
+            shadow_root.style_scope().m_pending_has_invalidations.clear();
+            return;
+        }
         invalidate_style_of_elements_affected_by_pending_has_mutations(shadow_root.style_scope());
     });
 }
@@ -440,6 +458,31 @@ static void schedule_has_invalidation_for_child_list_mutation(DOM::Node& parent,
         invalidate_children_affected_by_has_sibling_combinators(parent);
 }
 
+static void schedule_has_invalidation_for_node_in_scope(DOM::Node& node, StyleScope& style_scope)
+{
+    if (!style_scope.may_have_has_selectors())
+        return;
+
+    style_scope.record_pending_has_invalidation_mutation_features(node, node, false);
+    style_scope.schedule_ancestors_style_invalidation_due_to_presence_of_has(node);
+}
+
+static void schedule_document_user_has_invalidation_for_shadow_node(DOM::Node& node, StyleScope& node_style_scope)
+{
+    if (!is<DOM::ShadowRoot>(node.root()))
+        return;
+
+    auto& document_style_scope = node.document().style_scope();
+    if (&node_style_scope == &document_style_scope)
+        return;
+
+    if (!document_style_scope.may_have_user_has_selectors())
+        return;
+
+    document_style_scope.record_pending_has_invalidation_mutation_features(node, node, false);
+    document_style_scope.schedule_ancestors_style_invalidation_due_to_presence_of_has(node);
+}
+
 void schedule_has_invalidation_for_node(DOM::Node& node, DOM::StyleInvalidationReason reason)
 {
     auto is_child_list_mutation = reason == DOM::StyleInvalidationReason::NodeRemove
@@ -462,11 +505,12 @@ void schedule_has_invalidation_for_node(DOM::Node& node, DOM::StyleInvalidationR
         return;
     }
 
-    auto& style_scope = node.style_scope();
-    if (!style_scope.may_have_has_selectors() || !reason_may_affect_has_selectors(reason))
+    if (!reason_may_affect_has_selectors(reason))
         return;
-    style_scope.record_pending_has_invalidation_mutation_features(node, node, false);
-    style_scope.schedule_ancestors_style_invalidation_due_to_presence_of_has(node);
+
+    auto& style_scope = node.style_scope();
+    schedule_has_invalidation_for_node_in_scope(node, style_scope);
+    schedule_document_user_has_invalidation_for_shadow_node(node, style_scope);
 }
 
 void schedule_has_invalidation_for_same_parent_move(DOM::Node& node)

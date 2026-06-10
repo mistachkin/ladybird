@@ -1,5 +1,6 @@
 @media (prefers-color-scheme: light) {
     :root {
+        --border-color: #dcdde1;
         --card-background-color: #f5f5f5;
         --card-header-background-color: #f0f2f5;
     }
@@ -7,6 +8,7 @@
 
 @media (prefers-color-scheme: dark) {
     :root {
+        --border-color: #3d3d3d;
         --card-background-color: #242424;
         --card-header-background-color: #252525;
     }
@@ -65,10 +67,50 @@ header img {
     margin: 0 8px 16px 8px;
 }
 
-.card-group {
-    margin-bottom: 20px;
+.card-group:not(.hidden) ~ .card-group:not(.hidden) {
+    margin-top: 16px;
 }
 
-.card-group:last-child {
-    margin-bottom: 0;
+.card-separator:not(.hidden) ~ .card-separator:not(.hidden) {
+    border-top: 1px solid var(--border-color);
+    padding-top: 16px;
+}
+
+.search-container {
+    background-color: var(--card-background-color);
+
+    display: flex;
+    align-items: center;
+
+    max-width: 65%;
+    margin: 0 auto 24px auto;
+    padding: 0 12px;
+
+    border: none;
+    border-radius: 8px;
+}
+
+.search-container .search-icon {
+    color: var(--placeholder-color);
+    flex-shrink: 0;
+    width: 16px;
+    height: 16px;
+}
+
+.search-container .search-input {
+    background: none;
+    color: inherit;
+
+    flex-grow: 1;
+
+    border: none;
+    outline: none;
+
+    font-size: 14px;
+    line-height: 1.2;
+
+    width: auto;
+    min-width: 0;
+
+    padding: 10px 12px;
 }

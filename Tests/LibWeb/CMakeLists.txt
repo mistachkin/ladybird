@@ -1,17 +1,21 @@
 set(TEST_SOURCES
     TestCSSIDSpeed.cpp
-    TestContentFilter.cpp
+    TestContentBlocker.cpp
     TestControlMessageQueue.cpp
     TestCSSInheritedProperty.cpp
     TestCSSPixels.cpp
     TestCSSStyleSheetInvalidation.cpp
     TestCSSSyntaxParser.cpp
+    TestCSSTokenizer.cpp
     TestCSSTokenStream.cpp
+    TestFetchResponse.cpp
     TestFetchURL.cpp
     TestHTMLTokenizer.cpp
     TestMicrosyntax.cpp
     TestMimeSniff.cpp
     TestNumbers.cpp
+    TestRefCountedTreeNode.cpp
+    TestSecureContexts.cpp
     TestSourceHighlighter.cpp
     TestStrings.cpp
 )
@@ -20,10 +24,13 @@ foreach(source IN LISTS TEST_SOURCES)
     ladybird_test("${source}" LibWeb LIBS LibWeb)
 endforeach()
 
-lagom_utility(css-tokenizer SOURCES css-tokenizer.cpp LIBS LibFileSystem LibMain LibWeb)
+ladybird_utility(css-tokenizer SOURCES css-tokenizer.cpp LIBS LibFileSystem LibMain LibWeb)
 
-target_link_libraries(TestContentFilter PRIVATE LibURL)
+target_link_libraries(TestContentBlocker PRIVATE LibURL)
+target_link_libraries(TestControlMessageQueue PRIVATE LibSync)
+target_link_libraries(TestFetchResponse PRIVATE LibGC LibHTTP LibJS)
 target_link_libraries(TestFetchURL PRIVATE LibURL)
+target_link_libraries(TestSecureContexts PRIVATE LibURL)
 target_link_libraries(TestSourceHighlighter PRIVATE LibURL LibWebView)
 
 if (NOT WIN32)

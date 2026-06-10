@@ -8,6 +8,7 @@
 #pragma once
 
 #include <LibWeb/HTML/AudioPlayState.h>
+#include <LibWebView/Settings.h>
 #include <UI/Qt/BookmarksBar.h>
 #include <UI/Qt/FindInPageWidget.h>
 #include <UI/Qt/LocationEdit.h>
@@ -17,13 +18,15 @@
 #include <QLabel>
 #include <QMenu>
 #include <QPointer>
-#include <QToolBar>
 #include <QToolButton>
 #include <QWidget>
+
+class QTimer;
 
 namespace Ladybird {
 
 class BrowserWindow;
+class WindowControlButton;
 
 class HyperlinkLabel final : public QLabel {
     Q_OBJECT
@@ -44,7 +47,9 @@ signals:
     void mouse_entered(QEnterEvent*);
 };
 
-class Tab final : public QWidget {
+class Tab final
+    : public QWidget
+    , public WebView::SettingsObserver {
     Q_OBJECT
 
 public:
@@ -52,6 +57,7 @@ public:
     virtual ~Tab() override;
 
     WebContentView& view() { return *m_view; }
+    WebContentView const& view() const { return *m_view; }
 
     void navigate(URL::URL const&);
     void load_html(StringView);
@@ -67,12 +73,19 @@ public:
     void request_close();
 
     QIcon const& favicon() const { return m_favicon; }
-    QString const& title() const { return m_title; }
+    QIcon tab_icon() const;
+    QString title() const;
 
     QMenu* context_menu() const { return m_context_menu; }
 
     QToolButton* hamburger_button() const { return m_hamburger_button; }
+    QWidget* toolbar_container() const { return m_toolbar_container; }
 
+    void set_vertical_tabs_enabled(bool);
+    void set_window(BrowserWindow&);
+    void set_toolbar_container_in_tab_layout(bool);
+    void set_toolbar_window_controls_visible(bool);
+    void update_window_control_icons();
     void update_hover_label();
 
     bool url_is_hidden() const { return m_location_edit->url_is_hidden(); }
@@ -91,14 +104,29 @@ private:
     virtual void resizeEvent(QResizeEvent*) override;
     virtual bool event(QEvent*) override;
 
+    virtual void show_menu_bar_changed() override;
+    virtual void config_variable_changed(WebView::ConfigVariableID) override;
+
     void recreate_toolbar_icons();
+    void connect_hamburger_menu();
+    void update_hamburger_menu();
+    void update_chrome_style();
+    void update_tab_title();
+    void set_loading(bool);
+    void update_tab_icon();
     int tab_index();
 
-    QBoxLayout* m_layout { nullptr };
-    QToolBar* m_toolbar { nullptr };
+    QWidget* m_toolbar_container { nullptr };
+    QWidget* m_toolbar { nullptr };
+    QWidget* m_toolbar_window_controls_separator { nullptr };
+    QWidget* m_toolbar_window_controls { nullptr };
+    QSpacerItem* m_toolbar_window_controls_spacer { nullptr };
+    QSpacerItem* m_sidebar_toggle_navigation_spacer { nullptr };
+    WindowControlButton* m_minimize_window_button { nullptr };
+    WindowControlButton* m_maximize_window_button { nullptr };
+    WindowControlButton* m_close_window_button { nullptr };
     BookmarksBar* m_bookmarks_bar { nullptr };
     QToolButton* m_hamburger_button { nullptr };
-    QAction* m_hamburger_button_action { nullptr };
     LocationEdit* m_location_edit { nullptr };
     WebContentView* m_view { nullptr };
     FindInPageWidget* m_find_in_page { nullptr };
@@ -106,6 +134,10 @@ private:
     QString m_title;
     HyperlinkLabel* m_hover_label { nullptr };
     QIcon m_favicon;
+    QTimer* m_loading_animation_timer { nullptr };
+    bool m_is_loading { false };
+    bool m_is_updating_chrome_style { false };
+    int m_loading_animation_frame { 0 };
 
     QMenu* m_context_menu { nullptr };
     QMenu* m_page_context_menu { nullptr };
@@ -114,6 +146,7 @@ private:
     QMenu* m_media_context_menu { nullptr };
     QMenu* m_select_dropdown { nullptr };
 
+    QAction* m_toggle_vertical_tabs_expanded_action { nullptr };
     QAction* m_navigate_back_action { nullptr };
     QAction* m_navigate_forward_action { nullptr };
     QAction* m_reload_action { nullptr };

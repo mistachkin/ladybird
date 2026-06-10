@@ -7,7 +7,7 @@
 #include "SVGImageElement.h"
 #include <LibCore/Timer.h>
 #include <LibGC/Heap.h>
-#include <LibGfx/ImmutableBitmap.h>
+#include <LibGfx/DecodedImageFrame.h>
 #include <LibWeb/Bindings/SVGImageElement.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/DocumentObserver.h>
@@ -41,7 +41,6 @@ void SVGImageElement::initialize(JS::Realm& realm)
 void SVGImageElement::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
-    image_provider_visit_edges(visitor);
     SVGURIReferenceMixin::visit_edges(visitor);
     visitor.visit(m_x);
     visitor.visit(m_y);
@@ -206,9 +205,9 @@ void SVGImageElement::fetch_the_document(URL::URL const& url)
     }
 }
 
-GC::Ptr<Layout::Node> SVGImageElement::create_layout_node(GC::Ref<CSS::ComputedProperties> style)
+RefPtr<Layout::Node> SVGImageElement::create_layout_node(CSS::ComputedProperties const& style)
 {
-    return heap().allocate<Layout::SVGImageBox>(document(), *this, move(style));
+    return make_ref_counted<Layout::SVGImageBox>(document(), *this, style);
 }
 
 bool SVGImageElement::is_image_available() const
@@ -243,21 +242,21 @@ Optional<CSSPixelFraction> SVGImageElement::intrinsic_aspect_ratio() const
     return {};
 }
 
-RefPtr<Gfx::ImmutableBitmap> SVGImageElement::default_image_bitmap_sized(Gfx::IntSize size) const
+Optional<Gfx::DecodedImageFrame> SVGImageElement::default_image_frame_sized(Gfx::IntSize size) const
 {
     if (!m_resource_request)
         return {};
     if (auto data = m_resource_request->image_data())
-        return data->bitmap(0, size);
+        return data->frame(0, size);
     return {};
 }
 
-RefPtr<Gfx::ImmutableBitmap> SVGImageElement::current_image_bitmap_sized(Gfx::IntSize size) const
+Optional<Gfx::DecodedImageFrame> SVGImageElement::current_image_frame_sized(Gfx::IntSize size) const
 {
     if (!m_resource_request)
         return {};
     if (auto data = m_resource_request->image_data())
-        return data->bitmap(m_current_frame_index, size);
+        return data->frame(m_current_frame_index, size);
     return {};
 }
 

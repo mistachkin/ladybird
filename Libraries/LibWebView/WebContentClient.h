@@ -9,9 +9,12 @@
 #include <AK/HashMap.h>
 #include <AK/NonnullRawPtr.h>
 #include <AK/Optional.h>
+#include <AK/RefPtr.h>
 #include <AK/SourceLocation.h>
 #include <AK/String.h>
 #include <AK/StringView.h>
+#include <LibCore/Forward.h>
+#include <LibGfx/Point.h>
 #include <LibGfx/SharedImage.h>
 #include <LibHTTP/Header.h>
 #include <LibIPC/ConnectionToServer.h>
@@ -20,10 +23,13 @@
 #include <LibRequests/RequestTimingInfo.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
 #include <LibWeb/CSS/StyleSheetIdentifier.h>
+#include <LibWeb/Compositor/Types.h>
+#include <LibWeb/Forward.h>
 #include <LibWeb/HTML/ActivateTab.h>
 #include <LibWeb/HTML/FileFilter.h>
 #include <LibWeb/HTML/SelectItem.h>
 #include <LibWeb/HTML/WebViewHints.h>
+#include <LibWeb/HTML/WorkerAgentTypes.h>
 #include <LibWeb/Page/EventResult.h>
 #include <LibWeb/StorageAPI/StorageEndpoint.h>
 #include <LibWebView/Forward.h>
@@ -45,29 +51,51 @@ public:
     template<CallableAs<IterationDecision, WebContentClient&> Callback>
     static void for_each_client(Callback callback);
 
-    static size_t client_count() { return s_clients.size(); }
+    static size_t client_count() { return clients().size(); }
+    static Optional<WebContentClient&> client_for_compositor_context_id(Web::Compositor::CompositorContextId);
 
-    explicit WebContentClient(NonnullOwnPtr<IPC::Transport>);
-    WebContentClient(NonnullOwnPtr<IPC::Transport>, ViewImplementation&);
+    WebContentClient(NonnullOwnPtr<IPC::Transport>, u64 initial_page_id);
     ~WebContentClient();
 
     void assign_view(Badge<Application>, ViewImplementation&);
+    void set_compositor_connection_id(Badge<Application>, i32);
+    Optional<i32> compositor_connection_id(Badge<Application>) const { return m_compositor_connection_id; }
     void register_view(u64 page_id, ViewImplementation&);
     void unregister_view(u64 page_id);
+    void prepare_for_detached_close(u64 page_id);
+    void request_close(u64 page_id);
 
     void web_ui_disconnected(Badge<WebUI>);
 
+    bool has_views() const { return !m_views.is_empty(); }
+
     void notify_all_views_of_crash();
+    ErrorOr<void> reconnect_to_compositor_process(Badge<Application>);
+    ErrorOr<void> recreate_compositor_contexts(Badge<Application>);
+    void replay_compositor_view_state_after_reconnect(Badge<Application>);
+    void notify_compositor_process_reconnected(Badge<Application>);
+    Web::Compositor::CompositorContextId compositor_context_id_for_page(u64 page_id);
+    Optional<u64> page_id_for_compositor_context_id(Web::Compositor::CompositorContextId) const;
+    bool send_async_scroll_to_compositor(u64 page_id, Gfx::FloatPoint position, Gfx::FloatPoint delta_in_device_pixels);
+    bool handle_mouse_event_in_compositor(u64 page_id, Web::MouseEvent const&);
+    void dispatch_mouse_event_to_web_content(u64 page_id, Web::MouseEvent const&);
+    void notify_presented_bitmap_ready_to_paint(u64 page_id, i32 bitmap_id);
+    void did_present_backing_stores(u64 page_id, i32 front_bitmap_id, Gfx::SharedImage front_backing_store, i32 back_bitmap_id, Gfx::SharedImage back_backing_store);
+    void did_present_bitmap(u64 page_id, Gfx::IntRect, i32 bitmap_id);
 
     pid_t pid() const { return m_process_handle.pid; }
     void set_pid(pid_t pid) { m_process_handle.pid = pid; }
 
 private:
     void maybe_record_history_visit_for_current_load(u64 page_id, URL::URL const&, Optional<String> title, StringView reason);
+    void close_server_if_unused();
+    bool forget_compositor_context(Web::Compositor::CompositorContextId);
+    void destroy_all_compositor_contexts();
 
     virtual void die() override;
 
-    virtual void did_paint(u64 page_id, Gfx::IntRect, i32) override;
+    virtual Messages::WebContentClient::AllocateCompositorContextIdResponse allocate_compositor_context_id(u64 page_id, Web::Compositor::PagePresentationRegistration) override;
+    virtual void did_destroy_compositor_context(Web::Compositor::CompositorContextId) override;
     virtual void did_request_new_process_for_navigation(u64 page_id, URL::URL url) override;
     virtual void did_finish_loading(u64 page_id, URL::URL) override;
     virtual void did_request_refresh(u64 page_id) override;
@@ -83,15 +111,19 @@ private:
     virtual void did_click_link(u64 page_id, URL::URL, ByteString, unsigned) override;
     virtual void did_middle_click_link(u64 page_id, URL::URL, ByteString, unsigned) override;
     virtual void did_start_loading(u64 page_id, URL::URL, bool) override;
-    virtual void did_request_context_menu(u64 page_id, Gfx::IntPoint) override;
+    virtual void did_request_context_menu(u64 page_id, Gfx::IntPoint, Web::ContextMenuForInputEventsTarget) override;
     virtual void did_request_link_context_menu(u64 page_id, Gfx::IntPoint, URL::URL, ByteString, unsigned) override;
     virtual void did_request_image_context_menu(u64 page_id, Gfx::IntPoint, URL::URL, ByteString, unsigned, Optional<Gfx::ShareableBitmap>) override;
     virtual void did_request_media_context_menu(u64 page_id, Gfx::IntPoint, ByteString, unsigned, Web::Page::MediaContextMenu) override;
     virtual void did_get_source(u64 page_id, URL::URL, URL::URL, String) override;
     virtual void did_inspect_dom_tree(u64 page_id, String) override;
     virtual void did_inspect_dom_node(u64 page_id, DOMNodeProperties) override;
+    virtual void did_inspect_grid_layouts(u64 page_id, String) override;
+    virtual void did_inspect_current_grid(u64 page_id, String) override;
+    virtual void did_inspect_current_flexbox(u64 page_id, String) override;
     virtual void did_inspect_accessibility_tree(u64 page_id, String) override;
     virtual void did_get_hovered_node_id(u64 page_id, Web::UniqueNodeID node_id) override;
+    virtual void did_get_node_id_at_position(u64 page_id, u64 request_id, Web::UniqueNodeID node_id) override;
     virtual void did_finish_editing_dom_node(u64 page_id, Optional<Web::UniqueNodeID> node_id) override;
     virtual void did_mutate_dom(u64 page_id, Mutation) override;
     virtual void did_get_dom_node_html(u64 page_id, String html) override;
@@ -120,15 +152,18 @@ private:
     virtual void did_set_cookie(URL::URL, HTTP::Cookie::ParsedCookie, HTTP::Cookie::Source) override;
     virtual void did_update_cookie(HTTP::Cookie::Cookie) override;
     virtual void did_expire_cookies_with_time_offset(AK::Duration) override;
+    virtual void did_store_hsts_policy(String, HTTP::HSTS::ParsedHSTSPolicy) override;
+    virtual Messages::WebContentClient::DidIsKnownHstsHostResponse did_is_known_hsts_host(String) override;
     virtual Messages::WebContentClient::DidRequestStorageItemResponse did_request_storage_item(Web::StorageAPI::StorageEndpointType storage_endpoint, String storage_key, String bottle_key) override;
     virtual Messages::WebContentClient::DidSetStorageItemResponse did_set_storage_item(Web::StorageAPI::StorageEndpointType storage_endpoint, String storage_key, String bottle_key, String value) override;
     virtual void did_remove_storage_item(Web::StorageAPI::StorageEndpointType storage_endpoint, String storage_key, String bottle_key) override;
     virtual Messages::WebContentClient::DidRequestStorageKeysResponse did_request_storage_keys(Web::StorageAPI::StorageEndpointType storage_endpoint, String storage_key) override;
     virtual void did_clear_storage(Web::StorageAPI::StorageEndpointType storage_endpoint, String storage_key) override;
     virtual void did_post_broadcast_channel_message(u64 page_id, Web::HTML::BroadcastChannelMessage message) override;
-    virtual Messages::WebContentClient::DidRequestNewWebViewResponse did_request_new_web_view(u64 page_id, Web::HTML::ActivateTab, Web::HTML::WebViewHints, Optional<u64> page_index) override;
+    virtual Messages::WebContentClient::DidRequestNewWebViewResponse did_request_new_web_view(u64 page_id, Web::HTML::ActivateTab, Web::HTML::WebViewHints) override;
     virtual void did_request_activate_tab(u64 page_id) override;
     virtual void did_close_browsing_context(u64 page_id) override;
+    virtual void did_change_needs_beforeunload_check(u64 page_id, bool needs_beforeunload_check) override;
     virtual void did_update_resource_count(u64 page_id, i32 count_waiting) override;
     virtual void did_request_restore_window(u64 page_id) override;
     virtual void did_request_reposition_window(u64 page_id, Gfx::IntPoint) override;
@@ -142,36 +177,46 @@ private:
     virtual void did_request_file_picker(u64 page_id, Web::HTML::FileFilter accepted_file_types, Web::HTML::AllowMultipleFiles) override;
     virtual void did_request_select_dropdown(u64 page_id, Gfx::IntPoint content_position, i32 minimum_width, Vector<Web::HTML::SelectItem> items) override;
     virtual void did_finish_handling_input_event(u64 page_id, Web::EventResult event_result) override;
+    virtual void did_update_input_caret_rect(u64 page_id, Optional<Web::DevicePixelRect> rect) override;
     virtual void did_finish_test(u64 page_id, String text) override;
     virtual void did_set_test_timeout(u64 page_id, double milliseconds) override;
     virtual void did_receive_reference_test_metadata(u64 page_id, JsonValue) override;
-    virtual void did_receive_test_variant_metadata(u64 page_id, JsonValue) override;
     virtual void did_set_browser_zoom(u64 page_id, double factor) override;
     virtual void did_find_in_page(u64 page_id, size_t current_match_index, Optional<size_t> total_match_count) override;
     virtual void did_change_theme_color(u64 page_id, Gfx::Color color) override;
+    virtual void did_change_background_color(u64 page_id, Gfx::Color color) override;
     virtual void did_insert_clipboard_entry(u64 page_id, Web::Clipboard::SystemClipboardRepresentation, String presentation_style) override;
     virtual void did_request_clipboard_entries(u64 page_id, u64 request_id) override;
+    virtual void did_request_primary_paste(u64 page_id) override;
+    virtual void did_update_primary_selection(u64 page_id, String) override;
     virtual void did_change_audio_play_state(u64 page_id, Web::HTML::AudioPlayState) override;
     virtual void did_update_navigation_buttons_state(u64 page_id, bool back_enabled, bool forward_enabled) override;
-    virtual void did_allocate_backing_stores(u64 page_id, i32 front_bitmap_id, Gfx::SharedImage front_backing_store, i32 back_bitmap_id, Gfx::SharedImage back_backing_store) override;
-    virtual Messages::WebContentClient::RequestWorkerAgentResponse request_worker_agent(u64 page_id, Web::Bindings::AgentType worker_type) override;
+    virtual Messages::WebContentClient::StartWorkerAgentResponse start_worker_agent(u64 page_id, Web::HTML::WorkerAgentStartRequest request) override;
+    virtual void close_worker_agent(u64 page_id, Web::HTML::WorkerAgentId agent_id, Web::HTML::WorkerAgentOwnerToken owner_token) override;
 
     Optional<ViewImplementation&> view_for_page_id(u64, SourceLocation = SourceLocation::current());
 
+    void remember_compositor_context(Web::Compositor::CompositorContextId, Optional<u64> page_id);
+
     HashMap<u64, NonnullRawPtr<ViewImplementation>> m_views;
+    HashTable<u64> m_detached_pages_pending_close;
+    HashMap<Web::Compositor::CompositorContextId, Optional<u64>> m_compositor_contexts;
     HashMap<u64, String> m_history_recorded_urls_for_current_load;
+    Optional<i32> m_compositor_connection_id;
+    u64 m_initial_page_id { 0 };
 
     ProcessHandle m_process_handle;
+    RefPtr<Core::Timer> m_detached_page_close_timer;
 
     RefPtr<WebUI> m_web_ui;
 
-    static HashTable<WebContentClient*> s_clients;
+    static HashTable<WebContentClient*>& clients();
 };
 
 template<CallableAs<IterationDecision, WebContentClient&> Callback>
 void WebContentClient::for_each_client(Callback callback)
 {
-    for (auto& it : s_clients) {
+    for (auto& it : clients()) {
         if (callback(*it) == IterationDecision::Break)
             return;
     }

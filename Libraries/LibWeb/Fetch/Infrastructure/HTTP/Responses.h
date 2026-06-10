@@ -12,6 +12,7 @@
 #include <AK/Optional.h>
 #include <AK/Time.h>
 #include <AK/Vector.h>
+#include <LibCore/ImmutableBytes.h>
 #include <LibGC/Ptr.h>
 #include <LibHTTP/HeaderList.h>
 #include <LibJS/Forward.h>
@@ -105,6 +106,13 @@ public:
     [[nodiscard]] virtual BodyInfo const& body_info() const { return m_body_info; }
     virtual void set_body_info(BodyInfo body_info) { m_body_info = move(body_info); }
 
+    [[nodiscard]] Optional<Core::ImmutableBytes> const& javascript_bytecode_cache() const { return m_javascript_bytecode_cache; }
+    void set_javascript_bytecode_cache(Optional<Core::ImmutableBytes> javascript_bytecode_cache) { m_javascript_bytecode_cache = move(javascript_bytecode_cache); }
+    [[nodiscard]] Optional<u64> javascript_bytecode_cache_vary_key() const { return m_javascript_bytecode_cache_vary_key; }
+    void set_javascript_bytecode_cache_vary_key(Optional<u64> javascript_bytecode_cache_vary_key) { m_javascript_bytecode_cache_vary_key = javascript_bytecode_cache_vary_key; }
+    [[nodiscard]] Optional<NonnullRefPtr<HTTP::HeaderList>> const& javascript_bytecode_cache_memory_cache_request_headers() const { return m_javascript_bytecode_cache_memory_cache_request_headers; }
+    void set_javascript_bytecode_cache_memory_cache_request_headers(Optional<NonnullRefPtr<HTTP::HeaderList>> request_headers) { m_javascript_bytecode_cache_memory_cache_request_headers = move(request_headers); }
+
     [[nodiscard]] RedirectTaint redirect_taint() const { return m_redirect_taint; }
     void set_redirect_taint(RedirectTaint redirect_taint) { m_redirect_taint = redirect_taint; }
 
@@ -195,6 +203,9 @@ private:
     MonotonicTime m_monotonic_response_time;
 
     Optional<String> m_network_error_message;
+    Optional<Core::ImmutableBytes> m_javascript_bytecode_cache;
+    Optional<u64> m_javascript_bytecode_cache_vary_key;
+    Optional<NonnullRefPtr<HTTP::HeaderList>> m_javascript_bytecode_cache_memory_cache_request_headers;
 
 public:
     [[nodiscard]] ByteString const& method() const { return m_method; }

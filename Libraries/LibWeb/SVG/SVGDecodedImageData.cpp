@@ -4,13 +4,19 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Checked.h>
+#include <AK/NumericLimits.h>
 #include <LibGfx/Bitmap.h>
+#include <LibGfx/DecodedImageFrame.h>
+#include <LibGfx/PaintingSurface.h>
+#include <LibJS/Runtime/ExternalMemory.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Responses.h>
 #include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/DocumentState.h>
+#include <LibWeb/HTML/Navigable.h>
 #include <LibWeb/HTML/NavigationParams.h>
 #include <LibWeb/HTML/Parser/HTMLParser.h>
 #include <LibWeb/HTML/TraversableNavigable.h>
@@ -19,6 +25,8 @@
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/Painting/DisplayListPlayerSkia.h>
 #include <LibWeb/Painting/DisplayListRecordingContext.h>
+#include <LibWeb/Painting/DisplayListResourceStorage.h>
+#include <LibWeb/Painting/ViewportPaintable.h>
 #include <LibWeb/SVG/SVGDecodedImageData.h>
 #include <LibWeb/SVG/SVGSVGElement.h>
 #include <LibWeb/XML/XMLDocumentBuilder.h>
@@ -101,11 +109,86 @@ void SVGDecodedImageData::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_root_element);
 }
 
-RefPtr<Painting::DisplayList> SVGDecodedImageData::record_display_list(Gfx::IntSize size) const
+static size_t surface_external_memory_size(Gfx::PaintingSurface const& surface)
 {
+    auto surface_size = surface.size();
+    if (surface_size.is_empty())
+        return 0;
+
+    Checked<size_t> pixel_size = static_cast<size_t>(surface_size.width());
+    pixel_size *= static_cast<size_t>(surface_size.height());
+    pixel_size *= sizeof(u32);
+    if (pixel_size.has_overflow())
+        return NumericLimits<size_t>::max();
+    return pixel_size.value();
+}
+
+size_t SVGDecodedImageData::external_memory_size() const
+{
+    size_t size = Base::external_memory_size();
+    size = JS::saturating_add_external_memory_size(size, JS::hash_map_external_memory_size(m_cached_rendered_frames));
+    for (auto const& cached_frame : m_cached_rendered_frames)
+        size = JS::saturating_add_external_memory_size(size, cached_frame.value.bitmap().data_size());
+
+    size = JS::saturating_add_external_memory_size(size, JS::hash_map_external_memory_size(m_cached_rendered_surfaces));
+    for (auto const& cached_surface : m_cached_rendered_surfaces)
+        size = JS::saturating_add_external_memory_size(size, surface_external_memory_size(*cached_surface.value));
+
+    return size;
+}
+
+static void copy_referenced_resources_to(
+    Painting::DisplayListResourceStorage& destination,
+    Painting::DisplayListResourceStorage const& source,
+    Painting::DisplayListResourceSet const& referenced_resources)
+{
+    Painting::DisplayListResourceSet empty_resource_set;
+    destination.apply_transaction(source.create_transaction(empty_resource_set, referenced_resources));
+}
+
+void SVGDecodedImageData::prune_cached_display_list_resources() const
+{
+    auto& resource_storage = m_document->navigable()->display_list_resource_storage();
+
+    Painting::DisplayListResourceSet retained_resources;
+    for (auto const& cached_display_list : m_cached_display_lists) {
+        retained_resources.include(
+            resource_storage.collect_referenced_resources(*cached_display_list.value.display_list));
+    }
+    resource_storage.retain_only(retained_resources);
+}
+
+Optional<Painting::DisplayListResource> SVGDecodedImageData::record_display_list(Gfx::IntSize size, Painting::DisplayListResourceStorage& destination_resource_storage) const
+{
+    auto& resource_storage = m_document->navigable()->display_list_resource_storage();
+
+    if (auto it = m_cached_display_lists.find(size); it != m_cached_display_lists.end()) {
+        auto referenced_resources = resource_storage.collect_referenced_resources(*it->value.display_list);
+        copy_referenced_resources_to(destination_resource_storage, resource_storage, referenced_resources);
+        return Painting::DisplayListResource { *it->value.display_list, it->value.visual_context_tree };
+    }
+
+    // FIXME: Evict least used entries.
+    if (m_cached_display_lists.size() > 10) {
+        m_cached_display_lists.remove(m_cached_display_lists.begin());
+        prune_cached_display_list_resources();
+    }
+
     m_document->navigable()->set_viewport_size(size.to_type<CSSPixels>());
     m_document->update_layout(DOM::UpdateLayoutReason::SVGDecodedImageDataRender);
-    return m_document->record_display_list({});
+    auto display_list = m_document->record_display_list({}, resource_storage);
+    if (!display_list)
+        return {};
+
+    auto referenced_resources = resource_storage.collect_referenced_resources(*display_list);
+    copy_referenced_resources_to(destination_resource_storage, resource_storage, referenced_resources);
+    auto document_paintable = m_document->paintable();
+    VERIFY(document_paintable);
+    auto visual_context_tree = document_paintable->visual_context_tree();
+    auto display_list_resource = Painting::DisplayListResource { *display_list, visual_context_tree };
+    m_cached_display_lists.set(size, CachedDisplayList { NonnullRefPtr<Painting::DisplayList> { *display_list }, move(visual_context_tree) });
+    prune_cached_display_list_resources();
+    return display_list_resource;
 }
 
 RefPtr<Gfx::PaintingSurface> SVGDecodedImageData::render_to_surface(Gfx::IntSize size) const
@@ -113,7 +196,7 @@ RefPtr<Gfx::PaintingSurface> SVGDecodedImageData::render_to_surface(Gfx::IntSize
     VERIFY(m_document->navigable());
 
     if (size.is_empty())
-        return nullptr;
+        return {};
 
     if (auto it = m_cached_rendered_surfaces.find(size); it != m_cached_rendered_surfaces.end())
         return it->value;
@@ -124,15 +207,17 @@ RefPtr<Gfx::PaintingSurface> SVGDecodedImageData::render_to_surface(Gfx::IntSize
         m_cached_rendered_surfaces.remove(m_cached_rendered_surfaces.begin());
 
     auto surface = Gfx::PaintingSurface::create_with_size(size, Gfx::BitmapFormat::BGRA8888, Gfx::AlphaType::Premultiplied);
-    auto display_list = record_display_list(size);
-    if (!display_list)
+    Painting::DisplayListResourceStorage resource_storage;
+    auto display_list = record_display_list(size, resource_storage);
+    if (!display_list.has_value())
         return nullptr;
 
     switch (m_page_client->display_list_player_type()) {
     case DisplayListPlayerType::SkiaGPUIfAvailable:
     case DisplayListPlayerType::SkiaCPU: {
         Painting::DisplayListPlayerSkia display_list_player;
-        display_list_player.execute(*display_list, {}, surface);
+        display_list_player.execute(*display_list->display_list, display_list->visual_context_tree, resource_storage, {}, surface);
+        display_list_player.flush(*surface);
         break;
     }
     default:
@@ -143,22 +228,22 @@ RefPtr<Gfx::PaintingSurface> SVGDecodedImageData::render_to_surface(Gfx::IntSize
     return surface;
 }
 
-RefPtr<Gfx::ImmutableBitmap> SVGDecodedImageData::bitmap(size_t, Gfx::IntSize size) const
+Optional<Gfx::DecodedImageFrame> SVGDecodedImageData::frame(size_t, Gfx::IntSize size) const
 {
     if (size.is_empty())
-        return nullptr;
+        return {};
 
-    if (auto it = m_cached_rendered_bitmaps.find(size); it != m_cached_rendered_bitmaps.end())
+    if (auto it = m_cached_rendered_frames.find(size); it != m_cached_rendered_frames.end())
         return it->value;
 
     // Prevent the cache from growing too big.
     // FIXME: Evict least used entries.
-    if (m_cached_rendered_bitmaps.size() > 10)
-        m_cached_rendered_bitmaps.remove(m_cached_rendered_bitmaps.begin());
+    if (m_cached_rendered_frames.size() > 10)
+        m_cached_rendered_frames.remove(m_cached_rendered_frames.begin());
 
-    auto immutable_bitmap = Gfx::ImmutableBitmap::create_snapshot_from_painting_surface(*render_to_surface(size));
-    m_cached_rendered_bitmaps.set(size, immutable_bitmap);
-    return immutable_bitmap;
+    auto decoded_frame = Gfx::DecodedImageFrame { *render_to_surface(size)->snapshot_bitmap() };
+    m_cached_rendered_frames.set(size, decoded_frame);
+    return decoded_frame;
 }
 
 Optional<CSSPixels> SVGDecodedImageData::intrinsic_width() const
@@ -225,16 +310,13 @@ RefPtr<Gfx::PaintingSurface> SVGDecodedImageData::surface(size_t, Gfx::IntSize s
     return render_to_surface(size);
 }
 
-void SVGDecodedImageData::paint(DisplayListRecordingContext& context, size_t, Gfx::IntRect dst_rect, Gfx::IntRect clip_rect, Gfx::ScalingMode) const
+void SVGDecodedImageData::paint(DisplayListRecordingContext& context, size_t, Gfx::IntRect dst_rect, Gfx::ScalingMode) const
 {
-    auto display_list = record_display_list(dst_rect.size());
-    if (!display_list)
+    auto display_list = record_display_list(dst_rect.size(), context.display_list_recorder().resource_storage());
+    if (!display_list.has_value())
         return;
 
-    context.display_list_recorder().save();
-    context.display_list_recorder().add_clip_rect(clip_rect);
-    context.display_list_recorder().paint_nested_display_list(display_list, dst_rect);
-    context.display_list_recorder().restore();
+    context.display_list_recorder().paint_nested_display_list(*display_list, dst_rect);
 }
 
 }

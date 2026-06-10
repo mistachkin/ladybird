@@ -163,7 +163,7 @@ WebIDL::ExceptionOr<void> HTMLFormElement::submit_form(GC::Ref<HTMLElement> subm
         // 6. Let shouldContinue be the result of firing an event named submit at form using SubmitEvent, with the
         //    submitter attribute initialized to submitterButton, the bubbles attribute initialized to true, and the
         //    cancelable attribute initialized to true.
-        SubmitEventInit event_init {};
+        Bindings::SubmitEventInit event_init {};
         event_init.submitter = submitter_button;
         auto submit_event = SubmitEvent::create(realm, EventNames::submit, event_init);
         submit_event->set_bubbles(true);
@@ -354,7 +354,7 @@ void HTMLFormElement::reset_form()
 
     // 2. If reset is true, then invoke the reset algorithm of each resettable element whose form owner is form.
     if (reset) {
-        GC::RootVector<GC::Ref<HTMLElement>> associated_elements_copy(heap(), m_associated_elements);
+        GC::RootVector<GC::Ref<HTMLElement>> associated_elements_copy { m_associated_elements };
         for (auto element : associated_elements_copy) {
             auto& form_associated_element = as<FormAssociatedElement>(*element);
             if (form_associated_element.is_resettable())
@@ -557,7 +557,7 @@ HTMLFormElement::StaticValidationResult HTMLFormElement::statically_validate_con
     // 1. Let controls be a list of all the submittable elements whose form owner is form, in tree order.
     auto controls = get_submittable_elements();
     // 2. Let invalid controls be an initially empty list of elements.
-    GC::RootVector<GC::Ref<DOM::Element>> invalid_controls(realm().heap());
+    GC::RootVector<GC::Ref<DOM::Element>> invalid_controls;
     // 3. For each element field in controls, in tree order:
     for (auto& element : controls) {
         auto& field = as<FormAssociatedElement>(*element);
@@ -574,7 +574,7 @@ HTMLFormElement::StaticValidationResult HTMLFormElement::statically_validate_con
     if (invalid_controls.is_empty())
         return { true, invalid_controls };
     // 5. Let unhandled invalid controls be an initially empty list of elements.
-    GC::RootVector<GC::Ref<DOM::Element>> unhandled_invalid_controls(realm().heap());
+    GC::RootVector<GC::Ref<DOM::Element>> unhandled_invalid_controls;
     // 6. For each element field in invalid controls, if any, in tree order:
     for (auto& field : invalid_controls) {
         // 1. Let notCanceled be the result of firing an event named invalid at field, with the cancelable attribute
@@ -613,7 +613,7 @@ bool HTMLFormElement::interactively_validate_constraints()
     if (first_invalid_control.has_value()) {
         auto control = first_invalid_control.release_value();
         run_focusing_steps(control);
-        DOM::ScrollIntoViewOptions scroll_options;
+        Bindings::ScrollIntoViewOptions scroll_options;
         scroll_options.block = Bindings::ScrollLogicalPosition::Nearest;
         scroll_options.inline_ = Bindings::ScrollLogicalPosition::Nearest;
         scroll_options.behavior = Bindings::ScrollBehavior::Instant;
@@ -680,7 +680,7 @@ String HTMLFormElement::action() const
         return document().url_string();
     }
 
-    if (auto maybe_url = document().base_url().complete_url(form_action_attribute.value()); maybe_url.has_value())
+    if (auto maybe_url = document().encoding_parse_url(form_action_attribute.value()); maybe_url.has_value())
         return maybe_url->to_string();
     return {};
 }
@@ -754,7 +754,7 @@ static ErrorOr<Vector<DOMURL::QueryParam>> convert_to_list_of_name_value_pairs(G
         // 2. If entry's value is a File object, then let value be entry's value's name. Otherwise, let value be entry's value.
         String value;
         entry.value.visit(
-            [&value](GC::Root<FileAPI::File> const& file) {
+            [&value](GC::Ref<FileAPI::File> file) {
                 value = file->name();
             },
             [&value](String const& string) {

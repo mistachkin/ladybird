@@ -36,12 +36,7 @@ describe("errors", () => {
     });
 
     test("valid pattern (negated v-mode class set ops can eliminate strings)", () => {
-        for (const pattern of [
-            "[^[[a-z]--[\\q{ab}]]]",
-            "[^[[\\q{ab}]&&[a-z]]]",
-            "[^[[\\q{ab}]--[\\q{ab}]]]",
-            "[^[[\\q{ab}]&&[\\q{cd}]]]",
-        ]) {
+        for (const pattern of ["[^[[a-z]--[\\q{ab}]]]", "[^[[\\q{ab}]&&[a-z]]]"]) {
             expect(() => {
                 RegExp(pattern, "v");
             }).not.toThrow();
@@ -251,6 +246,11 @@ test("global unicode matches keep low-surrogate empty matches that V8 finds", ()
     const subject =
         "سلام 카차가≠ -YA😘🙂🤔 ذذذ/8️⃣ бшгА884 жЕ 🌟🎀🎀🎈✨🚀\n✨тест( \n\t \t },{ `:कगवचचजय mmmmm\t999\n⚡💢💥❤️💧;人बई÷{{😊😊🔢🔢🔢_";
     expect(subject.match(/\p{Script=Cyrillic}?(?<!\D)/gv)).toEqual(new Array(24).fill(""));
+});
+
+test("lookahead inside surrogate pair does not match paired low surrogate as a character", () => {
+    expect("💦💦".match(/(?!\W)/gv)).toEqual(["", "", ""]);
+    expect("💦💦".match(/\p{Emoji_Presentation}?(?!\W)/gv)).toEqual(["", "💦", ""]);
 });
 
 test("backward v-mode class-set operations inspect the consumed code point", () => {
@@ -924,4 +924,23 @@ test("incomplete \\u and \\x escapes", () => {
     expect("\\x0y\u0000".match(/[\x0y]+/)).toEqual(["x0y"]);
     expect("\\x\u0000".match(/[\x00]+/)).toEqual(["\u0000"]);
     expect("0\u0000".match(/[\x000]+/)).toEqual(["0\u0000"]);
+});
+
+test("lone surrogates as \\uXXXX escapes are valid in /v mode character classes", () => {
+    expect("".match(/[\udf9e]/v)).toBeNull();
+    expect("\udfff".match(/[\udf9e-\udfff]/v)).toEqual(["\udfff"]);
+});
+
+test("string properties allowed as set operation operands in negated /v mode classes", () => {
+    expect(/[^[a]--\p{Emoji_Keycap_Sequence}]/v).toBeInstanceOf(RegExp);
+    expect(/[^\p{Emoji_Keycap_Sequence}&&[a]]/v).toBeInstanceOf(RegExp);
+    expect(/[^[a]&&\p{Emoji_Keycap_Sequence}]/v).toBeInstanceOf(RegExp);
+
+    expect(() => {
+        RegExp("[^\\p{Emoji_Keycap_Sequence}--[a]]", "v");
+    }).toThrowWithMessage(SyntaxError, "RegExp compile error: invalid Unicode property 'Emoji_Keycap_Sequence'");
+
+    expect(() => {
+        RegExp("[^\\p{Emoji_Keycap_Sequence}]", "v");
+    }).toThrowWithMessage(SyntaxError, "RegExp compile error: invalid Unicode property 'Emoji_Keycap_Sequence'");
 });

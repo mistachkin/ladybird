@@ -94,8 +94,11 @@ struct WASM_API BytecodeInterpreter final : public Interpreter {
     void pop_and_push_m_splat(Configuration&, Instruction const&, SourcesAndDestination const&);
     template<typename M, template<typename> typename SetSign, typename VectorType = Native128ByteVectorOf<M, SetSign>>
     VectorType pop_vector(Configuration&, size_t source, SourcesAndDestination const&);
-    bool store_to_memory(Configuration&, Instruction::MemoryArgument const&, ReadonlyBytes data, u32 base);
+    bool store_to_memory(Configuration&, Instruction::MemoryArgument const&, ReadonlyBytes data, Value const& base);
     Outcome call_address(Configuration&, FunctionAddress, SourcesAndDestination const&, CallAddressSource = CallAddressSource::DirectCall, CallType = CallType::UsingStack);
+    Outcome run_compiled_function_direct(Configuration&);
+    Outcome run_native_entry(Configuration&);
+    bool trap_if_insufficient_native_stack_space(size_t minimum_native_stack_space_to_keep_free = 2 * MiB);
 
     template<typename T>
     bool store_to_memory(MemoryInstance&, u64 address, T value);
@@ -109,6 +112,12 @@ struct WASM_API BytecodeInterpreter final : public Interpreter {
     ALWAYS_INLINE bool set_trap(StringView reason)
     {
         m_trap = Trap { ByteString(reason) };
+        return true;
+    }
+
+    ALWAYS_INLINE bool set_trap(Trap trap)
+    {
+        m_trap = move(trap);
         return true;
     }
 

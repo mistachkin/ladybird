@@ -8,6 +8,7 @@
 
 #include <AK/ByteReader.h>
 #include <AK/MemoryStream.h>
+#include <AK/NeverDestroyed.h>
 #include <LibCore/System.h>
 #include <LibGC/WeakHashSet.h>
 #include <LibIPC/Decoder.h>
@@ -16,6 +17,7 @@
 #include <LibIPC/TransportHandle.h>
 #include <LibWeb/Bindings/ExceptionOrUtils.h>
 #include <LibWeb/Bindings/Intrinsics.h>
+#include <LibWeb/Bindings/MessageEvent.h>
 #include <LibWeb/Bindings/MessagePort.h>
 #include <LibWeb/DOM/EventDispatcher.h>
 #include <LibWeb/HTML/EventNames.h>
@@ -23,7 +25,6 @@
 #include <LibWeb/HTML/MessagePort.h>
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/HTML/StructuredSerialize.h>
-#include <LibWeb/HTML/StructuredSerializeOptions.h>
 #include <LibWeb/HTML/WorkerGlobalScope.h>
 
 namespace Web::HTML {
@@ -34,8 +35,8 @@ GC_DEFINE_ALLOCATOR(MessagePort);
 
 static GC::WeakHashSet<MessagePort>& all_message_ports()
 {
-    static GC::WeakHashSet<MessagePort> ports;
-    return ports;
+    static NeverDestroyed<GC::WeakHashSet<MessagePort>> ports;
+    return *ports;
 }
 
 GC::Ref<MessagePort> MessagePort::create(JS::Realm& realm)
@@ -230,20 +231,20 @@ void MessagePort::entangle_with(MessagePort& remote_port)
 }
 
 // https://html.spec.whatwg.org/multipage/web-messaging.html#dom-messageport-postmessage-options
-WebIDL::ExceptionOr<void> MessagePort::post_message(JS::Value message, Vector<GC::Root<JS::Object>> const& transfer)
+WebIDL::ExceptionOr<void> MessagePort::post_message(JS::Value message, GC::RootVector<GC::Ref<JS::Object>> const& transfer)
 {
     // 1. Let targetPort be the port with which this MessagePort is entangled, if any; otherwise let it be null.
     GC::Ptr<MessagePort> target_port = m_remote_port;
 
     // 2. Let options be «[ "transfer" → transfer ]».
-    auto options = StructuredSerializeOptions { transfer };
+    auto options = Bindings::StructuredSerializeOptions { transfer };
 
     // 3. Run the message port post message steps providing this, targetPort, message and options.
     return message_port_post_message_steps(target_port, message, options);
 }
 
 // https://html.spec.whatwg.org/multipage/web-messaging.html#dom-messageport-postmessage
-WebIDL::ExceptionOr<void> MessagePort::post_message(JS::Value message, StructuredSerializeOptions const& options)
+WebIDL::ExceptionOr<void> MessagePort::post_message(JS::Value message, Bindings::StructuredSerializeOptions const& options)
 {
     // 1. Let targetPort be the port with which this MessagePort is entangled, if any; otherwise let it be null.
     GC::Ptr<MessagePort> target_port = m_remote_port;
@@ -253,7 +254,7 @@ WebIDL::ExceptionOr<void> MessagePort::post_message(JS::Value message, Structure
 }
 
 // https://html.spec.whatwg.org/multipage/web-messaging.html#message-port-post-message-steps
-WebIDL::ExceptionOr<void> MessagePort::message_port_post_message_steps(GC::Ptr<MessagePort> target_port, JS::Value message, StructuredSerializeOptions const& options)
+WebIDL::ExceptionOr<void> MessagePort::message_port_post_message_steps(GC::Ptr<MessagePort> target_port, JS::Value message, Bindings::StructuredSerializeOptions const& options)
 {
     auto& realm = this->realm();
     auto& vm = this->vm();
@@ -407,7 +408,7 @@ void MessagePort::post_message_task_steps(SerializedTransferRecord& serialize_wi
     if (deserialize_record_or_error.is_error()) {
         // If this throws an exception, catch it, fire an event named messageerror at finalTargetPort, using MessageEvent, and then return.
         auto exception = deserialize_record_or_error.release_error();
-        MessageEventInit event_init {};
+        Bindings::MessageEventInit event_init;
         message_event_target->dispatch_event(MessageEvent::create(target_realm, HTML::EventNames::messageerror, event_init));
         return;
     }
@@ -418,7 +419,7 @@ void MessagePort::post_message_task_steps(SerializedTransferRecord& serialize_wi
 
     // 5. Let newPorts be a new frozen array consisting of all MessagePort objects in deserializeRecord.[[TransferredValues]], if any, maintaining their relative order.
     // FIXME: Use a FrozenArray
-    Vector<GC::Root<MessagePort>> new_ports;
+    GC::RootVector<GC::Ref<MessagePort>> new_ports;
     for (auto const& object : deserialize_record.transferred_values) {
         if (is<HTML::MessagePort>(*object)) {
             new_ports.append(as<MessagePort>(*object));
@@ -426,9 +427,7 @@ void MessagePort::post_message_task_steps(SerializedTransferRecord& serialize_wi
     }
 
     // 6. Fire an event named message at finalTargetPort, using MessageEvent, with the data attribute initialized to messageClone and the ports attribute initialized to newPorts.
-    MessageEventInit event_init {};
-    event_init.data = message_clone;
-    event_init.ports = move(new_ports);
+    Bindings::MessageEventInit event_init { Bindings::EventInit {}, message_clone, String {}, String {}, move(new_ports), Empty {} };
     auto event = MessageEvent::create(target_realm, HTML::EventNames::message, event_init);
     event->set_is_trusted(true);
     message_event_target->dispatch_event(event);

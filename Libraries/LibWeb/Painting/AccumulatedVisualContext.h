@@ -6,18 +6,19 @@
 
 #pragma once
 
-#include <AK/AtomicRefCounted.h>
 #include <AK/DistinctNumeric.h>
 #include <AK/Variant.h>
 #include <AK/Vector.h>
 #include <LibGfx/CompositingAndBlendingOperator.h>
+#include <LibGfx/CornerRadii.h>
 #include <LibGfx/Filter.h>
 #include <LibGfx/Matrix4x4.h>
 #include <LibGfx/Path.h>
 #include <LibGfx/Point.h>
 #include <LibGfx/Rect.h>
 #include <LibGfx/WindingRule.h>
-#include <LibWeb/Painting/BorderRadiiData.h>
+#include <LibIPC/Forward.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/Painting/ScrollFrame.h>
 #include <LibWeb/PixelUnits.h>
 
@@ -27,6 +28,8 @@ class ScrollStateSnapshot;
 
 AK_TYPEDEF_DISTINCT_ORDERED_ID(size_t, VisualContextIndex);
 
+static constexpr VisualContextIndex VISUAL_VIEWPORT_NODE_INDEX { 0 };
+
 struct ScrollData {
     ScrollFrameIndex scroll_frame_index;
     bool is_sticky;
@@ -34,9 +37,9 @@ struct ScrollData {
 
 struct ClipData {
     DevicePixelRect rect;
-    CornerRadii corner_radii;
+    Gfx::CornerRadii corner_radii;
 
-    ClipData(DevicePixelRect r, CornerRadii radii)
+    ClipData(DevicePixelRect r, Gfx::CornerRadii radii)
         : rect(r)
         , corner_radii(radii)
     {
@@ -73,7 +76,13 @@ struct EffectsData {
     }
 };
 
-using VisualContextData = Variant<ScrollData, ClipData, TransformData, PerspectiveData, ClipPathData, EffectsData>;
+// Negates a scroll frame's offset during display list replay. Used to keep fixed backgrounds stationary relative to
+// the viewport regardless of scroll position.
+struct ScrollCompensation {
+    ScrollFrameIndex scroll_frame_index;
+};
+
+using VisualContextData = Variant<ScrollData, ClipData, TransformData, PerspectiveData, ClipPathData, EffectsData, ScrollCompensation>;
 
 struct AccumulatedVisualContextNode {
     VisualContextData data;
@@ -82,13 +91,24 @@ struct AccumulatedVisualContextNode {
     bool has_empty_effective_clip { false };
 };
 
-class AccumulatedVisualContextTree : public AtomicRefCounted<AccumulatedVisualContextTree> {
+class AccumulatedVisualContextTree {
 public:
-    static NonnullRefPtr<AccumulatedVisualContextTree> create();
+    static AccumulatedVisualContextTree create();
+    static AccumulatedVisualContextTree create(TransformData visual_viewport_transform);
+
+    AccumulatedVisualContextTree(AccumulatedVisualContextTree const&) = default;
+    AccumulatedVisualContextTree& operator=(AccumulatedVisualContextTree const&) = default;
+    AccumulatedVisualContextTree(AccumulatedVisualContextTree&&) = default;
+    AccumulatedVisualContextTree& operator=(AccumulatedVisualContextTree&&) = default;
+    ~AccumulatedVisualContextTree() = default;
+
+    u64 version() const { return m_version; }
 
     VisualContextIndex append(VisualContextData data, VisualContextIndex parent_index);
+    void set_visual_viewport_transform(TransformData);
 
     AccumulatedVisualContextNode const& node_at(VisualContextIndex index) const { return m_nodes[index.value()]; }
+    ReadonlySpan<AccumulatedVisualContextNode> nodes() const { return m_nodes.span(); }
 
     VisualContextIndex find_common_ancestor(VisualContextIndex a, VisualContextIndex b) const;
     Optional<Gfx::FloatPoint> transform_point_for_hit_test(VisualContextIndex, Gfx::FloatPoint, ScrollStateSnapshot const&) const;
@@ -99,11 +119,70 @@ public:
     bool has_empty_effective_clip(VisualContextIndex i) const { return m_nodes[i.value()].has_empty_effective_clip; }
 
 private:
-    AccumulatedVisualContextTree() = default;
+    AccumulatedVisualContextTree(u64 version, Vector<AccumulatedVisualContextNode>&& nodes)
+        : m_version(version)
+        , m_nodes(move(nodes))
+    {
+    }
 
     Vector<size_t, 8> build_ancestor_chain(VisualContextIndex index) const;
 
+    u64 m_version { 0 };
     Vector<AccumulatedVisualContextNode> m_nodes;
+
+    template<typename T>
+    friend ErrorOr<void> IPC::encode(IPC::Encoder&, T const&);
+    template<typename T>
+    friend ErrorOr<T> IPC::decode(IPC::Decoder&);
 };
+
+}
+
+namespace IPC {
+
+template<>
+WEB_API ErrorOr<void> encode(Encoder&, Web::Painting::ScrollData const&);
+template<>
+WEB_API ErrorOr<Web::Painting::ScrollData> decode(Decoder&);
+
+template<>
+WEB_API ErrorOr<void> encode(Encoder&, Web::Painting::ClipData const&);
+template<>
+WEB_API ErrorOr<Web::Painting::ClipData> decode(Decoder&);
+
+template<>
+WEB_API ErrorOr<void> encode(Encoder&, Web::Painting::TransformData const&);
+template<>
+WEB_API ErrorOr<Web::Painting::TransformData> decode(Decoder&);
+
+template<>
+WEB_API ErrorOr<void> encode(Encoder&, Web::Painting::PerspectiveData const&);
+template<>
+WEB_API ErrorOr<Web::Painting::PerspectiveData> decode(Decoder&);
+
+template<>
+WEB_API ErrorOr<void> encode(Encoder&, Web::Painting::ClipPathData const&);
+template<>
+WEB_API ErrorOr<Web::Painting::ClipPathData> decode(Decoder&);
+
+template<>
+WEB_API ErrorOr<void> encode(Encoder&, Web::Painting::EffectsData const&);
+template<>
+WEB_API ErrorOr<Web::Painting::EffectsData> decode(Decoder&);
+
+template<>
+WEB_API ErrorOr<void> encode(Encoder&, Web::Painting::ScrollCompensation const&);
+template<>
+WEB_API ErrorOr<Web::Painting::ScrollCompensation> decode(Decoder&);
+
+template<>
+WEB_API ErrorOr<void> encode(Encoder&, Web::Painting::AccumulatedVisualContextNode const&);
+template<>
+WEB_API ErrorOr<Web::Painting::AccumulatedVisualContextNode> decode(Decoder&);
+
+template<>
+WEB_API ErrorOr<void> encode(Encoder&, Web::Painting::AccumulatedVisualContextTree const&);
+template<>
+WEB_API ErrorOr<Web::Painting::AccumulatedVisualContextTree> decode(Decoder&);
 
 }

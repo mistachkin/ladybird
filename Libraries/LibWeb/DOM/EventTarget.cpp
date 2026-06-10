@@ -11,6 +11,7 @@
 #include <AK/StringBuilder.h>
 #include <LibJS/Runtime/AbstractOperations.h>
 #include <LibJS/Runtime/ECMAScriptFunctionObject.h>
+#include <LibJS/Runtime/ExternalMemory.h>
 #include <LibJS/Runtime/GlobalEnvironment.h>
 #include <LibJS/Runtime/NativeFunction.h>
 #include <LibJS/Runtime/ObjectEnvironment.h>
@@ -27,6 +28,7 @@
 #include <LibWeb/DOM/EventDispatcher.h>
 #include <LibWeb/DOM/EventTarget.h>
 #include <LibWeb/DOM/IDLEventListener.h>
+#include <LibWeb/DOM/Node.h>
 #include <LibWeb/HTML/BeforeUnloadEvent.h>
 #include <LibWeb/HTML/CloseWatcherManager.h>
 #include <LibWeb/HTML/ErrorEvent.h>
@@ -36,8 +38,11 @@
 #include <LibWeb/HTML/HTMLBodyElement.h>
 #include <LibWeb/HTML/HTMLFormElement.h>
 #include <LibWeb/HTML/HTMLFrameSetElement.h>
+#include <LibWeb/HTML/Navigable.h>
+#include <LibWeb/HTML/TraversableNavigable.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
+#include <LibWeb/Page/Page.h>
 #include <LibWeb/UIEvents/EventNames.h>
 #include <LibWeb/UIEvents/KeyCode.h>
 #include <LibWeb/UIEvents/KeyboardEvent.h>
@@ -82,7 +87,18 @@ void EventTarget::visit_edges(Cell::Visitor& visitor)
     }
 }
 
-Vector<GC::Root<DOMEventListener>> EventTarget::event_listener_list()
+size_t EventTarget::external_memory_size() const
+{
+    auto size = Base::external_memory_size();
+    if (!m_data)
+        return size;
+
+    size = JS::saturating_add_external_memory_size(size, JS::vector_external_memory_size(m_data->event_listener_list));
+    size = JS::saturating_add_external_memory_size(size, JS::hash_map_external_memory_size(m_data->event_handler_map));
+    return size;
+}
+
+Vector<GC::Root<DOMEventListener>> EventTarget::event_listener_list() const
 {
     Vector<GC::Root<DOMEventListener>> list;
     if (!m_data)
@@ -93,24 +109,24 @@ Vector<GC::Root<DOMEventListener>> EventTarget::event_listener_list()
 }
 
 // https://dom.spec.whatwg.org/#concept-flatten-options
-static bool flatten_event_listener_options(Variant<EventListenerOptions, bool> const& options)
+static bool flatten_event_listener_options(Variant<Bindings::EventListenerOptions, bool> const& options)
 {
     // 1. If options is a boolean, then return options.
     if (options.has<bool>())
         return options.get<bool>();
 
     // 2. Return options["capture"].
-    return options.get<EventListenerOptions>().capture;
+    return options.get<Bindings::EventListenerOptions>().capture;
 }
 
-static bool flatten_event_listener_options(Variant<AddEventListenerOptions, bool> const& options)
+static bool flatten_event_listener_options(Variant<Bindings::AddEventListenerOptions, bool> const& options)
 {
     // 1. If options is a boolean, then return options.
     if (options.has<bool>())
         return options.get<bool>();
 
     // 2. Return options["capture"].
-    return options.get<AddEventListenerOptions>().capture;
+    return options.get<Bindings::AddEventListenerOptions>().capture;
 }
 
 struct FlattenedAddEventListenerOptions {
@@ -121,7 +137,7 @@ struct FlattenedAddEventListenerOptions {
 };
 
 // https://dom.spec.whatwg.org/#event-flatten-more
-static FlattenedAddEventListenerOptions flatten_add_event_listener_options(Variant<AddEventListenerOptions, bool> const& options)
+static FlattenedAddEventListenerOptions flatten_add_event_listener_options(Variant<Bindings::AddEventListenerOptions, bool> const& options)
 {
     // 1. Let capture be the result of flattening options.
     bool capture = flatten_event_listener_options(options);
@@ -134,8 +150,8 @@ static FlattenedAddEventListenerOptions flatten_add_event_listener_options(Varia
     GC::Ptr<AbortSignal> signal;
 
     // 4. If options is a dictionary, then:
-    if (options.has<AddEventListenerOptions>()) {
-        auto const& add_event_listener_options = options.get<AddEventListenerOptions>();
+    if (options.has<Bindings::AddEventListenerOptions>()) {
+        auto const& add_event_listener_options = options.get<Bindings::AddEventListenerOptions>();
 
         // 1. Set once to options["once"].
         once = add_event_listener_options.once;
@@ -174,8 +190,49 @@ static bool default_passive_value(FlyString const& type, EventTarget* event_targ
     return false;
 }
 
+static bool is_blocking_wheel_event_listener(DOMEventListener const& listener)
+{
+    return AK::first_is_one_of(listener.type, "wheel"sv, "mousewheel"sv) && listener.passive != true;
+}
+
+static void invalidate_compositor_wheel_event_listener_state(EventTarget& event_target, DOMEventListener const& listener)
+{
+    if (!is_blocking_wheel_event_listener(listener))
+        return;
+
+    if (auto* window = as_if<HTML::Window>(event_target)) {
+        auto& document = window->associated_document();
+        document.set_needs_to_record_display_list();
+        document.page().invalidate_compositor_wheel_event_listener_state();
+        return;
+    }
+
+    if (auto* node = as_if<Node>(event_target)) {
+        node->update_inside_blocking_wheel_event_handler_state_for_subtree();
+        node->set_needs_repaint();
+        node->document().page().invalidate_compositor_wheel_event_listener_state();
+    }
+}
+
+static void update_needs_beforeunload_check(EventTarget& event_target, DOMEventListener const& listener)
+{
+    if (listener.type != HTML::EventNames::beforeunload)
+        return;
+
+    auto* window = as_if<HTML::Window>(event_target);
+    if (!window)
+        return;
+
+    auto navigable = window->associated_document().navigable();
+    if (!navigable)
+        return;
+
+    if (auto traversable = navigable->traversable_navigable())
+        traversable->page().update_needs_beforeunload_check();
+}
+
 // https://dom.spec.whatwg.org/#dom-eventtarget-addeventlistener
-void EventTarget::add_event_listener(FlyString const& type, IDLEventListener* callback, Variant<AddEventListenerOptions, bool> const& options)
+void EventTarget::add_event_listener(FlyString const& type, IDLEventListener* callback, Variant<Bindings::AddEventListenerOptions, bool> const& options)
 {
     // 1. Let capture, passive, once, and signal be the result of flattening more options.
     auto flattened_options = flatten_add_event_listener_options(options);
@@ -195,7 +252,7 @@ void EventTarget::add_event_listener(FlyString const& type, IDLEventListener* ca
 
 void EventTarget::add_event_listener_without_options(FlyString const& type, IDLEventListener& callback)
 {
-    add_event_listener(type, &callback, AddEventListenerOptions {});
+    add_event_listener(type, &callback, Bindings::AddEventListenerOptions {});
 }
 
 // https://dom.spec.whatwg.org/#add-an-event-listener
@@ -227,8 +284,11 @@ void EventTarget::add_an_event_listener(DOMEventListener& listener)
             && entry->callback->callback().callback == listener.callback->callback().callback
             && entry->capture == listener.capture;
     });
-    if (it == event_listener_list.end())
+    if (it == event_listener_list.end()) {
         event_listener_list.append(listener);
+        invalidate_compositor_wheel_event_listener_state(*this, listener);
+        update_needs_beforeunload_check(*this, listener);
+    }
 
     // 6. If listener’s signal is not null, then add the following abort steps to it:
     if (listener.signal) {
@@ -241,7 +301,7 @@ void EventTarget::add_an_event_listener(DOMEventListener& listener)
 }
 
 // https://dom.spec.whatwg.org/#dom-eventtarget-removeeventlistener
-void EventTarget::remove_event_listener(FlyString const& type, IDLEventListener* callback, Variant<EventListenerOptions, bool> const& options)
+void EventTarget::remove_event_listener(FlyString const& type, IDLEventListener* callback, Variant<Bindings::EventListenerOptions, bool> const& options)
 {
     auto& event_listener_list = ensure_data().event_listener_list;
 
@@ -268,7 +328,7 @@ void EventTarget::remove_event_listener(FlyString const& type, IDLEventListener*
 
 void EventTarget::remove_event_listener_without_options(FlyString const& type, IDLEventListener& callback)
 {
-    remove_event_listener(type, &callback, EventListenerOptions {});
+    remove_event_listener(type, &callback, Bindings::EventListenerOptions {});
 }
 
 // https://dom.spec.whatwg.org/#remove-an-event-listener
@@ -280,7 +340,11 @@ void EventTarget::remove_an_event_listener(DOMEventListener& listener)
     // 2. Set listener’s removed to true and remove listener from eventTarget’s event listener list.
     listener.removed = true;
     VERIFY(m_data);
-    m_data->event_listener_list.remove_first_matching([&](auto& entry) { return entry.ptr() == &listener; });
+    auto did_remove = m_data->event_listener_list.remove_first_matching([&](auto& entry) { return entry.ptr() == &listener; });
+    if (did_remove) {
+        invalidate_compositor_wheel_event_listener_state(*this, listener);
+        update_needs_beforeunload_check(*this, listener);
+    }
 }
 
 // https://dom.spec.whatwg.org/#dom-eventtarget-dispatchevent
@@ -436,12 +500,12 @@ WebIDL::CallbackType* EventTarget::get_current_value_of_event_handler(FlyString 
         if (name == HTML::EventNames::error && is<HTML::Window>(this)) {
             //  -> If name is onerror and eventTarget is a Window object
             //      Let the function have five arguments, named event, source, lineno, colno, and error.
-            source_builder.appendff("function {}(event, source, lineno, colno, error) {{\n{}\n}}", name, body);
+            source_builder.appendff("function on{}(event, source, lineno, colno, error) {{\n{}\n}}", name, body);
             parameters_string = "event, source, lineno, colno, error"sv;
         } else {
             //  -> Otherwise
             //      Let the function have a single argument called event.
-            source_builder.appendff("function {}(event) {{\n{}\n}}", name, body);
+            source_builder.appendff("function on{}(event) {{\n{}\n}}", name, body);
             parameters_string = "event"sv;
         }
 
@@ -455,7 +519,7 @@ WebIDL::CallbackType* EventTarget::get_current_value_of_event_handler(FlyString 
         // 7. If body is not parsable as FunctionBody or if parsing detects an early error, then follow these substeps:
         if (!rust_compilation.has_value() || rust_compilation->is_error()) {
             // 1. Set eventHandler's value to null.
-            handler_map.remove(event_handler_iterator);
+            event_handler->value = GC::Ptr<WebIDL::CallbackType> {};
 
             // FIXME: 2. Report the error for the appropriate script and with the appropriate position (line number and column number) given by location, using settings object's global object.
 
@@ -864,6 +928,11 @@ bool EventTarget::dispatch_event(Event& event)
 bool EventTarget::has_event_listener(FlyString const& type) const
 {
     return m_data && m_data->event_listener_list.contains([&type](auto listener) { return listener->type == type; });
+}
+
+bool EventTarget::has_blocking_wheel_event_listener() const
+{
+    return m_data && m_data->event_listener_list.contains(is_blocking_wheel_event_listener);
 }
 
 bool EventTarget::has_event_listeners() const

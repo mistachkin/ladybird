@@ -5,7 +5,7 @@ We generate a significant amount of CSS-related code, taking in one or more .jso
 `Build/<build-preset>/Libraries/LibWeb/CSS/`.
 It's likely that you'll need to work with these if you add or modify a CSS property or its values.
 
-The generators are found in [`Meta/Lagom/Tools/CodeGenerators/LibWeb`](../Meta/Lagom/Tools/CodeGenerators/LibWeb).
+The generators are found in [`Meta/Generators`](../Meta/Generators).
 They are run automatically as part of the build, and most of the time you can ignore them.
 
 ## Properties.json
@@ -257,17 +257,18 @@ This generated `PseudoElement.h` and `PseudoElement.cpp`.
 
 Each entry has the following properties:
 
-| Field                | Required | Default        | Description                                                                                                                                                            |
-|----------------------|----------|----------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `alias-for`          | No       | Nothing        | Use to specify that this should be treated as an alias for the named pseudo-element.                                                                                   |
-| `function-syntax`    | No       | Nothing        | Syntax for the function arguments if this is a function-type pseudo-element. Copied directly from the spec.                                                            |
-| `is-allowed-in-has`  | No       | `false`        | Whether this is a [`:has`-allowed pseudo-element](https://drafts.csswg.org/selectors/#has-allowed-pseudo-element).                                                     |
-| `is-element-backed`  | No       | `false`        | Whether this is an [element-backed pseudo-element](https://drafts.csswg.org/css-pseudo-4/#element-backed).                                                             |
-| `is-pseudo-root`     | No       | `false`        | Whether this is a [pseudo-element root](https://drafts.csswg.org/css-view-transitions/#pseudo-element-root).                                                           |
-| `is-tree-abiding`    | No       | `false`        | Whether this is a [tree-abiding pseudo-element](https://drafts.csswg.org/css-pseudo-4/#tree-abiding).                                                                  |
-| `property-whitelist` | No       | Nothing        | Some pseudo-elements only permit certain properties. If so, name them in an array here. Some special values are allowed here for categories of properties - see below. |
-| `spec`               | No       | Nothing        | Link to the spec definition, for reference. Not used in generated code.                                                                                                |
-| `type`               | No       | `"identifier"` | What type of pseudo-element is this. Either "identifier", "function", or "both".                                                                                       |
+| Field                | Required                   | Default        | Description                                                                                                                                                            |
+|----------------------|----------------------------|----------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `alias-for`          | No                         | Nothing        | Use to specify that this should be treated as an alias for the named pseudo-element.                                                                                   |
+| `function-syntax`    | No                         | Nothing        | Syntax for the function arguments if this is a function-type pseudo-element. Copied directly from the spec.                                                            |
+| `implementation`     | Unless `type` is "function | Nothing        | How this pseudo-element is implemented, either `"synthetic"` or `"element-reference"` - see below.                                                                     |
+| `is-allowed-in-has`  | No                         | `false`        | Whether this is a [`:has`-allowed pseudo-element](https://drafts.csswg.org/selectors/#has-allowed-pseudo-element).                                                     |
+| `is-element-backed`  | No                         | `false`        | Whether this is an [element-backed pseudo-element](https://drafts.csswg.org/css-pseudo-4/#element-backed).                                                             |
+| `is-pseudo-root`     | No                         | `false`        | Whether this is a [pseudo-element root](https://drafts.csswg.org/css-view-transitions/#pseudo-element-root).                                                           |
+| `is-tree-abiding`    | No                         | `false`        | Whether this is a [tree-abiding pseudo-element](https://drafts.csswg.org/css-pseudo-4/#tree-abiding).                                                                  |
+| `property-whitelist` | No                         | Nothing        | Some pseudo-elements only permit certain properties. If so, name them in an array here. Some special values are allowed here for categories of properties - see below. |
+| `spec`               | No                         | Nothing        | Link to the spec definition, for reference. Not used in generated code.                                                                                                |
+| `type`               | No                         | `"identifier"` | What type of pseudo-element is this. Either "identifier", "function", or "both".                                                                                       |
 
 The generated code provides:
 - A `PseudoElement` enum listing every pseudo-element name
@@ -298,6 +299,19 @@ The following categories are supported:
 - `#padding-properties`: `padding` and its longhands
 - `#text-decoration-properties`: `text-decoration` and its longhands
 
+### `implementation`
+
+Pseudo-elements are implemented in two ways, either:
+ - "synthetic": The originating element is authoritative for the pseudo-element's data (e.g. animations, computed
+  style, etc) and handles it's behavior (such as generating layout nodes) itself. This includes pseudo-elements such
+  as "::first-line" and "::before"
+ - "element-reference": The pseudo-element refers to a "real" element elsewhere in the DOM, usually in the originating
+  element's shadow tree, and is thus not authoritative. This includes, among others, form pseudo-elements such as "::placeholder".
+
+NOTE: "element-reference" is an implementation detail and is distinct from the spec concept of "element-backed"
+    pseudo-elements, at time of writing all "element-backed" pseudo-elements are "element-reference", but not vice
+    versa.
+
 ## MediaFeatures.json
 
 This is a single JSON object, with media-feature names as keys and the values being objects with fields for the media-feature.
@@ -315,12 +329,11 @@ The definitions here are like a simplified version of the `Properties.json` defi
 | `false-keywords` | Array of strings. These are any keywords that should be considered false when the media feature is evaluated as `@media (foo)`. Generally this will be a single value, such as `"none"`.          |
 
 The generated code provides:
-- A `MediaFeatureValueType` enum listing the possible value types
 - A `MediaFeatureID` enum, listing each media-feature
 - `Optional<MediaFeatureID> media_feature_id_from_string(StringView)` to convert a string to a `MediaFeatureID`
 - `StringView string_from_media_feature_id(MediaFeatureID)` to convert a `MediaFeatureID` back to a string
 - `bool media_feature_type_is_range(MediaFeatureID)` returns whether the media feature is a `range` type, as opposed to a `discrete` type
-- `bool media_feature_accepts_type(MediaFeatureID, MediaFeatureValueType)` returns whether the media feature will accept values of this type
+- `bool media_feature_accepts_type(MediaFeatureID, QueryValueType)` returns whether the media feature will accept values of this type
 - `bool media_feature_accepts_keyword(MediaFeatureID, Keyword)` returns whether the media feature accepts this keyword
 - `bool media_feature_keyword_is_falsey(MediaFeatureID, Keyword)` returns whether the given keyword is considered false when the media-feature is evaluated in a boolean context. (Like `@media (foo)`)
 

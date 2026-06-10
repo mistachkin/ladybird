@@ -6,25 +6,31 @@
 
 #include "PulseAudioWrappers.h"
 
+#include <AK/NeverDestroyed.h>
 #include <LibMedia/Audio/SampleSpecification.h>
-#include <LibThreading/Mutex.h>
+#include <LibSync/Mutex.h>
 
 namespace Audio {
 
 static PulseAudioContext* s_pulse_audio_context;
-static Threading::Mutex s_pulse_audio_context_mutex;
+
+static Sync::RecursiveMutex& pulse_audio_context_mutex()
+{
+    static NeverDestroyed<Sync::RecursiveMutex> mutex;
+    return *mutex;
+}
 
 ErrorOr<NonnullRefPtr<PulseAudioContext>> PulseAudioContext::the()
 {
-    auto instantiation_locker = Threading::MutexLocker(s_pulse_audio_context_mutex);
+    auto instantiation_locker = Sync::MutexLocker(pulse_audio_context_mutex());
 
     // Lock and unlock the mutex to ensure that the mutex is fully unlocked at application
     // exit.
     static bool registered_atexit_callback = false;
     if (!registered_atexit_callback) {
         auto atexit_result = atexit([]() {
-            s_pulse_audio_context_mutex.lock();
-            s_pulse_audio_context_mutex.unlock();
+            pulse_audio_context_mutex().lock();
+            pulse_audio_context_mutex().unlock();
         });
         if (atexit_result)
             return Error::from_string_literal("Unable to set PulseAudioContext atexit action");
@@ -112,7 +118,7 @@ ErrorOr<NonnullRefPtr<PulseAudioContext>> PulseAudioContext::the()
 
 bool PulseAudioContext::is_connected()
 {
-    auto locker = Threading::MutexLocker(s_pulse_audio_context_mutex);
+    auto locker = Sync::MutexLocker(pulse_audio_context_mutex());
     return s_pulse_audio_context != nullptr;
 }
 
@@ -125,7 +131,7 @@ PulseAudioContext::PulseAudioContext(pa_threaded_mainloop* main_loop, pa_mainloo
 
 PulseAudioContext::~PulseAudioContext()
 {
-    auto locker = Threading::MutexLocker(s_pulse_audio_context_mutex);
+    auto locker = Sync::MutexLocker(pulse_audio_context_mutex());
 
     {
         auto loop_locker = main_loop_locker();
@@ -298,6 +304,8 @@ ErrorOr<NonnullRefPtr<PulseAudioStream>> PulseAudioContext::create_stream(Output
     if (initial_state == OutputState::Suspended) {
         stream_wrapper->m_suspended = true;
         flags = static_cast<pa_stream_flags>(static_cast<u32>(flags) | PA_STREAM_START_CORKED);
+    } else {
+        stream_wrapper->m_callback_state = PulseAudioStream::CallbackState::Active;
     }
 
     // This is a workaround for an issue with starting the stream corked, see PulseAudioStream::total_time_played().
@@ -414,6 +422,9 @@ void PulseAudioStream::on_write_requested(size_t bytes_to_write)
     VERIFY(m_write_callback);
     if (m_suspended)
         return;
+    auto callback_state = m_callback_state.load();
+    if (callback_state == CallbackState::Parked)
+        return;
     while (bytes_to_write > 0) {
         auto buffer = begin_write(bytes_to_write).release_value_but_fixme_should_propagate_errors();
         auto frame_size = this->frame_size();
@@ -421,6 +432,19 @@ void PulseAudioStream::on_write_requested(size_t bytes_to_write)
         auto written_buffer = m_write_callback(*this, buffer.reinterpret<float>()).reinterpret<u8 const>();
         if (written_buffer.size() == 0) {
             cancel_write().release_value_but_fixme_should_propagate_errors();
+
+            while (true) {
+                if (m_callback_state.compare_exchange_strong(callback_state, CallbackState::Parked))
+                    break;
+                VERIFY(callback_state != CallbackState::Parked);
+                if (callback_state == CallbackState::ActiveWithFutureData) {
+                    if (!m_callback_state.compare_exchange_strong(callback_state, CallbackState::Active))
+                        continue;
+                    queue_a_write_while_locked();
+                    break;
+                }
+            }
+
             break;
         }
         bytes_to_write -= written_buffer.size();
@@ -510,6 +534,24 @@ ErrorOr<void> PulseAudioStream::flush_and_suspend()
     return {};
 }
 
+void PulseAudioStream::queue_a_write_while_locked()
+{
+    // NOTE: We ref here and then unref in the callback so that this stream will not be deleted until
+    //       it finishes.
+    ref();
+    pa_mainloop_api_once(
+        m_context->m_api, [](pa_mainloop_api*, void* user_data) {
+            auto stream = adopt_ref(*static_cast<PulseAudioStream*>(user_data));
+            if (stream->m_suspended)
+                return;
+            // NOTE: writable_size() returns -1 in case of an error. However, the value is still safe
+            //       since begin_write() will interpret -1 as a default parameter and choose a good size.
+            auto bytes_to_write = pa_stream_writable_size(stream->m_stream);
+            stream->on_write_requested(bytes_to_write);
+        },
+        this);
+}
+
 ErrorOr<void> PulseAudioStream::resume()
 {
     auto locker = m_context->main_loop_locker();
@@ -522,20 +564,33 @@ ErrorOr<void> PulseAudioStream::resume()
 
     // Defer a write to the playback buffer on the PulseAudio main loop. Otherwise, playback will not
     // begin again, despite the fact that we uncorked.
-    // NOTE: We ref here and then unref in the callback so that this stream will not be deleted until
-    //       it finishes.
-    ref();
-    pa_mainloop_api_once(
-        m_context->m_api, [](pa_mainloop_api*, void* user_data) {
-            auto& stream = *static_cast<PulseAudioStream*>(user_data);
-            // NOTE: writable_size() returns -1 in case of an error. However, the value is still safe
-            //       since begin_write() will interpret -1 as a default parameter and choose a good size.
-            auto bytes_to_write = pa_stream_writable_size(stream.m_stream);
-            stream.on_write_requested(bytes_to_write);
-            stream.unref();
-        },
-        this);
+    m_callback_state = CallbackState::Active;
+    queue_a_write_while_locked();
     return {};
+}
+
+void PulseAudioStream::notify_data_available()
+{
+    auto callback_state = m_callback_state.load();
+    while (true) {
+        if (callback_state == CallbackState::Parked) {
+            if (m_callback_state.compare_exchange_strong(callback_state, CallbackState::Active)) {
+                auto locker = m_context->main_loop_locker();
+                queue_a_write_while_locked();
+                return;
+            }
+            continue;
+        }
+
+        if (callback_state == CallbackState::Active) [[likely]] {
+            if (m_callback_state.compare_exchange_strong(callback_state, CallbackState::ActiveWithFutureData))
+                return;
+            continue;
+        }
+
+        if (callback_state == CallbackState::ActiveWithFutureData)
+            return;
+    }
 }
 
 AK::Duration PulseAudioStream::total_time_played() const

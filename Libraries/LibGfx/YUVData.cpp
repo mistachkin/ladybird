@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Checked.h>
 #include <AK/Time.h>
 #include <LibGfx/Bitmap.h>
-#include <LibGfx/ImmutableBitmap.h>
 #include <LibGfx/SkiaBackendContext.h>
 #include <LibGfx/YUVData.h>
 #include <RustFFI.h>
@@ -36,19 +36,49 @@ struct YUVDataImpl {
 
 }
 
+static ErrorOr<size_t> checked_plane_size(Gfx::IntSize size, size_t component_size)
+{
+    Checked<size_t> plane_size = static_cast<size_t>(size.width());
+    plane_size *= static_cast<size_t>(size.height());
+    plane_size *= component_size;
+    if (plane_size.has_overflow())
+        return Error::from_string_literal("YUVData plane size overflow");
+    return plane_size.value();
+}
+
+ErrorOr<YUVData::PlaneSizes> YUVData::plane_sizes(IntSize size, u8 bit_depth, Media::Subsampling subsampling)
+{
+    if (size.is_empty())
+        return Error::from_string_literal("YUVData size is empty");
+    if (bit_depth == 0 || bit_depth > 16)
+        return Error::from_string_literal("Invalid YUVData bit depth");
+
+    auto component_size = bit_depth <= 8 ? 1 : 2;
+    auto y_buffer_size = TRY(checked_plane_size(size, component_size));
+    auto uv_size = subsampling.subsampled_size(size);
+    auto uv_buffer_size = TRY(checked_plane_size(uv_size, component_size));
+
+    Checked<size_t> total_size = y_buffer_size;
+    total_size += uv_buffer_size;
+    total_size += uv_buffer_size;
+    if (total_size.has_overflow())
+        return Error::from_string_literal("YUVData total size overflow");
+
+    return PlaneSizes {
+        .y = y_buffer_size,
+        .u = uv_buffer_size,
+        .v = uv_buffer_size,
+        .total = total_size.value(),
+    };
+}
+
 ErrorOr<NonnullOwnPtr<YUVData>> YUVData::create(IntSize size, u8 bit_depth, Media::Subsampling subsampling, Media::CodingIndependentCodePoints cicp)
 {
-    VERIFY(bit_depth <= 16);
-    auto component_size = bit_depth <= 8 ? 1 : 2;
+    auto sizes = TRY(plane_sizes(size, bit_depth, subsampling));
 
-    auto y_buffer_size = static_cast<size_t>(size.width()) * size.height() * component_size;
-
-    auto uv_size = subsampling.subsampled_size(size);
-    auto uv_buffer_size = static_cast<size_t>(uv_size.width()) * uv_size.height() * component_size;
-
-    auto y_buffer = TRY(FixedArray<u8>::create(y_buffer_size));
-    auto u_buffer = TRY(FixedArray<u8>::create(uv_buffer_size));
-    auto v_buffer = TRY(FixedArray<u8>::create(uv_buffer_size));
+    auto y_buffer = TRY(FixedArray<u8>::create(sizes.y));
+    auto u_buffer = TRY(FixedArray<u8>::create(sizes.u));
+    auto v_buffer = TRY(FixedArray<u8>::create(sizes.v));
 
     auto impl = TRY(try_make<Details::YUVDataImpl>(Details::YUVDataImpl {
         .size = size,
@@ -61,6 +91,19 @@ ErrorOr<NonnullOwnPtr<YUVData>> YUVData::create(IntSize size, u8 bit_depth, Medi
     }));
 
     return adopt_nonnull_own_or_enomem(new (nothrow) YUVData(move(impl)));
+}
+
+ErrorOr<NonnullOwnPtr<YUVData>> YUVData::create_from_data(IntSize size, u8 bit_depth, Media::Subsampling subsampling, Media::CodingIndependentCodePoints cicp, ReadonlyBytes y_data, ReadonlyBytes u_data, ReadonlyBytes v_data)
+{
+    auto sizes = TRY(plane_sizes(size, bit_depth, subsampling));
+    if (y_data.size() != sizes.y || u_data.size() != sizes.u || v_data.size() != sizes.v)
+        return Error::from_string_literal("YUVData plane data size mismatch");
+
+    auto yuv_data = TRY(create(size, bit_depth, subsampling, cicp));
+    y_data.copy_to(yuv_data->y_data());
+    u_data.copy_to(yuv_data->u_data());
+    v_data.copy_to(yuv_data->v_data());
+    return yuv_data;
 }
 
 YUVData::YUVData(NonnullOwnPtr<Details::YUVDataImpl> impl)
@@ -101,6 +144,21 @@ Bytes YUVData::u_data()
 }
 
 Bytes YUVData::v_data()
+{
+    return m_impl->v_buffer.span();
+}
+
+ReadonlyBytes YUVData::y_data() const
+{
+    return m_impl->y_buffer.span();
+}
+
+ReadonlyBytes YUVData::u_data() const
+{
+    return m_impl->u_buffer.span();
+}
+
+ReadonlyBytes YUVData::v_data() const
 {
     return m_impl->v_buffer.span();
 }
@@ -225,21 +283,6 @@ ErrorOr<NonnullRefPtr<Bitmap>> YUVData::to_bitmap() const
     return bitmap;
 }
 
-void YUVData::expand_samples_to_full_16_bit_range()
-{
-    auto const shift = 16 - m_impl->bit_depth;
-    auto const inverse_shift = m_impl->bit_depth - shift;
-
-    for (auto buffer : { m_impl->y_buffer.span(), m_impl->u_buffer.span(), m_impl->v_buffer.span() }) {
-        auto* samples = reinterpret_cast<u16*>(buffer.data());
-        auto sample_count = buffer.size() / sizeof(u16);
-        for (size_t i = 0; i < sample_count; i++)
-            samples[i] = static_cast<u16>((samples[i] << shift) | (samples[i] >> inverse_shift));
-    }
-
-    m_impl->bit_depth = 16;
-}
-
 static SkYUVColorSpace skia_yuv_color_space(Media::CodingIndependentCodePoints cicp)
 {
     bool full_range = cicp.video_full_range_flag() == Media::VideoFullRangeFlag::Full;
@@ -280,6 +323,31 @@ static SkYUVAInfo::Subsampling skia_subsampling(Media::Subsampling subsampling)
     return SkYUVAInfo::Subsampling::k420;
 }
 
+static u16 expand_sample_to_full_16_bit_range(u16 sample, u8 bit_depth)
+{
+    if (bit_depth >= 16)
+        return sample;
+
+    auto const shift = 16 - bit_depth;
+    auto const inverse_shift = bit_depth - shift;
+    return static_cast<u16>((sample << shift) | (sample >> inverse_shift));
+}
+
+static void copy_plane_expanded_to_full_16_bit_range(FixedArray<u8> const& source_buffer, SkPixmap const& destination, IntSize plane_size, u8 bit_depth)
+{
+    VERIFY(bit_depth > 8);
+
+    auto const* source = reinterpret_cast<u16 const*>(source_buffer.data());
+    auto source_stride = static_cast<size_t>(plane_size.width());
+
+    for (int row = 0; row < plane_size.height(); row++) {
+        auto const* source_row = source + (static_cast<size_t>(row) * source_stride);
+        auto* destination_row = destination.writable_addr16(0, row);
+        for (int column = 0; column < plane_size.width(); column++)
+            destination_row[column] = expand_sample_to_full_16_bit_range(source_row[column], bit_depth);
+    }
+}
+
 SkYUVAPixmaps YUVData::make_pixmaps() const
 {
     auto skia_size = SkISize::Make(m_impl->size.width(), m_impl->size.height());
@@ -298,9 +366,18 @@ SkYUVAPixmaps YUVData::make_pixmaps() const
         data_type = SkYUVAPixmapInfo::DataType::kUnorm8;
         component_size = 1;
     } else {
-        color_type = kA16_unorm_SkColorType;
-        data_type = SkYUVAPixmapInfo::DataType::kUnorm16;
-        component_size = 2;
+        SkYUVAPixmapInfo pixmap_info(yuva_info, SkYUVAPixmapInfo::DataType::kUnorm16, nullptr);
+        auto pixmaps = SkYUVAPixmaps::Allocate(pixmap_info);
+        if (!pixmaps.isValid())
+            return pixmaps;
+
+        copy_plane_expanded_to_full_16_bit_range(m_impl->y_buffer, pixmaps.plane(0), m_impl->size, m_impl->bit_depth);
+
+        auto uv_size = m_impl->subsampling.subsampled_size(m_impl->size);
+        copy_plane_expanded_to_full_16_bit_range(m_impl->u_buffer, pixmaps.plane(1), uv_size, m_impl->bit_depth);
+        copy_plane_expanded_to_full_16_bit_range(m_impl->v_buffer, pixmaps.plane(2), uv_size, m_impl->bit_depth);
+
+        return pixmaps;
     }
 
     auto y_row_bytes = static_cast<size_t>(m_impl->size.width()) * component_size;

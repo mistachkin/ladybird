@@ -664,9 +664,9 @@ GC::Ref<KeyframeEffect> KeyframeEffect::create(JS::Realm& realm)
 // https://www.w3.org/TR/web-animations-1/#dom-keyframeeffect-keyframeeffect
 WebIDL::ExceptionOr<GC::Ref<KeyframeEffect>> KeyframeEffect::construct_impl(
     JS::Realm& realm,
-    GC::Root<DOM::Element> const& target,
-    Optional<GC::Root<JS::Object>> const& keyframes,
-    Variant<double, KeyframeEffectOptions> options)
+    GC::Ptr<DOM::Element> target,
+    GC::Ptr<JS::Object> keyframes,
+    Variant<double, Bindings::KeyframeEffectOptions> options)
 {
     // 1. Create a new KeyframeEffect object, effect.
     auto effect = realm.create<KeyframeEffect>(realm);
@@ -677,13 +677,13 @@ WebIDL::ExceptionOr<GC::Ref<KeyframeEffect>> KeyframeEffect::construct_impl(
     // 3. Set the target pseudo-selector to the result corresponding to the first matching condition from below.
 
     //    If options is a KeyframeEffectOptions object with a pseudoElement property,
-    if (options.has<KeyframeEffectOptions>()) {
+    if (options.has<Bindings::KeyframeEffectOptions>()) {
         // Set the target pseudo-selector to the value of the pseudoElement property.
         //
         // When assigning this property, the error-handling defined for the pseudoElement setter on the interface is
         // applied. If the setter requires an exception to be thrown, this procedure must throw the same exception and
         // abort all further steps.
-        TRY(effect->set_pseudo_element(options.get<KeyframeEffectOptions>().pseudo_element));
+        TRY(effect->set_pseudo_element(options.get<Bindings::KeyframeEffectOptions>().pseudo_element));
     }
     //     Otherwise,
     else {
@@ -692,12 +692,12 @@ WebIDL::ExceptionOr<GC::Ref<KeyframeEffect>> KeyframeEffect::construct_impl(
     }
 
     // 4. Let timing input be the result corresponding to the first matching condition from below.
-    KeyframeEffectOptions timing_input;
+    Bindings::KeyframeEffectOptions timing_input;
 
     //     If options is a KeyframeEffectOptions object,
-    if (options.has<KeyframeEffectOptions>()) {
+    if (options.has<Bindings::KeyframeEffectOptions>()) {
         // Let timing input be options.
-        timing_input = options.get<KeyframeEffectOptions>();
+        timing_input = options.get<Bindings::KeyframeEffectOptions>();
     }
     //     Otherwise (if options is a double),
     else {
@@ -711,12 +711,12 @@ WebIDL::ExceptionOr<GC::Ref<KeyframeEffect>> KeyframeEffect::construct_impl(
     //       returned as a CSSNumericValue when resolving the duration in getComputedTiming(). Future versions of
     //       the spec may enable setting the duration as a CSSNumeric value, where the unit is a valid time unit or
     //       percent.
-    if (timing_input.duration.has<GC::Root<CSS::CSSNumericValue>>())
+    if (timing_input.duration.has<GC::Ref<CSS::CSSNumericValue>>())
         return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Setting duration as a CSSNumericValue is not supported"sv };
 
     // 5. Call the procedure to update the timing properties of an animation effect of effect from timing input.
     //    If that procedure causes an exception to be thrown, propagate the exception and abort this procedure.
-    TRY(effect->update_timing(timing_input.to_optional_effect_timing()));
+    TRY(effect->update_timing(to_optional_effect_timing(timing_input)));
 
     // 6. If options is a KeyframeEffectOptions object, assign the composite property of effect to the corresponding
     //    value from options.
@@ -724,8 +724,8 @@ WebIDL::ExceptionOr<GC::Ref<KeyframeEffect>> KeyframeEffect::construct_impl(
     //    When assigning this property, the error-handling defined for the corresponding setter on the KeyframeEffect
     //    interface is applied. If the setter requires an exception to be thrown for the value specified by options,
     //    this procedure must throw the same exception and abort all further steps.
-    if (options.has<KeyframeEffectOptions>())
-        effect->set_composite(options.get<KeyframeEffectOptions>().composite);
+    if (options.has<Bindings::KeyframeEffectOptions>())
+        effect->set_composite(options.get<Bindings::KeyframeEffectOptions>().composite);
 
     // 7. Initialize the set of keyframes by performing the procedure defined for setKeyframes() passing keyframes as
     //    the input.
@@ -796,6 +796,10 @@ void KeyframeEffect::set_target(DOM::Element* target)
             target->associate_with_animation(*animation);
     }
     m_target_element = target;
+
+    invalidate_effect();
+    // FIXME: We don't remove the animated style from the old target element as part of normal animated style update and
+    //        it will remain "stuck" until it's style is fully invalidated for some other reason.
 }
 
 Optional<String> KeyframeEffect::pseudo_element() const
@@ -812,6 +816,11 @@ WebIDL::ExceptionOr<void> KeyframeEffect::set_pseudo_element(Optional<String> va
     // pseudo-element parsing on the provided value, defined as the following:
     // NOTE: The actual definition is in pseudo_element_parsing().
     m_target_pseudo_selector = TRY(pseudo_element_parsing(realm(), value));
+
+    invalidate_effect();
+    // FIXME: We don't remove the animated style from the old target element as part of normal animated style update and
+    //        it will remain "stuck" until it's style is fully invalidated for some other reason.
+
     return {};
 }
 
@@ -833,6 +842,12 @@ Optional<CSS::PseudoElement> KeyframeEffect::pseudo_element_type() const
     if (!m_target_pseudo_selector.has_value())
         return {};
     return m_target_pseudo_selector->type();
+}
+
+void KeyframeEffect::set_composite(Bindings::CompositeOperation value)
+{
+    m_composite = value;
+    invalidate_effect();
 }
 
 // https://www.w3.org/TR/web-animations-1/#dom-keyframeeffect-getkeyframes
@@ -872,17 +887,17 @@ WebIDL::ExceptionOr<GC::RootVector<JS::Object*>> KeyframeEffect::get_keyframes()
         }
     }
 
-    GC::RootVector<JS::Object*> keyframes { heap() };
+    GC::RootVector<JS::Object*> keyframes;
     for (auto const& keyframe : m_keyframe_objects)
         keyframes.append(keyframe);
     return keyframes;
 }
 
 // https://www.w3.org/TR/web-animations-1/#dom-keyframeeffect-setkeyframes
-WebIDL::ExceptionOr<void> KeyframeEffect::set_keyframes(Optional<GC::Root<JS::Object>> const& keyframe_object)
+WebIDL::ExceptionOr<void> KeyframeEffect::set_keyframes(GC::Ptr<JS::Object> keyframe_object)
 {
     m_keyframe_objects.clear();
-    m_keyframes = TRY(process_a_keyframes_argument(realm(), keyframe_object.has_value() ? GC::Ptr { keyframe_object->ptr() } : GC::Ptr<Object> {}));
+    m_keyframes = TRY(process_a_keyframes_argument(realm(), keyframe_object));
     // FIXME: After processing the keyframe argument, we need to turn the set of keyframes into a set of computed
     //        keyframes using the procedure outlined in the second half of
     //        https://www.w3.org/TR/web-animations-1/#calculating-computed-keyframes. For now, just compute the
@@ -913,12 +928,20 @@ WebIDL::ExceptionOr<void> KeyframeEffect::set_keyframes(Optional<GC::Root<JS::Ob
     generate_initial_and_final_frames(keyframe_set, m_target_properties);
     m_key_frame_set = keyframe_set;
 
+    invalidate_effect();
+
     return {};
 }
 
 KeyframeEffect::KeyframeEffect(JS::Realm& realm)
     : AnimationEffect(realm)
 {
+}
+
+void KeyframeEffect::invalidate_effect()
+{
+    if (m_target_element)
+        m_target_element->document().set_needs_animated_style_update();
 }
 
 void KeyframeEffect::initialize(JS::Realm& realm)
@@ -954,7 +977,7 @@ void KeyframeEffect::update_computed_properties(AnimationUpdateContext& context)
     context.elements.ensure(abstract_element, [computed_properties] {
         auto old_animated_properties = computed_properties->animated_property_values();
         computed_properties->reset_non_inherited_animated_properties({});
-        return make<AnimationUpdateContext::ElementData>(move(old_animated_properties), computed_properties);
+        return AnimationUpdateContext::ElementData { move(old_animated_properties), computed_properties };
     });
 
     target->document().style_computer().collect_animation_into(abstract_element, *this, *computed_properties);

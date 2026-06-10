@@ -5,12 +5,16 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibCore/ReportTime.h>
+#include <AK/StringBuilder.h>
+#include <LibWeb/CSS/CSSConditionRule.h>
+#include <LibWeb/CSS/CSSContainerRule.h>
+#include <LibWeb/CSS/CSSGroupingRule.h>
 #include <LibWeb/CSS/CSSImportRule.h>
 #include <LibWeb/CSS/CSSKeyframesRule.h>
 #include <LibWeb/CSS/CSSLayerBlockRule.h>
 #include <LibWeb/CSS/CSSLayerStatementRule.h>
 #include <LibWeb/CSS/CSSNestedDeclarations.h>
+#include <LibWeb/CSS/CSSScopeRule.h>
 #include <LibWeb/CSS/CSSStyleRule.h>
 #include <LibWeb/CSS/CSSStyleSheet.h>
 #include <LibWeb/CSS/CounterStyle.h>
@@ -22,6 +26,7 @@
 #include <LibWeb/CSS/StyleScope.h>
 #include <LibWeb/CSS/StyleValues/StyleValueList.h>
 #include <LibWeb/DOM/Document.h>
+#include <LibWeb/Loader/ContentBlocker.h>
 #include <LibWeb/Namespace.h>
 #include <LibWeb/Page/Page.h>
 
@@ -69,10 +74,12 @@ void StyleScope::visit_edges(GC::Cell::Visitor& visitor)
     visitor.visit(m_pending_has_invalidations);
 }
 
-void MatchingRule::visit_edges(GC::Cell::Visitor& visitor)
+void MatchingRule::visit_edges(GC::Cell::Visitor& visitor) const
 {
     visitor.visit(rule);
     visitor.visit(sheet);
+    visitor.visit(container_rule);
+    visitor.visit(scope_rule);
 }
 
 void RuleCache::visit_edges(GC::Cell::Visitor& visitor)
@@ -163,8 +170,24 @@ void StyleScope::build_user_style_sheet_if_needed()
     if (m_user_style_sheet)
         return;
 
-    if (auto user_style_source = document().page().user_style(); user_style_source.has_value())
-        m_user_style_sheet = GC::make_root(parse_css_stylesheet(CSS::Parser::ParsingParams(document()), user_style_source.value()));
+    if (!is<DOM::Document>(*m_node))
+        return;
+
+    auto user_style_source = document().page().user_style();
+    auto const& content_blocker_style_source = document().content_blocker_style_sheet();
+    if (!user_style_source.has_value() && content_blocker_style_source.is_empty())
+        return;
+
+    StringBuilder source;
+    if (user_style_source.has_value())
+        source.append(user_style_source.value());
+    if (!content_blocker_style_source.is_empty()) {
+        if (!source.is_empty())
+            source.append('\n');
+        source.append(content_blocker_style_source);
+    }
+
+    m_user_style_sheet = GC::make_root(parse_css_stylesheet(CSS::Parser::ParsingParams(document()), source.to_string_without_validation()));
 }
 
 void StyleScope::build_rule_cache_if_needed() const
@@ -176,9 +199,9 @@ void StyleScope::build_rule_cache_if_needed() const
 
 static CSSStyleSheet& default_stylesheet()
 {
-    static GC::Root<CSSStyleSheet> sheet;
+    static auto& sheet = *new GC::Root<CSSStyleSheet>;
     if (!sheet.cell()) {
-        extern String default_stylesheet_source;
+        extern String const& default_stylesheet_source;
         sheet = GC::make_root(parse_css_stylesheet(CSS::Parser::ParsingParams(internal_css_realm(), Parser::IsUAStyleSheet::Yes), default_stylesheet_source));
     }
     return *sheet;
@@ -186,9 +209,9 @@ static CSSStyleSheet& default_stylesheet()
 
 static CSSStyleSheet& quirks_mode_stylesheet()
 {
-    static GC::Root<CSSStyleSheet> sheet;
+    static auto& sheet = *new GC::Root<CSSStyleSheet>;
     if (!sheet.cell()) {
-        extern String quirks_mode_stylesheet_source;
+        extern String const& quirks_mode_stylesheet_source;
         sheet = GC::make_root(parse_css_stylesheet(CSS::Parser::ParsingParams(internal_css_realm(), Parser::IsUAStyleSheet::Yes), quirks_mode_stylesheet_source));
     }
     return *sheet;
@@ -196,9 +219,9 @@ static CSSStyleSheet& quirks_mode_stylesheet()
 
 static CSSStyleSheet& mathml_stylesheet()
 {
-    static GC::Root<CSSStyleSheet> sheet;
+    static auto& sheet = *new GC::Root<CSSStyleSheet>;
     if (!sheet.cell()) {
-        extern String mathml_stylesheet_source;
+        extern String const& mathml_stylesheet_source;
         sheet = GC::make_root(parse_css_stylesheet(CSS::Parser::ParsingParams(internal_css_realm(), Parser::IsUAStyleSheet::Yes), mathml_stylesheet_source));
     }
     return *sheet;
@@ -206,22 +229,162 @@ static CSSStyleSheet& mathml_stylesheet()
 
 static CSSStyleSheet& svg_stylesheet()
 {
-    static GC::Root<CSSStyleSheet> sheet;
+    static auto& sheet = *new GC::Root<CSSStyleSheet>;
     if (!sheet.cell()) {
-        extern String svg_stylesheet_source;
+        extern String const& svg_stylesheet_source;
         sheet = GC::make_root(parse_css_stylesheet(CSS::Parser::ParsingParams(internal_css_realm(), Parser::IsUAStyleSheet::Yes), svg_stylesheet_source));
     }
     return *sheet;
 }
 
+void StyleScope::for_each_user_agent_stylesheet(bool include_quirks_mode_stylesheet, Function<void(CSS::CSSStyleSheet&, StyleSheetIdentifier const&)> const& callback)
+{
+    auto callback_with_identifier = [&](CSSStyleSheet& sheet, String url) {
+        StyleSheetIdentifier identifier {
+            .type = StyleSheetIdentifier::Type::UserAgent,
+            .url = move(url),
+        };
+        callback(sheet, identifier);
+    };
+
+    callback_with_identifier(default_stylesheet(), "CSS/Default.css"_string);
+    if (include_quirks_mode_stylesheet)
+        callback_with_identifier(quirks_mode_stylesheet(), "CSS/QuirksMode.css"_string);
+    callback_with_identifier(mathml_stylesheet(), "MathML/Default.css"_string);
+    callback_with_identifier(svg_stylesheet(), "SVG/Default.css"_string);
+}
+
+Optional<StyleSheetIdentifier> StyleScope::user_agent_style_sheet_identifier(CSS::CSSStyleSheet const& style_sheet)
+{
+    Optional<StyleSheetIdentifier> identifier;
+    for_each_user_agent_stylesheet(true, [&](auto& user_agent_style_sheet, auto const& user_agent_style_sheet_identifier) {
+        if (&style_sheet == &user_agent_style_sheet)
+            identifier = user_agent_style_sheet_identifier;
+    });
+    return identifier;
+}
+
+static GC::Ptr<CSSContainerRule const> current_container_rule(Vector<GC::Ptr<CSSContainerRule const>> const& container_rule_stack)
+{
+    if (container_rule_stack.is_empty())
+        return nullptr;
+    return container_rule_stack.last();
+}
+
+static void collect_scope_boundary_selector_dependencies(CSSRule const& scope_rule, StyleCache& style_cache)
+{
+    auto collect_selector_list = [&](Optional<SelectorList> const& selector_list) {
+        if (!selector_list.has_value())
+            return;
+        for (auto const& selector : *selector_list) {
+            style_cache.style_invalidation_data.build_invalidation_sets_for_scope_boundary_selector(selector);
+            StyleScope::collect_selector_insights(selector, style_cache.selector_insights);
+        }
+    };
+
+    for (auto const* current_scope_rule = &scope_rule; current_scope_rule; current_scope_rule = nearest_ancestor_scope_rule_for_matching(*current_scope_rule).ptr()) {
+        collect_selector_list(scope_start_selectors_for_matching(*current_scope_rule));
+        collect_selector_list(scope_end_selectors_for_matching(*current_scope_rule));
+    }
+}
+
+using RuleCacheStyleRuleCallback = Function<void(CSSRule const&, CSSStyleSheet const&, GC::Ptr<CSSContainerRule const>, GC::Ptr<CSSRule const>)>;
+
+static void for_each_style_producing_rule_for_rule_cache(
+    CSSRuleList const& rule_list,
+    CSSStyleSheet const& current_style_sheet,
+    Vector<GC::Ptr<CSSContainerRule const>>& container_rule_stack,
+    GC::Ptr<CSSRule const> scope_rule,
+    RuleCacheStyleRuleCallback const& callback);
+
+static void for_each_style_producing_rule_for_rule_cache(
+    CSSStyleSheet const& sheet,
+    Vector<GC::Ptr<CSSContainerRule const>>& container_rule_stack,
+    GC::Ptr<CSSRule const> scope_rule,
+    RuleCacheStyleRuleCallback const& callback)
+{
+    if (!sheet.media()->matches())
+        return;
+    for_each_style_producing_rule_for_rule_cache(sheet.rules(), sheet, container_rule_stack, scope_rule, callback);
+}
+
+static void for_each_style_producing_rule_for_rule_cache(
+    CSSRuleList const& rule_list,
+    CSSStyleSheet const& current_style_sheet,
+    Vector<GC::Ptr<CSSContainerRule const>>& container_rule_stack,
+    GC::Ptr<CSSRule const> scope_rule,
+    RuleCacheStyleRuleCallback const& callback)
+{
+    for (auto const& rule : rule_list) {
+        switch (rule->type()) {
+        case CSSRule::Type::Import: {
+            auto const& import_rule = as<CSSImportRule>(*rule);
+            if (import_rule.loaded_style_sheet()) {
+                GC::Ptr<CSSRule const> import_scope_rule = scope_rule;
+                if (import_rule.has_scope())
+                    import_scope_rule = &import_rule;
+                for_each_style_producing_rule_for_rule_cache(*import_rule.loaded_style_sheet(), container_rule_stack, import_scope_rule, callback);
+            }
+            break;
+        }
+
+        case CSSRule::Type::Container: {
+            auto const& container_rule = as<CSSContainerRule>(*rule);
+            // @container conditions are element-dependent, so keep their style rules and evaluate the container later.
+            container_rule_stack.append(&container_rule);
+            for_each_style_producing_rule_for_rule_cache(container_rule.css_rules(), current_style_sheet, container_rule_stack, scope_rule, callback);
+            container_rule_stack.take_last();
+            break;
+        }
+
+        case CSSRule::Type::Scope: {
+            auto const& nested_scope_rule = as<CSSScopeRule>(*rule);
+            for_each_style_producing_rule_for_rule_cache(nested_scope_rule.css_rules(), current_style_sheet, container_rule_stack, &nested_scope_rule, callback);
+            break;
+        }
+
+        case CSSRule::Type::Media:
+        case CSSRule::Type::Supports:
+            if (as<CSSConditionRule>(*rule).condition_matches())
+                for_each_style_producing_rule_for_rule_cache(as<CSSGroupingRule>(*rule).css_rules(), current_style_sheet, container_rule_stack, scope_rule, callback);
+            break;
+
+        case CSSRule::Type::LayerBlock:
+        case CSSRule::Type::Page:
+            for_each_style_producing_rule_for_rule_cache(as<CSSGroupingRule>(*rule).css_rules(), current_style_sheet, container_rule_stack, scope_rule, callback);
+            break;
+
+        case CSSRule::Type::Style:
+            callback(*rule, current_style_sheet, current_container_rule(container_rule_stack), scope_rule);
+            for_each_style_producing_rule_for_rule_cache(as<CSSGroupingRule>(*rule).css_rules(), current_style_sheet, container_rule_stack, scope_rule, callback);
+            break;
+
+        case CSSRule::Type::NestedDeclarations:
+            callback(*rule, current_style_sheet, current_container_rule(container_rule_stack), scope_rule);
+            break;
+
+        case CSSRule::Type::CounterStyle:
+        case CSSRule::Type::FontFace:
+        case CSSRule::Type::FontFeatureValues:
+        case CSSRule::Type::Function:
+        case CSSRule::Type::FunctionDeclarations:
+        case CSSRule::Type::Keyframe:
+        case CSSRule::Type::Keyframes:
+        case CSSRule::Type::LayerStatement:
+        case CSSRule::Type::Margin:
+        case CSSRule::Type::Namespace:
+        case CSSRule::Type::Property:
+            break;
+        }
+    }
+}
+
 void StyleScope::for_each_stylesheet(CascadeOrigin cascade_origin, Function<void(CSS::CSSStyleSheet&)> const& callback) const
 {
     if (cascade_origin == CascadeOrigin::UserAgent) {
-        callback(default_stylesheet());
-        if (document().in_quirks_mode())
-            callback(quirks_mode_stylesheet());
-        callback(mathml_stylesheet());
-        callback(svg_stylesheet());
+        for_each_user_agent_stylesheet(document().in_quirks_mode(), [&](auto& sheet, auto const&) {
+            callback(sheet);
+        });
     }
     if (cascade_origin == CascadeOrigin::User) {
         auto& style_scope = const_cast<StyleScope&>(*this);
@@ -236,7 +399,7 @@ void StyleScope::for_each_stylesheet(CascadeOrigin cascade_origin, Function<void
 
 void StyleScope::make_rule_cache_for_cascade_origin(CascadeOrigin cascade_origin, StyleCache& style_cache)
 {
-    Vector<MatchingRule> matching_rules;
+    GC::ConservativeVector<MatchingRule> matching_rules;
     size_t style_sheet_index = 0;
     for_each_stylesheet(cascade_origin, [&](auto& sheet) {
         auto& rule_caches = [&] -> RuleCaches& {
@@ -253,25 +416,35 @@ void StyleScope::make_rule_cache_for_cascade_origin(CascadeOrigin cascade_origin
         }();
 
         size_t rule_index = 0;
-        sheet.for_each_effective_style_producing_rule([&](auto const& rule) {
-            SelectorList const& absolutized_selectors = [&]() {
+        Vector<GC::Ptr<CSSContainerRule const>> container_rule_stack;
+        for_each_style_producing_rule_for_rule_cache(sheet, container_rule_stack, nullptr, [&](auto const& rule, auto const& current_style_sheet, auto container_rule, auto scope_rule) {
+            if (container_rule && container_rule->contains_size_feature())
+                style_cache.has_size_container_queries = true;
+
+            SelectorList const& absolutized_selectors = [&]() -> SelectorList const& {
                 if (rule.type() == CSSRule::Type::Style)
                     return static_cast<CSSStyleRule const&>(rule).absolutized_selectors();
                 if (rule.type() == CSSRule::Type::NestedDeclarations)
-                    return static_cast<CSSNestedDeclarations const&>(rule).parent_style_rule().absolutized_selectors();
+                    return static_cast<CSSNestedDeclarations const&>(rule).absolutized_selectors();
                 VERIFY_NOT_REACHED();
             }();
 
             for (auto const& selector : absolutized_selectors) {
                 style_cache.style_invalidation_data.build_invalidation_sets_for_selector(selector);
             }
+            if (scope_rule)
+                collect_scope_boundary_selector_dependencies(*scope_rule, style_cache);
 
-            for (CSS::Selector const& selector : absolutized_selectors) {
+            for (size_t selector_index = 0; selector_index < absolutized_selectors.size(); ++selector_index) {
+                auto const& selector = *absolutized_selectors[selector_index];
                 MatchingRule matching_rule {
                     .rule = &rule,
-                    .sheet = sheet,
-                    .default_namespace = sheet.default_namespace(),
+                    .sheet = current_style_sheet,
+                    .container_rule = container_rule,
+                    .scope_rule = scope_rule,
+                    .default_namespace = current_style_sheet.default_namespace(),
                     .selector = selector,
+                    .selector_index = selector_index,
                     .style_sheet_index = style_sheet_index,
                     .rule_index = rule_index,
                     .specificity = selector.specificity(),
@@ -307,7 +480,7 @@ void StyleScope::make_rule_cache_for_cascade_origin(CascadeOrigin cascade_origin
                     }
                 }
 
-                rule_cache.add_rule(matching_rule, selector.target_pseudo_element().map([](auto& it) { return it.type(); }), contains_root_pseudo_class);
+                rule_cache.add_rule(matching_rule, selector.target_pseudo_element(), contains_root_pseudo_class);
             }
             ++rule_index;
         });
@@ -393,6 +566,9 @@ void StyleScope::collect_selector_insights(Selector const& selector, SelectorIns
     for (auto const& compound_selector : selector.compound_selectors()) {
         for (auto const& simple_selector : compound_selector.simple_selectors) {
             if (simple_selector.type == Selector::SimpleSelector::Type::PseudoClass) {
+                insights.pseudo_classes.set(simple_selector.pseudo_class().type, true);
+                if (simple_selector.pseudo_class().type == PseudoClass::LocalLink)
+                    insights.has_local_link_selectors = true;
                 if (simple_selector.pseudo_class().type == PseudoClass::Has) {
                     insights.has_has_selectors = true;
                     for (auto const& argument_selector : simple_selector.pseudo_class().argument_selector_list) {
@@ -492,6 +668,7 @@ void StyleScope::build_qualified_layer_names_cache(StyleCache& style_cache)
             case CSSRule::Type::NestedDeclarations:
             case CSSRule::Type::Page:
             case CSSRule::Type::Property:
+            case CSSRule::Type::Scope:
             case CSSRule::Type::Supports:
                 break;
             }
@@ -796,11 +973,39 @@ void StyleScope::build_counter_style_cache()
 
 bool StyleScope::may_have_has_selectors() const
 {
-    if (!has_valid_rule_cache())
-        return true;
+    if (!has_valid_rule_cache()) {
+        bool may_have_has_selectors = false;
+        for (auto cascade_origin : { CascadeOrigin::Author, CascadeOrigin::User, CascadeOrigin::UserAgent }) {
+            for_each_stylesheet(cascade_origin, [&](auto& style_sheet) {
+                if (style_sheet.selector_insights().has_has_selectors)
+                    may_have_has_selectors = true;
+            });
+        }
+        return may_have_has_selectors;
+    }
 
     build_rule_cache_if_needed();
     return m_rule_cache->selector_insights.has_has_selectors;
+}
+
+bool StyleScope::may_have_user_has_selectors() const
+{
+    bool may_have_user_has_selectors = false;
+    for_each_stylesheet(CascadeOrigin::User, [&](auto& style_sheet) {
+        if (style_sheet.selector_insights().has_has_selectors)
+            may_have_user_has_selectors = true;
+    });
+    return may_have_user_has_selectors;
+}
+
+bool StyleScope::may_have_user_pseudo_class_selectors(PseudoClass pseudo_class) const
+{
+    bool may_have_user_pseudo_class_selectors = false;
+    for_each_stylesheet(CascadeOrigin::User, [&](auto& style_sheet) {
+        if (style_sheet.selector_insights().pseudo_classes.get(pseudo_class))
+            may_have_user_pseudo_class_selectors = true;
+    });
+    return may_have_user_pseudo_class_selectors;
 }
 
 bool StyleScope::have_has_selectors() const
@@ -811,8 +1016,16 @@ bool StyleScope::have_has_selectors() const
 
 bool StyleScope::may_have_has_selectors_with_relative_selector_that_has_sibling_combinator() const
 {
-    if (!has_valid_rule_cache())
-        return true;
+    if (!has_valid_rule_cache()) {
+        bool may_have_has_selectors_with_relative_selector_that_has_sibling_combinator = false;
+        for (auto cascade_origin : { CascadeOrigin::Author, CascadeOrigin::User, CascadeOrigin::UserAgent }) {
+            for_each_stylesheet(cascade_origin, [&](auto& style_sheet) {
+                if (style_sheet.selector_insights().has_has_selectors_with_relative_selector_that_has_sibling_combinator)
+                    may_have_has_selectors_with_relative_selector_that_has_sibling_combinator = true;
+            });
+        }
+        return may_have_has_selectors_with_relative_selector_that_has_sibling_combinator;
+    }
 
     build_rule_cache_if_needed();
     return m_rule_cache->selector_insights.has_has_selectors_with_relative_selector_that_has_sibling_combinator;
@@ -822,6 +1035,12 @@ bool StyleScope::have_has_selectors_with_relative_selector_that_has_sibling_comb
 {
     build_rule_cache_if_needed();
     return m_rule_cache->selector_insights.has_has_selectors_with_relative_selector_that_has_sibling_combinator;
+}
+
+bool StyleScope::have_size_container_queries() const
+{
+    build_rule_cache_if_needed();
+    return m_rule_cache->has_size_container_queries;
 }
 
 DOM::Document& StyleScope::document() const

@@ -215,12 +215,15 @@ bool SourceBuffer::updating() const
 }
 
 // https://w3c.github.io/media-source/#dom-sourcebuffer-buffered
-GC::Ref<HTML::TimeRanges> SourceBuffer::buffered()
+WebIDL::ExceptionOr<GC::Ref<HTML::TimeRanges>> SourceBuffer::buffered()
 {
-    auto time_ranges = realm().create<HTML::TimeRanges>(realm());
+    // 1. If this object has been removed from the sourceBuffers attribute of the parent media source then throw
+    //    an InvalidStateError exception and abort these steps.
 
-    // FIXME: 1. If this object has been removed from the sourceBuffers attribute of the parent media source then throw
-    //           an InvalidStateError exception and abort these steps.
+    if (!m_media_source->source_buffers()->contains(*this))
+        return WebIDL::InvalidStateError::create(realm(), "SourceBuffer has been removed"_utf16);
+
+    auto time_ranges = realm().create<HTML::TimeRanges>(realm());
 
     // NB: Further steps to intersect the buffered ranges of the track buffers are implemented within
     //     SourceBufferProcessor::buffered_ranges() below, since it has access to the track buffers.
@@ -271,7 +274,7 @@ WebIDL::ExceptionOr<void> SourceBuffer::set_mode(Bindings::AppendMode mode)
 }
 
 // https://w3c.github.io/media-source/#sourcebuffer-prepare-append
-WebIDL::ExceptionOr<void> SourceBuffer::prepare_append()
+WebIDL::ExceptionOr<void> SourceBuffer::prepare_append(size_t new_data_size, AK::Duration current_time)
 {
     // FIXME: Support MediaSourceExtensions in workers.
     if (!m_media_source->media_element_assigned_to())
@@ -314,7 +317,7 @@ WebIDL::ExceptionOr<void> SourceBuffer::prepare_append()
     }
 
     // 6. Run the coded frame eviction algorithm.
-    m_processor->run_coded_frame_eviction();
+    m_processor->run_coded_frame_eviction(new_data_size, current_time);
 
     // 7. If the [[buffer full flag]] equals true, then throw a QuotaExceededError exception and abort these steps.
     if (m_processor->is_buffer_full())
@@ -324,14 +327,14 @@ WebIDL::ExceptionOr<void> SourceBuffer::prepare_append()
 }
 
 // https://w3c.github.io/media-source/#dom-sourcebuffer-appendbuffer
-WebIDL::ExceptionOr<void> SourceBuffer::append_buffer(GC::Root<WebIDL::BufferSource> const& data)
+WebIDL::ExceptionOr<void> SourceBuffer::append_buffer(WebIDL::BufferSource data)
 {
     // 1. Run the prepare append algorithm.
-    TRY(prepare_append());
+    TRY(prepare_append(data.byte_length(), m_media_source->media_element_assigned_to()->playback_manager().current_time()));
 
     // 2. Add data to the end of the [[input buffer]].
-    if (auto array_buffer = data->viewed_array_buffer(); array_buffer && !array_buffer->is_detached()) {
-        auto bytes = array_buffer->buffer().bytes().slice(data->byte_offset(), data->byte_length());
+    if (auto array_buffer = data.viewed_array_buffer(); array_buffer && !array_buffer->is_detached()) {
+        auto bytes = array_buffer->bytes().slice(data.byte_offset(), data.byte_length());
         m_processor->append_to_input_buffer(bytes);
     }
 

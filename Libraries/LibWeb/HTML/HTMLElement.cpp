@@ -10,6 +10,7 @@
 #include <LibWeb/ARIA/Roles.h>
 #include <LibWeb/Bindings/ExceptionOrUtils.h>
 #include <LibWeb/Bindings/HTMLElement.h>
+#include <LibWeb/Bindings/PointerEvent.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/StyleValues/DisplayStyleValue.h>
 #include <LibWeb/DOM/Document.h>
@@ -45,6 +46,7 @@
 #include <LibWeb/Infra/Strings.h>
 #include <LibWeb/Layout/Box.h>
 #include <LibWeb/Layout/TextNode.h>
+#include <LibWeb/Layout/TextOffsetMapping.h>
 #include <LibWeb/Namespace.h>
 #include <LibWeb/Painting/PaintableBox.h>
 #include <LibWeb/Selection/Selection.h>
@@ -73,7 +75,7 @@ void HTMLElement::initialize(JS::Realm& realm)
 void HTMLElement::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
-    HTMLOrSVGElement::visit_edges(visitor);
+    HTMLOrSVGOrMathMLElement::visit_edges(visitor);
     FormAssociatedElement::visit_edges(visitor);
     visitor.visit(m_labels);
     visitor.visit(m_attached_internals);
@@ -122,7 +124,8 @@ void HTMLElement::set_dir(String const& dir)
 
 bool HTMLElement::is_focusable() const
 {
-    return Base::is_focusable() || is_editing_host();
+    return (Base::is_focusable() || is_editing_host())
+        && meets_focusable_area_rendering_requirements();
 }
 
 // https://html.spec.whatwg.org/multipage/interaction.html#dom-iscontenteditable
@@ -221,7 +224,7 @@ WebIDL::ExceptionOr<void> HTMLElement::set_outer_text(Utf16View const& value)
         MUST(fragment->append_child(document().create_text_node({})));
 
     // 6. Replace this with fragment within this's parent.
-    MUST(parent()->replace_child(fragment, *this));
+    TRY(parent()->replace_child(fragment, *this));
 
     // 7. If next is non-null and next's previous sibling is a Text node, then merge with the next text node given next's previous sibling.
     if (next && is<DOM::Text>(next->previous_sibling()))
@@ -311,6 +314,8 @@ static Vector<Variant<Utf16String, RequiredLineBreakCount>> rendered_text_collec
     auto* layout_node = node.layout_node();
     if (!layout_node)
         return items;
+    if (!layout_node->has_style_or_parent_with_style())
+        return items;
 
     auto const& computed_values = layout_node->computed_values();
 
@@ -331,13 +336,16 @@ static Vector<Variant<Utf16String, RequiredLineBreakCount>> rendered_text_collec
     //    element. Soft hyphens should be preserved. [CSSTEXT]
 
     if (auto const* layout_text_node = as_if<Layout::TextNode>(layout_node)) {
-        Layout::TextNode::ChunkIterator iterator { *layout_text_node, false, false };
-        while (true) {
-            auto chunk = iterator.next();
-            if (!chunk.has_value())
-                break;
-            items.append(Utf16String::from_utf16(chunk.release_value().view));
-        }
+        Layout::TextOffsetMapping mapping { layout_text_node->dom_node() };
+        mapping.for_each_fragment([&](Layout::TextNode const& slice) {
+            Layout::TextNode::ChunkIterator iterator { slice, false, false };
+            while (true) {
+                auto chunk = iterator.next();
+                if (!chunk.has_value())
+                    break;
+                items.append(Utf16String::from_utf16(chunk.release_value().view));
+            }
+        });
         return items;
     }
 
@@ -676,7 +684,7 @@ int HTMLElement::offset_width() const
     const_cast<DOM::Document&>(document()).update_layout_if_needed_for_node(*this, DOM::UpdateLayoutReason::HTMLElementOffsetWidth);
 
     // 1. If the element does not have any associated box return zero and terminate this algorithm.
-    auto const* box = paintable_box();
+    auto box = paintable_box();
     if (!box)
         return 0;
 
@@ -695,7 +703,7 @@ int HTMLElement::offset_height() const
     const_cast<DOM::Document&>(document()).update_layout_if_needed_for_node(*this, DOM::UpdateLayoutReason::HTMLElementOffsetHeight);
 
     // 1. If the element does not have any associated box return zero and terminate this algorithm.
-    auto const* box = paintable_box();
+    auto box = paintable_box();
     if (!box)
         return 0;
 
@@ -710,7 +718,7 @@ int HTMLElement::offset_height() const
 void HTMLElement::attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
 {
     Base::attribute_changed(name, old_value, value, namespace_);
-    HTMLOrSVGElement::attribute_changed(name, old_value, value, namespace_);
+    HTMLOrSVGOrMathMLElement::attribute_changed(name, old_value, value, namespace_);
 
     if (name == HTML::AttributeNames::contenteditable) {
         if (!value.has_value()) {
@@ -780,12 +788,19 @@ void HTMLElement::attribute_changed(FlyString const& name, Optional<String> cons
 
 void HTMLElement::set_subtree_inertness(bool is_inert)
 {
-    set_inert(is_inert);
+    auto update_inertness = [&](HTMLElement& element) {
+        if (element.is_inert() == is_inert)
+            return;
+        element.set_inert(is_inert);
+        element.set_needs_repaint();
+    };
+
+    update_inertness(*this);
     for_each_in_subtree_of_type<HTMLElement>([&](auto& html_element) {
         if (html_element.has_attribute(HTML::AttributeNames::inert))
             return TraversalDecision::SkipChildrenAndContinue;
         // FIXME: Exclude elements that should escape inertness.
-        html_element.set_inert(is_inert);
+        update_inertness(html_element);
         return TraversalDecision::Continue;
     });
 }
@@ -793,14 +808,14 @@ void HTMLElement::set_subtree_inertness(bool is_inert)
 WebIDL::ExceptionOr<void> HTMLElement::cloned(Web::DOM::Node& copy, bool clone_children) const
 {
     TRY(Base::cloned(copy, clone_children));
-    TRY(HTMLOrSVGElement::cloned(copy, clone_children));
+    TRY(HTMLOrSVGOrMathMLElement::cloned(copy, clone_children));
     return {};
 }
 
 void HTMLElement::inserted()
 {
     Base::inserted();
-    HTMLOrSVGElement::inserted();
+    HTMLOrSVGOrMathMLElement::inserted();
 
     if (auto* parent_html_element = first_ancestor_of_type<HTMLElement>(); parent_html_element && parent_html_element->is_inert() && !has_attribute(HTML::AttributeNames::inert))
         set_subtree_inertness(true);
@@ -1197,10 +1212,10 @@ WebIDL::ExceptionOr<bool> HTMLElement::check_popover_validity(ExpectedToBeShowin
 }
 
 // https://html.spec.whatwg.org/multipage/popover.html#dom-showpopover
-WebIDL::ExceptionOr<void> HTMLElement::show_popover_for_bindings(ShowPopoverOptions const& options)
+WebIDL::ExceptionOr<void> HTMLElement::show_popover_for_bindings(Bindings::ShowPopoverOptions const& options)
 {
     // 1. Let source be options["source"] if it exists; otherwise, null.
-    auto source = options.source;
+    auto source = GC::Ptr<HTMLElement> { options.source };
     // 2. Run show popover given this, true, and source.
     return show_popover(ThrowExceptions::Yes, source);
 }
@@ -1242,11 +1257,11 @@ WebIDL::ExceptionOr<void> HTMLElement::show_popover(ThrowExceptions throw_except
     //    initialized to true, the oldState attribute initialized to "closed", the newState attribute initialized to
     //    "open" at element, and the source attribute initialized to source at element is false,
     //    then run cleanupShowingFlag and return.
-    ToggleEventInit event_init {};
+    Bindings::ToggleEventInit event_init {};
     event_init.old_state = "closed"_string;
     event_init.new_state = "open"_string;
     event_init.cancelable = true;
-    event_init.source = source;
+    event_init.source = GC::make_root<DOM::Element>(source.ptr());
     if (!dispatch_event(ToggleEvent::create(realm(), HTML::EventNames::beforetoggle, move(event_init)))) {
         cleanup_showing_flag();
         return {};
@@ -1482,10 +1497,10 @@ WebIDL::ExceptionOr<void> HTMLElement::hide_popover(FocusPreviousElement focus_p
     if (fire_events == FireEvents::Yes) {
         // 1. Fire an event named beforetoggle, using ToggleEvent, with the oldState attribute initialized to "open",
         //    the newState attribute initialized to "closed", and the source attribute set to source at element.
-        ToggleEventInit event_init {};
+        Bindings::ToggleEventInit event_init {};
         event_init.old_state = "open"_string;
         event_init.new_state = "closed"_string;
-        event_init.source = source;
+        event_init.source = GC::make_root<DOM::Element>(source.ptr());
         dispatch_event(ToggleEvent::create(realm(), HTML::EventNames::beforetoggle, move(event_init)));
 
         // 2. If autoPopoverListContainsElement is true and document's showing auto popover list's last item is not
@@ -1570,7 +1585,7 @@ WebIDL::ExceptionOr<bool> HTMLElement::toggle_popover(TogglePopoverOptionsOrForc
         [&force](bool forceBool) {
             force = forceBool;
         },
-        [&force, &source](TogglePopoverOptions options) {
+        [&force, &source](Bindings::TogglePopoverOptions options) {
             // 3. Otherwise, if options["force"] exists, set force to options["force"].
             force = options.force;
             // 4. Let source be options["source"] if it exists; otherwise, null.
@@ -1883,10 +1898,10 @@ void HTMLElement::queue_a_popover_toggle_event_task(String old_state, String new
     auto task_id = queue_an_element_task(HTML::Task::Source::DOMManipulation, [this, old_state, new_state = move(new_state), source]() mutable {
         // 1. Fire an event named toggle at element, using ToggleEvent, with the oldState attribute initialized to
         //    oldState, the newState attribute initialized to newState, and the source attribute initialized to source.
-        ToggleEventInit event_init {};
+        Bindings::ToggleEventInit event_init {};
         event_init.old_state = move(old_state);
         event_init.new_state = move(new_state);
-        event_init.source = source;
+        event_init.source = GC::make_root<DOM::Element>(source.ptr());
 
         dispatch_event(ToggleEvent::create(realm(), HTML::EventNames::toggle, move(event_init)));
 

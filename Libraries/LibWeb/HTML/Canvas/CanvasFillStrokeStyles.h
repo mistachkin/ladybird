@@ -10,16 +10,15 @@
 #pragma once
 
 #include <LibWeb/Forward.h>
-#include <LibWeb/HTML/Canvas/CanvasState.h>
+#include <LibWeb/HTML/Canvas/AbstractCanvasMixin.h>
 
 namespace Web::HTML {
 
 // https://html.spec.whatwg.org/multipage/canvas.html#canvasfillstrokestyles
-template<typename IncludingClass>
-class CanvasFillStrokeStyles {
+class CanvasFillStrokeStyles : protected virtual AbstractCanvasMixin {
 public:
     ~CanvasFillStrokeStyles() = default;
-    using FillOrStrokeStyleVariant = Variant<String, GC::Root<CanvasGradient>, GC::Root<CanvasPattern>>;
+    using FillOrStrokeStyleVariant = Variant<String, GC::Ref<CanvasGradient>, GC::Ref<CanvasPattern>>;
 
     void set_fill_style(FillOrStrokeStyleVariant style);
     FillOrStrokeStyleVariant fill_style() const;
@@ -34,11 +33,6 @@ public:
 
 protected:
     CanvasFillStrokeStyles() = default;
-
-private:
-    Variant<HTMLCanvasElement*, OffscreenCanvas*> my_canvas_element();
-    CanvasState::DrawingState& my_drawing_state();
-    CanvasState::DrawingState const& my_drawing_state() const;
 };
 
 }

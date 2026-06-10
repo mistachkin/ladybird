@@ -44,7 +44,7 @@ void Cache::visit_edges(Visitor& visitor)
 }
 
 // https://w3c.github.io/ServiceWorker/#cache-match
-GC::Ref<WebIDL::Promise> Cache::match(Fetch::RequestInfo request, CacheQueryOptions options)
+GC::Ref<WebIDL::Promise> Cache::match(Fetch::RequestInfo request, Bindings::CacheQueryOptions options)
 {
     auto& realm = HTML::relevant_realm(*this);
 
@@ -93,7 +93,7 @@ GC::Ref<WebIDL::Promise> Cache::match(Fetch::RequestInfo request, CacheQueryOpti
 }
 
 // https://w3c.github.io/ServiceWorker/#cache-matchall
-GC::Ref<WebIDL::Promise> Cache::match_all(Optional<Fetch::RequestInfo> request, CacheQueryOptions options)
+GC::Ref<WebIDL::Promise> Cache::match_all(Optional<Fetch::RequestInfo> request, Bindings::CacheQueryOptions options)
 {
     auto& realm = HTML::relevant_realm(*this);
 
@@ -104,7 +104,7 @@ GC::Ref<WebIDL::Promise> Cache::match_all(Optional<Fetch::RequestInfo> request, 
     if (request.has_value()) {
         TRY(request->visit(
             // 1. If request is a Request object, then:
-            [&](GC::Root<Fetch::Request> const& request) -> ErrorOr<void, GC::Ref<WebIDL::Promise>> {
+            [&](GC::Ref<Fetch::Request> request) -> ErrorOr<void, GC::Ref<WebIDL::Promise>> {
                 // 1. Set r to request’s request.
                 inner_request = request->request();
 
@@ -226,7 +226,7 @@ GC::Ref<WebIDL::Promise> Cache::add_all(ReadonlySpan<Fetch::RequestInfo> request
 
     // 3. For each request whose type is Request in requests:
     for (auto const& request_info : requests) {
-        if (auto const* request = request_info.get_pointer<GC::Root<Fetch::Request>>()) {
+        if (auto const* request = request_info.get_pointer<GC::Ref<Fetch::Request>>()) {
             // 1. Let r be request’s request.
             auto inner_request = (*request)->request();
 
@@ -415,7 +415,7 @@ GC::Ref<WebIDL::Promise> Cache::put(Fetch::RequestInfo request, GC::Ref<Fetch::R
 
     TRY(request.visit(
         // 2. If request is a Request object, then set innerRequest to request’s request.
-        [&](GC::Root<Fetch::Request> const& request) -> ErrorOr<void, GC::Ref<WebIDL::Promise>> {
+        [&](GC::Ref<Fetch::Request> request) -> ErrorOr<void, GC::Ref<WebIDL::Promise>> {
             inner_request = request->request();
             return {};
         },
@@ -536,7 +536,7 @@ GC::Ref<WebIDL::Promise> Cache::put(Fetch::RequestInfo request, GC::Ref<Fetch::R
 }
 
 // https://w3c.github.io/ServiceWorker/#cache-delete
-GC::Ref<WebIDL::Promise> Cache::delete_(Fetch::RequestInfo request, CacheQueryOptions options)
+GC::Ref<WebIDL::Promise> Cache::delete_(Fetch::RequestInfo request, Bindings::CacheQueryOptions options)
 {
     auto& realm = HTML::relevant_realm(*this);
 
@@ -545,7 +545,7 @@ GC::Ref<WebIDL::Promise> Cache::delete_(Fetch::RequestInfo request, CacheQueryOp
 
     TRY(request.visit(
         // 2. If request is a Request object, then:
-        [&](GC::Root<Fetch::Request> const& request) -> ErrorOr<void, GC::Ref<WebIDL::Promise>> {
+        [&](GC::Ref<Fetch::Request> request) -> ErrorOr<void, GC::Ref<WebIDL::Promise>> {
             // 1. Set r to request’s request.
             inner_request = request->request();
 
@@ -622,7 +622,7 @@ GC::Ref<WebIDL::Promise> Cache::delete_(Fetch::RequestInfo request, CacheQueryOp
 }
 
 // https://w3c.github.io/ServiceWorker/#cache-keys
-GC::Ref<WebIDL::Promise> Cache::keys(Optional<Fetch::RequestInfo> request, CacheQueryOptions options)
+GC::Ref<WebIDL::Promise> Cache::keys(Optional<Fetch::RequestInfo> request, Bindings::CacheQueryOptions options)
 {
     auto& realm = HTML::relevant_realm(*this);
 
@@ -633,7 +633,7 @@ GC::Ref<WebIDL::Promise> Cache::keys(Optional<Fetch::RequestInfo> request, Cache
     if (request.has_value()) {
         TRY(request->visit(
             // 1. If request is a Request object, then:
-            [&](GC::Root<Fetch::Request> const& request) -> ErrorOr<void, GC::Ref<WebIDL::Promise>> {
+            [&](GC::Ref<Fetch::Request> request) -> ErrorOr<void, GC::Ref<WebIDL::Promise>> {
                 // 1. Set r to request’s request.
                 inner_request = request->request();
 
@@ -720,7 +720,7 @@ static bool request_matches_cached_item(
     GC::Ref<Fetch::Infrastructure::Request> request_query,
     GC::Ref<Fetch::Infrastructure::Request> request,
     GC::Ptr<Fetch::Infrastructure::Response> response,
-    CacheQueryOptions options)
+    Bindings::CacheQueryOptions options)
 {
     // 1. If options["ignoreMethod"] is false and request’s method is not `GET`, return false.
     if (!options.ignore_method && request->method() != "GET"sv)
@@ -768,7 +768,7 @@ static bool request_matches_cached_item(
 }
 
 // https://w3c.github.io/ServiceWorker/#query-cache-algorithm
-GC::Ref<RequestResponseList> Cache::query_cache(GC::Ref<Fetch::Infrastructure::Request> request_query, CacheQueryOptions options, GC::Ptr<RequestResponseList> target_storage, CloneCache clone_cache)
+GC::Ref<RequestResponseList> Cache::query_cache(GC::Ref<Fetch::Infrastructure::Request> request_query, Bindings::CacheQueryOptions options, GC::Ptr<RequestResponseList> target_storage, CloneCache clone_cache)
 {
     auto& realm = HTML::relevant_realm(*this);
 

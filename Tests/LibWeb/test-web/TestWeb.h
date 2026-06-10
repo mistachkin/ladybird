@@ -14,8 +14,9 @@
 #include <AK/String.h>
 #include <AK/Time.h>
 #include <AK/Vector.h>
-#include <LibCore/Forward.h>
 #include <LibCore/Promise.h>
+#include <LibCore/Timer.h>
+#include <LibGfx/Bitmap.h>
 #include <LibGfx/Forward.h>
 
 namespace TestWeb {
@@ -51,7 +52,6 @@ enum class TestResult {
     Skipped,
     Timeout,
     Crashed,
-    Expanded,
 };
 
 constexpr StringView test_result_to_string(TestResult result)
@@ -67,13 +67,12 @@ constexpr StringView test_result_to_string(TestResult result)
         return "Timeout"sv;
     case TestResult::Crashed:
         return "Crashed"sv;
-    case TestResult::Expanded:
-        return "Expanded"sv;
     }
     VERIFY_NOT_REACHED();
 }
 
 enum class RefTestExpectationType {
+    None, // Test did not specify an expection file
     Match,
     Mismatch,
 };
@@ -98,9 +97,8 @@ struct Test {
     bool did_finish_test { false };
     bool did_finish_loading { false };
     bool did_inject_js { false };
-    bool did_check_variants { false };
 
-    Optional<RefTestExpectationType> ref_test_expectation_type {};
+    RefTestExpectationType ref_test_expectation_type {};
     Optional<URL::URL> ref_test_expectation_url {};
     Vector<FuzzyMatch> fuzzy_matches {};
 

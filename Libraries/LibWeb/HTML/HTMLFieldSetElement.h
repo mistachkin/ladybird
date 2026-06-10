@@ -22,7 +22,7 @@ public:
 
     String const& type() const
     {
-        static String const fieldset = "fieldset"_string;
+        static String const& fieldset = *new String("fieldset"_string);
         return fieldset;
     }
 
@@ -42,7 +42,7 @@ public:
 
     virtual Optional<ARIA::Role> default_role() const override { return ARIA::Role::group; }
 
-    virtual GC::Ptr<Layout::Node> create_layout_node(GC::Ref<CSS::ComputedProperties>) override;
+    virtual RefPtr<Layout::Node> create_layout_node(CSS::ComputedProperties const&) override;
     Layout::FieldSetBox* layout_node();
     Layout::FieldSetBox const* layout_node() const;
 

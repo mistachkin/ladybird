@@ -6,15 +6,16 @@
 
 #pragma once
 
+#include <LibGfx/AntiAliasing.h>
 #include <LibWeb/Layout/SVGBox.h>
 #include <LibWeb/Painting/PaintableBox.h>
 
 namespace Web::Painting {
 
 class SVGPaintable : public PaintableBox {
-    GC_CELL(SVGPaintable, PaintableBox);
-
 public:
+    virtual StringView class_name() const override { return "SVGPaintable"sv; }
+
     Layout::SVGBox const& layout_box() const;
     virtual Optional<CSSPixelRect> clip_path_geometry_bounds(Gfx::AffineTransform const& additional_transform) const;
     bool contributes_to_clip_path() const;
@@ -26,7 +27,7 @@ protected:
 
     virtual CSSPixelRect compute_absolute_rect() const override;
 
-    ShouldAntiAlias should_anti_alias() const;
+    Gfx::ShouldAntiAlias should_anti_alias() const;
 };
 
 template<>

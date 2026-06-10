@@ -11,37 +11,31 @@
 #include <AK/Optional.h>
 #include <AK/Variant.h>
 #include <LibGC/Root.h>
+#include <LibWeb/Bindings/TrackEvent.h>
 #include <LibWeb/DOM/Event.h>
 
 namespace Web::HTML {
 
-using NullableTrackType = Variant<GC::Root<VideoTrack>, GC::Root<AudioTrack>, GC::Root<TextTrack>, Empty>;
-
-struct TrackEventInit : public DOM::EventInit {
-    NullableTrackType track { Empty {} };
-};
+using NullableTrackType = Variant<GC::Ref<VideoTrack>, GC::Ref<AudioTrack>, GC::Ref<TextTrack>, Empty>;
 
 class TrackEvent : public DOM::Event {
     WEB_PLATFORM_OBJECT(TrackEvent, DOM::Event);
     GC_DECLARE_ALLOCATOR(TrackEvent);
 
 public:
-    [[nodiscard]] static GC::Ref<TrackEvent> create(JS::Realm&, FlyString const& event_name, TrackEventInit = {});
-    static WebIDL::ExceptionOr<GC::Ref<TrackEvent>> construct_impl(JS::Realm&, FlyString const& event_name, TrackEventInit);
+    [[nodiscard]] static GC::Ref<TrackEvent> create(JS::Realm&, FlyString const& event_name, Bindings::TrackEventInit const& = {});
+    static WebIDL::ExceptionOr<GC::Ref<TrackEvent>> construct_impl(JS::Realm&, FlyString const& event_name, Bindings::TrackEventInit const&);
 
     // https://html.spec.whatwg.org/multipage/media.html#dom-trackevent-track
     NullableTrackType track() const;
 
 private:
-    TrackEvent(JS::Realm&, FlyString const& event_name, TrackEventInit event_init);
+    TrackEvent(JS::Realm&, FlyString const& event_name, Bindings::TrackEventInit const&);
 
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Visitor&) override;
 
-    using TrackTypeInternal = Variant<Empty, GC::Ref<VideoTrack>, GC::Ref<AudioTrack>, GC::Ref<TextTrack>>;
-    static TrackTypeInternal to_track_type_internal(NullableTrackType const&);
-
-    TrackTypeInternal m_track;
+    NullableTrackType m_track;
 };
 
 }

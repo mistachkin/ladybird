@@ -6,12 +6,18 @@
 
 #pragma once
 
+#include <AK/ByteBuffer.h>
+#include <AK/Error.h>
+#include <AK/Function.h>
 #include <AK/NonnullOwnPtr.h>
+#include <AK/Types.h>
 #include <LibGfx/Color.h>
 #include <LibGfx/CompositingAndBlendingOperator.h>
+#include <LibGfx/DecodedImageFrame.h>
 #include <LibGfx/Forward.h>
 #include <LibGfx/Rect.h>
 #include <LibGfx/ScalingMode.h>
+#include <LibIPC/Forward.h>
 
 namespace Gfx {
 
@@ -43,6 +49,8 @@ class Filter {
 public:
     Filter(Filter const&);
     Filter& operator=(Filter const&);
+    Filter(Filter&&);
+    Filter& operator=(Filter&&);
 
     ~Filter();
 
@@ -58,7 +66,7 @@ public:
     static Filter color_table(Optional<ReadonlyBytes> a, Optional<ReadonlyBytes> r, Optional<ReadonlyBytes> g, Optional<ReadonlyBytes> b, Optional<Filter const&> input = {});
     static Filter saturate(float value, Optional<Filter const&> input = {});
     static Filter hue_rotate(float angle_degrees, Optional<Filter const&> input = {});
-    static Filter image(Gfx::ImmutableBitmap const& bitmap, Gfx::IntRect const& src_rect, Gfx::IntRect const& dest_rect, Gfx::ScalingMode scaling_mode);
+    static Filter image(Gfx::DecodedImageFrame const&, Gfx::IntRect const& src_rect, Gfx::IntRect const& dest_rect, Gfx::ScalingMode scaling_mode);
     static Filter merge(Vector<Optional<Filter>> const&);
     static Filter offset(float dx, float dy, Optional<Filter const&> input = {});
     static Filter erode(float radius_x, float radius_y, Optional<Filter> const& input = {});
@@ -71,5 +79,18 @@ private:
     Filter(NonnullOwnPtr<FilterImpl>&&);
     NonnullOwnPtr<FilterImpl> m_impl;
 };
+
+ByteBuffer serialize_filter(Filter const&, Function<u64(Gfx::DecodedImageFrame const&)> const& encode_image);
+Filter deserialize_filter(ReadonlyBytes, Function<Gfx::DecodedImageFrame(u64)> const& decode_image);
+
+}
+
+namespace IPC {
+
+template<>
+ErrorOr<void> encode(Encoder&, Gfx::Filter const&);
+
+template<>
+ErrorOr<Gfx::Filter> decode(Decoder&);
 
 }

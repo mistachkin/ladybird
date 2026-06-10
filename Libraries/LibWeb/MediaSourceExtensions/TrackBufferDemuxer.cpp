@@ -20,7 +20,7 @@ TrackBufferDemuxer::~TrackBufferDemuxer() = default;
 
 Media::TimeRanges TrackBufferDemuxer::track_buffer_ranges() const
 {
-    Threading::MutexLocker locker { m_mutex };
+    Sync::MutexLocker locker { m_mutex };
     // https://w3c.github.io/media-source/#track-buffer-ranges
     // NOTE: Implementations MAY coalesce adjacent ranges separated by a gap smaller than 2 times the
     //       maximum frame duration buffered so far in this track buffer.
@@ -32,7 +32,7 @@ Media::TimeRanges TrackBufferDemuxer::track_buffer_ranges() const
 
 void TrackBufferDemuxer::add_coded_frame(Media::CodedFrame frame)
 {
-    Threading::MutexLocker locker { m_mutex };
+    Sync::MutexLocker locker { m_mutex };
     auto start = frame.timestamp();
     auto end = frame.timestamp() + frame.duration();
     m_last_frame_duration = frame.duration();
@@ -50,6 +50,7 @@ void TrackBufferDemuxer::add_coded_frame(Media::CodedFrame frame)
     if (insert_index < m_coded_frames.size() && m_coded_frames[insert_index].timestamp() < timestamp)
         insert_index++;
 
+    m_total_bytes += frame.data().size();
     m_coded_frames.insert(insert_index, move(frame));
 
     if (insert_index <= m_read_position && (!m_last_returned_timestamp.has_value() || m_last_returned_timestamp.value() > timestamp))
@@ -60,7 +61,7 @@ void TrackBufferDemuxer::add_coded_frame(Media::CodedFrame frame)
 
 void TrackBufferDemuxer::remove_coded_frames_and_dependants_in_range(AK::Duration start, AK::Duration end)
 {
-    Threading::MutexLocker locker { m_mutex };
+    Sync::MutexLocker locker { m_mutex };
 
     // https://w3c.github.io/media-source/#sourcebuffer-coded-frame-processing
     // 1.13. Remove all coded frames from track buffer that have a presentation timestamp greater than
@@ -88,6 +89,7 @@ void TrackBufferDemuxer::remove_coded_frames_and_dependants_in_range(AK::Duratio
         auto removed_start = removed_frame.timestamp();
         auto removed_end = (removed_frame.timestamp() + removed_frame.duration());
         m_track_buffer_ranges.remove_range(removed_start, removed_end);
+        m_total_bytes -= removed_frame.data().size();
     }
 
     m_coded_frames.remove(remove_start, remove_end - remove_start);
@@ -105,16 +107,77 @@ void TrackBufferDemuxer::remove_coded_frames_and_dependants_in_range(AK::Duratio
     }
 }
 
+size_t TrackBufferDemuxer::total_bytes() const
+{
+    Sync::MutexLocker locker { m_mutex };
+    return m_total_bytes;
+}
+
+bool TrackBufferDemuxer::is_frame_evictable_while_locked(Media::CodedFrame const& frame, AK::Duration current_time) const
+{
+    auto time_range_start = current_time;
+    auto time_range_end = current_time;
+    if (m_last_returned_timestamp.has_value()) {
+        time_range_start = min(time_range_start, m_last_returned_timestamp.value());
+        time_range_end = max(time_range_end, m_last_returned_timestamp.value());
+    }
+    return frame.timestamp() < time_range_start || frame.timestamp() > time_range_end;
+}
+
+Optional<AK::Duration> TrackBufferDemuxer::earliest_evictable_frame_timestamp(AK::Duration current_time) const
+{
+    Sync::MutexLocker locker { m_mutex };
+    if (m_coded_frames.is_empty())
+        return {};
+    auto const& frame = m_coded_frames[0];
+    if (!is_frame_evictable_while_locked(frame, current_time))
+        return {};
+    return frame.timestamp();
+}
+
+size_t TrackBufferDemuxer::take_earliest_frame()
+{
+    Sync::MutexLocker locker { m_mutex };
+    auto frame = m_coded_frames.take_first();
+    m_track_buffer_ranges.remove_range(frame.timestamp(), frame.timestamp() + frame.duration());
+    auto bytes = frame.data().size();
+    m_total_bytes -= bytes;
+    if (m_read_position > 0)
+        m_read_position--;
+    return bytes;
+}
+
+Optional<AK::Duration> TrackBufferDemuxer::latest_evictable_frame_timestamp(AK::Duration current_time) const
+{
+    Sync::MutexLocker locker { m_mutex };
+    if (m_coded_frames.is_empty())
+        return {};
+    auto const& frame = m_coded_frames.last();
+    if (!is_frame_evictable_while_locked(frame, current_time))
+        return {};
+    return frame.timestamp();
+}
+
+size_t TrackBufferDemuxer::take_latest_frame()
+{
+    Sync::MutexLocker locker { m_mutex };
+    auto frame = m_coded_frames.take_last();
+    m_track_buffer_ranges.remove_range(frame.timestamp(), frame.timestamp() + frame.duration());
+    auto bytes = frame.data().size();
+    m_total_bytes -= bytes;
+    return bytes;
+}
+
 void TrackBufferDemuxer::set_reached_end_of_stream()
 {
-    Threading::MutexLocker locker { m_mutex };
+    Sync::MutexLocker locker { m_mutex };
     m_reached_end_of_stream = true;
     m_data_changed.broadcast();
 }
 
 void TrackBufferDemuxer::clear_reached_end_of_stream()
 {
-    Threading::MutexLocker locker { m_mutex };
+    Sync::MutexLocker locker { m_mutex };
     m_reached_end_of_stream = false;
 }
 
@@ -155,7 +218,7 @@ bool TrackBufferDemuxer::next_frame_is_in_gap_while_locked() const
 
 Media::DecoderErrorOr<Media::CodedFrame> TrackBufferDemuxer::get_next_sample_for_track(Media::Track const&)
 {
-    Threading::MutexLocker locker { m_mutex };
+    Sync::MutexLocker locker { m_mutex };
 
     while (m_read_position >= m_coded_frames.size() || next_frame_is_in_gap_while_locked()) {
         if (m_aborted.load())
@@ -179,9 +242,41 @@ Media::DecoderErrorOr<ReadonlyBytes> TrackBufferDemuxer::get_codec_initializatio
     return m_codec_initialization_data.bytes();
 }
 
+AK::Duration TrackBufferDemuxer::select_fast_seek_target_for_track(Media::Track const&, AK::Duration target, Media::SeekMode mode)
+{
+    Sync::MutexLocker locker { m_mutex };
+    if (m_coded_frames.is_empty())
+        return target;
+
+    size_t nearby_index = 0;
+    binary_search(m_coded_frames, target, &nearby_index, [](AK::Duration needle, Media::CodedFrame const& frame) {
+        return needle <=> frame.timestamp();
+    });
+
+    if (mode == Media::SeekMode::FastBefore) {
+        if (m_coded_frames[nearby_index].timestamp() > target)
+            return target;
+        for (auto i = nearby_index; i-- > 0;) {
+            if (m_coded_frames[i].is_keyframe())
+                return m_coded_frames[i].timestamp();
+        }
+        return target;
+    }
+
+    VERIFY(mode == Media::SeekMode::FastAfter);
+    auto start = nearby_index;
+    if (m_coded_frames[start].timestamp() < target)
+        start++;
+    for (auto i = start; i < m_coded_frames.size(); i++) {
+        if (m_coded_frames[i].is_keyframe())
+            return m_coded_frames[i].timestamp();
+    }
+    return target;
+}
+
 Media::DecoderErrorOr<Media::DemuxerSeekResult> TrackBufferDemuxer::seek_to_most_recent_keyframe(Media::Track const&, AK::Duration timestamp, Media::DemuxerSeekOptions)
 {
-    Threading::MutexLocker locker { m_mutex };
+    Sync::MutexLocker locker { m_mutex };
 
     size_t best_position = 0;
     AK::Duration best_timestamp;
@@ -254,7 +349,7 @@ Media::TimeRanges TrackBufferDemuxer::buffered_time_ranges() const
 void TrackBufferDemuxer::set_blocking_reads_aborted_for_track(Media::Track const&)
 {
     m_aborted.store(true);
-    Threading::MutexLocker locker { m_mutex };
+    Sync::MutexLocker locker { m_mutex };
     m_data_changed.broadcast();
 }
 
@@ -265,7 +360,7 @@ void TrackBufferDemuxer::reset_blocking_reads_aborted_for_track(Media::Track con
 
 bool TrackBufferDemuxer::is_read_blocked_for_track(Media::Track const&)
 {
-    Threading::MutexLocker locker { m_mutex };
+    Sync::MutexLocker locker { m_mutex };
     if (m_aborted.load())
         return false;
     return m_read_position >= m_coded_frames.size() || next_frame_is_in_gap_while_locked();

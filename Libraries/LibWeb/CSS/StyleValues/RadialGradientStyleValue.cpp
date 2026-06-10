@@ -69,12 +69,8 @@ void RadialGradientStyleValue::resolve_for_size(Layout::NodeWithStyle const& nod
     auto center = m_properties.position->resolved(node, gradient_box);
     auto gradient_size = resolve_size(center, gradient_box, node);
 
-    ResolvedDataCacheKey cache_key {
-        .length_resolution_context = Length::ResolutionContext::for_layout_node(node),
-        .size = paint_size,
-    };
-    if (m_resolved_data_cache_key != cache_key) {
-        m_resolved_data_cache_key = move(cache_key);
+    if (m_resolved_size != paint_size) {
+        m_resolved_size = move(paint_size);
         m_resolved = ResolvedData {
             Painting::resolve_radial_gradient_data(node, gradient_size, *this),
             gradient_size,
@@ -115,7 +111,7 @@ bool RadialGradientStyleValue::is_computationally_independent() const
         && (!m_properties.color_interpolation_method || m_properties.color_interpolation_method->is_computationally_independent());
 }
 
-void RadialGradientStyleValue::paint(DisplayListRecordingContext& context, DevicePixelRect const& dest_rect, CSS::ImageRendering) const
+void RadialGradientStyleValue::paint(DisplayListRecordingContext& context, DOM::Document const&, DevicePixelRect const& dest_rect, CSS::ImageRendering) const
 {
     VERIFY(m_resolved.has_value());
     auto center = context.rounded_device_point(m_resolved->center).to_type<int>();

@@ -6,7 +6,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibGfx/ImmutableBitmap.h>
+#include <LibGfx/DecodedImageFrame.h>
 #include <LibWeb/Bindings/CanvasPattern.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/HTML/CanvasPattern.h>
@@ -60,8 +60,8 @@ WebIDL::ExceptionOr<GC::Ptr<CanvasPattern>> CanvasPattern::create(JS::Realm& rea
         return WebIDL::SyntaxError::create(realm, "Repetition value is not valid"_utf16);
 
     // 6. Let pattern be a new CanvasPattern object with the image image and the repetition behavior given by repetition.
-    auto immutable_bitmap = canvas_image_source_bitmap(image);
-    auto paint_style = TRY_OR_THROW_OOM(realm.vm(), Gfx::CanvasPatternPaintStyle::create(immutable_bitmap, *repetition_value));
+    auto frame = canvas_image_source_frame(image);
+    auto paint_style = TRY_OR_THROW_OOM(realm.vm(), Gfx::CanvasPatternPaintStyle::create(frame, *repetition_value));
     auto pattern = realm.create<CanvasPattern>(realm, *paint_style);
 
     // FIXME: 7. If image is not origin-clean, then mark pattern as not origin-clean.
@@ -77,7 +77,7 @@ void CanvasPattern::initialize(JS::Realm& realm)
 }
 
 // https://html.spec.whatwg.org/multipage/canvas.html#dom-canvaspattern-settransform
-WebIDL::ExceptionOr<void> CanvasPattern::set_transform(Geometry::DOMMatrix2DInit& transform)
+WebIDL::ExceptionOr<void> CanvasPattern::set_transform(Bindings::DOMMatrix2DInit& transform)
 {
     // 1. Let matrix be the result of creating a DOMMatrix from the 2D dictionary transform.
     auto matrix = TRY(Geometry::DOMMatrix::create_from_dom_matrix_2d_init(realm(), transform));

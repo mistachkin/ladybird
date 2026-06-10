@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <AK/Optional.h>
 #include <AK/Vector.h>
 #include <LibGfx/Point.h>
 #include <LibGfx/Rect.h>
@@ -17,7 +18,7 @@ namespace Ladybird {
 
 class WebViewBridge final : public WebView::ViewImplementation {
 public:
-    static ErrorOr<NonnullOwnPtr<WebViewBridge>> create(Vector<Web::DevicePixelRect> screen_rects, double device_pixel_ratio, u64 maximum_frames_per_second);
+    static ErrorOr<NonnullOwnPtr<WebViewBridge>> create(Vector<Web::DevicePixelRect> screen_rects, double device_pixel_ratio, u64 maximum_frames_per_second, Optional<u64> display_id);
     virtual ~WebViewBridge() override;
 
     virtual void initialize_client(CreateNewClient = CreateNewClient::Yes) override;
@@ -29,7 +30,7 @@ public:
 
     void set_viewport_rect(Gfx::IntRect);
 
-    void set_maximum_frames_per_second(u64 maximum_frames_per_second);
+    void set_display_metadata(u64 maximum_frames_per_second, Optional<u64> display_id);
 
     void exit_fullscreen();
 
@@ -48,10 +49,10 @@ public:
 
     Function<void()> on_zoom_level_changed;
 
-    auto& pinch_state() { return m_pinch_state; }
-
 private:
-    WebViewBridge(Vector<Web::DevicePixelRect> screen_rects, double device_pixel_ratio, u64 maximum_frames_per_second);
+    WebViewBridge(Vector<Web::DevicePixelRect> screen_rects, double device_pixel_ratio, u64 maximum_frames_per_second, Optional<u64> display_id);
+
+    void update_compositor_display_metadata();
 
     virtual void update_zoom() override;
     virtual Web::DevicePixelSize viewport_size() const override;
@@ -60,11 +61,6 @@ private:
 
     Vector<Web::DevicePixelRect> m_screen_rects;
     Gfx::IntSize m_viewport_size;
-
-    struct PinchState {
-        double previous_scale { 1.0 };
-    };
-    Optional<PinchState> m_pinch_state;
 };
 
 }

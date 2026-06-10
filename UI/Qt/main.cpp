@@ -13,6 +13,9 @@
 #include <UI/Qt/BrowserWindow.h>
 #include <UI/Qt/Settings.h>
 
+#include <QCoreApplication>
+#include <QtGlobal>
+
 #if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
 #    include <QStyleHints>
 #endif
@@ -42,6 +45,12 @@ bool is_using_dark_system_theme(QWidget& widget)
 ErrorOr<int> ladybird_main(Main::Arguments arguments)
 {
     AK::set_rich_debug_enabled(true);
+
+#ifdef AK_OS_MACOS
+    // The web content view is a native QRhiWidget child. Keep it from forcing
+    // every sibling in the tab UI to become native as well.
+    QCoreApplication::setAttribute(Qt::AA_DontCreateNativeWidgetSiblings);
+#endif
 
     auto app = TRY(Ladybird::Application::create(arguments));
     WebView::BrowserProcess browser_process;
@@ -74,22 +83,27 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         };
 
         browser_process.on_new_window = [&](auto const& urls) {
-            app->new_window(urls);
+            auto const& previous_active_window = app->active_window();
+            Ladybird::WindowConfiguration configuration {
+                .width = previous_active_window.width(),
+                .height = previous_active_window.height(),
+                .maximized = previous_active_window.isMaximized(),
+            };
+            app->new_window(urls, configuration);
         };
 
-        auto& window = app->new_window(browser_options.urls);
-        window.setWindowTitle("Ladybird");
-
-        if (Ladybird::Settings::the()->is_maximized()) {
-            window.showMaximized();
-        } else {
-            auto last_position = Ladybird::Settings::the()->last_position();
-            if (last_position.has_value())
-                window.move(last_position.value());
-            window.resize(Ladybird::Settings::the()->last_size());
+        auto last_size = Ladybird::Settings::the()->last_size();
+        Ladybird::WindowConfiguration configuration {
+            .width = last_size.width(),
+            .height = last_size.height(),
+            .maximized = Ladybird::Settings::the()->is_maximized(),
+        };
+        if (auto last_position = Ladybird::Settings::the()->last_position(); last_position.has_value()) {
+            configuration.x = last_position->x();
+            configuration.y = last_position->y();
         }
-
-        window.show();
+        auto& window = app->new_window(browser_options.urls, configuration);
+        window.setWindowTitle("Ladybird");
     }
 
     return app->execute();

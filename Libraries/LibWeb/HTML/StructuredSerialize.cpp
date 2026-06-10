@@ -9,6 +9,7 @@
 
 #include <AK/StdLibExtras.h>
 #include <AK/String.h>
+#include <LibCrypto/BigInt/UnsignedBigInteger.h>
 #include <LibIPC/File.h>
 #include <LibJS/Runtime/Array.h>
 #include <LibJS/Runtime/ArrayBuffer.h>
@@ -143,14 +144,14 @@ static WebIDL::ExceptionOr<void> serialize_array_buffer(JS::VM& vm, TransferData
             //           [[ArrayBufferMaxByteLength]]: value.[[ArrayBufferMaxByteLength]],
             //           FIXME: [[AgentCluster]]: the surrounding agent's agent cluster }.
             data_holder.encode(ValueTag::GrowableSharedArrayBuffer);
-            data_holder.encode(array_buffer.buffer());
+            data_holder.encode(MUST(ByteBuffer::copy(array_buffer.bytes())));
             data_holder.encode(array_buffer.max_byte_length());
         } else {
             // 4. Otherwise, set serialized to { [[Type]]: "SharedArrayBuffer", [[ArrayBufferData]]: value.[[ArrayBufferData]],
             //           [[ArrayBufferByteLength]]: value.[[ArrayBufferByteLength]],
             //           FIXME: [[AgentCluster]]: the surrounding agent's agent cluster }.
             data_holder.encode(ValueTag::SharedArrayBuffer);
-            data_holder.encode(array_buffer.buffer());
+            data_holder.encode(MUST(ByteBuffer::copy(array_buffer.bytes())));
         }
     }
     // 2. Otherwise:
@@ -167,19 +168,21 @@ static WebIDL::ExceptionOr<void> serialize_array_buffer(JS::VM& vm, TransferData
         auto data_copy = TRY(JS::create_byte_data_block(vm, size));
 
         // 4. Perform CopyDataBlockBytes(dataCopy, 0, value.[[ArrayBufferData]], 0, size).
-        JS::copy_data_block_bytes(data_copy.buffer(), 0, array_buffer.buffer(), 0, size);
+        auto data_copy_bytes = data_copy.bytes();
+        auto array_buffer_bytes = array_buffer.bytes();
+        JS::copy_data_block_bytes(data_copy_bytes, 0, array_buffer_bytes, 0, size);
 
         // 5. If value has an [[ArrayBufferMaxByteLength]] internal slot, then set serialized to { [[Type]]: "ResizableArrayBuffer",
         //    [[ArrayBufferData]]: dataCopy, [[ArrayBufferByteLength]]: size, [[ArrayBufferMaxByteLength]]: value.[[ArrayBufferMaxByteLength]] }.
         if (!array_buffer.is_fixed_length()) {
             data_holder.encode(ValueTag::ResizeableArrayBuffer);
-            data_holder.encode(data_copy.buffer());
+            data_holder.encode(MUST(ByteBuffer::copy(data_copy.bytes())));
             data_holder.encode(array_buffer.max_byte_length());
         }
         // 6. Otherwise, set serialized to { [[Type]]: "ArrayBuffer", [[ArrayBufferData]]: dataCopy, [[ArrayBufferByteLength]]: size }.
         else {
             data_holder.encode(ValueTag::ArrayBuffer);
-            data_holder.encode(data_copy.buffer());
+            data_holder.encode(MUST(ByteBuffer::copy(data_copy.bytes())));
         }
     }
     return {};
@@ -266,6 +269,9 @@ public:
     // https://html.spec.whatwg.org/multipage/structured-data.html#structuredserializeinternal
     WebIDL::ExceptionOr<SerializationRecord> serialize(JS::Value value)
     {
+        if (m_vm.did_reach_stack_space_limit())
+            return m_vm.throw_completion<JS::InternalError>(JS::ErrorType::CallStackSizeExceeded);
+
         TransferDataEncoder serialized;
 
         // 2. If memory[value] exists, then return memory[value].
@@ -589,6 +595,9 @@ public:
     // https://html.spec.whatwg.org/multipage/structured-data.html#structureddeserialize
     WebIDL::ExceptionOr<JS::Value> deserialize()
     {
+        if (m_vm.did_reach_stack_space_limit())
+            return m_vm.throw_completion<JS::InternalError>(JS::ErrorType::CallStackSizeExceeded);
+
         auto& realm = *m_vm.current_realm();
 
         auto tag = m_serialized.decode<ValueTag>();
@@ -983,7 +992,7 @@ private:
 };
 
 // https://html.spec.whatwg.org/multipage/structured-data.html#structuredserializewithtransfer
-WebIDL::ExceptionOr<SerializedTransferRecord> structured_serialize_with_transfer(JS::VM& vm, JS::Value value, Vector<GC::Root<JS::Object>> const& transfer_list)
+WebIDL::ExceptionOr<SerializedTransferRecord> structured_serialize_with_transfer(JS::VM& vm, JS::Value value, ReadonlySpan<GC::Ref<JS::Object>> transfer_list)
 {
     // 1. Let memory be an empty map.
     SerializationMemory memory = {};
@@ -1040,13 +1049,15 @@ WebIDL::ExceptionOr<SerializedTransferRecord> structured_serialize_with_transfer
         // 4. If transferable has an [[ArrayBufferData]] internal slot, then:
         if (array_buffer) {
             // 1. If transferable has an [[ArrayBufferMaxByteLength]] internal slot, then:
+            auto buffer_data = MUST(ByteBuffer::copy(array_buffer->bytes()));
+
             if (!array_buffer->is_fixed_length()) {
                 // 1. Set dataHolder.[[Type]] to "ResizableArrayBuffer".
                 data_holder.encode(TransferType::ResizableArrayBuffer);
 
                 // 2. Set dataHolder.[[ArrayBufferData]] to transferable.[[ArrayBufferData]].
                 // 3. Set dataHolder.[[ArrayBufferByteLength]] to transferable.[[ArrayBufferByteLength]].
-                data_holder.encode(array_buffer->buffer());
+                data_holder.encode(buffer_data);
 
                 // 4. Set dataHolder.[[ArrayBufferMaxByteLength]] to transferable.[[ArrayBufferMaxByteLength]].
                 data_holder.encode(array_buffer->max_byte_length());
@@ -1058,7 +1069,7 @@ WebIDL::ExceptionOr<SerializedTransferRecord> structured_serialize_with_transfer
 
                 // 2. Set dataHolder.[[ArrayBufferData]] to transferable.[[ArrayBufferData]].
                 // 3. Set dataHolder.[[ArrayBufferByteLength]] to transferable.[[ArrayBufferByteLength]].
-                data_holder.encode(array_buffer->buffer());
+                data_holder.encode(buffer_data);
             }
 
             // 3. Perform ? DetachArrayBuffer(transferable).
@@ -1156,7 +1167,7 @@ WebIDL::ExceptionOr<DeserializedTransferRecord> structured_deserialize_with_tran
     auto& vm = target_realm.vm();
 
     // 1. Let memory be an empty map.
-    auto memory = DeserializationMemory(vm.heap());
+    DeserializationMemory memory {};
 
     // 2. Let transferredValues be a new empty List.
     Vector<GC::Root<JS::Object>> transferred_values;
@@ -1268,7 +1279,7 @@ WebIDL::ExceptionOr<JS::Value> structured_deserialize(JS::VM& vm, SerializationR
     TemporaryExecutionContext execution_context { target_realm };
 
     if (!memory.has_value())
-        memory = DeserializationMemory { vm.heap() };
+        memory = DeserializationMemory {};
 
     TransferDataDecoder decoder { serialized };
     return structured_deserialize_internal(vm, decoder, target_realm, *memory);
@@ -1340,6 +1351,20 @@ WebIDL::ExceptionOr<ByteBuffer> TransferDataDecoder::decode_buffer(JS::Realm& re
     }
 
     return buffer.release_value();
+}
+
+void TransferDataEncoder::encode_unsigned_big_integer(::Crypto::UnsignedBigInteger const& value)
+{
+    auto buffer = MUST(ByteBuffer::create_zeroed(value.byte_length()));
+    auto written = value.export_data(buffer.bytes());
+    VERIFY(written.size() == buffer.size());
+    encode(buffer);
+}
+
+WebIDL::ExceptionOr<::Crypto::UnsignedBigInteger> TransferDataDecoder::decode_unsigned_big_integer(JS::Realm& realm)
+{
+    auto buffer = TRY(decode_buffer(realm));
+    return ::Crypto::UnsignedBigInteger::import_data(buffer);
 }
 
 }

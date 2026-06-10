@@ -293,7 +293,6 @@ def configure_build_env(platform: Platform, preset: str, jobs: Optional[str] = N
         "Distribution": build_root_dir / "distribution",
         "Release": build_root_dir / "release",
         "Sanitizer": build_root_dir / "sanitizers",
-        "Host_Tools": build_root_dir / "host-tools-build",
     }
 
     build_preset_dir = known_presets.get(preset, None)

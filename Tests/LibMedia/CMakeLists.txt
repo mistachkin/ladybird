@@ -1,9 +1,10 @@
 include(audio)
 
 set(TEST_SOURCES
-    TestAudioDataProvider.cpp
     TestCICP.cpp
-    TestDataProviders.cpp
+    TestBufferedRanges.cpp
+    TestDataProducers.cpp
+    TestDecodedAudioProducer.cpp
     TestFFmpegAudioNormalization.cpp
     TestFFmpegDemuxer.cpp
     TestH264Decode.cpp
@@ -18,7 +19,7 @@ set(TEST_SOURCES
 )
 
 foreach(source IN LISTS TEST_SOURCES)
-    lagom_test("${source}" LibMedia LIBS LibMedia LibFileSystem WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+    ladybird_test("${source}" LibMedia LIBS LibMedia LibFileSystem LibSync)
 endforeach()
 
 target_link_libraries(TestFFmpegDemuxer PRIVATE LibThreading)

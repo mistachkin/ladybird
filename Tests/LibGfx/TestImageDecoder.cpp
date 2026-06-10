@@ -17,7 +17,6 @@
 #include <LibGfx/ImageFormats/PNGLoader.h>
 #include <LibGfx/ImageFormats/TIFFLoader.h>
 #include <LibGfx/ImageFormats/TIFFMetadata.h>
-#include <LibGfx/ImageFormats/TinyVGLoader.h>
 #include <LibGfx/ImageFormats/WebPLoader.h>
 #include <LibTest/TestCase.h>
 #include <stdio.h>
@@ -105,6 +104,20 @@ TEST_CASE(test_bmp_os2_3bit)
     EXPECT_EQ(frame.image->get_pixel(152, 100), Gfx::Color::NamedColor::White);
 }
 
+TEST_CASE(test_bmp_rle24)
+{
+    // 2x1 OS/2 2.x BI_RLE24 image: one run of two BGR (0x33, 0x22, 0x11) pixels.
+    // Regression test for a misaligned u32 store in the RLE24 decoder (issue #9958).
+    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("bmp/rle24.bmp"sv)));
+    EXPECT(Gfx::BMPImageDecoderPlugin::sniff(file->bytes()));
+    auto plugin_decoder = TRY_OR_FAIL(Gfx::BMPImageDecoderPlugin::create(file->bytes()));
+
+    auto frame = TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 2, 1 }));
+    EXPECT_EQ(frame.image->format(), Gfx::BitmapFormat::RGBx8888);
+    EXPECT_EQ(frame.image->begin()[0] & 0x00ffffffU, 0x00332211U);
+    EXPECT_EQ(frame.image->begin()[1] & 0x00ffffffU, 0x00332211U);
+}
+
 TEST_CASE(test_ico_malformed_frame)
 {
     Array test_inputs = {
@@ -119,6 +132,15 @@ TEST_CASE(test_ico_malformed_frame)
         auto frame_or_error = plugin_decoder->frame(0);
         EXPECT(frame_or_error.is_error());
     }
+}
+
+TEST_CASE(test_ico_selects_largest_image_with_same_bpp)
+{
+    auto input = TEST_INPUT("ico/multiple-sizes-with-same-bpp.ico"sv);
+    auto file = TRY_OR_FAIL(Core::MappedFile::map(input));
+
+    auto plugin_decoder = TRY_OR_FAIL(Gfx::ICOImageDecoderPlugin::create(file->bytes()));
+    EXPECT_EQ(plugin_decoder->size(), Gfx::IntSize(256, 256));
 }
 
 TEST_CASE(test_cur)
@@ -514,6 +536,34 @@ TEST_CASE(test_png_malformed_frame)
         auto frame_or_error = plugin_decoder->frame(0);
         EXPECT(frame_or_error.is_error());
     }
+}
+
+// Regression test: libpng longjmp() out of png_read_image() must not leak the in-flight row-pointers buffer or bitmap
+// from PNGLoadingContext::read_frames(). The fixture has a valid IHDR, but a corrupted IDAT body that decompresses past
+// its zlib end-of-block marker — forcing libpng to longjmp mid-decode.
+TEST_CASE(test_png_corrupt_idat_does_not_leak_on_libpng_longjmp)
+{
+    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("png/corrupt-idat.png"sv)));
+    auto plugin_or_error = Gfx::PNGImageDecoderPlugin::create(file->bytes());
+    // PNGImageDecoderPlugin::create() catches the libpng error and falls back to a single-frame placeholder — so we
+    // don't assert on the result here. The test passes if the run completes without LeakSanitizer reports.
+    if (!plugin_or_error.is_error())
+        (void)plugin_or_error.release_value()->frame(0);
+}
+
+TEST_CASE(test_png_large_dimensions)
+{
+    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("png/65535x1.png"sv)));
+    EXPECT(Gfx::PNGImageDecoderPlugin::sniff(file->bytes()));
+    auto plugin_decoder = TRY_OR_FAIL(Gfx::PNGImageDecoderPlugin::create(file->bytes()));
+    TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 65535, 1 }));
+    EXPECT_EQ(plugin_decoder->frame(0).value().image->get_pixel(0, 0), Gfx::Color::NamedColor::Red);
+
+    file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("png/1x65535.png"sv)));
+    EXPECT(Gfx::PNGImageDecoderPlugin::sniff(file->bytes()));
+    plugin_decoder = TRY_OR_FAIL(Gfx::PNGImageDecoderPlugin::create(file->bytes()));
+    TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 1, 65535 }));
+    EXPECT_EQ(plugin_decoder->frame(0).value().image->get_pixel(0, 0), Gfx::Color::NamedColor::Red);
 }
 
 TEST_CASE(test_tiff_uncompressed)
@@ -1085,56 +1135,6 @@ TEST_CASE(test_webp_unpremultiplied_alpha)
     // Webp decodes with unpremultiplied color data, so {R,G,B} can be >A (unlike with premultiplied colors).
     EXPECT_EQ(frame.image->alpha_type(), Gfx::AlphaType::Unpremultiplied);
     EXPECT_EQ(frame.image->get_pixel(0, 0), Gfx::Color(255, 255, 255, 128));
-}
-
-TEST_CASE(test_tvg)
-{
-    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("tvg/yak.tvg"sv)));
-    EXPECT(Gfx::TinyVGImageDecoderPlugin::sniff(file->bytes()));
-    auto plugin_decoder = TRY_OR_FAIL(Gfx::TinyVGImageDecoderPlugin::create(file->bytes()));
-
-    TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 1024, 1024 }));
-}
-
-TEST_CASE(test_everything_tvg)
-{
-    Array file_names {
-        TEST_INPUT("tvg/everything.tvg"sv),
-        TEST_INPUT("tvg/everything-32.tvg"sv)
-    };
-
-    for (auto file_name : file_names) {
-        auto file = TRY_OR_FAIL(Core::MappedFile::map(file_name));
-        EXPECT(Gfx::TinyVGImageDecoderPlugin::sniff(file->bytes()));
-        auto plugin_decoder = TRY_OR_FAIL(Gfx::TinyVGImageDecoderPlugin::create(file->bytes()));
-
-        TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 400, 768 }));
-    }
-}
-
-TEST_CASE(test_tvg_malformed)
-{
-    Array test_inputs = {
-        TEST_INPUT("tvg/bogus-color-table-size.tvg"sv)
-    };
-
-    for (auto test_input : test_inputs) {
-        auto file = TRY_OR_FAIL(Core::MappedFile::map(test_input));
-        auto plugin_decoder = TRY_OR_FAIL(Gfx::TinyVGImageDecoderPlugin::create(file->bytes()));
-        auto frame_or_error = plugin_decoder->frame(0);
-        EXPECT(frame_or_error.is_error());
-    }
-}
-
-TEST_CASE(test_tvg_rgb565)
-{
-    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("tvg/green-rgb565.tvg"sv)));
-    EXPECT(Gfx::TinyVGImageDecoderPlugin::sniff(file->bytes()));
-    auto plugin_decoder = TRY_OR_FAIL(Gfx::TinyVGImageDecoderPlugin::create(file->bytes()));
-    auto frame = TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 100, 100 }));
-
-    // Should be a solid dark green:
-    EXPECT_EQ(frame.image->get_pixel(50, 50), Gfx::Color(0, 130, 0));
 }
 
 TEST_CASE(test_jxl_modular_simple_tree_upsample2_10bits)

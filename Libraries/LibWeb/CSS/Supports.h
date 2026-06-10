@@ -26,7 +26,7 @@ public:
         }
         virtual ~Declaration() override = default;
 
-        virtual MatchResult evaluate(DOM::Document const*) const override;
+        virtual MatchResult evaluate(BooleanExpressionEvaluationContext const&) const override;
         virtual String to_string() const override;
         virtual void dump(StringBuilder&, int indent_levels = 0) const override;
 
@@ -48,7 +48,7 @@ public:
         }
         virtual ~Selector() override = default;
 
-        virtual MatchResult evaluate(DOM::Document const*) const override;
+        virtual MatchResult evaluate(BooleanExpressionEvaluationContext const&) const override;
         virtual String to_string() const override;
         virtual void dump(StringBuilder&, int indent_levels = 0) const override;
 
@@ -70,7 +70,7 @@ public:
         }
         virtual ~FontTech() override = default;
 
-        virtual MatchResult evaluate(DOM::Document const*) const override;
+        virtual MatchResult evaluate(BooleanExpressionEvaluationContext const&) const override;
         virtual String to_string() const override;
         virtual void dump(StringBuilder&, int indent_levels = 0) const override;
 
@@ -92,7 +92,7 @@ public:
         }
         virtual ~FontFormat() override = default;
 
-        virtual MatchResult evaluate(DOM::Document const*) const override;
+        virtual MatchResult evaluate(BooleanExpressionEvaluationContext const&) const override;
         virtual String to_string() const override;
         virtual void dump(StringBuilder&, int indent_levels = 0) const override;
 
@@ -114,7 +114,7 @@ public:
         }
         virtual ~Env() override = default;
 
-        virtual MatchResult evaluate(DOM::Document const*) const override;
+        virtual MatchResult evaluate(BooleanExpressionEvaluationContext const&) const override;
         virtual String to_string() const override;
         virtual void dump(StringBuilder&, int indent_levels = 0) const override;
 
@@ -125,6 +125,29 @@ public:
         {
         }
         FlyString m_variable_name;
+        bool m_matches;
+    };
+
+    class AtRule final : public BooleanExpression {
+    public:
+        static NonnullOwnPtr<AtRule> create(FlyString name, bool matches)
+        {
+            return adopt_own(*new AtRule(move(name), matches));
+        }
+        virtual ~AtRule() override = default;
+
+        virtual MatchResult evaluate(BooleanExpressionEvaluationContext const&) const override;
+        virtual String to_string() const override;
+        virtual void dump(StringBuilder&, int indent_levels = 0) const override;
+
+    private:
+        AtRule(FlyString name, bool matches)
+            : m_name(move(name))
+            , m_matches(matches)
+        {
+        }
+
+        FlyString m_name;
         bool m_matches;
     };
 

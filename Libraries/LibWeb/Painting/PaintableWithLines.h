@@ -14,36 +14,25 @@
 namespace Web::Painting {
 
 class PaintableWithLines : public PaintableBox {
-    GC_CELL(PaintableWithLines, PaintableBox);
-    GC_DECLARE_ALLOCATOR(PaintableWithLines);
-
 public:
-    static GC::Ref<PaintableWithLines> create(Layout::BlockContainer const&);
-    static GC::Ref<PaintableWithLines> create(Layout::InlineNode const&, size_t line_index);
+    static NonnullRefPtr<PaintableWithLines> create(Layout::BlockContainer const&);
+    static NonnullRefPtr<PaintableWithLines> create(Layout::InlineNode const&, size_t line_index);
     virtual ~PaintableWithLines() override;
+    virtual StringView class_name() const override { return "PaintableWithLines"sv; }
 
     virtual void reset_for_relayout() override;
 
     Vector<PaintableFragment> const& fragments() const { return m_fragments; }
     Vector<PaintableFragment>& fragments() { return m_fragments; }
 
-    void add_fragment(Layout::LineBoxFragment const& fragment)
+    void add_fragment(Layout::LineBoxFragment const& fragment, LineBoxData line_box_data)
     {
-        m_fragments.append(PaintableFragment { fragment });
+        m_fragments.append(PaintableFragment { fragment, line_box_data });
     }
 
     virtual void paint(DisplayListRecordingContext&, PaintPhase) const override;
+    virtual void record_hit_test_items(DisplayListRecordingContext&, PaintPhase) const override;
     static void paint_text_fragment_debug_highlight(DisplayListRecordingContext&, PaintableFragment const&);
-
-    [[nodiscard]] virtual TraversalDecision hit_test(CSSPixelPoint position, HitTestType type, Function<TraversalDecision(HitTestResult)> const& callback) const override;
-    [[nodiscard]] TraversalDecision hit_test_fragments(CSSPixelPoint position, CSSPixelPoint local_position, HitTestType type, Function<TraversalDecision(HitTestResult)> const& callback) const;
-
-    virtual void visit_edges(Cell::Visitor& visitor) override
-    {
-        Base::visit_edges(visitor);
-        for (auto& fragment : m_fragments)
-            visitor.visit(GC::Ref { fragment.layout_node() });
-    }
 
     size_t line_index() const { return m_line_index; }
 

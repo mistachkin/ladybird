@@ -4,12 +4,35 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/ScopeGuard.h>
+#include <LibCore/EventLoop.h>
 #include <LibCore/Promise.h>
 #include <LibCore/System.h>
 #include <LibRequests/Request.h>
 #include <LibRequests/RequestClient.h>
 
 namespace Requests {
+
+static Optional<Core::ImmutableBytes> map_javascript_bytecode_file(int fd, u64 size)
+{
+    ArmedScopeGuard close_fd = [fd] {
+        (void)Core::System::close(fd);
+    };
+
+    if (!AK::is_within_range<size_t>(size)) {
+        dbgln("RequestClient: Received JavaScript bytecode cache file outside mappable range");
+        return {};
+    }
+
+    close_fd.disarm();
+    auto payload = Core::ImmutableBytes::map_from_fd_range_and_close(fd, "javascript bytecode cache"sv, 0, static_cast<size_t>(size));
+    if (payload.is_error()) {
+        dbgln("RequestClient: Failed to map JavaScript bytecode cache file: {}", payload.error());
+        return {};
+    }
+
+    return payload.release_value();
+}
 
 RequestClient::RequestClient(NonnullOwnPtr<IPC::Transport> transport)
     : IPC::ConnectionToServer<RequestClientEndpoint, RequestServerEndpoint>(*this, move(transport))
@@ -28,8 +51,29 @@ void RequestClient::die()
     for (auto& [id, promise] : m_pending_cache_size_estimations)
         promise->reject(Error::from_string_literal("RequestServer process died"));
 
+    auto websockets = move(m_websockets);
+
     m_requests.clear();
     m_pending_cache_size_estimations.clear();
+    m_websockets.clear();
+
+    for (auto& [id, websocket] : websockets) {
+        auto ready_state = websocket->ready_state();
+        websocket->detach_from_client({});
+        websocket->set_ready_state(WebSocket::ReadyState::Closed);
+
+        auto error = ready_state == WebSocket::ReadyState::Connecting
+            ? WebSocket::Error::CouldNotEstablishConnection
+            : WebSocket::Error::ServerClosedSocket;
+        websocket->did_error({}, to_underlying(error));
+        websocket->did_close({}, to_underlying(::WebSocket::CloseStatusCode::AbnormalClosure), {}, false);
+    }
+
+    if (auto request_server_died_callback = move(on_request_server_died)) {
+        Core::deferred_invoke([request_server_died_callback = move(request_server_died_callback)]() mutable {
+            request_server_died_callback();
+        });
+    }
 }
 
 RefPtr<Request> RequestClient::start_request(ByteString const& method, URL::URL const& url, Optional<HTTP::HeaderList const&> request_headers, ReadonlyBytes request_body, HTTP::CacheMode cache_mode, HTTP::Cookie::IncludeCredentials include_credentials, Core::ProxyData const& proxy_data)
@@ -41,6 +85,26 @@ RefPtr<Request> RequestClient::start_request(ByteString const& method, URL::URL 
     auto request = Request::create_from_id({}, *this, request_id);
     m_requests.set(request_id, request);
     return request;
+}
+
+ErrorOr<bool> RequestClient::store_cache_associated_data(URL::URL const& url, ByteString const& method, Optional<HTTP::HeaderList const&> request_headers, Optional<u64> vary_key, HTTP::CacheEntryAssociatedData associated_data, ReadonlyBytes data)
+{
+    auto buffer = TRY(Core::AnonymousBuffer::create_with_size(data.size()));
+    memcpy(buffer.data<void>(), data.data(), data.size());
+
+    auto headers = request_headers.map([](auto const& headers) { return headers.headers(); }).value_or({});
+    return IPCProxy::store_cache_associated_data(url, method, headers, vary_key, associated_data, move(buffer));
+}
+
+ErrorOr<Optional<Core::AnonymousBuffer>> RequestClient::retrieve_cache_associated_data(URL::URL const& url, ByteString const& method, Optional<HTTP::HeaderList const&> request_headers, Optional<u64> vary_key, HTTP::CacheEntryAssociatedData associated_data)
+{
+    auto headers = request_headers.map([](auto const& headers) { return headers.headers(); }).value_or({});
+    return IPCProxy::retrieve_cache_associated_data(url, method, headers, vary_key, associated_data);
+}
+
+ErrorOr<bool> RequestClient::create_synthetic_cache_entry(URL::URL const& url, ByteString const& method)
+{
+    return IPCProxy::create_synthetic_cache_entry(url, method);
 }
 
 bool RequestClient::stop_request(Badge<Request>, Request& request)
@@ -93,6 +157,30 @@ void RequestClient::request_started(u64 request_id, IPC::File response_file)
     request.value()->set_request_fd({}, response_fd);
 }
 
+void RequestClient::request_body_file_available(u64 request_id, IPC::File response_file, u64 offset, u64 size)
+{
+    auto request = m_requests.get(request_id);
+    if (!request.has_value()) {
+        warnln("Received response body file for non-existent request {}", request_id);
+        return;
+    }
+
+    auto response_fd = response_file.take_fd();
+    request.value()->set_request_body_file({}, response_fd, offset, size);
+}
+
+void RequestClient::request_cached_body_file_available(u64 request_id, IPC::File response_file, u64 offset, u64 size)
+{
+    auto request = m_requests.get(request_id);
+    if (!request.has_value()) {
+        warnln("Received cached response body file for non-existent request {}", request_id);
+        return;
+    }
+
+    auto response_fd = response_file.take_fd();
+    request.value()->set_request_cached_body_file({}, response_fd, offset, size);
+}
+
 void RequestClient::request_finished(u64 request_id, u64 total_size, RequestTimingInfo timing_info, Optional<NetworkError> network_error)
 {
     if (RefPtr<Request> request = m_requests.get(request_id).value_or(nullptr)) {
@@ -101,10 +189,14 @@ void RequestClient::request_finished(u64 request_id, u64 total_size, RequestTimi
     }
 }
 
-void RequestClient::headers_became_available(u64 request_id, Vector<HTTP::Header> response_headers, Optional<u32> status_code, Optional<String> reason_phrase)
+void RequestClient::headers_became_available(u64 request_id, Vector<HTTP::Header> response_headers, Optional<u32> status_code, Optional<String> reason_phrase, Optional<IPC::File> javascript_bytecode_file, u64 javascript_bytecode_size, Optional<u64> javascript_bytecode_cache_vary_key)
 {
+    Optional<Core::ImmutableBytes> javascript_bytecode;
+    if (javascript_bytecode_file.has_value())
+        javascript_bytecode = map_javascript_bytecode_file(javascript_bytecode_file->take_fd(), javascript_bytecode_size);
+
     if (auto request = m_requests.get(request_id); request.has_value())
-        (*request)->did_receive_headers({}, HTTP::HeaderList::create(move(response_headers)), status_code, reason_phrase);
+        (*request)->did_receive_headers({}, HTTP::HeaderList::create(move(response_headers)), status_code, reason_phrase, move(javascript_bytecode), javascript_bytecode_cache_vary_key);
     else
         warnln("Received headers for non-existent request {}", request_id);
 }
@@ -154,8 +246,10 @@ void RequestClient::websocket_errored(u64 websocket_id, i32 message)
 
 void RequestClient::websocket_closed(u64 websocket_id, u16 code, ByteString reason, bool clean)
 {
-    if (auto connection = m_websockets.get(websocket_id); connection.has_value())
+    if (auto connection = m_websockets.take(websocket_id); connection.has_value()) {
+        (*connection)->set_ready_state(WebSocket::ReadyState::Closed);
         (*connection)->did_close({}, code, move(reason), clean);
+    }
 }
 
 void RequestClient::websocket_ready_state_changed(u64 websocket_id, u32 ready_state)

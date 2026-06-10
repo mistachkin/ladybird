@@ -7,6 +7,7 @@ set(SOURCES
     ConstrainedStream.cpp
     CountingStream.cpp
     Error.cpp
+    FFIHelpers.cpp
     FlyString.cpp
     Format.cpp
     GenericLexer.cpp
@@ -32,7 +33,6 @@ set(SOURCES
     Utf16String.cpp
     Utf16StringData.cpp
     Utf16View.cpp
-    Utf32View.cpp
     Utf8View.cpp
     kmalloc.cpp
 )

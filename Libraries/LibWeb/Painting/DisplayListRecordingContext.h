@@ -17,13 +17,21 @@
 #include <LibWeb/Painting/DevicePixelConverter.h>
 #include <LibWeb/PixelUnits.h>
 
+namespace Web::Painting {
+
+class HitTestDisplayList;
+class ScrollState;
+
+}
+
 namespace Web {
 
 class WEB_API DisplayListRecordingContext {
 public:
-    DisplayListRecordingContext(Painting::DisplayListRecorder& painter, Palette const& palette, double device_pixels_per_css_pixel, ChromeMetrics const& chrome_metrics);
+    DisplayListRecordingContext(Painting::DisplayListRecorder& painter, Palette const& palette, double device_pixels_per_css_pixel, ChromeMetrics const& chrome_metrics, Painting::HitTestDisplayList* = nullptr);
 
     Painting::DisplayListRecorder& display_list_recorder() const { return m_display_list_recorder; }
+    Painting::HitTestDisplayList* hit_test_display_list() const { return m_hit_test_display_list; }
     Palette const& palette() const { return m_palette; }
 
     bool should_show_line_box_borders() const { return m_should_show_line_box_borders; }
@@ -34,7 +42,6 @@ public:
 
     DevicePixelRect device_viewport_rect() const { return m_device_viewport_rect; }
     void set_device_viewport_rect(DevicePixelRect const& rect) { m_device_viewport_rect = rect; }
-    CSSPixelRect css_viewport_rect() const;
 
     void set_svg_transform(Gfx::AffineTransform transform)
     {
@@ -65,10 +72,6 @@ public:
     DevicePixelRect rounded_device_rect(CSSPixelRect) const;
     DevicePixelSize enclosing_device_size(CSSPixelSize) const;
     DevicePixelSize rounded_device_size(CSSPixelSize) const;
-    CSSPixels scale_to_css_pixels(DevicePixels) const;
-    CSSPixelPoint scale_to_css_point(DevicePixelPoint) const;
-    CSSPixelSize scale_to_css_size(DevicePixelSize) const;
-    CSSPixelRect scale_to_css_rect(DevicePixelRect) const;
 
     DisplayListRecordingContext clone(Painting::DisplayListRecorder& painter) const
     {
@@ -84,8 +87,28 @@ public:
     ChromeMetrics const& chrome_metrics() const { return m_chrome_metrics; }
     u64 paint_generation_id() const { return m_paint_generation_id; }
 
+    void set_async_scrolling_metadata_context(
+        UniqueNodeID document_id,
+        Painting::ScrollState const& scroll_state,
+        bool has_blocking_wheel_event_listeners,
+        bool has_blocking_wheel_event_region_covering_viewport)
+    {
+        m_async_scrolling_document_id = document_id;
+        m_async_scrolling_scroll_state = &scroll_state;
+        m_has_blocking_wheel_event_listeners = has_blocking_wheel_event_listeners;
+        m_has_blocking_wheel_event_region_covering_viewport = has_blocking_wheel_event_region_covering_viewport;
+    }
+
+    bool is_recording_async_scrolling_metadata() const { return m_async_scrolling_scroll_state != nullptr; }
+    UniqueNodeID async_scrolling_document_id() const { return m_async_scrolling_document_id; }
+    Painting::ScrollState const& async_scrolling_scroll_state() const { return *m_async_scrolling_scroll_state; }
+    bool has_blocking_wheel_event_listeners() const { return m_has_blocking_wheel_event_listeners; }
+    void set_has_blocking_wheel_event_listeners(bool value) { m_has_blocking_wheel_event_listeners = value; }
+    bool has_blocking_wheel_event_region_covering_viewport() const { return m_has_blocking_wheel_event_region_covering_viewport; }
+
 private:
     Painting::DisplayListRecorder& m_display_list_recorder;
+    Painting::HitTestDisplayList* m_hit_test_display_list { nullptr };
     Palette m_palette;
     Painting::DevicePixelConverter m_device_pixel_converter;
     ChromeMetrics m_chrome_metrics;
@@ -95,6 +118,10 @@ private:
     bool m_draw_svg_geometry_for_clip_path { false };
     Gfx::AffineTransform m_svg_transform;
     u64 m_paint_generation_id { 0 };
+    UniqueNodeID m_async_scrolling_document_id {};
+    Painting::ScrollState const* m_async_scrolling_scroll_state { nullptr };
+    bool m_has_blocking_wheel_event_listeners { false };
+    bool m_has_blocking_wheel_event_region_covering_viewport { false };
 };
 
 }

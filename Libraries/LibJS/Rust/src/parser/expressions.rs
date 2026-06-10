@@ -7,16 +7,26 @@
 //! Expression parsing: primary, secondary (binary/postfix), unary, and
 //! precedence climbing.
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::ast::*;
 use crate::lexer::ch;
-use crate::parser::{
-    Associativity, ForbiddenTokens, FunctionKind, MethodKind, PRECEDENCE_ASSIGNMENT, PRECEDENCE_COMMA,
-    PRECEDENCE_MEMBER, PRECEDENCE_UNARY, ParamInfo, ParsedParameters, Parser, Position, PropertyKey,
-    is_strict_reserved_word,
-};
-use crate::token::{Token, TokenType};
+use crate::parser::Associativity;
+use crate::parser::ForbiddenTokens;
+use crate::parser::FunctionKind;
+use crate::parser::MethodKind;
+use crate::parser::PRECEDENCE_ASSIGNMENT;
+use crate::parser::PRECEDENCE_COMMA;
+use crate::parser::PRECEDENCE_MEMBER;
+use crate::parser::PRECEDENCE_UNARY;
+use crate::parser::ParamInfo;
+use crate::parser::ParsedParameters;
+use crate::parser::Parser;
+use crate::parser::Position;
+use crate::parser::PropertyKey;
+use crate::parser::is_strict_reserved_word;
+use crate::token::Token;
+use crate::token::TokenType;
 
 #[derive(PartialEq, Eq)]
 enum EscapeMode {
@@ -81,7 +91,7 @@ impl Parser<'_> {
                 | TokenType::Typeof
                 | TokenType::Void
                 | TokenType::Delete
-        )
+        ) || (self.flags.await_expression_is_valid && self.current_token_type() == TokenType::Await)
     }
 
     pub(crate) fn match_secondary_expression(&self, forbidden: &ForbiddenTokens) -> bool {
@@ -172,21 +182,24 @@ impl Parser<'_> {
 
         let lhs_start = self.position();
         self.last_primary_was_parenthesized = false;
-        let (expression, should_continue) = self.parse_primary_expression(min_precedence);
+        let (expression, should_continue) = self.parse_primary_expression(min_precedence, forbidden);
 
         // C++ checks for freestanding `arguments` references here (after
         // parse_primary_expression), NOT during consume(). This avoids
         // falsely flagging parameter names like `function f(arguments)`.
-        if let ExpressionKind::Identifier(ref id) = expression.inner
-            && id.name == utf16!("arguments")
+        if let ExpressionKind::Identifier(id) = expression.inner
+            && self.arena.name_of(id).as_slice() == utf16!("arguments")
         {
             // https://tc39.es/ecma262/#sec-class-static-initialization-blocks
             // It is a Syntax Error if ContainsArguments of ClassStaticBlockBody is true.
             if self.flags.in_class_static_init_block {
                 self.syntax_error("'arguments' is not allowed in class static initialization blocks");
-            } else if !self.flags.strict_mode && !self.scope_collector.has_declaration_in_current_function(&id.name) {
-                self.scope_collector
-                    .set_contains_access_to_arguments_object_in_non_strict_mode();
+            } else {
+                let name = self.arena.name_of(id).clone();
+                if !self.flags.strict_mode && !self.scope_collector.has_declaration_in_current_function(&name) {
+                    self.scope_collector
+                        .set_contains_access_to_arguments_object_in_non_strict_mode();
+                }
             }
         }
 
@@ -278,7 +291,7 @@ impl Parser<'_> {
     /// Parse a primary expression (literal, identifier, `this`, etc.).
     /// Returns `(expression, should_continue)` — `false` means the caller
     /// should not attempt to parse a secondary expression (e.g. arrow).
-    fn parse_primary_expression(&mut self, min_precedence: i32) -> (Expression, bool) {
+    fn parse_primary_expression(&mut self, min_precedence: i32, forbidden: ForbiddenTokens) -> (Expression, bool) {
         let start = self.position();
         let token = self.current_token().clone();
 
@@ -286,7 +299,8 @@ impl Parser<'_> {
             TokenType::ParenOpen => {
                 let paren_start = self.position();
                 self.consume_token(TokenType::ParenOpen);
-                if let Some(arrow) = self.try_parse_arrow_function_expression(true, false, Some(paren_start)) {
+                if let Some(arrow) = self.try_parse_arrow_function_expression(true, false, Some(paren_start), forbidden)
+                {
                     return (arrow, false);
                 }
                 if self.match_token(TokenType::ParenClose) {
@@ -434,20 +448,33 @@ impl Parser<'_> {
                     let expression = self.parse_function_expression();
                     return (expression, true);
                 }
-                if let Some(arrow) =
-                    self.try_parse_arrow_function_expression(next.token_type == TokenType::ParenOpen, true, None)
-                {
+                if let Some(arrow) = self.try_parse_arrow_function_expression(
+                    next.token_type == TokenType::ParenOpen,
+                    true,
+                    None,
+                    forbidden,
+                ) {
                     return (arrow, false);
                 }
                 self.arrow_function_failed_positions.remove(&(start.offset as usize));
                 // `async => ...` is a regular arrow function with parameter name `async`
                 // (not an async arrow function).
-                if let Some(arrow) = self.try_parse_arrow_function_expression(false, false, None) {
+                if let Some(arrow) = self.try_parse_arrow_function_expression(false, false, None, forbidden) {
                     return (arrow, false);
                 }
                 let token = self.consume_and_check_identifier();
-                let id = self.make_identifier(start, self.token_identifier_name(&token));
-                self.scope_collector.register_identifier(id.clone(), None);
+                let name = self.token_identifier_name(&token);
+                let id = self.make_identifier(start, name);
+                let Self {
+                    scope_collector, arena, ..
+                } = self;
+                scope_collector.register_identifier(
+                    id,
+                    None,
+                    &mut arena.identifiers,
+                    &arena.strings,
+                    &mut arena.scopes,
+                );
                 (self.expression(start, ExpressionKind::Identifier(id)), true)
             }
 
@@ -525,18 +552,8 @@ impl Parser<'_> {
             // When min_precedence is higher (e.g. void/typeof at 17), yield must
             // be treated as an identifier, not a yield expression.
             TokenType::Yield if self.flags.in_generator_function_context && min_precedence <= 3 => {
-                let expression = self.parse_yield_expression();
+                let expression = self.parse_yield_expression(forbidden);
                 (expression, false)
-            }
-
-            // https://tc39.es/ecma262/#sec-async-function-definitions
-            // AwaitExpression : `await` UnaryExpression
-            // NB: Unlike yield (AssignmentExpression level), await is at
-            // UnaryExpression level, so `await 1 + 2` is `(await 1) + 2`.
-            // We set should_continue=true to allow binary operators.
-            TokenType::Await if self.flags.await_expression_is_valid => {
-                let expression = self.parse_await_expression();
-                (expression, true)
             }
 
             TokenType::PrivateIdentifier => {
@@ -566,7 +583,7 @@ impl Parser<'_> {
                 // parsing and identifier consumption (with appropriate errors).
                 // This matches C++'s "goto read_as_identifier" pattern.
                 if self.match_identifier() || self.match_token(TokenType::Await) || self.match_token(TokenType::Yield) {
-                    if let Some(arrow) = self.try_parse_arrow_function_expression(false, false, None) {
+                    if let Some(arrow) = self.try_parse_arrow_function_expression(false, false, None, forbidden) {
                         return (arrow, false);
                     }
                     if self.match_token(TokenType::Await)
@@ -582,14 +599,34 @@ impl Parser<'_> {
                         self.syntax_error("'yield' is not allowed as an identifier in this context");
                     }
                     let token = self.consume_and_check_identifier();
-                    let id = self.make_identifier(start, self.token_identifier_name(&token));
-                    self.scope_collector.register_identifier(id.clone(), None);
+                    let name = self.token_identifier_name(&token);
+                    let id = self.make_identifier(start, name);
+                    let Self {
+                        scope_collector, arena, ..
+                    } = self;
+                    scope_collector.register_identifier(
+                        id,
+                        None,
+                        &mut arena.identifiers,
+                        &arena.strings,
+                        &mut arena.scopes,
+                    );
                     (self.expression(start, ExpressionKind::Identifier(id)), true)
                 } else if self.match_token(TokenType::EscapedKeyword) {
                     self.syntax_error("Keyword must not contain escaped characters");
                     let token = self.consume_and_check_identifier();
-                    let id = self.make_identifier(start, self.token_identifier_name(&token));
-                    self.scope_collector.register_identifier(id.clone(), None);
+                    let name = self.token_identifier_name(&token);
+                    let id = self.make_identifier(start, name);
+                    let Self {
+                        scope_collector, arena, ..
+                    } = self;
+                    scope_collector.register_identifier(
+                        id,
+                        None,
+                        &mut arena.identifiers,
+                        &arena.strings,
+                        &mut arena.scopes,
+                    );
                     (self.expression(start, ExpressionKind::Identifier(id)), true)
                 } else {
                     self.expected("primary expression");
@@ -615,10 +652,10 @@ impl Parser<'_> {
         };
         self.validate_regex_flags(&flags);
         let compiled_regex = match crate::bytecode::ffi::compile_regex(&pattern, &flags) {
-            Ok(handle) => Rc::new(CompiledRegex::new(handle)),
+            Ok(handle) => Arc::new(CompiledRegex::new(handle)),
             Err(msg) => {
                 self.syntax_error_at_position(&msg, start);
-                Rc::new(CompiledRegex::new(std::ptr::null_mut()))
+                Arc::new(CompiledRegex::new(std::ptr::null_mut()))
             }
         };
         self.expression(
@@ -800,9 +837,21 @@ impl Parser<'_> {
                     // Register synthesized identifiers with the scope collector so
                     // they get resolved as locals during analyze().
                     let bound_names: Vec<_> = self.pattern_bound_names.drain(..).collect();
-                    for (name, id) in &bound_names {
-                        self.check_identifier_name_for_assignment_validity(name, false);
-                        self.scope_collector.register_identifier(id.clone(), None);
+                    for (name, _id) in &bound_names {
+                        let name_str = self.arena.strings[*name].clone();
+                        self.check_identifier_name_for_assignment_validity(name_str.as_slice(), false);
+                    }
+                    let Self {
+                        scope_collector, arena, ..
+                    } = self;
+                    for (_name, id) in &bound_names {
+                        scope_collector.register_identifier(
+                            *id,
+                            None,
+                            &mut arena.identifiers,
+                            &arena.strings,
+                            &mut arena.scopes,
+                        );
                     }
                     self.pattern_bound_names = saved_bound_names;
                     self.consume();
@@ -814,6 +863,7 @@ impl Parser<'_> {
                                 op,
                                 lhs: AssignmentLhs::Pattern(binding_pattern),
                                 rhs: Box::new(rhs),
+                                lhs_is_parenthesized,
                             })),
                         ),
                         ForbiddenTokens::none(),
@@ -828,8 +878,9 @@ impl Parser<'_> {
                 if !Self::is_simple_assignment_target(&lhs, allow_call, self.flags.strict_mode) {
                     self.syntax_error("Invalid left-hand side in assignment");
                 }
-                if let ExpressionKind::Identifier(ref id) = lhs.inner {
-                    self.check_identifier_name_for_assignment_validity(&id.name, false);
+                if let ExpressionKind::Identifier(id) = lhs.inner {
+                    let name = self.arena.name_of(id).clone();
+                    self.check_identifier_name_for_assignment_validity(&name, false);
                 }
                 self.consume();
                 let rhs = self.parse_expression(min_precedence, Associativity::Right, forbidden);
@@ -840,6 +891,7 @@ impl Parser<'_> {
                             op,
                             lhs: AssignmentLhs::Expression(Box::new(lhs)),
                             rhs: Box::new(rhs),
+                            lhs_is_parenthesized,
                         })),
                     ),
                     ForbiddenTokens::none(),
@@ -892,7 +944,8 @@ impl Parser<'_> {
                 } else if self.match_identifier_name() {
                     let property_start = self.position();
                     let token = self.consume();
-                    let property_identifier = self.make_identifier(property_start, self.token_identifier_name(&token));
+                    let property_name = self.token_identifier_name(&token);
+                    let property_identifier = self.make_identifier(property_start, property_name);
                     let property = self.expression(property_start, ExpressionKind::Identifier(property_identifier));
                     (
                         self.expression(
@@ -965,8 +1018,9 @@ impl Parser<'_> {
                 if !Self::is_simple_assignment_target(&lhs, true, self.flags.strict_mode) {
                     self.syntax_error("Invalid left-hand side in postfix operation");
                 }
-                if let ExpressionKind::Identifier(ref id) = lhs.inner {
-                    self.check_identifier_name_for_assignment_validity(&id.name, false);
+                if let ExpressionKind::Identifier(id) = lhs.inner {
+                    let name = self.arena.name_of(id).clone();
+                    self.check_identifier_name_for_assignment_validity(&name, false);
                 }
                 self.consume();
                 (
@@ -985,8 +1039,9 @@ impl Parser<'_> {
                 if !Self::is_simple_assignment_target(&lhs, true, self.flags.strict_mode) {
                     self.syntax_error("Invalid left-hand side in postfix operation");
                 }
-                if let ExpressionKind::Identifier(ref id) = lhs.inner {
-                    self.check_identifier_name_for_assignment_validity(&id.name, false);
+                if let ExpressionKind::Identifier(id) = lhs.inner {
+                    let name = self.arena.name_of(id).clone();
+                    self.check_identifier_name_for_assignment_validity(&name, false);
                 }
                 self.consume();
                 (
@@ -1014,14 +1069,16 @@ impl Parser<'_> {
         let tt = self.current_token_type();
 
         match tt {
+            TokenType::Await if self.flags.await_expression_is_valid => self.parse_await_expression(),
             TokenType::PlusPlus => {
                 self.consume();
                 let expression = self.parse_expression(PRECEDENCE_UNARY, Associativity::Right, ForbiddenTokens::none());
                 if !Self::is_simple_assignment_target(&expression, true, self.flags.strict_mode) {
                     self.syntax_error("Invalid left-hand side in prefix operation");
                 }
-                if let ExpressionKind::Identifier(ref id) = expression.inner {
-                    self.check_identifier_name_for_assignment_validity(&id.name, false);
+                if let ExpressionKind::Identifier(id) = expression.inner {
+                    let name = self.arena.name_of(id).clone();
+                    self.check_identifier_name_for_assignment_validity(&name, false);
                 }
                 self.expression(
                     start,
@@ -1038,8 +1095,9 @@ impl Parser<'_> {
                 if !Self::is_simple_assignment_target(&expression, true, self.flags.strict_mode) {
                     self.syntax_error("Invalid left-hand side in prefix operation");
                 }
-                if let ExpressionKind::Identifier(ref id) = expression.inner {
-                    self.check_identifier_name_for_assignment_validity(&id.name, false);
+                if let ExpressionKind::Identifier(id) = expression.inner {
+                    let name = self.arena.name_of(id).clone();
+                    self.check_identifier_name_for_assignment_validity(&name, false);
                 }
                 self.expression(
                     start,
@@ -1141,6 +1199,7 @@ impl Parser<'_> {
             return self.expression(start, ExpressionKind::MetaProperty(MetaPropertyType::NewTarget));
         }
 
+        let callee_starts_with_grouping_paren = self.match_token(TokenType::ParenOpen);
         let callee = if self.match_token(TokenType::New) {
             self.parse_new_expression()
         } else {
@@ -1148,7 +1207,7 @@ impl Parser<'_> {
             self.parse_expression(PRECEDENCE_MEMBER, Associativity::Right, forbidden)
         };
 
-        if matches!(callee.inner, ExpressionKind::ImportCall(_)) {
+        if matches!(callee.inner, ExpressionKind::ImportCall(_)) && !callee_starts_with_grouping_paren {
             self.syntax_error("Cannot call new on dynamic import");
         }
 
@@ -1187,8 +1246,8 @@ impl Parser<'_> {
         let arguments = self.parse_arguments();
         // Check the actual callee expression kind, matching C++ which does
         // is<Identifier>(callee) && callee.string() == "eval".
-        if let ExpressionKind::Identifier(ref id) = callee.inner
-            && id.name == utf16!("eval")
+        if let ExpressionKind::Identifier(id) = callee.inner
+            && self.arena.name_of(id).as_slice() == utf16!("eval")
         {
             self.scope_collector.set_contains_direct_call_to_eval();
             self.scope_collector.set_uses_this();
@@ -1276,8 +1335,9 @@ impl Parser<'_> {
                         if self.match_identifier_name() {
                             let property_start = self.position();
                             let token = self.consume();
+                            let name = self.token_identifier_name(&token);
                             references.push(OptionalChainReference::MemberReference {
-                                identifier: self.make_identifier(property_start, self.token_identifier_name(&token)),
+                                identifier: self.make_identifier(property_start, name),
                                 mode: OptionalChainMode::Optional,
                             });
                         } else {
@@ -1304,8 +1364,9 @@ impl Parser<'_> {
                 } else if self.match_identifier_name() {
                     let property_start = self.position();
                     let token = self.consume();
+                    let name = self.token_identifier_name(&token);
                     references.push(OptionalChainReference::MemberReference {
-                        identifier: self.make_identifier(property_start, self.token_identifier_name(&token)),
+                        identifier: self.make_identifier(property_start, name),
                         mode: OptionalChainMode::NotOptional,
                     });
                 } else {
@@ -1348,7 +1409,7 @@ impl Parser<'_> {
     //                 | `yield` [no LineTerminator here] `*` AssignmentExpression
     // https://tc39.es/ecma262/#sec-generator-function-definitions-static-semantics-early-errors
     // It is a Syntax Error if YieldExpression appears within FormalParameters.
-    fn parse_yield_expression(&mut self) -> Expression {
+    fn parse_yield_expression(&mut self, forbidden: ForbiddenTokens) -> Expression {
         let start = self.position();
 
         if self.flags.in_formal_parameter_context {
@@ -1373,7 +1434,11 @@ impl Parser<'_> {
         }
 
         if is_yield_from || self.match_expression() || self.match_token(TokenType::Class) {
-            let argument = self.parse_assignment_expression();
+            // https://tc39.es/ecma262/#prod-YieldExpression
+            // YieldExpression[In, Await] :
+            //   `yield` [no LineTerminator here] AssignmentExpression[?In, +Yield, ?Await]
+            //   `yield` [no LineTerminator here] `*` AssignmentExpression[?In, +Yield, ?Await]
+            let argument = self.parse_expression(PRECEDENCE_ASSIGNMENT, Associativity::Right, forbidden);
             self.expression(
                 start,
                 ExpressionKind::Yield(Box::new(YieldExprData {
@@ -1594,8 +1659,19 @@ impl Parser<'_> {
             && is_identifier
             && let Some(kv) = &key_value
         {
-            let id = self.make_identifier(obj_start, kv.clone());
-            self.scope_collector.register_identifier(id.clone(), None);
+            let id = self.make_identifier_from_slice(obj_start, kv.as_slice());
+            {
+                let Self {
+                    scope_collector, arena, ..
+                } = self;
+                scope_collector.register_identifier(
+                    id,
+                    None,
+                    &mut arena.identifiers,
+                    &arena.strings,
+                    &mut arena.scopes,
+                );
+            }
             let value = self.expression(obj_start, ExpressionKind::Identifier(id));
             self.consume(); // consume '='
             // NB: Add a syntax error for CoverInitializedName. This error will
@@ -1625,8 +1701,19 @@ impl Parser<'_> {
                 let name_str = String::from_utf16_lossy(&kv);
                 self.syntax_error(&format!("'{name_str}' is a reserved keyword"));
             }
-            let id = self.make_identifier(obj_start, kv);
-            self.scope_collector.register_identifier(id.clone(), None);
+            let id = self.make_identifier_from_slice(obj_start, kv.as_slice());
+            {
+                let Self {
+                    scope_collector, arena, ..
+                } = self;
+                scope_collector.register_identifier(
+                    id,
+                    None,
+                    &mut arena.identifiers,
+                    &arena.strings,
+                    &mut arena.scopes,
+                );
+            }
             let value = self.expression(obj_start, ExpressionKind::Identifier(id));
             return ObjectProperty {
                 range: self.range_from(obj_start),
@@ -2131,12 +2218,14 @@ impl Parser<'_> {
         expect_parens: bool,
         is_async: bool,
         source_start_override: Option<Position>,
+        forbidden: ForbiddenTokens,
     ) -> Option<Expression> {
         let offset = source_start_override.map_or(self.current_token.offset, |p| p.offset) as usize;
         if self.arrow_function_failed_positions.contains(&offset) {
             return None;
         }
-        let result = self.try_parse_arrow_function_expression_impl(expect_parens, is_async, source_start_override);
+        let result =
+            self.try_parse_arrow_function_expression_impl(expect_parens, is_async, source_start_override, forbidden);
         if result.is_none() {
             self.arrow_function_failed_positions.insert(offset);
         }
@@ -2148,6 +2237,7 @@ impl Parser<'_> {
         expect_parens: bool,
         is_async: bool,
         source_start_override: Option<Position>,
+        forbidden: ForbiddenTokens,
     ) -> Option<Expression> {
         let start = source_start_override.unwrap_or_else(|| self.position());
 
@@ -2225,14 +2315,20 @@ impl Parser<'_> {
         } else if self.match_identifier() || self.match_token(TokenType::Await) {
             let token = self.consume();
             let value = self.token_value(&token).to_vec();
-            if is_async && value == utf16!("await") {
-                self.syntax_error("'await' is a reserved identifier in async functions");
+            if value == utf16!("await")
+                && (is_async || self.program_type == ProgramType::Module || self.flags.in_class_static_init_block)
+            {
+                self.syntax_error("'await' is not allowed as an identifier in this context");
             }
             // C++ uses rule_start (arrow function start, which is `async` for async arrows).
-            let binding = Rc::new(Identifier::new(self.range_from(start), value.clone().into()));
+            let value_id = self.arena.strings.intern(&value);
+            let binding = self
+                .arena
+                .identifiers
+                .insert(Identifier::new(self.range_from(start), value_id));
             parsed = ParsedParameters {
                 parameters: vec![FunctionParameter {
-                    binding: FunctionParameterBinding::Identifier(binding.clone()),
+                    binding: FunctionParameterBinding::Identifier(binding),
                     default_value: None,
                     is_rest: false,
                 }],
@@ -2319,14 +2415,22 @@ impl Parser<'_> {
             });
             Some(self.expression(start, ExpressionKind::Function(function_id)))
         } else {
-            let expression = self.parse_assignment_expression();
+            let body_forbidden = if saved_formal_parameter_ctx {
+                ForbiddenTokens::none()
+            } else {
+                forbidden
+            };
+            // https://tc39.es/ecma262/#prod-ArrowFunction
+            // ArrowFunction[In, Yield, Await] :
+            //   ArrowParameters[?Yield, ?Await] [no LineTerminator here] `=>` ConciseBody[?In]
+            let expression = self.parse_expression(PRECEDENCE_ASSIGNMENT, Associativity::Right, body_forbidden);
             // C++ uses rule_start (function start) for ReturnStatement and FunctionBody.
             let return_statement = Statement::new(
                 self.range_from(start),
                 StatementKind::Return(Some(Box::new(expression))),
             );
-            let scope = ScopeData::shared_with_children(vec![return_statement]);
-            self.scope_collector.set_scope_node(scope.clone());
+            let scope = self.make_scope(vec![return_statement]);
+            self.scope_collector.set_scope_node(scope);
             let body = Statement::new(
                 self.range_from(start),
                 StatementKind::FunctionBody {
@@ -2410,6 +2514,10 @@ impl Parser<'_> {
         self.push_function_context();
         let parsed = self.parse_formal_parameters();
 
+        // UniqueFormalParameters : FormalParameters
+        // It is a Syntax Error if the BoundNames of |FormalParameters| contains any duplicate elements.
+        self.check_unique_formal_parameters(&parsed.parameter_info);
+
         self.register_function_parameters_with_scope(&parsed.parameters, &parsed.parameter_info);
 
         if method_kind == MethodKind::Getter && !parsed.parameters.is_empty() {
@@ -2434,8 +2542,9 @@ impl Parser<'_> {
         // Check parameters before restoring flags so that the method's
         // context is used (e.g. in_class_static_init_block must remain
         // false to allow `await` as a parameter name in generators).
-        if has_use_strict || fn_kind != FunctionKind::Normal {
-            self.check_parameters_post_body(&parsed.parameter_info, has_use_strict, fn_kind);
+        let parameters_are_strict = self.flags.strict_mode || has_use_strict;
+        if parameters_are_strict || fn_kind != FunctionKind::Normal {
+            self.check_parameters_post_body(&parsed.parameter_info, parameters_are_strict, fn_kind);
         }
 
         self.flags.in_class_static_init_block = saved_static_init;

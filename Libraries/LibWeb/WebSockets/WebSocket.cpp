@@ -10,6 +10,7 @@
 #include <LibJS/Runtime/FunctionObject.h>
 #include <LibRequests/RequestClient.h>
 #include <LibURL/Origin.h>
+#include <LibWeb/Bindings/MessageEvent.h>
 #include <LibWeb/Bindings/PrincipalHostDefined.h>
 #include <LibWeb/Bindings/WebSocket.h>
 #include <LibWeb/DOM/Document.h>
@@ -23,6 +24,7 @@
 #include <LibWeb/HTML/EventHandler.h>
 #include <LibWeb/HTML/EventNames.h>
 #include <LibWeb/HTML/MessageEvent.h>
+#include <LibWeb/HTML/MessagePort.h>
 #include <LibWeb/HTML/WindowOrWorkerGlobalScope.h>
 #include <LibWeb/Loader/ResourceLoader.h>
 #include <LibWeb/Page/Page.h>
@@ -106,8 +108,13 @@ WebIDL::ExceptionOr<GC::Ref<WebSocket>> WebSocket::construct_impl(JS::Realm& rea
     Platform::EventLoopPlugin::the().deferred_invoke(GC::create_function(vm.heap(), [web_socket, url_record, protocols_sequence = move(protocols_sequence)]() {
         auto& client = HTML::relevant_settings_object(*web_socket);
 
-        //  1. Establish a WebSocket connection given urlRecord, protocols, and client. [FETCH]
-        (void)web_socket->establish_web_socket_connection(*url_record, protocols_sequence, client);
+        // 1. Establish a WebSocket connection given urlRecord, protocols, and client. [FETCH]
+        // AD-HOC: We don't yet implement this method to spec, so it's possible for the connection to fail before we
+        //         make a Requests::WebSocket. If so, we need to manually error and close it.
+        if (web_socket->establish_web_socket_connection(*url_record, protocols_sequence, client).is_error()) {
+            web_socket->on_error();
+            web_socket->on_close(to_underlying(::WebSocket::CloseStatusCode::AbnormalClosure), String {}, false);
+        }
     }));
 
     return web_socket;
@@ -194,6 +201,7 @@ bool WebSocket::must_survive_garbage_collection() const
 ErrorOr<void> WebSocket::establish_web_socket_connection(URL::URL const& url_record, Vector<String> const& protocols, HTML::EnvironmentSettingsObject& client)
 {
     // FIXME: Integrate properly with FETCH as per https://fetch.spec.whatwg.org/#websocket-opening-handshake
+    //        That means following https://websockets.spec.whatwg.org/#concept-websocket-establish
 
     auto& window_or_worker = as<HTML::WindowOrWorkerGlobalScopeMixin>(client.global_object());
     auto origin_string = window_or_worker.origin().to_byte_string();
@@ -297,7 +305,7 @@ WebIDL::ExceptionOr<void> WebSocket::close(Optional<u16> code, Optional<String> 
 }
 
 // https://websockets.spec.whatwg.org/#dom-websocket-send
-WebIDL::ExceptionOr<void> WebSocket::send(Variant<GC::Root<WebIDL::BufferSource>, GC::Root<FileAPI::Blob>, String> const& data)
+WebIDL::ExceptionOr<void> WebSocket::send(WebSocketSendData const& data)
 {
     auto state = ready_state();
     if (state == Requests::WebSocket::ReadyState::Connecting)
@@ -307,15 +315,16 @@ WebIDL::ExceptionOr<void> WebSocket::send(Variant<GC::Root<WebIDL::BufferSource>
             [this](String const& string) {
                 m_websocket->send(string);
             },
-            [this](GC::Root<WebIDL::BufferSource> const& buffer_source) {
+            [this](WebIDL::BufferSourceVariant buffer_source_variant) {
+                auto buffer_source = WebIDL::BufferSource { buffer_source_variant };
                 ReadonlyBytes buffer;
 
-                if (auto array_buffer = buffer_source->viewed_array_buffer(); array_buffer && !array_buffer->is_detached())
-                    buffer = array_buffer->buffer();
+                if (auto array_buffer = buffer_source.viewed_array_buffer(); array_buffer && !array_buffer->is_detached())
+                    buffer = array_buffer->bytes().slice(buffer_source.byte_offset(), buffer_source.byte_length());
 
                 m_websocket->send(buffer, false);
             },
-            [this](GC::Root<FileAPI::Blob> const& blob) {
+            [this](GC::Ref<FileAPI::Blob> blob) {
                 m_websocket->send(blob->raw_bytes(), false);
             });
         // TODO : If the data cannot be sent, e.g. because it would need to be buffered but the buffer is full, the user agent must flag the WebSocket as full and then close the WebSocket connection.
@@ -352,7 +361,7 @@ void WebSocket::on_close(u16 code, String reason, bool was_clean)
     HTML::queue_a_task(HTML::Task::Source::WebSocket, nullptr, nullptr, GC::create_function(heap(), [this, code, reason = move(reason), was_clean] {
         // 1. Change the readyState attribute's value to CLOSED. This is handled by the Protocol's WebSocket
         // 2. If [needed], fire an event named error at the WebSocket object. This is handled by the Protocol's WebSocket
-        HTML::CloseEventInit event_init {};
+        Bindings::CloseEventInit event_init {};
         event_init.was_clean = was_clean;
         event_init.code = code;
         event_init.reason = reason;
@@ -370,26 +379,23 @@ void WebSocket::on_message(ByteBuffer message, bool is_text)
     HTML::queue_a_task(HTML::Task::Source::WebSocket, nullptr, nullptr, GC::create_function(heap(), [this, message = move(message), is_text] {
         if (is_text) {
             auto text_message = ByteString(ReadonlyBytes(message));
-            HTML::MessageEventInit event_init;
+            Bindings::MessageEventInit event_init;
             event_init.data = JS::PrimitiveString::create(vm(), text_message);
-            event_init.origin = url();
-            dispatch_event(HTML::MessageEvent::create(realm(), HTML::EventNames::message, event_init));
+            dispatch_event(HTML::MessageEvent::create(realm(), HTML::EventNames::message, event_init, m_url.origin()));
             return;
         }
 
         if (m_binary_type == "blob") {
             // type indicates that the data is Binary and binaryType is "blob"
-            HTML::MessageEventInit event_init;
+            Bindings::MessageEventInit event_init;
             event_init.data = FileAPI::Blob::create(realm(), message, "text/plain;charset=utf-8"_string);
-            event_init.origin = url();
-            dispatch_event(HTML::MessageEvent::create(realm(), HTML::EventNames::message, event_init));
+            dispatch_event(HTML::MessageEvent::create(realm(), HTML::EventNames::message, event_init, m_url.origin()));
             return;
         } else if (m_binary_type == "arraybuffer") {
             // type indicates that the data is Binary and binaryType is "arraybuffer"
-            HTML::MessageEventInit event_init;
+            Bindings::MessageEventInit event_init;
             event_init.data = JS::ArrayBuffer::create(realm(), message);
-            event_init.origin = url();
-            dispatch_event(HTML::MessageEvent::create(realm(), HTML::EventNames::message, event_init));
+            dispatch_event(HTML::MessageEvent::create(realm(), HTML::EventNames::message, event_init, m_url.origin()));
             return;
         }
 

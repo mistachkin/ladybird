@@ -16,14 +16,17 @@ class Action;
 class Application;
 class Autocomplete;
 class BookmarkStore;
+class CompositorClient;
 class CookieJar;
 class HistoryStore;
+class HSTSStore;
 class Menu;
 class OutOfProcessWebView;
 class ProcessManager;
 class Settings;
 class ViewImplementation;
 class WebContentClient;
+class WebWorkerClient;
 class WebUI;
 
 struct Attribute;

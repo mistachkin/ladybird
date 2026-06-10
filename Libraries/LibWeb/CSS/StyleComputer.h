@@ -8,6 +8,7 @@
 #pragma once
 
 #include <AK/HashMap.h>
+#include <AK/JsonArray.h>
 #include <AK/Optional.h>
 #include <AK/OwnPtr.h>
 #include <LibWeb/Animations/KeyframeEffect.h>
@@ -100,18 +101,21 @@ public:
     void push_ancestor(DOM::Element const&);
     void pop_ancestor(DOM::Element const&);
 
-    [[nodiscard]] GC::Ref<ComputedProperties> create_document_style() const;
+    [[nodiscard]] NonnullRefPtr<ComputedProperties> create_document_style() const;
 
-    [[nodiscard]] GC::Ref<ComputedProperties> compute_style(DOM::AbstractElement, Optional<bool&> did_change_custom_properties = {}) const;
-    [[nodiscard]] GC::Ref<ComputedProperties> compute_style_with_seeded_ancestors(DOM::AbstractElement);
-    [[nodiscard]] GC::Ptr<ComputedProperties> compute_pseudo_element_style_if_needed(DOM::AbstractElement, Optional<bool&> did_change_custom_properties) const;
+    [[nodiscard]] NonnullRefPtr<ComputedProperties> compute_style(DOM::AbstractElement, Optional<bool&> did_change_custom_properties = {}) const;
+    [[nodiscard]] NonnullRefPtr<ComputedProperties> compute_style_with_seeded_ancestors(DOM::AbstractElement);
+    [[nodiscard]] RefPtr<ComputedProperties> compute_pseudo_element_style_if_needed(DOM::AbstractElement, Optional<bool&> did_change_custom_properties) const;
+    [[nodiscard]] JsonArray collect_devtools_applied_style_rules(DOM::AbstractElement, bool include_inherited, bool include_user_agent_styles);
 
     struct ScopedMatchingRule {
         MatchingRule const* rule { nullptr };
         GC::Ptr<DOM::ShadowRoot const> shadow_root;
-    };
+        GC::Ptr<DOM::Element const> scope_root;
+        size_t scope_proximity { NumericLimits<size_t>::max() };
 
-    [[nodiscard]] Vector<ScopedMatchingRule> collect_matching_rules(DOM::AbstractElement, CascadeOrigin, PseudoClassBitmap& attempted_pseudo_class_matches, Optional<FlyString const> qualified_layer_name = {}) const;
+        void visit_edges(GC::Cell::Visitor& visitor);
+    };
 
     NonnullRefPtr<InvalidationPlan> invalidation_plan_for_properties(Vector<InvalidationSet::Property> const&, StyleScope const&) const;
     Vector<HasInvalidationMetadata> const* has_invalidation_metadata_for_property(InvalidationSet::Property const&, StyleScope const&) const;
@@ -119,20 +123,20 @@ public:
     static CSSPixels default_user_font_size();
     static CSSPixels absolute_size_mapping(AbsoluteSize, CSSPixels default_font_size);
     static CSSPixels relative_size_mapping(RelativeSize, CSSPixels inherited_font_size);
-    [[nodiscard]] RefPtr<StyleValue const> recascade_font_size_if_needed(DOM::AbstractElement, CascadedProperties&) const;
+    [[nodiscard]] RefPtr<StyleValue const> recascade_font_size_if_needed(DOM::AbstractElement, CascadedProperties&, bool& depends_on_viewport_metrics) const;
 
     void set_viewport_rect(Badge<DOM::Document>, CSSPixelRect const& viewport_rect) { m_viewport_rect = viewport_rect; }
 
     void collect_animation_into(DOM::AbstractElement, GC::Ref<Animations::KeyframeEffect> animation, ComputedProperties&) const;
 
-    [[nodiscard]] GC::Ref<ComputedProperties> compute_properties(DOM::AbstractElement, CascadedProperties&) const;
+    [[nodiscard]] NonnullRefPtr<ComputedProperties> compute_properties(DOM::AbstractElement, CascadedProperties&) const;
 
     void compute_property_values(ComputedProperties&, Optional<DOM::AbstractElement>) const;
     void process_animation_definitions(ComputedProperties const& computed_properties, CascadedProperties const&, DOM::AbstractElement& abstract_element) const;
 
     [[nodiscard]] inline bool should_reject_with_ancestor_filter(Selector const&) const;
 
-    static NonnullRefPtr<StyleValue const> compute_value_of_custom_property(DOM::AbstractElement, FlyString const& custom_property, Optional<Parser::GuardedSubstitutionContexts&> = {});
+    static NonnullRefPtr<StyleValue const> compute_value_of_custom_property(DOM::AbstractElement, Utf16FlyString const& custom_property, Optional<Parser::GuardedSubstitutionContexts&> = {});
 
     static NonnullRefPtr<StyleValue const> compute_value_of_property(PropertyID, NonnullRefPtr<StyleValue const> const& specified_value, Function<NonnullRefPtr<StyleValue const>(PropertyID)> const& get_property_specified_value, ComputationContext const&, double device_pixels_per_css_pixel);
     static NonnullRefPtr<StyleValue const> compute_animation_name(NonnullRefPtr<StyleValue const> const& absolutized_value);
@@ -147,6 +151,11 @@ public:
     static NonnullRefPtr<StyleValue const> compute_line_height(NonnullRefPtr<StyleValue const> const& absolutized_value, CSSPixels computed_font_size);
     static NonnullRefPtr<StyleValue const> compute_position_area(NonnullRefPtr<StyleValue const> const& absolutized_value);
 
+    enum class BypassPseudoElementPropertyWhitelist : u8 {
+        No,
+        Yes,
+    };
+
 private:
     virtual void visit_edges(Visitor&) override;
 
@@ -160,16 +169,21 @@ private:
         Vector<ScopedMatchingRule> rules;
     };
 
-    struct MatchingRuleSet {
-        Vector<ScopedMatchingRule> user_agent_rules;
-        Vector<ScopedMatchingRule> user_rules;
+    struct ContextMatchingRules {
+        GC::Ptr<DOM::ShadowRoot const> shadow_root;
         Vector<LayerMatchingRules> author_rules;
     };
 
-    [[nodiscard]] MatchingRuleSet build_matching_rule_set(DOM::AbstractElement, PseudoClassBitmap& attempted_pseudo_class_matches, bool& did_match_any_pseudo_element_rules, ComputeStyleMode, StyleScope const&) const;
+    struct MatchingRuleSet {
+        Vector<ScopedMatchingRule> user_agent_rules;
+        Vector<ScopedMatchingRule> user_rules;
+        Vector<ContextMatchingRules> author_contexts;
+    };
 
-    [[nodiscard]] GC::Ptr<ComputedProperties> compute_style_impl(DOM::AbstractElement, ComputeStyleMode, Optional<bool&> did_change_custom_properties, StyleScope const&) const;
-    [[nodiscard]] GC::Ref<CascadedProperties> compute_cascaded_values(DOM::AbstractElement, bool did_match_any_pseudo_element_rules, ComputeStyleMode, MatchingRuleSet const&) const;
+    [[nodiscard]] MatchingRuleSet build_matching_rule_set(DOM::AbstractElement, bool& did_match_any_pseudo_element_rules, ComputeStyleMode) const;
+
+    [[nodiscard]] RefPtr<ComputedProperties> compute_style_impl(DOM::AbstractElement, ComputeStyleMode, Optional<bool&> did_change_custom_properties, StyleScope const&) const;
+    [[nodiscard]] NonnullRefPtr<CascadedProperties> compute_cascaded_values(DOM::AbstractElement, bool did_match_any_pseudo_element_rules, ComputeStyleMode, MatchingRuleSet const&) const;
     void compute_custom_properties(ComputedProperties&, DOM::AbstractElement) const;
     void start_needed_transitions(ComputedProperties const& old_style, ComputedProperties& new_style, DOM::AbstractElement) const;
     void resolve_effective_overflow_values(ComputedProperties&) const;
@@ -179,13 +193,16 @@ private:
 
     [[nodiscard]] Length::FontMetrics calculate_root_element_font_metrics(ComputedProperties const&) const;
 
+    [[nodiscard]] Vector<ScopedMatchingRule> collect_matching_rules_from_context(DOM::AbstractElement, CascadeOrigin, GC::Ptr<DOM::ShadowRoot const>, Optional<FlyString const> qualified_layer_name = {}) const;
+
     void cascade_declarations(
         CascadedProperties&,
         DOM::AbstractElement,
         Vector<ScopedMatchingRule> const&,
         CascadeOrigin,
         Important,
-        Optional<FlyString> layer_name) const;
+        Optional<FlyString> layer_name,
+        bool include_inline_style) const;
 
     void apply_property_list_to_cascade(
         CascadedProperties&,
@@ -195,7 +212,8 @@ private:
         Important,
         Optional<FlyString> layer_name,
         GC::Ptr<CSSStyleDeclaration const> source,
-        GC::Ptr<DOM::ShadowRoot const> source_shadow_root) const;
+        GC::Ptr<DOM::ShadowRoot const> source_shadow_root,
+        BypassPseudoElementPropertyWhitelist) const;
 
     GC::Ref<DOM::Document> m_document;
 
@@ -203,6 +221,7 @@ private:
 
     Length::FontMetrics m_default_font_metrics;
     mutable Length::FontMetrics m_root_element_font_metrics;
+    mutable bool m_root_element_font_metrics_depend_on_viewport_metrics { false };
 
     mutable Optional<ComputationContext> m_cached_font_computation_context;
     mutable Optional<ComputationContext> m_cached_line_height_computation_context;
@@ -221,6 +240,8 @@ private:
     }
 
     CSSPixelRect m_viewport_rect;
+
+    mutable Vector<ScopedMatchingRule> m_rules_to_run_scratch;
 
     OwnPtr<CountingBloomFilter<u8, 14>> m_ancestor_filter;
     OwnPtr<SelectorEngine::HasResultCache> m_has_result_cache;

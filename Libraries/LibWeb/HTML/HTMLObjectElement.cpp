@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibGfx/ImmutableBitmap.h>
+#include <LibGfx/DecodedImageFrame.h>
 #include <LibWeb/Bindings/HTMLObjectElement.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/Invalidation/EmbeddedContentInvalidator.h>
@@ -80,7 +80,6 @@ void HTMLObjectElement::initialize(JS::Realm& realm)
 void HTMLObjectElement::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
-    image_provider_visit_edges(visitor);
     visitor.visit(m_resource_request);
     visitor.visit(m_document_observer);
 }
@@ -126,10 +125,15 @@ void HTMLObjectElement::apply_presentational_hints(Vector<CSS::StyleProperty>& p
     Base::apply_presentational_hints(properties);
     for_each_attribute([&](auto& name, auto& value) {
         if (name == HTML::AttributeNames::align) {
-            if (value.equals_ignoring_ascii_case("center"sv))
-                properties.append({ .property_id = CSS::PropertyID::TextAlign, .value = CSS::KeywordStyleValue::create(CSS::Keyword::Center) });
-            else if (value.equals_ignoring_ascii_case("middle"sv))
-                properties.append({ .property_id = CSS::PropertyID::TextAlign, .value = CSS::KeywordStyleValue::create(CSS::Keyword::Middle) });
+            // https://html.spec.whatwg.org/multipage/rendering.html#attributes-for-embedded-content-and-images
+            // When an embed, iframe, img, or object element, or an input element whose type attribute is in the Image Button state,
+            // has an align attribute whose value is an ASCII case-insensitive match for the string "center" or the string "middle",
+            // the user agent is expected to act as if the element's 'vertical-align' property was set to a value that aligns the
+            // vertical middle of the element with the parent element's baseline.
+            // FIXME: This should use legacy baseline-middle alignment instead of CSS vertical-align: middle,
+            //        as Firefox and Chrome do with engine-specific legacy values.
+            if (value.equals_ignoring_ascii_case("center"sv) || value.equals_ignoring_ascii_case("middle"sv))
+                properties.append({ .property_id = CSS::PropertyID::VerticalAlign, .value = CSS::KeywordStyleValue::create(CSS::Keyword::Middle) });
         } else if (name == HTML::AttributeNames::border) {
             if (auto parsed_value = parse_non_negative_integer(value); parsed_value.has_value()) {
                 auto width_style_value = CSS::LengthStyleValue::create(CSS::Length::make_px(*parsed_value));
@@ -189,16 +193,16 @@ void HTMLObjectElement::set_data(String const& data)
     set_attribute_value(HTML::AttributeNames::data, data);
 }
 
-GC::Ptr<Layout::Node> HTMLObjectElement::create_layout_node(GC::Ref<CSS::ComputedProperties> style)
+RefPtr<Layout::Node> HTMLObjectElement::create_layout_node(CSS::ComputedProperties const& style)
 {
     switch (m_representation) {
     case Representation::Children:
-        return NavigableContainer::create_layout_node(move(style));
+        return NavigableContainer::create_layout_node(style);
     case Representation::ContentNavigable:
-        return heap().allocate<Layout::NavigableContainerViewport>(document(), *this, move(style));
+        return make_ref_counted<Layout::NavigableContainerViewport>(document(), *this, style);
     case Representation::Image:
         if (image_data())
-            return heap().allocate<Layout::ImageBox>(document(), *this, move(style), *this);
+            return make_ref_counted<Layout::ImageBox>(document(), *this, style, *this);
         break;
     default:
         break;
@@ -606,11 +610,11 @@ Optional<CSSPixelFraction> HTMLObjectElement::intrinsic_aspect_ratio() const
     return {};
 }
 
-RefPtr<Gfx::ImmutableBitmap> HTMLObjectElement::current_image_bitmap_sized(Gfx::IntSize size) const
+Optional<Gfx::DecodedImageFrame> HTMLObjectElement::current_image_frame_sized(Gfx::IntSize size) const
 {
     if (auto image_data = this->image_data())
-        return image_data->bitmap(0, size);
-    return nullptr;
+        return image_data->frame(0, size);
+    return {};
 }
 
 void HTMLObjectElement::set_visible_in_viewport(bool)

@@ -5,6 +5,7 @@
  */
 
 #include <AK/QuickSort.h>
+#include <LibJS/Runtime/ExternalMemory.h>
 #include <LibJS/Runtime/GlobalObject.h>
 #include <LibJS/Runtime/ModuleEnvironment.h>
 #include <LibJS/Runtime/ModuleNamespaceObject.h>
@@ -30,6 +31,11 @@ void ModuleNamespaceObject::initialize(Realm& realm)
 
     // 28.3.1 @@toStringTag, https://tc39.es/ecma262/#sec-@@tostringtag
     define_direct_property(vm.well_known_symbol_to_string_tag(), PrimitiveString::create(vm, "Module"_string), 0);
+}
+
+size_t ModuleNamespaceObject::external_memory_size() const
+{
+    return Object::external_memory_size() + vector_external_memory_size(m_exports);
 }
 
 // 10.4.6.1 [[GetPrototypeOf]] ( ), https://tc39.es/ecma262/#sec-module-namespace-exotic-objects-getprototypeof
@@ -213,7 +219,7 @@ ThrowCompletionOr<GC::RootVector<Value>> ModuleNamespaceObject::internal_own_pro
 {
     // 1. Let exports be O.[[Exports]].
     // NOTE: We only add the exports after we know the size of symbolKeys
-    GC::RootVector<Value> exports { vm().heap() };
+    GC::RootVector<Value> exports;
 
     // 2. Let symbolKeys be OrdinaryOwnPropertyKeys(O).
     auto symbol_keys = MUST(Object::internal_own_property_keys());

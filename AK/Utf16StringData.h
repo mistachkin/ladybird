@@ -34,7 +34,6 @@ public:
     static NonnullRefPtr<Utf16StringData> from_utf8(StringView, AllowASCIIStorage);
     static NonnullRefPtr<Utf16StringData> from_ascii(ReadonlyBytes);
     static NonnullRefPtr<Utf16StringData> from_utf16(Utf16View const&);
-    static NonnullRefPtr<Utf16StringData> from_utf32(Utf32View const&);
     static NonnullRefPtr<Utf16StringData> from_string_builder(StringBuilder&);
     static ErrorOr<NonnullRefPtr<Utf16StringData>> from_ipc_stream(Stream&, size_t length_in_code_units, bool is_ascii);
 
@@ -151,7 +150,7 @@ private:
 
     mutable bool m_is_fly_string { false };
 
-    union {
+    union alignas(8) {
         char m_ascii_data[0];
         char16_t m_utf16_data[0];
     };

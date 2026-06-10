@@ -95,6 +95,9 @@ RequiredInvalidationAfterStyleChange compute_property_invalidation(CSS::Property
         return invalidation;
     }
 
+    if (AK::first_is_one_of(property_id, CSS::PropertyID::ContainerName, CSS::PropertyID::ContainerType))
+        invalidation.recompute_descendant_styles = true;
+
     // OPTIMIZATION: Special handling for CSS `visibility`:
     if (property_id == CSS::PropertyID::Visibility) {
         // We don't need to relayout if the visibility changes from visible to hidden or vice versa. Only collapse requires relayout.
@@ -132,22 +135,8 @@ RequiredInvalidationAfterStyleChange compute_property_invalidation(CSS::Property
     }
     invalidation.repaint = true;
 
-    // Transform, perspective, clip, clip-path, and effects properties require rebuilding AccumulatedVisualContext tree.
-    if (AK::first_is_one_of(property_id,
-            CSS::PropertyID::Transform,
-            CSS::PropertyID::Rotate,
-            CSS::PropertyID::Scale,
-            CSS::PropertyID::Translate,
-            CSS::PropertyID::Perspective,
-            CSS::PropertyID::TransformOrigin,
-            CSS::PropertyID::PerspectiveOrigin,
-            CSS::PropertyID::Clip,
-            CSS::PropertyID::ClipPath,
-            CSS::PropertyID::Opacity,
-            CSS::PropertyID::MixBlendMode,
-            CSS::PropertyID::Filter)) {
+    if (CSS::property_affects_accumulated_visual_contexts(property_id))
         invalidation.rebuild_accumulated_visual_contexts = true;
-    }
 
     return invalidation;
 }

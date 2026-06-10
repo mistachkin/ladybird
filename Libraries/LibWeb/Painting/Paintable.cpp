@@ -7,12 +7,16 @@
  */
 
 #include <LibWeb/CSS/ComputedProperties.h>
+#include <LibWeb/CSS/StyleValues/ColorSchemeStyleValue.h>
 #include <LibWeb/CSS/SystemColor.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Element.h>
 #include <LibWeb/DOM/ShadowRoot.h>
 #include <LibWeb/DOM/Text.h>
 #include <LibWeb/Layout/Node.h>
+#include <LibWeb/Layout/TextNode.h>
+#include <LibWeb/Layout/TextOffsetMapping.h>
+#include <LibWeb/Page/Page.h>
 #include <LibWeb/Painting/DisplayListRecorder.h>
 #include <LibWeb/Painting/DisplayListRecordingContext.h>
 #include <LibWeb/Painting/Paintable.h>
@@ -46,22 +50,6 @@ Paintable::Paintable(Layout::Node const& layout_node)
 
 Paintable::~Paintable() = default;
 
-void Paintable::finalize()
-{
-    Base::finalize();
-    if (m_list_node.is_in_list())
-        m_list_node.remove();
-}
-
-void Paintable::visit_edges(Cell::Visitor& visitor)
-{
-    Base::visit_edges(visitor);
-    TreeNode::visit_edges(visitor);
-    visitor.visit(m_dom_node);
-    visitor.visit(m_layout_node);
-    visitor.visit(m_containing_block);
-}
-
 String Paintable::debug_description() const
 {
     return MUST(String::formatted("{}({})", class_name(), layout_node().debug_description()));
@@ -77,19 +65,29 @@ DOM::Document& Paintable::document()
     return layout_node().document();
 }
 
-PaintableBox* Paintable::containing_block() const
+RefPtr<PaintableBox> Paintable::containing_block() const
 {
-    return m_containing_block.ensure([&] -> GC::Ptr<PaintableBox> {
-        auto containing_layout_box = m_layout_node->containing_block();
+    if (m_containing_block.has_value()) {
+        if (auto containing_block = m_containing_block->strong_ref())
+            return containing_block;
+    }
+
+    auto containing_block = [&] -> RefPtr<PaintableBox> {
+        auto containing_layout_box = layout_node().containing_block();
         if (!containing_layout_box)
             return nullptr;
-        return const_cast<PaintableBox*>(containing_layout_box->paintable_box());
-    });
+        auto paintable_box = containing_layout_box->paintable_box();
+        if (!paintable_box)
+            return nullptr;
+        return const_cast<PaintableBox&>(*paintable_box);
+    }();
+    m_containing_block = containing_block;
+    return containing_block;
 }
 
 CSS::ImmutableComputedValues const& Paintable::computed_values() const
 {
-    return m_layout_node->computed_values();
+    return layout_node().computed_values();
 }
 
 bool Paintable::visible_for_hit_testing() const
@@ -101,17 +99,17 @@ bool Paintable::visible_for_hit_testing() const
 
 void Paintable::set_dom_node(GC::Ptr<DOM::Node> dom_node)
 {
-    m_dom_node = dom_node;
+    m_dom_node = dom_node.ptr();
 }
 
 GC::Ptr<DOM::Node> Paintable::dom_node()
 {
-    return m_dom_node;
+    return m_dom_node.ptr();
 }
 
 GC::Ptr<DOM::Node const> Paintable::dom_node() const
 {
-    return m_dom_node;
+    return m_dom_node.ptr();
 }
 
 GC::Ptr<HTML::Navigable> Paintable::navigable() const
@@ -119,30 +117,44 @@ GC::Ptr<HTML::Navigable> Paintable::navigable() const
     return document().navigable();
 }
 
-bool Paintable::handle_mousewheel(Badge<EventHandler>, CSSPixelPoint, unsigned, unsigned, int, int)
+bool Paintable::handle_mousewheel(Badge<EventHandler>, CSSPixelPoint, unsigned, unsigned, double, double)
 {
     return false;
-}
-
-TraversalDecision Paintable::hit_test(CSSPixelPoint, HitTestType, Function<TraversalDecision(HitTestResult)> const&) const
-{
-    return TraversalDecision::Continue;
 }
 
 bool Paintable::has_stacking_context() const
 {
-    if (is_paintable_box())
-        return static_cast<PaintableBox const&>(*this).stacking_context();
+    if (auto const* paintable_box = as_if<PaintableBox>(this))
+        return paintable_box->stacking_context();
     return false;
 }
 
-StackingContext* Paintable::enclosing_stacking_context()
+DOM::Node* HitTestResult::dom_node()
 {
-    for (auto* ancestor = parent(); ancestor; ancestor = ancestor->parent()) {
-        if (!ancestor->is_paintable_box())
+    for (auto* current = paintable.ptr(); current; current = current->parent()) {
+        if (auto node = current->dom_node())
+            return node;
+    }
+    return nullptr;
+}
+
+DOM::Node const* HitTestResult::dom_node() const
+{
+    for (auto const* current = paintable.ptr(); current; current = current->parent()) {
+        if (auto node = current->dom_node())
+            return node;
+    }
+    return nullptr;
+}
+
+RefPtr<StackingContext> Paintable::enclosing_stacking_context()
+{
+    for (auto ancestor = parent(); ancestor; ancestor = ancestor->parent()) {
+        auto* paintable_box = as_if<PaintableBox>(ancestor.ptr());
+        if (!paintable_box)
             continue;
-        if (auto* stacking_context = static_cast<PaintableBox&>(*ancestor).stacking_context())
-            return const_cast<StackingContext*>(stacking_context);
+        if (auto stacking_context = paintable_box->stacking_context())
+            return stacking_context;
     }
     // We should always reach the viewport's stacking context.
     VERIFY_NOT_REACHED();
@@ -150,46 +162,60 @@ StackingContext* Paintable::enclosing_stacking_context()
 
 void Paintable::paint_inspector_overlay(DisplayListRecordingContext& context) const
 {
+    paint_with_inspector_overlay_context(context, [&] {
+        paint_inspector_overlay_internal(context);
+    });
+}
+
+void Paintable::paint_with_inspector_overlay_context(DisplayListRecordingContext& context, Function<void()> const& callback) const
+{
     auto& display_list_recorder = context.display_list_recorder();
-    auto const* paintable_box = as_if<PaintableBox>(this);
-    if (!paintable_box)
+    auto previous_visual_context_index = display_list_recorder.accumulated_visual_context();
+
+    RefPtr<PaintableBox const> paintable_box;
+    if (is<PaintableBox>(*this))
+        paintable_box = static_cast<PaintableBox const&>(*this);
+    else
         paintable_box = first_ancestor_of_type<PaintableBox>();
 
     if (paintable_box) {
-        auto& visual_context_tree = const_cast<ViewportPaintable*>(document().paintable())->visual_context_tree();
+        auto viewport_paintable = document().paintable();
+        VERIFY(viewport_paintable);
+        auto& visual_context_tree = const_cast<ViewportPaintable&>(*viewport_paintable).visual_context_tree();
         auto visual_context_index = paintable_box->accumulated_visual_context_index();
 
-        if (visual_context_index.value()) {
+        if (visual_context_index != VISUAL_VIEWPORT_NODE_INDEX) {
             Vector<VisualContextIndex> relevant_indices;
-            for (auto i = visual_context_index; i.value(); i = visual_context_tree.node_at(i).parent_index) {
+            for (auto i = visual_context_index; i != VISUAL_VIEWPORT_NODE_INDEX; i = visual_context_tree.node_at(i).parent_index) {
                 auto should_keep = visual_context_tree.node_at(i).data.visit(
                     [](ScrollData const&) { return true; },
                     [](ClipData const&) { return false; },
                     [](TransformData const&) { return true; },
                     [](PerspectiveData const&) { return true; },
                     [](ClipPathData const&) { return false; },
-                    [](EffectsData const&) { return false; });
+                    [](EffectsData const&) { return false; },
+                    [](ScrollCompensation const&) { return true; });
                 if (should_keep)
                     relevant_indices.append(i);
             }
 
-            VisualContextIndex overlay_visual_context_index {};
+            auto overlay_visual_context_index = VISUAL_VIEWPORT_NODE_INDEX;
             for (auto const& source_visual_context_index : relevant_indices.in_reverse())
                 overlay_visual_context_index = visual_context_tree.append(visual_context_tree.node_at(source_visual_context_index).data, overlay_visual_context_index);
 
-            if (overlay_visual_context_index.value())
+            if (overlay_visual_context_index != VISUAL_VIEWPORT_NODE_INDEX)
                 display_list_recorder.set_accumulated_visual_context(overlay_visual_context_index);
         }
     }
 
-    paint_inspector_overlay_internal(context);
-    display_list_recorder.set_accumulated_visual_context({});
+    callback();
+    display_list_recorder.set_accumulated_visual_context(previous_visual_context_index);
 }
 
 void Paintable::set_needs_repaint(InvalidateDisplayList should_invalidate_display_list)
 {
     if (should_invalidate_display_list == InvalidateDisplayList::Yes) {
-        if (auto* containing_block = this->containing_block())
+        if (auto containing_block = this->containing_block())
             containing_block->invalidate_paint_cache();
     }
     document().set_needs_repaint(Badge<Painting::Paintable> {}, should_invalidate_display_list);
@@ -197,13 +223,13 @@ void Paintable::set_needs_repaint(InvalidateDisplayList should_invalidate_displa
 
 CSSPixelPoint Paintable::box_type_agnostic_position() const
 {
-    if (is_paintable_box())
-        return static_cast<PaintableBox const*>(this)->absolute_position();
+    if (auto const* paintable_box = as_if<PaintableBox>(this))
+        return paintable_box->absolute_position();
 
     VERIFY(is_inline());
 
     CSSPixelPoint position;
-    if (auto const* block = containing_block(); block && is<Painting::PaintableWithLines>(*block)) {
+    if (auto block = containing_block(); block && is<Painting::PaintableWithLines>(*block)) {
         auto const& fragments = static_cast<Painting::PaintableWithLines const&>(*block).fragments();
         if (!fragments.is_empty()) {
             position = fragments[0].absolute_rect().location();
@@ -232,6 +258,8 @@ Painting::BorderRadiiData normalize_border_radii_data(Layout::Node const& node, 
     // NOTE: We iterate twice as a form of iterative refinement. A single scaling pass using
     // fixed-point arithmetic can result in small rounding errors, causing the scaled radii to
     // still slightly overflow the box dimensions. A second pass corrects this remaining error.
+    auto border_width = max(CSSPixels(0), border_rect.width());
+    auto border_height = max(CSSPixels(0), border_rect.height());
     for (int iteration = 0; iteration < 2; ++iteration) {
         auto s_top = radii_px.top_left.horizontal_radius + radii_px.top_right.horizontal_radius;
         auto s_right = radii_px.top_right.vertical_radius + radii_px.bottom_right.vertical_radius;
@@ -239,14 +267,14 @@ Painting::BorderRadiiData normalize_border_radii_data(Layout::Node const& node, 
         auto s_left = radii_px.bottom_left.vertical_radius + radii_px.top_left.vertical_radius;
 
         CSSPixelFraction f = 1;
-        if (s_top > border_rect.width())
-            f = min(f, border_rect.width() / s_top);
-        if (s_right > border_rect.height())
-            f = min(f, border_rect.height() / s_right);
-        if (s_bottom > border_rect.width())
-            f = min(f, border_rect.width() / s_bottom);
-        if (s_left > border_rect.height())
-            f = min(f, border_rect.height() / s_left);
+        if (s_top > 0 && s_top > border_width)
+            f = min(f, border_width / s_top);
+        if (s_right > 0 && s_right > border_height)
+            f = min(f, border_height / s_right);
+        if (s_bottom > 0 && s_bottom > border_width)
+            f = min(f, border_width / s_bottom);
+        if (s_left > 0 && s_left > border_height)
+            f = min(f, border_height / s_left);
 
         // If f is 1 or more, the radii fit perfectly and no more scaling is needed
         if (f >= 1)
@@ -270,19 +298,40 @@ Painting::BorderRadiiData normalize_border_radii_data(Layout::Node const& node, 
 //        fill-color, stroke-width, and CSS custom properties.
 Paintable::SelectionStyle Paintable::selection_style() const
 {
-    auto color_scheme = computed_values().color_scheme();
-    SelectionStyle default_style { CSS::SystemColor::highlight(color_scheme), {}, {}, {} };
+    auto default_style_for_color_scheme = [&](CSS::PreferredColorScheme color_scheme, bool use_palette_for_normal_color_scheme = true) {
+        auto palette = document().page().palette();
+        auto palette_color_scheme = palette.is_dark() ? CSS::PreferredColorScheme::Dark : CSS::PreferredColorScheme::Light;
+        if (color_scheme == palette_color_scheme || use_palette_for_normal_color_scheme) {
+            return SelectionStyle {
+                CSS::SystemColor::transform_selection_background_color(palette.selection()),
+                palette.selection_text(),
+                {},
+                {},
+            };
+        }
+
+        return SelectionStyle {
+            CSS::SystemColor::transform_selection_background_color(CSS::SystemColor::highlight(color_scheme)),
+            CSS::SystemColor::highlight_text(color_scheme),
+            {},
+            {},
+        };
+    };
 
     // For text nodes, check the parent element since text nodes don't have computed properties.
     auto node = dom_node();
     if (!node)
-        return default_style;
+        return default_style_for_color_scheme(computed_values().color_scheme());
 
     DOM::Element const* element = as_if<DOM::Element>(*node);
     if (!element)
         element = node->parent_element();
     if (!element)
-        return default_style;
+        return default_style_for_color_scheme(computed_values().color_scheme());
+
+    auto color_scheme_is_normal = element->computed_properties()->property(CSS::PropertyID::ColorScheme).as_color_scheme().schemes().is_empty();
+    auto use_palette_for_normal_color_scheme = color_scheme_is_normal && !document().supported_color_schemes().has_value();
+    auto default_style = default_style_for_color_scheme(computed_values().color_scheme(), use_palette_for_normal_color_scheme);
 
     auto style_from_element = [&](DOM::Element const& element) -> Optional<SelectionStyle> {
         auto element_layout_node = element.layout_node();
@@ -352,11 +401,11 @@ void Paintable::set_selection_state(SelectionState state)
     m_selection_state = state;
     if (auto* box = as_if<PaintableBox>(this)) {
         box->invalidate_paint_cache();
-    } else if (auto* containing_block = this->containing_block()) {
+    } else if (auto containing_block = this->containing_block()) {
         containing_block->invalidate_paint_cache();
         for (auto const* ancestor = layout_node().parent(); ancestor && ancestor != &containing_block->layout_node(); ancestor = ancestor->parent()) {
             for (auto& paintable : ancestor->paintables()) {
-                if (auto* ancestor_box = as_if<PaintableBox>(paintable))
+                if (auto* ancestor_box = as_if<PaintableBox>(paintable.ptr()))
                     ancestor_box->invalidate_paint_cache();
             }
         }
@@ -365,34 +414,47 @@ void Paintable::set_selection_state(SelectionState state)
 
 void Paintable::scroll_ancestor_to_offset_into_view(size_t offset)
 {
-    // Walk up to find the containing PaintableWithLines.
-    GC::Ptr<PaintableWithLines const> paintable_with_lines;
-    for (auto* ancestor = this; ancestor; ancestor = ancestor->parent()) {
-        paintable_with_lines = as_if<PaintableWithLines>(*ancestor);
-        if (paintable_with_lines)
-            break;
-    }
-    if (!paintable_with_lines)
-        return;
-
-    // Find the fragment containing the offset and compute a cursor rect.
-    for (auto const& fragment : paintable_with_lines->fragments()) {
-        if (&fragment.paintable() != this)
-            continue;
-        if (offset < fragment.start_offset() || offset > fragment.start_offset() + fragment.length_in_code_units())
-            continue;
-
+    auto scroll_to_cursor = [&](PaintableFragment const& fragment, Paintable const& fragment_paintable) {
         auto cursor_rect = fragment.range_rect(SelectionState::StartAndEnd, offset, offset);
-
-        // Walk up the containing block chain to find the nearest scrollable ancestor.
-        for (auto* ancestor = containing_block(); ancestor; ancestor = ancestor->containing_block()) {
+        for (auto ancestor = fragment_paintable.containing_block(); ancestor; ancestor = ancestor->containing_block()) {
             if (ancestor->has_scrollable_overflow()) {
                 ancestor->scroll_into_view(cursor_rect);
-                break;
+                return;
             }
         }
+    };
+
+    // Find the paintable fragment containing the cursor offset and scroll it into view.
+    auto scan_layout_fragment = [&](Paintable const& slice_paintable) -> bool {
+        auto paintable_with_lines = slice_paintable.first_ancestor_of_type<PaintableWithLines>();
+        if (!paintable_with_lines)
+            return false;
+        for (auto const& fragment : paintable_with_lines->fragments()) {
+            if (&fragment.paintable() != &slice_paintable)
+                continue;
+            if (offset < fragment.dom_start_offset_in_node() || offset > fragment.dom_end_offset_in_node())
+                continue;
+            scroll_to_cursor(fragment, slice_paintable);
+            return true;
+        }
+        return false;
+    };
+
+    if (auto const* text = as_if<DOM::Text>(dom_node().ptr())) {
+        Layout::TextOffsetMapping mapping { *text };
+        bool scrolled = false;
+        mapping.for_each_fragment([&](Layout::TextNode const& slice) {
+            if (scrolled)
+                return;
+            if (auto slice_paintable = slice.first_paintable()) {
+                if (scan_layout_fragment(*slice_paintable))
+                    scrolled = true;
+            }
+        });
         return;
     }
+
+    scan_layout_fragment(*this);
 }
 
 }

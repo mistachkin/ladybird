@@ -8,6 +8,7 @@
 #pragma once
 
 #include <AK/Optional.h>
+#include <LibGfx/DecodedImageFrame.h>
 #include <LibGfx/Forward.h>
 #include <LibWeb/DOM/DocumentLoadEventDelayer.h>
 #include <LibWeb/Forward.h>
@@ -37,7 +38,7 @@ public:
     u32 video_width() const;
     u32 video_height() const;
 
-    virtual void update_intrinsic_video_dimensions() override;
+    virtual bool update_intrinsic_video_dimensions() override;
     virtual void update_natural_dimensions() override;
     Optional<Gfx::Size<u32>> natural_media_size() const;
     Optional<CSSPixelSize> natural_element_size() const;
@@ -59,8 +60,7 @@ public:
     };
     Representation current_representation() const;
 
-    // FIXME: This is a hack for images used as CanvasImageSource. Do something more elegant.
-    RefPtr<Gfx::ImmutableBitmap> bitmap() const;
+    Optional<Gfx::DecodedImageFrame> current_decoded_image_frame() const;
 
 private:
     HTMLVideoElement(DOM::Document&, DOM::QualifiedName);
@@ -74,7 +74,7 @@ private:
     // https://html.spec.whatwg.org/multipage/media.html#the-video-element:dimension-attributes
     virtual bool supports_dimension_attributes() const override { return true; }
 
-    virtual GC::Ptr<Layout::Node> create_layout_node(GC::Ref<CSS::ComputedProperties>) override;
+    virtual RefPtr<Layout::Node> create_layout_node(CSS::ComputedProperties const&) override;
 
     WebIDL::ExceptionOr<void> determine_element_poster_frame(Optional<String> const& poster);
 

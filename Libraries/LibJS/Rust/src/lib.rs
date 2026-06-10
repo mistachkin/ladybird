@@ -83,6 +83,8 @@ macro_rules! utf16 {
 pub mod ast;
 pub mod ast_dump;
 pub mod bytecode;
+mod bytecode_cache;
+pub mod fast_hash;
 pub mod lexer;
 pub mod parser;
 pub mod scope_collector;
@@ -95,12 +97,25 @@ pub(crate) fn u32_from_usize(value: usize) -> u32 {
 }
 
 use ast::StatementKind;
-use parser::{ParseError, Parser, ProgramType};
+use bytecode::generator::PendingSharedFunctionData;
+use parser::ParseError;
+use parser::Parser;
+use parser::ProgramType;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::ffi::c_void;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
+use std::panic::catch_unwind;
 use std::rc::Rc;
+
+// Compile-time assertion: `ParsedProgram` travels between the parse worker
+// thread and the main thread, so it must be `Send`. After the StringId and
+// ScopeId arena migrations the AST itself contains no `Rc`/`Cell`/`RefCell`
+// values, so this is naturally satisfied without `unsafe impl Send`.
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    assert_send::<ParsedProgram>();
+};
 
 // =============================================================================
 // ParsedProgram: GC-free parse result for off-thread parsing
@@ -111,19 +126,39 @@ use std::rc::Rc;
 pub struct ParsedProgram {
     program: ast::Statement,
     function_table: ast::FunctionTable,
-    scope_ref: Rc<RefCell<ast::ScopeData>>,
+    arena: std::sync::Arc<ast::AstArena>,
+    scope_ref: ast::ScopeId,
+    program_type: ast::ProgramType,
     is_strict_mode: bool,
     has_top_level_await: bool,
     errors: Vec<ParseError>,
     ast_dump: Option<Vec<u8>>,
 }
 
-// SAFETY: Full ownership transfer between threads, never concurrent access.
-unsafe impl Send for ParsedProgram {}
-
 pub struct CompiledProgram {
     parsed: ParsedProgram,
     bytecode: CompiledProgramBytecode,
+    declaration_functions: Vec<PendingSharedFunctionData>,
+    source_len: usize,
+}
+
+pub struct CompiledFunction {
+    precompiled: Box<bytecode::generator::PrecompiledFunction>,
+}
+
+#[repr(C)]
+pub struct BytecodeCacheBlob {
+    data: *mut u8,
+    length: usize,
+}
+
+pub struct DecodedBytecodeCacheBlob {
+    _blob: Rc<RefCell<bytecode_cache::DecodedCacheBlob>>,
+}
+
+fn validate_decoded_blob(blob: &DecodedBytecodeCacheBlob, source_len: usize) -> bool {
+    let mut decoded_blob = blob._blob.borrow_mut();
+    decoded_blob.validate_for_materialization(source_len).is_ok()
 }
 
 enum CompiledProgramBytecode {
@@ -136,10 +171,14 @@ struct CompiledBytecode {
     assembled: bytecode::generator::AssembledBytecode,
 }
 
-// SAFETY: This handle owns its parser and bytecode-generator state, and C++ treats it as a move-only handoff object.
-// The Rc/RefCell values inside are only ever touched by one thread at a time: the worker creates the handle, then the
-// main thread consumes or frees it after the event-loop hop.
+// SAFETY: `CompiledProgram` owns codegen state that uses `Rc`/`RefCell` and
+// raw VM pointers; it is created on the parse-worker thread and consumed (or
+// freed) on the main thread, never accessed concurrently.
 unsafe impl Send for CompiledProgram {}
+
+// SAFETY: `CompiledFunction` owns GC-free codegen state and is transferred
+// from a compile worker back to the main thread for materialization.
+unsafe impl Send for CompiledFunction {}
 
 // =============================================================================
 // Internal helpers
@@ -176,6 +215,7 @@ fn abort_on_panic<F: FnOnce() -> R, R>(f: F) -> R {
 unsafe fn write_ast_dump_output(
     program: &ast::Statement,
     function_table: &ast::FunctionTable,
+    arena: &ast::AstArena,
     output_ptr: *mut *mut u8,
     output_len: *mut usize,
 ) {
@@ -183,7 +223,7 @@ unsafe fn write_ast_dump_output(
         if output_ptr.is_null() || output_len.is_null() {
             return;
         }
-        let dump_string = ast_dump::dump_program_to_string(program, function_table);
+        let dump_string = ast_dump::dump_program_to_string(program, function_table, arena);
         let mut boxed = dump_string.into_bytes().into_boxed_slice();
         *output_ptr = boxed.as_mut_ptr();
         *output_len = boxed.len();
@@ -213,11 +253,6 @@ unsafe fn source_from_raw<'a>(source: *const u16, len: usize) -> Option<&'a [u16
 pub type ParseErrorCallback = Option<
     unsafe extern "C" fn(ctx: *mut c_void, message: *const u8, message_len: usize, line: u32, column: u32) -> (),
 >;
-
-/// Log parser and scope collector errors, returning true if any were found.
-fn check_errors(parser: &mut Parser) -> bool {
-    check_errors_with_callback(parser, std::ptr::null_mut(), None)
-}
 
 /// Check for errors, optionally reporting them via a C++ callback.
 fn check_errors_with_callback(
@@ -287,9 +322,10 @@ fn new_program_generator(
 fn compile_program_body_to_bytecode(
     generator: &mut bytecode::generator::Generator,
     program: &ast::Statement,
-    scope_ref: &Rc<RefCell<ast::ScopeData>>,
+    scope_id: ast::ScopeId,
 ) -> bytecode::generator::AssembledBytecode {
-    generator.local_variables = convert_local_variables(&scope_ref.borrow());
+    let arena_clone = generator.arena.clone();
+    generator.local_variables = convert_local_variables(&arena_clone.scopes[scope_id]);
 
     let entry_block = generator.make_block();
     generator.switch_to_basic_block(entry_block);
@@ -311,17 +347,33 @@ unsafe fn create_executable_from_compiled_bytecode(
     bytecode: &mut CompiledBytecode,
     vm_ptr: *mut c_void,
     source_code_ptr: *const c_void,
+    shared_function_data_owner: bytecode::ffi::SharedFunctionDataOwner,
 ) -> *mut c_void {
     unsafe {
         bytecode.generator.vm_ptr = vm_ptr;
         bytecode.generator.source_code_ptr = source_code_ptr;
-        bytecode::ffi::create_executable(&mut bytecode.generator, &bytecode.assembled, vm_ptr, source_code_ptr)
+        bytecode::ffi::create_executable(
+            &mut bytecode.generator,
+            &bytecode.assembled,
+            vm_ptr,
+            source_code_ptr,
+            shared_function_data_owner,
+        )
     }
 }
 
-fn precompile_eager_functions(generator: &mut bytecode::generator::Generator) {
+#[derive(Clone, Copy, PartialEq)]
+enum FunctionPrecompileMode {
+    EagerOnly,
+    All,
+}
+
+fn precompile_functions(generator: &mut bytecode::generator::Generator, mode: FunctionPrecompileMode) {
     for pending in &mut generator.shared_function_data {
-        if !pending.should_eager_compile || pending.precompiled_function.is_some() {
+        if pending.precompiled_function.is_some() {
+            continue;
+        }
+        if matches!(mode, FunctionPrecompileMode::EagerOnly) && !pending.should_eager_compile {
             continue;
         }
 
@@ -333,14 +385,18 @@ fn precompile_eager_functions(generator: &mut bytecode::generator::Generator) {
             .subtable
             .take()
             .expect("pending eager function subtable was already materialized");
+        let arena = pending.arena.clone().unwrap_or_else(|| generator.arena.clone());
         let payload = ast::FunctionPayload {
             data: *function_data,
             function_table: subtable,
+            arena: arena.clone(),
         };
         let (function_data, precompiled) = compile_function_payload_to_bytecode(
             payload,
             generator.source_len,
             generator.builtin_abstract_operations_enabled,
+            arena,
+            mode,
         );
 
         pending.function_data = Some(function_data);
@@ -352,90 +408,162 @@ fn precompile_eager_functions(generator: &mut bytecode::generator::Generator) {
     }
 }
 
+fn precompile_declaration_functions(
+    program_type: ast::ProgramType,
+    scope_id: ast::ScopeId,
+    generator: &mut bytecode::generator::Generator,
+    mode: FunctionPrecompileMode,
+) -> Vec<PendingSharedFunctionData> {
+    if mode != FunctionPrecompileMode::All {
+        return Vec::new();
+    }
+
+    match program_type {
+        ast::ProgramType::Script => precompile_script_declaration_functions(scope_id, generator, mode),
+        ast::ProgramType::Module => precompile_module_declaration_functions(scope_id, generator, mode),
+    }
+}
+
+fn precompile_script_declaration_functions(
+    scope_id: ast::ScopeId,
+    generator: &mut bytecode::generator::Generator,
+    mode: FunctionPrecompileMode,
+) -> Vec<PendingSharedFunctionData> {
+    let arena = generator.arena.clone();
+    let scope = &arena.scopes[scope_id];
+    let mut last_position: std::collections::HashMap<ast::StringId, usize> = std::collections::HashMap::new();
+    for (index, child) in scope.children.iter().enumerate() {
+        if let Some(function) = child.inner.function_declaration_for_labelled_item()
+            && let Some(name) = function.name
+        {
+            last_position.insert(arena.identifiers[name].name, index);
+        }
+    }
+
+    let mut declaration_functions = Vec::new();
+    for (index, child) in scope.children.iter().enumerate() {
+        if let Some(function) = child.inner.function_declaration_for_labelled_item()
+            && let Some(name) = function.name
+            && last_position.get(&arena.identifiers[name].name).copied() == Some(index)
+        {
+            declaration_functions.push(precompile_declaration_function(
+                function.function_id,
+                None,
+                generator,
+                mode,
+            ));
+        }
+    }
+
+    declaration_functions
+}
+
+fn precompile_module_declaration_functions(
+    scope_id: ast::ScopeId,
+    generator: &mut bytecode::generator::Generator,
+    mode: FunctionPrecompileMode,
+) -> Vec<PendingSharedFunctionData> {
+    use ast::StatementKind;
+
+    let arena = generator.arena.clone();
+    let scope = &arena.scopes[scope_id];
+    let default_name: ast::Utf16String = utf16!("*default*").into();
+    let mut declaration_functions = Vec::new();
+    for child in &scope.children {
+        let (declaration, is_exported) = match &child.inner {
+            StatementKind::Export(export_data) => {
+                if let Some(ref statement) = export_data.statement {
+                    (&statement.inner, true)
+                } else {
+                    continue;
+                }
+            }
+            other => (other, false),
+        };
+
+        if let StatementKind::FunctionDeclaration(function) = declaration {
+            let is_default = is_exported
+                && function
+                    .name
+                    .is_some_and(|name| arena.name_slice(name) == default_name.as_slice());
+            let name_override = if is_default {
+                Some(utf16!("default").into())
+            } else {
+                None
+            };
+            declaration_functions.push(precompile_declaration_function(
+                function.function_id,
+                name_override,
+                generator,
+                mode,
+            ));
+        }
+    }
+
+    declaration_functions
+}
+
+fn precompile_declaration_function(
+    function_id: ast::FunctionId,
+    name_override: Option<ast::Utf16String>,
+    generator: &mut bytecode::generator::Generator,
+    mode: FunctionPrecompileMode,
+) -> PendingSharedFunctionData {
+    let function_data = generator.function_table.take(function_id);
+    let arena = generator.arena.clone();
+    let subtable = generator
+        .function_table
+        .extract_reachable(&function_data, &arena.scopes);
+    let payload = ast::FunctionPayload {
+        data: *function_data,
+        function_table: subtable,
+        arena: arena.clone(),
+    };
+    let (function_data, precompiled_function) = compile_function_payload_to_bytecode(
+        payload,
+        generator.source_len,
+        generator.builtin_abstract_operations_enabled,
+        arena.clone(),
+        mode,
+    );
+
+    PendingSharedFunctionData {
+        function_data: Some(function_data),
+        subtable: Some(ast::FunctionTable::new()),
+        arena: Some(arena),
+        name_override,
+        class_field_initializer_name: None,
+        should_eager_compile: false,
+        precompiled_function: Some(precompiled_function),
+    }
+}
+
 /// Shared compilation pipeline: local variable setup → codegen → assemble → create Executable.
 ///
 /// Called by program-level entry points that compile synchronously on the main thread.
 unsafe fn compile_program_body(
     generator: &mut bytecode::generator::Generator,
     program: &ast::Statement,
-    scope_ref: &Rc<RefCell<ast::ScopeData>>,
+    scope_id: ast::ScopeId,
     vm_ptr: *mut c_void,
     source_code_ptr: *const c_void,
+    shared_function_data_owner: bytecode::ffi::SharedFunctionDataOwner,
 ) -> *mut c_void {
-    let assembled = compile_program_body_to_bytecode(generator, program, scope_ref);
-    unsafe { bytecode::ffi::create_executable(generator, &assembled, vm_ptr, source_code_ptr) }
+    let assembled = compile_program_body_to_bytecode(generator, program, scope_id);
+    unsafe {
+        bytecode::ffi::create_executable(
+            generator,
+            &assembled,
+            vm_ptr,
+            source_code_ptr,
+            shared_function_data_owner,
+        )
+    }
 }
 
 // =============================================================================
 // FFI entry points: program compilation
 // =============================================================================
-
-/// Compile a JavaScript program using the parser and bytecode generator.
-///
-/// This is the full pipeline: parse → codegen → assemble → create Executable.
-/// Called from C++ unless `LIBJS_CPP=1` is set.
-///
-/// Returns a `GC::Ptr<Bytecode::Executable>` cast to `void*`, or nullptr on failure.
-///
-/// # Safety
-/// - `source` must point to a valid UTF-16 buffer of `source_len` elements.
-/// - `vm_ptr` must be a valid `JS::VM*`.
-/// - `source_code_ptr` must be a valid `JS::SourceCode const*`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_compile_program(
-    source: *const u16,
-    source_len: usize,
-    vm_ptr: *mut c_void,
-    source_code_ptr: *const c_void,
-    program_type: u8,
-    starts_in_strict_mode: bool,
-    initiated_by_eval: bool,
-    in_eval_function_context: bool,
-    allow_super_property_lookup: bool,
-    allow_super_constructor_call: bool,
-    in_class_field_initializer: bool,
-) -> *mut c_void {
-    unsafe {
-        abort_on_panic(|| {
-            let Some(source_slice) = source_from_raw(source, source_len) else {
-                return std::ptr::null_mut();
-            };
-            let pt = match program_type {
-                0 => ProgramType::Script,
-                1 => ProgramType::Module,
-                _ => {
-                    return std::ptr::null_mut();
-                }
-            };
-            let mut parser = Parser::new(source_slice, pt);
-            if initiated_by_eval {
-                parser.initiated_by_eval = true;
-                parser.in_eval_function_context = in_eval_function_context;
-                parser.flags.allow_super_property_lookup = allow_super_property_lookup;
-                parser.flags.allow_super_constructor_call = allow_super_constructor_call;
-                parser.flags.in_class_field_initializer = in_class_field_initializer;
-            }
-
-            let program = parser.parse_program(starts_in_strict_mode);
-
-            if check_errors(&mut parser) {
-                return std::ptr::null_mut();
-            }
-
-            parser.scope_collector.analyze(initiated_by_eval);
-
-            let scope_ref = if let StatementKind::Program(ref data) = program.inner {
-                data.scope.clone()
-            } else {
-                return std::ptr::null_mut();
-            };
-
-            let mut generator = new_program_generator(starts_in_strict_mode, vm_ptr, source_code_ptr, source_len);
-            generator.function_table = std::mem::take(&mut parser.function_table);
-            compile_program_body(&mut generator, &program, &scope_ref, vm_ptr, source_code_ptr)
-        })
-    }
-}
 
 /// Parse a program (script or module) without any GC interaction.
 ///
@@ -487,30 +615,33 @@ pub unsafe extern "C" fn rust_parse_program(
             }
 
             if errors.is_empty() {
-                parser.scope_collector.analyze(false);
+                parser.scope_collector.analyze(
+                    false,
+                    &mut parser.arena.identifiers,
+                    &parser.arena.strings,
+                    &mut parser.arena.scopes,
+                );
             }
 
             // Dump AST if requested (after scope analysis).
             if dump_ast && errors.is_empty() {
-                ast_dump::dump_program(&program, use_color, &parser.function_table);
+                ast_dump::dump_program(&program, use_color, &parser.function_table, &parser.arena);
             }
 
-            let (scope_ref, is_strict, has_tla) = if errors.is_empty() {
-                if let StatementKind::Program(ref data) = program.inner {
-                    (data.scope.clone(), data.is_strict_mode, data.has_top_level_await)
-                } else {
-                    let scope = Rc::new(RefCell::new(ast::ScopeData::default()));
-                    (scope, false, false)
-                }
+            let (scope_ref, is_strict, has_tla) = if errors.is_empty()
+                && let StatementKind::Program(ref data) = program.inner
+            {
+                (data.scope, data.is_strict_mode, data.has_top_level_await)
             } else {
-                let scope = Rc::new(RefCell::new(ast::ScopeData::default()));
-                (scope, false, false)
+                (parser.arena.scopes.insert(ast::ScopeData::default()), false, false)
             };
 
             let parsed = ParsedProgram {
                 program,
                 function_table: std::mem::take(&mut parser.function_table),
+                arena: std::sync::Arc::new(std::mem::take(&mut parser.arena)),
                 scope_ref,
+                program_type: pt,
                 is_strict_mode: is_strict,
                 has_top_level_await: has_tla,
                 errors,
@@ -565,6 +696,69 @@ pub unsafe extern "C" fn rust_free_parsed_program(parsed: *mut ParsedProgram) {
     }
 }
 
+fn compile_parsed_program_off_thread_impl(
+    parsed: *mut ParsedProgram,
+    source_len: usize,
+    function_precompile_mode: FunctionPrecompileMode,
+) -> *mut CompiledProgram {
+    unsafe {
+        abort_on_panic(|| {
+            if parsed.is_null() {
+                return std::ptr::null_mut();
+            }
+
+            let mut parsed = Box::from_raw(parsed);
+            let arena_arc = parsed.arena.clone();
+            let (bytecode, declaration_functions) = if parsed.has_top_level_await {
+                let mut generator = new_module_async_generator(source_len, std::mem::take(&mut parsed.function_table));
+                generator.arena = arena_arc;
+                generator.eager_compile_direct_iifes = true;
+                let assembled = compile_module_as_async_to_bytecode(&parsed.program, parsed.scope_ref, &mut generator);
+                let declaration_functions = precompile_declaration_functions(
+                    parsed.program_type,
+                    parsed.scope_ref,
+                    &mut generator,
+                    function_precompile_mode,
+                );
+                precompile_functions(&mut generator, function_precompile_mode);
+                (
+                    CompiledProgramBytecode::AsyncModule(CompiledBytecode { generator, assembled }),
+                    declaration_functions,
+                )
+            } else {
+                let mut generator = new_program_generator(
+                    parsed.is_strict_mode,
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    source_len,
+                );
+                generator.arena = arena_arc;
+                generator.eager_compile_direct_iifes = true;
+                generator.function_table = std::mem::take(&mut parsed.function_table);
+                let assembled = compile_program_body_to_bytecode(&mut generator, &parsed.program, parsed.scope_ref);
+                let declaration_functions = precompile_declaration_functions(
+                    parsed.program_type,
+                    parsed.scope_ref,
+                    &mut generator,
+                    function_precompile_mode,
+                );
+                precompile_functions(&mut generator, function_precompile_mode);
+                (
+                    CompiledProgramBytecode::Program(CompiledBytecode { generator, assembled }),
+                    declaration_functions,
+                )
+            };
+
+            Box::into_raw(Box::new(CompiledProgram {
+                parsed: *parsed,
+                bytecode,
+                declaration_functions,
+                source_len,
+            }))
+        })
+    }
+}
+
 /// Compile a parsed program to an off-thread bytecode artifact.
 ///
 /// Consumes and frees the ParsedProgram. The returned CompiledProgram still needs to be materialized on the main thread
@@ -577,39 +771,22 @@ pub unsafe extern "C" fn rust_compile_parsed_program_off_thread(
     parsed: *mut ParsedProgram,
     source_len: usize,
 ) -> *mut CompiledProgram {
-    unsafe {
-        abort_on_panic(|| {
-            if parsed.is_null() {
-                return std::ptr::null_mut();
-            }
+    compile_parsed_program_off_thread_impl(parsed, source_len, FunctionPrecompileMode::EagerOnly)
+}
 
-            let mut parsed = Box::from_raw(parsed);
-            let bytecode = if parsed.has_top_level_await {
-                let mut generator = new_module_async_generator(source_len, std::mem::take(&mut parsed.function_table));
-                generator.eager_compile_direct_iifes = true;
-                let assembled = compile_module_as_async_to_bytecode(&parsed.program, &parsed.scope_ref, &mut generator);
-                precompile_eager_functions(&mut generator);
-                CompiledProgramBytecode::AsyncModule(CompiledBytecode { generator, assembled })
-            } else {
-                let mut generator = new_program_generator(
-                    parsed.is_strict_mode,
-                    std::ptr::null_mut(),
-                    std::ptr::null(),
-                    source_len,
-                );
-                generator.eager_compile_direct_iifes = true;
-                generator.function_table = std::mem::take(&mut parsed.function_table);
-                let assembled = compile_program_body_to_bytecode(&mut generator, &parsed.program, &parsed.scope_ref);
-                precompile_eager_functions(&mut generator);
-                CompiledProgramBytecode::Program(CompiledBytecode { generator, assembled })
-            };
-
-            Box::into_raw(Box::new(CompiledProgram {
-                parsed: *parsed,
-                bytecode,
-            }))
-        })
-    }
+/// Fully compile a parsed program to an off-thread bytecode artifact for persistence.
+///
+/// This is intended for post-handoff cache generation, not the latency-sensitive
+/// path that produces bytecode for immediate execution.
+///
+/// # Safety
+/// - `parsed` must be a valid pointer from `rust_parse_program()` with no errors.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_compile_parsed_program_fully_off_thread(
+    parsed: *mut ParsedProgram,
+    source_len: usize,
+) -> *mut CompiledProgram {
+    compile_parsed_program_off_thread_impl(parsed, source_len, FunctionPrecompileMode::All)
 }
 
 /// Free a CompiledProgram without materializing it.
@@ -620,6 +797,450 @@ pub unsafe extern "C" fn rust_compile_parsed_program_off_thread(
 pub unsafe extern "C" fn rust_free_compiled_program(compiled: *mut CompiledProgram) {
     unsafe {
         drop(Box::from_raw(compiled));
+    }
+}
+
+/// Serialize a fully compiled program into a versioned bytecode cache blob.
+///
+/// The caller owns the returned bytes and must release them with
+/// `rust_free_bytecode_cache_blob()`.
+///
+/// # Safety
+/// `compiled` must be a valid pointer from `rust_compile_parsed_program_fully_off_thread()`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_serialize_compiled_program_for_bytecode_cache(
+    compiled: *const CompiledProgram,
+    program_type: u8,
+    source_hash: *const u8,
+    source_hash_len: usize,
+) -> BytecodeCacheBlob {
+    unsafe {
+        abort_on_panic(|| {
+            if compiled.is_null() || source_hash.is_null() || source_hash_len != 32 {
+                return BytecodeCacheBlob {
+                    data: std::ptr::null_mut(),
+                    length: 0,
+                };
+            }
+
+            let program_type = match program_type {
+                0 => ast::ProgramType::Script,
+                1 => ast::ProgramType::Module,
+                _ => {
+                    return BytecodeCacheBlob {
+                        data: std::ptr::null_mut(),
+                        length: 0,
+                    };
+                }
+            };
+
+            let source_hash = std::slice::from_raw_parts(source_hash, source_hash_len)
+                .try_into()
+                .expect("source hash length was checked");
+            let bytes = bytecode_cache::serialize_compiled_program(&*compiled, program_type, source_hash);
+            let length = bytes.len();
+            let mut bytes = bytes.into_boxed_slice();
+            let data = bytes.as_mut_ptr();
+            std::mem::forget(bytes);
+            BytecodeCacheBlob { data, length }
+        })
+    }
+}
+
+/// Free a bytecode cache blob returned by `rust_serialize_compiled_program_for_bytecode_cache()`.
+///
+/// # Safety
+/// `data` and `length` must match a blob returned by Rust.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_free_bytecode_cache_blob(data: *mut u8, length: usize) {
+    unsafe {
+        abort_on_panic(|| {
+            if !data.is_null() {
+                drop(Vec::from_raw_parts(data, length, length));
+            }
+        });
+    }
+}
+
+/// Decode an ImmutableBytes-backed bytecode cache blob into a parser-free cache handle.
+///
+/// # Safety
+/// - `data` must point to `length` readable bytes.
+/// - `owner` must keep `data` alive until `free_owner` is called.
+/// - `clone_owner` must return a new `bytecode_owner` for `rust_create_executable()`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_decode_bytecode_cache_blob_with_owner(
+    data: *const u8,
+    length: usize,
+    expected_program_type: u8,
+    expected_source_hash: *const u8,
+    expected_source_hash_len: usize,
+    owner: *mut c_void,
+    clone_owner: bytecode_cache::CloneBytecodeCacheBlobOwner,
+    free_owner: bytecode_cache::FreeBytecodeCacheBlobOwner,
+) -> *mut DecodedBytecodeCacheBlob {
+    unsafe {
+        abort_on_panic(|| {
+            if owner.is_null() {
+                return std::ptr::null_mut();
+            }
+            let reject = || {
+                free_owner(owner);
+                std::ptr::null_mut()
+            };
+            if data.is_null() || expected_source_hash.is_null() || expected_source_hash_len != 32 {
+                return reject();
+            }
+            let expected_program_type = match expected_program_type {
+                0 => ast::ProgramType::Script,
+                1 => ast::ProgramType::Module,
+                _ => return reject(),
+            };
+            let expected_source_hash = std::slice::from_raw_parts(expected_source_hash, expected_source_hash_len)
+                .try_into()
+                .expect("source hash length was checked");
+            let Some(blob) = bytecode_cache::decode_blob_with_foreign_owner(
+                std::slice::from_raw_parts(data, length),
+                expected_program_type,
+                expected_source_hash,
+                bytecode_cache::ForeignBytecodeCacheBlobOwner {
+                    owner,
+                    clone_owner,
+                    free_owner,
+                },
+            ) else {
+                return std::ptr::null_mut();
+            };
+            Box::into_raw(Box::new(DecodedBytecodeCacheBlob {
+                _blob: Rc::new(RefCell::new(blob)),
+            }))
+        })
+    }
+}
+
+/// Free a decoded bytecode cache blob.
+///
+/// # Safety
+/// `blob` must be a valid pointer from `rust_decode_bytecode_cache_blob_with_owner()`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_free_decoded_bytecode_cache_blob(blob: *mut DecodedBytecodeCacheBlob) {
+    unsafe {
+        drop(Box::from_raw(blob));
+    }
+}
+
+/// Validate a decoded bytecode cache blob before materializing it.
+///
+/// # Safety
+/// `blob` must be a valid pointer from `rust_decode_bytecode_cache_blob_with_owner()`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_validate_decoded_bytecode_cache_blob(
+    blob: *mut DecodedBytecodeCacheBlob,
+    source_len: usize,
+) -> bool {
+    unsafe {
+        abort_on_panic(|| {
+            if blob.is_null() {
+                return false;
+            }
+            (*blob)
+                ._blob
+                .borrow_mut()
+                .validate_for_materialization(source_len)
+                .is_ok()
+        })
+    }
+}
+
+/// Add a reference to a decoded bytecode cache blob.
+///
+/// # Safety
+/// `blob` must be a valid pointer from `rust_decode_bytecode_cache_blob_with_owner()`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_ref_decoded_bytecode_cache_blob(
+    blob: *const DecodedBytecodeCacheBlob,
+) -> *mut DecodedBytecodeCacheBlob {
+    unsafe {
+        abort_on_panic(|| {
+            if blob.is_null() {
+                return std::ptr::null_mut();
+            }
+
+            Box::into_raw(Box::new(DecodedBytecodeCacheBlob {
+                _blob: Rc::clone(&(*blob)._blob),
+            }))
+        })
+    }
+}
+
+/// Materialize a decoded script bytecode cache blob. Consumes and frees the blob.
+///
+/// # Safety
+/// - `blob` must be a valid pointer from `rust_decode_bytecode_cache_blob_with_owner()`.
+/// - `vm_ptr` must be a valid `JS::VM*`.
+/// - `source_code_ptr` must be a valid `JS::SourceCode const*`.
+/// - `gdi_context` must be a valid pointer to a C++ ScriptGdiBuilder.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_materialize_bytecode_cache_script(
+    blob: *mut DecodedBytecodeCacheBlob,
+    vm_ptr: *mut c_void,
+    source_code_ptr: *const c_void,
+    source_len: usize,
+    shared_function_data_list_ptr: *mut c_void,
+    gdi_context: *mut c_void,
+) -> *mut c_void {
+    unsafe {
+        abort_on_panic(|| {
+            if blob.is_null() {
+                return std::ptr::null_mut();
+            }
+            let blob = Box::from_raw(blob);
+            if !validate_decoded_blob(&blob, source_len) {
+                return std::ptr::null_mut();
+            }
+            blob._blob
+                .borrow()
+                .materialize_script(vm_ptr, source_code_ptr, shared_function_data_list_ptr, gdi_context)
+        })
+    }
+}
+
+/// Materialize a decoded module bytecode cache blob. Consumes and frees the blob.
+///
+/// # Safety
+/// - `blob` must be a valid pointer from `rust_decode_bytecode_cache_blob_with_owner()`.
+/// - `vm_ptr` must be a valid `JS::VM*`.
+/// - `source_code_ptr` must be a valid `JS::SourceCode const*`.
+/// - `module_context` must be a valid `ModuleBuilder*`.
+/// - `callbacks` must point to a valid `ModuleCallbacks`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_materialize_bytecode_cache_module(
+    blob: *mut DecodedBytecodeCacheBlob,
+    vm_ptr: *mut c_void,
+    source_code_ptr: *const c_void,
+    source_len: usize,
+    shared_function_data_list_ptr: *mut c_void,
+    module_context: *mut c_void,
+    callbacks: *const ModuleCallbacks,
+    tla_executable_out: *mut *mut c_void,
+) -> *mut c_void {
+    unsafe {
+        abort_on_panic(|| {
+            if blob.is_null() {
+                return std::ptr::null_mut();
+            }
+            let blob = Box::from_raw(blob);
+            if !validate_decoded_blob(&blob, source_len) {
+                return std::ptr::null_mut();
+            }
+            blob._blob.borrow().materialize_module(
+                vm_ptr,
+                source_code_ptr,
+                shared_function_data_list_ptr,
+                module_context,
+                callbacks,
+                tla_executable_out,
+            )
+        })
+    }
+}
+
+/// Install a decoded script bytecode cache blob into an existing program.
+/// Consumes and frees the blob.
+///
+/// # Safety
+/// - `blob` must be a valid pointer from `rust_decode_bytecode_cache_blob_with_owner()`.
+/// - `vm_ptr` must be a valid `JS::VM*`.
+/// - `source_code_ptr` must be a valid `JS::SourceCode const*`.
+/// - `existing_executable_ptr` must be a valid `Bytecode::Executable*`.
+/// - `existing_declaration_function_ptrs` must be null when
+///   `existing_declaration_function_count` is zero, otherwise it must point to
+///   `existing_declaration_function_count` valid `SharedFunctionInstanceData*`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_install_bytecode_cache_script(
+    blob: *mut DecodedBytecodeCacheBlob,
+    vm_ptr: *mut c_void,
+    source_code_ptr: *const c_void,
+    source_len: usize,
+    existing_executable_ptr: *const c_void,
+    existing_declaration_function_ptrs: *const *mut c_void,
+    existing_declaration_function_count: usize,
+) -> *mut c_void {
+    unsafe {
+        abort_on_panic(|| {
+            if blob.is_null() {
+                return std::ptr::null_mut();
+            }
+            let blob = Box::from_raw(blob);
+            let existing_declaration_functions = if existing_declaration_function_count == 0 {
+                &[]
+            } else {
+                if existing_declaration_function_ptrs.is_null() {
+                    return std::ptr::null_mut();
+                }
+                std::slice::from_raw_parts(existing_declaration_function_ptrs, existing_declaration_function_count)
+            };
+            if !validate_decoded_blob(&blob, source_len) {
+                return std::ptr::null_mut();
+            }
+            blob._blob.borrow().install_script(
+                vm_ptr,
+                source_code_ptr,
+                existing_executable_ptr,
+                existing_declaration_functions,
+            )
+        })
+    }
+}
+
+/// Install a decoded module bytecode cache blob into an existing program.
+/// Consumes and frees the blob.
+///
+/// # Safety
+/// - `blob` must be a valid pointer from `rust_decode_bytecode_cache_blob_with_owner()`.
+/// - `vm_ptr` must be a valid `JS::VM*`.
+/// - `source_code_ptr` must be a valid `JS::SourceCode const*`.
+/// - `existing_executable_ptr` must be null or a valid `Bytecode::Executable*`.
+/// - `existing_declaration_function_ptrs` must be null when
+///   `existing_declaration_function_count` is zero, otherwise it must point to
+///   `existing_declaration_function_count` valid `SharedFunctionInstanceData*`.
+/// - `existing_tla_sfd_ptr` must be null or a valid `SharedFunctionInstanceData*`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_install_bytecode_cache_module(
+    blob: *mut DecodedBytecodeCacheBlob,
+    vm_ptr: *mut c_void,
+    source_code_ptr: *const c_void,
+    source_len: usize,
+    existing_executable_ptr: *const c_void,
+    existing_declaration_function_ptrs: *const *mut c_void,
+    existing_declaration_function_count: usize,
+    existing_tla_sfd_ptr: *mut c_void,
+    tla_executable_out: *mut *mut c_void,
+) -> *mut c_void {
+    unsafe {
+        abort_on_panic(|| {
+            if blob.is_null() {
+                return std::ptr::null_mut();
+            }
+            let blob = Box::from_raw(blob);
+            let existing_declaration_functions = if existing_declaration_function_count == 0 {
+                &[]
+            } else {
+                if existing_declaration_function_ptrs.is_null() {
+                    return std::ptr::null_mut();
+                }
+                std::slice::from_raw_parts(existing_declaration_function_ptrs, existing_declaration_function_count)
+            };
+            if !validate_decoded_blob(&blob, source_len) {
+                return std::ptr::null_mut();
+            }
+            blob._blob.borrow().install_module(
+                vm_ptr,
+                source_code_ptr,
+                existing_executable_ptr,
+                existing_declaration_functions,
+                existing_tla_sfd_ptr,
+                tla_executable_out,
+            )
+        })
+    }
+}
+
+/// Materialize a decoded function executable from a bytecode cache blob.
+/// Consumes and frees the cached executable.
+///
+/// # Safety
+/// - `cached_executable` must be a valid pointer attached to a
+///   `SharedFunctionInstanceData` by bytecode cache materialization.
+/// - `vm_ptr` must be a valid `JS::VM*`.
+/// - `source_code_ptr` must be a valid `JS::SourceCode const*`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_materialize_bytecode_cache_function(
+    cached_executable: *mut c_void,
+    vm_ptr: *mut c_void,
+    source_code_ptr: *const c_void,
+    shared_function_data_list_ptr: *mut c_void,
+) -> *mut c_void {
+    unsafe {
+        abort_on_panic(|| {
+            bytecode_cache::materialize_cached_function(
+                cached_executable,
+                vm_ptr,
+                source_code_ptr,
+                shared_function_data_list_ptr,
+            )
+        })
+    }
+}
+
+/// Free a cached decoded function executable without materializing it.
+///
+/// # Safety
+/// `cached_executable` must be either null or a valid pointer attached to a
+/// `SharedFunctionInstanceData` by bytecode cache materialization.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_free_cached_bytecode_executable(cached_executable: *mut c_void) {
+    unsafe {
+        abort_on_panic(|| {
+            bytecode_cache::free_cached_function(cached_executable);
+        });
+    }
+}
+
+/// Materialize a precompiled function executable.
+/// Consumes and frees the precompiled executable.
+///
+/// # Safety
+/// - `precompiled_executable` must be a valid `Box<PrecompiledFunction>`
+///   pointer attached to a `SharedFunctionInstanceData`.
+/// - `vm_ptr` must be a valid `JS::VM*`.
+/// - `source_code_ptr` must be a valid `JS::SourceCode const*`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_materialize_precompiled_bytecode_function(
+    precompiled_executable: *mut c_void,
+    vm_ptr: *mut c_void,
+    source_code_ptr: *const c_void,
+    shared_function_data_list_ptr: *mut c_void,
+) -> *mut c_void {
+    unsafe {
+        abort_on_panic(|| {
+            if precompiled_executable.is_null() {
+                return std::ptr::null_mut();
+            }
+            let mut precompiled =
+                Box::from_raw(precompiled_executable as *mut bytecode::generator::PrecompiledFunction);
+            precompiled.generator.vm_ptr = vm_ptr;
+            precompiled.generator.source_code_ptr = source_code_ptr;
+            bytecode::ffi::create_executable(
+                &mut precompiled.generator,
+                &precompiled.assembled,
+                vm_ptr,
+                source_code_ptr,
+                if shared_function_data_list_ptr.is_null() {
+                    bytecode::ffi::SharedFunctionDataOwner::None
+                } else {
+                    bytecode::ffi::SharedFunctionDataOwner::List(shared_function_data_list_ptr)
+                },
+            )
+        })
+    }
+}
+
+/// Free a precompiled function executable without materializing it.
+///
+/// # Safety
+/// `precompiled_executable` must be either null or a valid
+/// `Box<PrecompiledFunction>` pointer attached to a `SharedFunctionInstanceData`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_free_precompiled_bytecode_executable(precompiled_executable: *mut c_void) {
+    unsafe {
+        abort_on_panic(|| {
+            if !precompiled_executable.is_null() {
+                drop(Box::from_raw(
+                    precompiled_executable as *mut bytecode::generator::PrecompiledFunction,
+                ));
+            }
+        });
     }
 }
 
@@ -641,7 +1262,7 @@ pub unsafe extern "C" fn rust_parsed_program_ast_dump(
     unsafe {
         let parsed = &mut *parsed;
         let dump = parsed.ast_dump.get_or_insert_with(|| {
-            ast_dump::dump_program_to_string(&parsed.program, &parsed.function_table).into_bytes()
+            ast_dump::dump_program_to_string(&parsed.program, &parsed.function_table, &parsed.arena).into_bytes()
         });
         *output_ptr = dump.as_ptr();
         *output_len = dump.len();
@@ -664,6 +1285,7 @@ pub unsafe extern "C" fn rust_compile_parsed_script(
     parsed: *mut ParsedProgram,
     vm_ptr: *mut c_void,
     source_code_ptr: *const c_void,
+    shared_function_data_list_ptr: *mut c_void,
     gdi_context: *mut c_void,
     source_len: usize,
 ) -> *mut c_void {
@@ -673,24 +1295,31 @@ pub unsafe extern "C" fn rust_compile_parsed_script(
 
             let mut generator = new_program_generator(parsed.is_strict_mode, vm_ptr, source_code_ptr, source_len);
             generator.function_table = std::mem::take(&mut parsed.function_table);
+            generator.arena = parsed.arena.clone();
+            let shared_function_data_context = bytecode::ffi::SharedFunctionDataCreationContext {
+                vm_ptr,
+                source_code_ptr,
+                owner: bytecode::ffi::SharedFunctionDataOwner::List(shared_function_data_list_ptr),
+            };
             let exec_ptr = compile_program_body(
                 &mut generator,
                 &parsed.program,
-                &parsed.scope_ref,
+                parsed.scope_ref,
                 vm_ptr,
                 source_code_ptr,
+                shared_function_data_context.owner,
             );
             if exec_ptr.is_null() {
                 return std::ptr::null_mut();
             }
 
             extract_script_gdi(
-                &parsed.scope_ref.borrow(),
+                &parsed.arena.scopes[parsed.scope_ref],
                 parsed.is_strict_mode,
-                vm_ptr,
-                source_code_ptr,
+                shared_function_data_context,
                 gdi_context,
                 &mut generator.function_table,
+                &parsed.arena,
             );
 
             exec_ptr
@@ -710,6 +1339,7 @@ pub unsafe extern "C" fn rust_materialize_compiled_script(
     compiled: *mut CompiledProgram,
     vm_ptr: *mut c_void,
     source_code_ptr: *const c_void,
+    shared_function_data_list_ptr: *mut c_void,
     gdi_context: *mut c_void,
 ) -> *mut c_void {
     unsafe {
@@ -723,18 +1353,28 @@ pub unsafe extern "C" fn rust_materialize_compiled_script(
                 return std::ptr::null_mut();
             };
 
-            let exec_ptr = create_executable_from_compiled_bytecode(bytecode, vm_ptr, source_code_ptr);
+            let shared_function_data_context = bytecode::ffi::SharedFunctionDataCreationContext {
+                vm_ptr,
+                source_code_ptr,
+                owner: bytecode::ffi::SharedFunctionDataOwner::List(shared_function_data_list_ptr),
+            };
+            let exec_ptr = create_executable_from_compiled_bytecode(
+                bytecode,
+                vm_ptr,
+                source_code_ptr,
+                shared_function_data_context.owner,
+            );
             if exec_ptr.is_null() {
                 return std::ptr::null_mut();
             }
 
             extract_script_gdi(
-                &compiled.parsed.scope_ref.borrow(),
+                &compiled.parsed.arena.scopes[compiled.parsed.scope_ref],
                 compiled.parsed.is_strict_mode,
-                vm_ptr,
-                source_code_ptr,
+                shared_function_data_context,
                 gdi_context,
                 &mut bytecode.generator.function_table,
+                &compiled.parsed.arena,
             );
 
             exec_ptr
@@ -793,30 +1433,54 @@ pub unsafe extern "C" fn rust_compile_eval(
                 return std::ptr::null_mut();
             }
 
-            parser.scope_collector.analyze(true);
+            let eval_referenced_private_names = parser.eval_referenced_private_names().to_vec();
 
-            write_ast_dump_output(&program, &parser.function_table, ast_dump_output, ast_dump_output_len);
+            parser.scope_collector.analyze(
+                true,
+                &mut parser.arena.identifiers,
+                &parser.arena.strings,
+                &mut parser.arena.scopes,
+            );
 
-            let (scope_ref, is_strict) = if let StatementKind::Program(ref data) = program.inner {
-                (data.scope.clone(), data.is_strict_mode)
+            write_ast_dump_output(
+                &program,
+                &parser.function_table,
+                &parser.arena,
+                ast_dump_output,
+                ast_dump_output_len,
+            );
+
+            let (scope_id, is_strict) = if let StatementKind::Program(ref data) = program.inner {
+                (data.scope, data.is_strict_mode)
             } else {
                 return std::ptr::null_mut();
             };
 
+            let arena_arc = std::sync::Arc::new(std::mem::take(&mut parser.arena));
             let mut generator = new_program_generator(is_strict, vm_ptr, source_code_ptr, source_len);
             generator.function_table = std::mem::take(&mut parser.function_table);
-            let exec_ptr = compile_program_body(&mut generator, &program, &scope_ref, vm_ptr, source_code_ptr);
+            generator.arena = arena_arc.clone();
+            let exec_ptr = compile_program_body(
+                &mut generator,
+                &program,
+                scope_id,
+                vm_ptr,
+                source_code_ptr,
+                bytecode::ffi::SharedFunctionDataOwner::None,
+            );
             if exec_ptr.is_null() {
                 return std::ptr::null_mut();
             }
 
             extract_eval_gdi(
-                &scope_ref.borrow(),
+                &arena_arc.scopes[scope_id],
                 is_strict,
                 vm_ptr,
                 source_code_ptr,
                 gdi_context,
                 &mut generator.function_table,
+                &arena_arc,
+                &eval_referenced_private_names,
             );
 
             exec_ptr
@@ -968,7 +1632,11 @@ pub unsafe extern "C" fn rust_compile_dynamic_function(
             // Run scope analysis. Use analyze_as_dynamic_function() to suppress
             // marking identifiers as global, matching the C++ path which parses
             // as a FunctionExpression (no Program scope for globals to bind to).
-            parser.scope_collector.analyze_as_dynamic_function();
+            parser.scope_collector.analyze_as_dynamic_function(
+                &mut parser.arena.identifiers,
+                &parser.arena.strings,
+                &mut parser.arena.scopes,
+            );
 
             if parser.scope_collector.has_errors() {
                 if let Some(cb) = error_callback {
@@ -980,12 +1648,18 @@ pub unsafe extern "C" fn rust_compile_dynamic_function(
                 return std::ptr::null_mut();
             }
 
-            write_ast_dump_output(&program, &parser.function_table, ast_dump_output, ast_dump_output_len);
+            write_ast_dump_output(
+                &program,
+                &parser.function_table,
+                &parser.arena,
+                ast_dump_output,
+                ast_dump_output_len,
+            );
 
             // Extract the FunctionExpression from the program.
             // The program should contain a single ExpressionStatement wrapping a FunctionExpression.
             let function_id = if let StatementKind::Program(ref data) = program.inner {
-                let scope = data.scope.borrow();
+                let scope = &parser.arena.scopes[data.scope];
                 scope.children.iter().find_map(|child| match &child.inner {
                     StatementKind::FunctionDeclaration(fd) => Some(fd.function_id),
                     StatementKind::Expression(expression) => {
@@ -1016,9 +1690,22 @@ pub unsafe extern "C" fn rust_compile_dynamic_function(
             function_data.parsing_insights.might_need_arguments_object = true;
 
             let is_strict = function_data.is_strict_mode;
-            let subtable = parser.function_table.extract_reachable(&function_data);
+            let subtable = parser
+                .function_table
+                .extract_reachable(&function_data, &parser.arena.scopes);
+            let arena = std::sync::Arc::new(std::mem::take(&mut parser.arena));
 
-            bytecode::ffi::create_sfd_for_gdi(function_data, subtable, vm_ptr, source_code_ptr, is_strict)
+            bytecode::ffi::create_sfd_for_gdi(
+                function_data,
+                subtable,
+                bytecode::ffi::SharedFunctionDataCreationContext {
+                    vm_ptr,
+                    source_code_ptr,
+                    owner: bytecode::ffi::SharedFunctionDataOwner::None,
+                },
+                is_strict,
+                arena,
+            )
         })
     }
 }
@@ -1071,32 +1758,49 @@ pub unsafe extern "C" fn rust_compile_builtin_file(
                 panic!("Parse errors in builtin file: {}", errors.join("; "));
             }
 
-            parser.scope_collector.analyze(false);
+            parser.scope_collector.analyze(
+                false,
+                &mut parser.arena.identifiers,
+                &parser.arena.strings,
+                &mut parser.arena.scopes,
+            );
 
-            write_ast_dump_output(&program, &parser.function_table, ast_dump_output, ast_dump_output_len);
+            write_ast_dump_output(
+                &program,
+                &parser.function_table,
+                &parser.arena,
+                ast_dump_output,
+                ast_dump_output_len,
+            );
 
-            let scope_ref = if let StatementKind::Program(ref data) = program.inner {
-                data.scope.clone()
+            let scope_id = if let StatementKind::Program(ref data) = program.inner {
+                data.scope
             } else {
                 return;
             };
 
-            let scope = scope_ref.borrow();
+            let arena = std::sync::Arc::new(std::mem::take(&mut parser.arena));
+            let scope = &arena.scopes[scope_id];
             for child in &scope.children {
                 if let StatementKind::FunctionDeclaration(ref fd) = child.inner {
                     let function_data = parser.function_table.take(fd.function_id);
-                    let subtable = parser.function_table.extract_reachable(&function_data);
+                    let subtable = parser.function_table.extract_reachable(&function_data, &arena.scopes);
                     let sfd_ptr = bytecode::ffi::create_sfd_for_gdi(
                         function_data,
                         subtable,
-                        vm_ptr,
-                        source_code_ptr,
+                        bytecode::ffi::SharedFunctionDataCreationContext {
+                            vm_ptr,
+                            source_code_ptr,
+                            owner: bytecode::ffi::SharedFunctionDataOwner::None,
+                        },
                         true, // strict
+                        arena.clone(),
                     );
                     if !sfd_ptr.is_null()
-                        && let Some(name_ident) = &fd.name
+                        && let Some(name_ident) = fd.name
                     {
-                        push_function(ctx, sfd_ptr, name_ident.name.as_ptr(), name_ident.name.len());
+                        let name = arena.name_of(name_ident);
+                        push_function(ctx, sfd_ptr, name.as_ptr(), name.len());
                     }
                 }
             }
@@ -1127,6 +1831,7 @@ pub unsafe extern "C" fn rust_compile_parsed_module(
     parsed: *mut ParsedProgram,
     vm_ptr: *mut c_void,
     source_code_ptr: *const c_void,
+    shared_function_data_list_ptr: *mut c_void,
     module_context: *mut c_void,
     callbacks: *const ModuleCallbacks,
     tla_executable_out: *mut *mut c_void,
@@ -1136,34 +1841,38 @@ pub unsafe extern "C" fn rust_compile_parsed_module(
         abort_on_panic(|| {
             let mut parsed = Box::from_raw(parsed);
             let cb = &*callbacks;
+            let shared_function_data_context = bytecode::ffi::SharedFunctionDataCreationContext {
+                vm_ptr,
+                source_code_ptr,
+                owner: bytecode::ffi::SharedFunctionDataOwner::List(shared_function_data_list_ptr),
+            };
 
             // 1. Report has_top_level_await.
             (cb.set_has_top_level_await)(module_context, parsed.has_top_level_await);
 
             // 2. Process imports and exports.
-            extract_module_metadata(&parsed.scope_ref.borrow(), module_context, cb);
+            extract_module_metadata(&parsed.arena.scopes[parsed.scope_ref], module_context, cb);
 
             // 3. Extract var declared names and lexical bindings.
             extract_module_declarations(
-                &parsed.scope_ref.borrow(),
-                vm_ptr,
-                source_code_ptr,
+                &parsed.arena.scopes[parsed.scope_ref],
+                shared_function_data_context,
                 module_context,
                 cb,
                 &mut parsed.function_table,
+                &parsed.arena,
             );
 
             // 4. Compute requested modules (sorted by source offset).
-            extract_requested_modules(&parsed.scope_ref.borrow(), module_context, cb);
+            extract_requested_modules(&parsed.arena.scopes[parsed.scope_ref], module_context, cb);
 
             // 5. Compile module body.
             if parsed.has_top_level_await {
                 let exec_ptr = compile_module_as_async(
                     &parsed.program,
-                    &parsed.scope_ref,
-                    vm_ptr,
-                    source_code_ptr,
-                    std::ptr::null(),
+                    parsed.scope_ref,
+                    parsed.arena.clone(),
+                    shared_function_data_context,
                     source_len,
                     std::mem::take(&mut parsed.function_table),
                 );
@@ -1177,12 +1886,14 @@ pub unsafe extern "C" fn rust_compile_parsed_module(
                 }
                 let mut generator = new_program_generator(true, vm_ptr, source_code_ptr, source_len);
                 generator.function_table = std::mem::take(&mut parsed.function_table);
+                generator.arena = parsed.arena.clone();
                 compile_program_body(
                     &mut generator,
                     &parsed.program,
-                    &parsed.scope_ref,
+                    parsed.scope_ref,
                     vm_ptr,
                     source_code_ptr,
+                    shared_function_data_context.owner,
                 )
             }
         })
@@ -1202,6 +1913,7 @@ pub unsafe extern "C" fn rust_materialize_compiled_module(
     compiled: *mut CompiledProgram,
     vm_ptr: *mut c_void,
     source_code_ptr: *const c_void,
+    shared_function_data_list_ptr: *mut c_void,
     module_context: *mut c_void,
     callbacks: *const ModuleCallbacks,
     tla_executable_out: *mut *mut c_void,
@@ -1214,26 +1926,44 @@ pub unsafe extern "C" fn rust_materialize_compiled_module(
 
             let mut compiled = Box::from_raw(compiled);
             let cb = &*callbacks;
+            let shared_function_data_context = bytecode::ffi::SharedFunctionDataCreationContext {
+                vm_ptr,
+                source_code_ptr,
+                owner: bytecode::ffi::SharedFunctionDataOwner::List(shared_function_data_list_ptr),
+            };
 
             (cb.set_has_top_level_await)(module_context, compiled.parsed.has_top_level_await);
-            extract_module_metadata(&compiled.parsed.scope_ref.borrow(), module_context, cb);
+            extract_module_metadata(
+                &compiled.parsed.arena.scopes[compiled.parsed.scope_ref],
+                module_context,
+                cb,
+            );
 
             let bytecode = match &mut compiled.bytecode {
                 CompiledProgramBytecode::Program(bytecode) | CompiledProgramBytecode::AsyncModule(bytecode) => bytecode,
             };
             extract_module_declarations(
-                &compiled.parsed.scope_ref.borrow(),
-                vm_ptr,
-                source_code_ptr,
+                &compiled.parsed.arena.scopes[compiled.parsed.scope_ref],
+                shared_function_data_context,
                 module_context,
                 cb,
                 &mut bytecode.generator.function_table,
+                &compiled.parsed.arena,
             );
-            extract_requested_modules(&compiled.parsed.scope_ref.borrow(), module_context, cb);
+            extract_requested_modules(
+                &compiled.parsed.arena.scopes[compiled.parsed.scope_ref],
+                module_context,
+                cb,
+            );
 
             match &mut compiled.bytecode {
                 CompiledProgramBytecode::AsyncModule(bytecode) => {
-                    let exec_ptr = create_executable_from_compiled_bytecode(bytecode, vm_ptr, source_code_ptr);
+                    let exec_ptr = create_executable_from_compiled_bytecode(
+                        bytecode,
+                        vm_ptr,
+                        source_code_ptr,
+                        shared_function_data_context.owner,
+                    );
                     if !tla_executable_out.is_null() {
                         *tla_executable_out = exec_ptr;
                     }
@@ -1243,7 +1973,12 @@ pub unsafe extern "C" fn rust_materialize_compiled_module(
                     if !tla_executable_out.is_null() {
                         *tla_executable_out = std::ptr::null_mut();
                     }
-                    create_executable_from_compiled_bytecode(bytecode, vm_ptr, source_code_ptr)
+                    create_executable_from_compiled_bytecode(
+                        bytecode,
+                        vm_ptr,
+                        source_code_ptr,
+                        shared_function_data_context.owner,
+                    )
                 }
             }
         })
@@ -1396,6 +2131,7 @@ pub unsafe extern "C" fn rust_compile_module(
     source_len: usize,
     vm_ptr: *mut c_void,
     source_code_ptr: *const c_void,
+    shared_function_data_list_ptr: *mut c_void,
     module_context: *mut c_void,
     callbacks: *const ModuleCallbacks,
     dump_ast: bool,
@@ -1422,9 +2158,11 @@ pub unsafe extern "C" fn rust_compile_module(
                 return std::ptr::null_mut();
             }
 
+            let parsed_ref = &*parsed;
             write_ast_dump_output(
-                &(*parsed).program,
-                &(*parsed).function_table,
+                &parsed_ref.program,
+                &parsed_ref.function_table,
+                &parsed_ref.arena,
                 ast_dump_output,
                 ast_dump_output_len,
             );
@@ -1433,6 +2171,7 @@ pub unsafe extern "C" fn rust_compile_module(
                 parsed,
                 vm_ptr,
                 source_code_ptr,
+                shared_function_data_list_ptr,
                 module_context,
                 callbacks,
                 tla_executable_out,
@@ -1445,7 +2184,8 @@ pub unsafe extern "C" fn rust_compile_module(
 /// Extract import/export metadata from a module's scope and call C++ callbacks.
 unsafe fn extract_module_metadata(scope: &ast::ScopeData, ctx: *mut c_void, cb: &ModuleCallbacks) {
     unsafe {
-        use ast::{ExportEntryKind, StatementKind};
+        use ast::ExportEntryKind;
+        use ast::StatementKind;
 
         // Collect all import entries with their module requests.
         struct ImportEntryWithRequest {
@@ -1504,7 +2244,13 @@ unsafe fn extract_module_metadata(scope: &ast::ScopeData, ctx: *mut c_void, cb: 
                         StatementKind::FunctionDeclaration(_) | StatementKind::ClassDeclaration(_)
                     )
                 });
-                if !is_declaration && let Some(ref name) = entry.local_or_import_name {
+                let is_specific_import_export = all_import_entries
+                    .iter()
+                    .any(|ie| entry.local_or_import_name.as_ref() == Some(&ie.local_name) && ie.import_name.is_some());
+                if !is_declaration
+                    && !is_specific_import_export
+                    && let Some(ref name) = entry.local_or_import_name
+                {
                     (cb.set_default_export_binding)(ctx, name.as_ptr(), name.len());
                 }
             }
@@ -1524,14 +2270,14 @@ unsafe fn extract_module_metadata(scope: &ast::ScopeData, ctx: *mut c_void, cb: 
 
                     if let Some(import_entry) = matching_import {
                         if import_entry.import_name.is_none() {
-                            // Namespace re-export → local export.
+                            // Re-export of an imported module namespace object becomes an indirect namespace export.
                             call_export_callback(
-                                cb.push_local_export,
+                                cb.push_indirect_export,
                                 ctx,
-                                entry.kind as u8,
+                                ExportEntryKind::ModuleRequestAll as u8,
                                 entry.export_name.as_ref(),
-                                entry.local_or_import_name.as_ref(),
                                 None,
+                                Some(&import_entry.module_request),
                             );
                         } else {
                             // Re-export of a specific binding → indirect export.
@@ -1584,11 +2330,11 @@ unsafe fn extract_module_metadata(scope: &ast::ScopeData, ctx: *mut c_void, cb: 
 /// Extract var declared names and lexical bindings from a module scope.
 unsafe fn extract_module_declarations(
     scope: &ast::ScopeData,
-    vm_ptr: *mut c_void,
-    source_code_ptr: *const c_void,
+    shared_function_data_context: bytecode::ffi::SharedFunctionDataCreationContext,
     ctx: *mut c_void,
     cb: &ModuleCallbacks,
     function_table: &mut ast::FunctionTable,
+    arena: &std::sync::Arc<ast::AstArena>,
 ) {
     unsafe {
         use ast::StatementKind;
@@ -1597,7 +2343,7 @@ unsafe fn extract_module_declarations(
 
         // Var declared names (walk all nesting levels).
         for child in &scope.children {
-            collect_module_var_names(&child.inner, ctx, cb.push_var_name);
+            collect_module_var_names(&child.inner, ctx, cb.push_var_name, arena);
         }
 
         // Lexical bindings and functions to initialize.
@@ -1616,19 +2362,27 @@ unsafe fn extract_module_declarations(
 
             match declaration {
                 StatementKind::FunctionDeclaration(fd) => {
-                    let is_default = is_exported && fd.name.as_ref().is_some_and(|n| n.name == default_name);
+                    let is_default = is_exported
+                        && fd
+                            .name
+                            .is_some_and(|n| arena.name_of(n).as_slice() == default_name.as_slice());
 
                     let function_data = function_table.take(fd.function_id);
-                    let subtable = function_table.extract_reachable(&function_data);
-                    let sfd_ptr =
-                        bytecode::ffi::create_sfd_for_gdi(function_data, subtable, vm_ptr, source_code_ptr, true);
+                    let subtable = function_table.extract_reachable(&function_data, &arena.scopes);
+                    let sfd_ptr = bytecode::ffi::create_sfd_for_gdi(
+                        function_data,
+                        subtable,
+                        shared_function_data_context,
+                        true,
+                        arena.clone(),
+                    );
                     if sfd_ptr.is_null() {
                         continue;
                     }
 
                     // Get the binding name from the AST (e.g., "*default*" for anonymous defaults).
-                    let binding_name = if let Some(name_ident) = &fd.name {
-                        name_ident.name.to_utf16_string()
+                    let binding_name = if let Some(name_ident) = fd.name {
+                        arena.name_of(name_ident).clone()
                     } else {
                         continue;
                     };
@@ -1651,21 +2405,22 @@ unsafe fn extract_module_declarations(
                     (cb.push_lexical_binding)(ctx, binding_name.as_ptr(), binding_name.len(), false, function_index);
                 }
                 StatementKind::ClassDeclaration(class_data) => {
-                    if let Some(ref name_ident) = class_data.name {
-                        (cb.push_lexical_binding)(ctx, name_ident.name.as_ptr(), name_ident.name.len(), false, -1);
+                    if let Some(name_ident) = class_data.name {
+                        let name = arena.name_of(name_ident);
+                        (cb.push_lexical_binding)(ctx, name.as_ptr(), name.len(), false, -1);
                     }
                 }
                 StatementKind::VariableDeclaration(vd) if vd.kind != ast::DeclarationKind::Var => {
                     let is_constant = vd.kind == ast::DeclarationKind::Const;
                     for declaration in &vd.declarations {
-                        for_each_bound_name(&declaration.target, &mut |name| {
+                        for_each_bound_name(&declaration.target, arena, &mut |name| {
                             (cb.push_lexical_binding)(ctx, name.as_ptr(), name.len(), is_constant, -1);
                         });
                     }
                 }
                 StatementKind::UsingDeclaration(declarations) => {
                     for declaration in declarations.iter() {
-                        for_each_bound_name(&declaration.target, &mut |name| {
+                        for_each_bound_name(&declaration.target, arena, &mut |name| {
                             (cb.push_lexical_binding)(ctx, name.as_ptr(), name.len(), false, -1);
                         });
                     }
@@ -1681,24 +2436,25 @@ unsafe fn collect_module_var_names(
     statement: &ast::StatementKind,
     ctx: *mut c_void,
     push_var_name: ModuleNameCallback,
+    arena: &ast::AstArena,
 ) {
     unsafe {
         match statement {
             ast::StatementKind::VariableDeclaration(vd) if vd.kind == ast::DeclarationKind::Var => {
                 for declaration in &vd.declarations {
-                    for_each_bound_name(&declaration.target, &mut |name| {
+                    for_each_bound_name(&declaration.target, arena, &mut |name| {
                         push_var_name(ctx, name.as_ptr(), name.len());
                     });
                 }
             }
             ast::StatementKind::Export(export_data) => {
                 if let Some(ref stmt) = export_data.statement {
-                    collect_module_var_names(&stmt.inner, ctx, push_var_name);
+                    collect_module_var_names(&stmt.inner, ctx, push_var_name, arena);
                 }
             }
             _ => {
-                for_each_child_statement(statement, &mut |child| {
-                    collect_module_var_names(child, ctx, push_var_name);
+                for_each_child_statement(statement, arena, &mut |child| {
+                    collect_module_var_names(child, ctx, push_var_name, arena);
                 });
             }
         }
@@ -1772,16 +2528,17 @@ fn new_module_async_generator(source_len: usize, function_table: ast::FunctionTa
 
 fn compile_module_as_async_to_bytecode(
     program: &ast::Statement,
-    scope_ref: &Rc<RefCell<ast::ScopeData>>,
+    scope_id: ast::ScopeId,
     generator: &mut bytecode::generator::Generator,
 ) -> bytecode::generator::AssembledBytecode {
     use bytecode::instruction::Instruction;
 
-    let scope = scope_ref.borrow();
+    let arena_clone = generator.arena.clone();
+    let scope = &arena_clone.scopes[scope_id];
 
     // Extract local variables from the program scope so the executable has the correct registers_and_locals_count.
     // Without this, locals are not saved across await suspension points, causing them to become undefined.
-    generator.local_variables = convert_local_variables(&scope);
+    generator.local_variables = convert_local_variables(scope);
 
     let entry_block = generator.make_block();
     generator.switch_to_basic_block(entry_block);
@@ -1816,20 +2573,26 @@ fn compile_module_as_async_to_bytecode(
 
 unsafe fn compile_module_as_async(
     program: &ast::Statement,
-    scope_ref: &Rc<RefCell<ast::ScopeData>>,
-    vm_ptr: *mut c_void,
-    source_code_ptr: *const c_void,
-    _source: *const u16,
+    scope_id: ast::ScopeId,
+    arena: std::sync::Arc<ast::AstArena>,
+    shared_function_data_context: bytecode::ffi::SharedFunctionDataCreationContext,
     source_len: usize,
     function_table: ast::FunctionTable,
 ) -> *mut c_void {
     unsafe {
         let mut generator = new_module_async_generator(source_len, function_table);
-        generator.vm_ptr = vm_ptr;
-        generator.source_code_ptr = source_code_ptr;
+        generator.arena = arena;
+        generator.vm_ptr = shared_function_data_context.vm_ptr;
+        generator.source_code_ptr = shared_function_data_context.source_code_ptr;
 
-        let assembled = compile_module_as_async_to_bytecode(program, scope_ref, &mut generator);
-        bytecode::ffi::create_executable(&mut generator, &assembled, vm_ptr, source_code_ptr)
+        let assembled = compile_module_as_async_to_bytecode(program, scope_id, &mut generator);
+        bytecode::ffi::create_executable(
+            &mut generator,
+            &assembled,
+            shared_function_data_context.vm_ptr,
+            shared_function_data_context.source_code_ptr,
+            shared_function_data_context.owner,
+        )
     }
 }
 
@@ -1843,16 +2606,20 @@ unsafe extern "C" {
 
 /// Recursively collect var-declared names from a statement and all nested
 /// statements, excluding function/class bodies (which create new var scopes).
-fn collect_var_names_recursive(statement: &ast::StatementKind, push_name: &mut dyn FnMut(&[u16])) {
+fn collect_var_names_recursive(
+    statement: &ast::StatementKind,
+    arena: &ast::AstArena,
+    push_name: &mut dyn FnMut(&[u16]),
+) {
     match statement {
         ast::StatementKind::VariableDeclaration(vd) if vd.kind == ast::DeclarationKind::Var => {
             for declaration in &vd.declarations {
-                for_each_bound_name(&declaration.target, push_name);
+                for_each_bound_name(&declaration.target, arena, push_name);
             }
         }
         _ => {
-            for_each_child_statement(statement, &mut |child| {
-                collect_var_names_recursive(child, push_name);
+            for_each_child_statement(statement, arena, &mut |child| {
+                collect_var_names_recursive(child, arena, push_name);
             });
         }
     }
@@ -1868,6 +2635,7 @@ fn extract_gdi_common(
     scope: &ast::ScopeData,
     vm_ptr: *mut c_void,
     source_code_ptr: *const c_void,
+    shared_function_data_owner: bytecode::ffi::SharedFunctionDataOwner,
     is_strict: bool,
     push_var_name: &mut dyn FnMut(&[u16]),
     push_function: &mut dyn FnMut(*mut c_void, &[u16]),
@@ -1875,48 +2643,60 @@ fn extract_gdi_common(
     push_annex_b_name: &mut dyn FnMut(&[u16]),
     push_lexical_binding: &mut dyn FnMut(&[u16], bool),
     function_table: &mut ast::FunctionTable,
+    arena: &std::sync::Arc<ast::AstArena>,
 ) {
-    use ast::{DeclarationKind, StatementKind};
+    use ast::DeclarationKind;
+    use ast::StatementKind;
 
     // Var names (var declarations at any nesting level + top-level function declarations)
     for child in &scope.children {
-        collect_var_names_recursive(&child.inner, push_var_name);
-        if let StatementKind::FunctionDeclaration(ref fd) = child.inner
-            && let Some(ref name_ident) = fd.name
+        collect_var_names_recursive(&child.inner, arena, push_var_name);
+        if let Some(fd) = child.inner.function_declaration_for_labelled_item()
+            && let Some(name_ident) = fd.name
         {
-            push_var_name(&name_ident.name);
+            push_var_name(arena.name_slice(name_ident));
         }
     }
 
     // Functions to initialize: keep the last declaration with each name
     // (ECMAScript hoisting semantics), but emit them in source order. Two
-    // forward passes; SharedUtf16String keys keep the inserts cheap.
-    let mut last_position: std::collections::HashMap<ast::SharedUtf16String, usize> = std::collections::HashMap::new();
+    // forward passes; StringId keys keep the inserts to a u32 compare.
+    let mut last_position: std::collections::HashMap<ast::StringId, usize> = std::collections::HashMap::new();
     for (i, child) in scope.children.iter().enumerate() {
-        if let StatementKind::FunctionDeclaration(ref fd) = child.inner
-            && let Some(ref name_ident) = fd.name
+        if let Some(fd) = child.inner.function_declaration_for_labelled_item()
+            && let Some(name_ident) = fd.name
         {
-            last_position.insert(name_ident.name.clone(), i);
+            last_position.insert(arena.identifiers[name_ident].name, i);
         }
     }
     for (i, child) in scope.children.iter().enumerate() {
-        if let StatementKind::FunctionDeclaration(ref fd) = child.inner
-            && let Some(ref name_ident) = fd.name
-            && last_position.get(&name_ident.name).copied() == Some(i)
+        if let Some(fd) = child.inner.function_declaration_for_labelled_item()
+            && let Some(name_ident) = fd.name
+            && last_position.get(&arena.identifiers[name_ident].name).copied() == Some(i)
         {
             let function_data = function_table.take(fd.function_id);
-            let subtable = function_table.extract_reachable(&function_data);
+            let subtable = function_table.extract_reachable(&function_data, &arena.scopes);
             let sfd_ptr = unsafe {
-                bytecode::ffi::create_sfd_for_gdi(function_data, subtable, vm_ptr, source_code_ptr, is_strict)
+                bytecode::ffi::create_sfd_for_gdi(
+                    function_data,
+                    subtable,
+                    bytecode::ffi::SharedFunctionDataCreationContext {
+                        vm_ptr,
+                        source_code_ptr,
+                        owner: shared_function_data_owner,
+                    },
+                    is_strict,
+                    arena.clone(),
+                )
             };
             assert!(!sfd_ptr.is_null(), "create_sfd_for_gdi returned null");
-            push_function(sfd_ptr, name_ident.name.as_slice());
+            push_function(sfd_ptr, arena.name_slice(name_ident));
         }
     }
 
     // Var-scoped names (var VariableDeclaration names, excluding function declarations)
     for child in &scope.children {
-        collect_var_names_recursive(&child.inner, push_var_scoped_name);
+        collect_var_names_recursive(&child.inner, arena, push_var_scoped_name);
     }
 
     for name in &scope.annexb_function_names {
@@ -1928,21 +2708,21 @@ fn extract_gdi_common(
             StatementKind::VariableDeclaration(vd) if vd.kind != DeclarationKind::Var => {
                 let is_constant = vd.kind == DeclarationKind::Const;
                 for declaration in &vd.declarations {
-                    for_each_bound_name(&declaration.target, &mut |name| {
+                    for_each_bound_name(&declaration.target, arena, &mut |name| {
                         push_lexical_binding(name, is_constant);
                     });
                 }
             }
             StatementKind::UsingDeclaration(declarations) => {
                 for declaration in declarations.iter() {
-                    for_each_bound_name(&declaration.target, &mut |name| {
+                    for_each_bound_name(&declaration.target, arena, &mut |name| {
                         push_lexical_binding(name, false);
                     });
                 }
             }
             StatementKind::ClassDeclaration(class_data) => {
-                if let Some(ref name) = class_data.name {
-                    push_lexical_binding(&name.name, false);
+                if let Some(name) = class_data.name {
+                    push_lexical_binding(arena.name_slice(name), false);
                 }
             }
             _ => {}
@@ -1952,6 +2732,7 @@ fn extract_gdi_common(
 
 /// Extract EDI metadata from a program-level ScopeData and populate
 /// the C++ EvalGdiBuilder via callbacks.
+#[allow(clippy::too_many_arguments)]
 unsafe fn extract_eval_gdi(
     scope: &ast::ScopeData,
     is_strict: bool,
@@ -1959,12 +2740,17 @@ unsafe fn extract_eval_gdi(
     source_code_ptr: *const c_void,
     ctx: *mut c_void,
     function_table: &mut ast::FunctionTable,
+    arena: &std::sync::Arc<ast::AstArena>,
+    referenced_private_names: &[ast::Utf16String],
 ) {
     unsafe {
-        use bytecode::ffi::{
-            eval_gdi_push_annex_b_name, eval_gdi_push_function, eval_gdi_push_lexical_binding, eval_gdi_push_var_name,
-            eval_gdi_push_var_scoped_name, eval_gdi_set_strict,
-        };
+        use bytecode::ffi::eval_gdi_push_annex_b_name;
+        use bytecode::ffi::eval_gdi_push_function;
+        use bytecode::ffi::eval_gdi_push_lexical_binding;
+        use bytecode::ffi::eval_gdi_push_private_name;
+        use bytecode::ffi::eval_gdi_push_var_name;
+        use bytecode::ffi::eval_gdi_push_var_scoped_name;
+        use bytecode::ffi::eval_gdi_set_strict;
 
         eval_gdi_set_strict(ctx, is_strict);
 
@@ -1972,6 +2758,7 @@ unsafe fn extract_eval_gdi(
             scope,
             vm_ptr,
             source_code_ptr,
+            bytecode::ffi::SharedFunctionDataOwner::None,
             is_strict,
             &mut |name| eval_gdi_push_var_name(ctx, name.as_ptr(), name.len()),
             &mut |sfd_ptr, name| eval_gdi_push_function(ctx, sfd_ptr, name.as_ptr(), name.len()),
@@ -1981,7 +2768,12 @@ unsafe fn extract_eval_gdi(
                 eval_gdi_push_lexical_binding(ctx, name.as_ptr(), name.len(), is_const);
             },
             function_table,
+            arena,
         );
+
+        for name in referenced_private_names {
+            eval_gdi_push_private_name(ctx, name.as_ptr(), name.len());
+        }
     }
 }
 
@@ -1990,38 +2782,42 @@ unsafe fn extract_eval_gdi(
 unsafe fn extract_script_gdi(
     scope: &ast::ScopeData,
     is_strict: bool,
-    vm_ptr: *mut c_void,
-    source_code_ptr: *const c_void,
+    shared_function_data_context: bytecode::ffi::SharedFunctionDataCreationContext,
     ctx: *mut c_void,
     function_table: &mut ast::FunctionTable,
+    arena: &std::sync::Arc<ast::AstArena>,
 ) {
     unsafe {
-        use ast::{DeclarationKind, StatementKind};
-        use bytecode::ffi::{
-            script_gdi_push_annex_b_name, script_gdi_push_function, script_gdi_push_lexical_binding,
-            script_gdi_push_lexical_name, script_gdi_push_var_name, script_gdi_push_var_scoped_name,
-        };
+        use ast::DeclarationKind;
+        use ast::StatementKind;
+        use bytecode::ffi::script_gdi_push_annex_b_name;
+        use bytecode::ffi::script_gdi_push_function;
+        use bytecode::ffi::script_gdi_push_lexical_binding;
+        use bytecode::ffi::script_gdi_push_lexical_name;
+        use bytecode::ffi::script_gdi_push_var_name;
+        use bytecode::ffi::script_gdi_push_var_scoped_name;
 
         // Lexical names (let/const/using/class at top level) — script-only step.
         for child in &scope.children {
             match &child.inner {
                 StatementKind::VariableDeclaration(vd) if vd.kind != DeclarationKind::Var => {
                     for declaration in &vd.declarations {
-                        for_each_bound_name(&declaration.target, &mut |name| {
+                        for_each_bound_name(&declaration.target, arena, &mut |name| {
                             script_gdi_push_lexical_name(ctx, name.as_ptr(), name.len());
                         });
                     }
                 }
                 StatementKind::UsingDeclaration(declarations) => {
                     for declaration in declarations.iter() {
-                        for_each_bound_name(&declaration.target, &mut |name| {
+                        for_each_bound_name(&declaration.target, arena, &mut |name| {
                             script_gdi_push_lexical_name(ctx, name.as_ptr(), name.len());
                         });
                     }
                 }
                 StatementKind::ClassDeclaration(class_data) => {
-                    if let Some(ref name) = class_data.name {
-                        script_gdi_push_lexical_name(ctx, name.name.as_ptr(), name.name.len());
+                    if let Some(name) = class_data.name {
+                        let n = arena.name_of(name);
+                        script_gdi_push_lexical_name(ctx, n.as_ptr(), n.len());
                     }
                 }
                 _ => {}
@@ -2030,8 +2826,9 @@ unsafe fn extract_script_gdi(
 
         extract_gdi_common(
             scope,
-            vm_ptr,
-            source_code_ptr,
+            shared_function_data_context.vm_ptr,
+            shared_function_data_context.source_code_ptr,
+            shared_function_data_context.owner,
             is_strict,
             &mut |name| script_gdi_push_var_name(ctx, name.as_ptr(), name.len()),
             &mut |sfd_ptr, name| script_gdi_push_function(ctx, sfd_ptr, name.as_ptr(), name.len()),
@@ -2041,18 +2838,23 @@ unsafe fn extract_script_gdi(
                 script_gdi_push_lexical_binding(ctx, name.as_ptr(), name.len(), is_const);
             },
             function_table,
+            arena,
         );
     }
 }
 
 /// Visit each child statement of a statement, excluding function/class bodies
 /// (which create new var scopes). This enables recursive var-declaration walking.
-fn for_each_child_statement(statement: &ast::StatementKind, f: &mut dyn FnMut(&ast::StatementKind)) {
+fn for_each_child_statement(
+    statement: &ast::StatementKind,
+    arena: &ast::AstArena,
+    f: &mut dyn FnMut(&ast::StatementKind),
+) {
     use ast::StatementKind;
 
     match statement {
         StatementKind::Block(scope) => {
-            for child in &scope.borrow().children {
+            for child in &arena.scopes[*scope].children {
                 f(&child.inner);
             }
         }
@@ -2085,7 +2887,7 @@ fn for_each_child_statement(statement: &ast::StatementKind, f: &mut dyn FnMut(&a
         }
         StatementKind::Switch(data) => {
             for case in &data.cases {
-                for child in &case.scope.borrow().children {
+                for child in &arena.scopes[case.scope].children {
                     f(&child.inner);
                 }
             }
@@ -2107,26 +2909,26 @@ fn for_each_child_statement(statement: &ast::StatementKind, f: &mut dyn FnMut(&a
     }
 }
 
-fn for_each_bound_name(target: &ast::VariableDeclaratorTarget, f: &mut dyn FnMut(&[u16])) {
+fn for_each_bound_name(target: &ast::VariableDeclaratorTarget, arena: &ast::AstArena, f: &mut dyn FnMut(&[u16])) {
     match target {
-        ast::VariableDeclaratorTarget::Identifier(id) => f(&id.name),
+        ast::VariableDeclaratorTarget::Identifier(id) => f(arena.name_slice(*id)),
         ast::VariableDeclaratorTarget::BindingPattern(pattern) => {
-            for_each_bound_name_in_pattern(pattern, f);
+            for_each_bound_name_in_pattern(pattern, arena, f);
         }
     }
 }
 
-fn for_each_bound_name_in_pattern(pattern: &ast::BindingPattern, f: &mut dyn FnMut(&[u16])) {
+fn for_each_bound_name_in_pattern(pattern: &ast::BindingPattern, arena: &ast::AstArena, f: &mut dyn FnMut(&[u16])) {
     for entry in &pattern.entries {
         match &entry.alias {
             None => {
                 if let Some(ast::BindingEntryName::Identifier(id)) = &entry.name {
-                    f(&id.name);
+                    f(arena.name_slice(*id));
                 }
             }
-            Some(ast::BindingEntryAlias::Identifier(id)) => f(&id.name),
+            Some(ast::BindingEntryAlias::Identifier(id)) => f(arena.name_slice(*id)),
             Some(ast::BindingEntryAlias::BindingPattern(inner)) => {
-                for_each_bound_name_in_pattern(inner, f);
+                for_each_bound_name_in_pattern(inner, arena, f);
             }
             Some(ast::BindingEntryAlias::MemberExpression(_)) => {}
         }
@@ -2152,6 +2954,26 @@ pub unsafe extern "C" fn rust_free_function_ast(ast: *mut c_void) {
                 drop(Box::from_raw(ast as *mut ast::FunctionPayload));
             }
         });
+    }
+}
+
+/// Clone a lazy function compilation payload.
+///
+/// The clone lets background compilation race with synchronous lazy
+/// compilation. Each path owns and eventually frees its own AST payload.
+///
+/// # Safety
+/// `ast` must be null or a valid pointer returned by `Box::into_raw(Box<FunctionPayload>)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_clone_function_ast(ast: *const c_void) -> *mut c_void {
+    unsafe {
+        abort_on_panic(|| {
+            if ast.is_null() {
+                return std::ptr::null_mut();
+            }
+            let payload = &*(ast as *const ast::FunctionPayload);
+            Box::into_raw(Box::new(payload.clone())) as *mut c_void
+        })
     }
 }
 
@@ -2190,6 +3012,7 @@ pub unsafe extern "C" fn rust_compile_function(
     sfd_ptr: *mut c_void,
     rust_function_ast: *mut c_void,
     builtin_abstract_operations_enabled: bool,
+    shared_function_data_list_ptr: *mut c_void,
 ) -> *mut c_void {
     unsafe {
         abort_on_panic(|| {
@@ -2197,8 +3020,14 @@ pub unsafe extern "C" fn rust_compile_function(
                 return std::ptr::null_mut();
             }
             let payload = Box::from_raw(rust_function_ast as *mut ast::FunctionPayload);
-            let (_function_data, mut precompiled) =
-                compile_function_payload_to_bytecode(*payload, source_len, builtin_abstract_operations_enabled);
+            let arena = payload.arena.clone();
+            let (_function_data, mut precompiled) = compile_function_payload_to_bytecode(
+                *payload,
+                source_len,
+                builtin_abstract_operations_enabled,
+                arena,
+                FunctionPrecompileMode::EagerOnly,
+            );
 
             precompiled.generator.vm_ptr = vm_ptr;
             precompiled.generator.source_code_ptr = source_code_ptr;
@@ -2210,8 +3039,104 @@ pub unsafe extern "C" fn rust_compile_function(
                 &precompiled.assembled,
                 vm_ptr,
                 source_code_ptr,
+                if shared_function_data_list_ptr.is_null() {
+                    bytecode::ffi::SharedFunctionDataOwner::None
+                } else {
+                    bytecode::ffi::SharedFunctionDataOwner::List(shared_function_data_list_ptr)
+                },
             )
         })
+    }
+}
+
+/// Compile a function payload to a GC-free bytecode artifact.
+///
+/// Takes ownership of the cloned `Box<FunctionPayload>`. The result must be
+/// materialized on the main thread or freed with `rust_free_compiled_function`.
+///
+/// # Safety
+/// `rust_function_ast` must be a valid `Box<FunctionPayload>` pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_compile_function_off_thread(
+    rust_function_ast: *mut c_void,
+    source_len: usize,
+    builtin_abstract_operations_enabled: bool,
+) -> *mut CompiledFunction {
+    unsafe {
+        abort_on_panic(|| {
+            if rust_function_ast.is_null() {
+                return std::ptr::null_mut();
+            }
+            let payload = Box::from_raw(rust_function_ast as *mut ast::FunctionPayload);
+            let arena = payload.arena.clone();
+            let (_function_data, precompiled) = compile_function_payload_to_bytecode(
+                *payload,
+                source_len,
+                builtin_abstract_operations_enabled,
+                arena,
+                FunctionPrecompileMode::All,
+            );
+            Box::into_raw(Box::new(CompiledFunction { precompiled }))
+        })
+    }
+}
+
+/// Attach a GC-free compiled function to an existing SFD.
+///
+/// Consumes the compiled function. Its precompiled bytecode is materialized
+/// lazily the first time the function is called.
+///
+/// # Safety
+/// - `compiled` must be a valid pointer returned by `rust_compile_function_off_thread`.
+/// - `vm_ptr`, `source_code_ptr`, and `sfd_ptr` must be valid main-thread pointers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_materialize_compiled_function(
+    compiled: *mut CompiledFunction,
+    _vm_ptr: *mut c_void,
+    _source_code_ptr: *const c_void,
+    sfd_ptr: *mut c_void,
+) {
+    unsafe {
+        abort_on_panic(|| {
+            if compiled.is_null() {
+                return;
+            }
+            let CompiledFunction { precompiled } = *Box::from_raw(compiled);
+            let uses_this = precompiled.metadata.uses_this;
+            let this_value_needs_environment_resolution = precompiled.metadata.this_value_needs_environment_resolution;
+            let function_environment_needed = precompiled.metadata.function_environment_needed;
+            let function_environment_bindings_count = precompiled.metadata.function_environment_bindings_count;
+            let var_environment_bindings_count = precompiled.metadata.var_environment_bindings_count;
+            let might_need_arguments = precompiled.metadata.might_need_arguments;
+            let contains_eval = precompiled.metadata.contains_eval;
+            let precompiled_ptr = Box::into_raw(precompiled) as *mut c_void;
+            bytecode::ffi::rust_sfd_set_precompiled_bytecode_executable(
+                sfd_ptr,
+                precompiled_ptr,
+                uses_this,
+                this_value_needs_environment_resolution,
+                function_environment_needed,
+                function_environment_bindings_count,
+                var_environment_bindings_count,
+                might_need_arguments,
+                contains_eval,
+            );
+        });
+    }
+}
+
+/// Free a GC-free compiled function without materializing it.
+///
+/// # Safety
+/// `compiled` must be null or a valid pointer returned by `rust_compile_function_off_thread`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_free_compiled_function(compiled: *mut CompiledFunction) {
+    unsafe {
+        abort_on_panic(|| {
+            if !compiled.is_null() {
+                drop(Box::from_raw(compiled));
+            }
+        });
     }
 }
 
@@ -2219,20 +3144,23 @@ fn compile_function_payload_to_bytecode(
     payload: ast::FunctionPayload,
     source_len: usize,
     builtin_abstract_operations_enabled: bool,
+    arena: std::sync::Arc<ast::AstArena>,
+    precompile_mode: FunctionPrecompileMode,
 ) -> (Box<ast::FunctionData>, Box<bytecode::generator::PrecompiledFunction>) {
     let function_data = Box::new(payload.data);
 
-    let body_scope = match &function_data.body.inner {
-        StatementKind::FunctionBody { scope, .. } => Some(scope),
-        StatementKind::Block(scope) => Some(scope),
+    let body_scope: Option<ast::ScopeId> = match &function_data.body.inner {
+        StatementKind::FunctionBody { scope, .. } => Some(*scope),
+        StatementKind::Block(scope) => Some(*scope),
         _ => None,
     };
 
     // Compute SFD metadata before codegen so the generator can optimize
     // direct `this` access when it does not need environment resolution.
-    let sfd_metadata = compute_sfd_metadata(&function_data);
+    let sfd_metadata = compute_sfd_metadata(&function_data, &arena);
 
     let mut generator = bytecode::generator::Generator::new();
+    generator.arena = arena;
     generator.strict = function_data.is_strict_mode;
     generator.this_value_needs_environment_resolution = sfd_metadata.this_value_needs_environment_resolution;
     generator.builtin_abstract_operations_enabled = builtin_abstract_operations_enabled;
@@ -2240,8 +3168,9 @@ fn compile_function_payload_to_bytecode(
     generator.source_len = source_len;
     generator.enclosing_function_kind = function_data.kind;
 
-    if let Some(scope) = body_scope {
-        generator.local_variables = convert_local_variables(&scope.borrow());
+    if let Some(scope_id) = body_scope {
+        let arena_clone = generator.arena.clone();
+        generator.local_variables = convert_local_variables(&arena_clone.scopes[scope_id]);
     }
 
     let entry_block = generator.make_block();
@@ -2261,13 +3190,14 @@ fn compile_function_payload_to_bytecode(
         generator.switch_to_basic_block(start_block);
     }
 
-    generator.capture_saved_lexical_environment();
+    generator.capture_saved_lexical_environment_with_coordinates();
 
-    if let Some(scope) = body_scope {
+    if let Some(scope_id) = body_scope {
+        let arena_clone = generator.arena.clone();
         bytecode::codegen::emit_function_declaration_instantiation(
             &mut generator,
             &function_data,
-            &scope.borrow(),
+            &arena_clone.scopes[scope_id],
             sfd_metadata.var_environment_bindings_count,
         );
     }
@@ -2307,6 +3237,8 @@ fn compile_function_payload_to_bytecode(
         generator.terminate_unterminated_blocks_with_yield();
     }
 
+    precompile_functions(&mut generator, precompile_mode);
+
     let assembled = generator.assemble();
 
     (
@@ -2340,9 +3272,12 @@ struct BodyScopeInfo {
 
 /// Compute FDI runtime metadata matching the C++ SharedFunctionInstanceData
 /// constructor (ECMA-262 §10.2.11).
-fn compute_sfd_metadata(function_data: &ast::FunctionData) -> bytecode::generator::FunctionSfdMetadata {
-    let body_scope = match &function_data.body.inner {
-        ast::StatementKind::FunctionBody { scope, .. } => Some(scope),
+fn compute_sfd_metadata(
+    function_data: &ast::FunctionData,
+    arena: &ast::AstArena,
+) -> bytecode::generator::FunctionSfdMetadata {
+    let body_scope: Option<ast::ScopeId> = match &function_data.body.inner {
+        ast::StatementKind::FunctionBody { scope, .. } => Some(*scope),
         _ => None,
     };
 
@@ -2350,8 +3285,8 @@ fn compute_sfd_metadata(function_data: &ast::FunctionData) -> bytecode::generato
     let is_arrow = function_data.is_arrow_function;
 
     // Extract all scope analysis data in one borrow.
-    let bsi = if let Some(scope) = &body_scope {
-        let sd = scope.borrow();
+    let bsi = if let Some(scope_id) = body_scope {
+        let sd = &arena.scopes[scope_id];
         let fsd = sd.function_scope_data.as_ref();
         BodyScopeInfo {
             uses_this: sd.uses_this || function_data.parsing_insights.uses_this,
@@ -2401,14 +3336,15 @@ fn compute_sfd_metadata(function_data: &ast::FunctionData) -> bytecode::generato
     let mut parameters_in_environment: usize = 0;
     for parameter in &function_data.parameters {
         match &parameter.binding {
-            ast::FunctionParameterBinding::Identifier(ident) => {
-                if parameter_names.insert(ident.name.to_utf16_string()) && !ident.is_local() {
+            ast::FunctionParameterBinding::Identifier(id) => {
+                let ident = &arena.identifiers[*id];
+                if parameter_names.insert(arena.strings[ident.name].clone()) && !ident.is_local() {
                     parameters_in_environment += 1;
                 }
             }
             ast::FunctionParameterBinding::BindingPattern(pattern) => {
-                for_each_binding_pattern_identifier(pattern, &mut |ident| {
-                    if parameter_names.insert(ident.name.to_utf16_string()) && !ident.is_local() {
+                for_each_binding_pattern_identifier(pattern, arena, &mut |ident| {
+                    if parameter_names.insert(arena.strings[ident.name].clone()) && !ident.is_local() {
                         parameters_in_environment += 1;
                     }
                 });
@@ -2467,7 +3403,7 @@ fn compute_sfd_metadata(function_data: &ast::FunctionData) -> bytecode::generato
             }
 
             // §10.2.11 step 30: lexical environment.
-            let non_local_lex_count = count_non_local_lex_declarations(body_scope);
+            let non_local_lex_count = count_non_local_lex_declarations(body_scope, arena);
             if strict {
                 // Lex env == var env == function env.
                 function_environment_bindings_count += non_local_lex_count;
@@ -2489,7 +3425,7 @@ fn compute_sfd_metadata(function_data: &ast::FunctionData) -> bytecode::generato
                 }
             }
 
-            let non_local_lex_count = count_non_local_lex_declarations(body_scope);
+            let non_local_lex_count = count_non_local_lex_declarations(body_scope, arena);
             if strict {
                 // Lex env == var env.
                 var_environment_bindings_count += non_local_lex_count;
@@ -2533,6 +3469,7 @@ unsafe fn write_sfd_metadata(sfd_ptr: *mut c_void, metadata: &bytecode::generato
             metadata.this_value_needs_environment_resolution,
             metadata.function_environment_needed,
             metadata.function_environment_bindings_count,
+            metadata.var_environment_bindings_count,
             metadata.might_need_arguments,
             metadata.contains_eval,
         );
@@ -2542,8 +3479,8 @@ unsafe fn write_sfd_metadata(sfd_ptr: *mut c_void, metadata: &bytecode::generato
 /// Count non-local lexically-declared identifiers in a function body scope.
 /// Returns the count (used for environment sizing in the function_environment_needed
 /// computation).
-fn count_non_local_lex_declarations(scope: &Rc<RefCell<ast::ScopeData>>) -> usize {
-    let sd = scope.borrow();
+fn count_non_local_lex_declarations(scope_id: ast::ScopeId, arena: &ast::AstArena) -> usize {
+    let sd = &arena.scopes[scope_id];
     let mut count = 0;
     for child in &sd.children {
         match &child.inner {
@@ -2551,18 +3488,18 @@ fn count_non_local_lex_declarations(scope: &Rc<RefCell<ast::ScopeData>>) -> usiz
                 use parser::DeclarationKind;
                 if vd.kind == DeclarationKind::Let || vd.kind == DeclarationKind::Const {
                     for declaration in &vd.declarations {
-                        count_non_local_names_in_target(&declaration.target, &mut count);
+                        count_non_local_names_in_target(&declaration.target, &mut count, arena);
                     }
                 }
             }
             ast::StatementKind::UsingDeclaration(declarations) => {
                 for declaration in declarations.iter() {
-                    count_non_local_names_in_target(&declaration.target, &mut count);
+                    count_non_local_names_in_target(&declaration.target, &mut count, arena);
                 }
             }
             ast::StatementKind::ClassDeclaration(class_data) => {
-                if let Some(ref name_ident) = class_data.name
-                    && !name_ident.is_local()
+                if let Some(name_ident) = class_data.name
+                    && !arena.identifiers[name_ident].is_local()
                 {
                     count += 1;
                 }
@@ -2573,33 +3510,33 @@ fn count_non_local_lex_declarations(scope: &Rc<RefCell<ast::ScopeData>>) -> usiz
     count
 }
 
-fn count_non_local_names_in_target(target: &ast::VariableDeclaratorTarget, count: &mut usize) {
+fn count_non_local_names_in_target(target: &ast::VariableDeclaratorTarget, count: &mut usize, arena: &ast::AstArena) {
     match target {
-        ast::VariableDeclaratorTarget::Identifier(ident) => {
-            if !ident.is_local() {
+        ast::VariableDeclaratorTarget::Identifier(id) => {
+            if !arena.identifiers[*id].is_local() {
                 *count += 1;
             }
         }
         ast::VariableDeclaratorTarget::BindingPattern(pattern) => {
-            count_non_local_names_in_binding_pattern(pattern, count);
+            count_non_local_names_in_binding_pattern(pattern, count, arena);
         }
     }
 }
 
-fn count_non_local_names_in_binding_pattern(pattern: &ast::BindingPattern, count: &mut usize) {
+fn count_non_local_names_in_binding_pattern(pattern: &ast::BindingPattern, count: &mut usize, arena: &ast::AstArena) {
     for entry in &pattern.entries {
         match &entry.alias {
-            Some(ast::BindingEntryAlias::Identifier(ident)) => {
-                if !ident.is_local() {
+            Some(ast::BindingEntryAlias::Identifier(id)) => {
+                if !arena.identifiers[*id].is_local() {
                     *count += 1;
                 }
             }
             Some(ast::BindingEntryAlias::BindingPattern(sub)) => {
-                count_non_local_names_in_binding_pattern(sub, count);
+                count_non_local_names_in_binding_pattern(sub, count, arena);
             }
             None => {
-                if let Some(ast::BindingEntryName::Identifier(ident)) = &entry.name
-                    && !ident.is_local()
+                if let Some(ast::BindingEntryName::Identifier(id)) = &entry.name
+                    && !arena.identifiers[*id].is_local()
                 {
                     *count += 1;
                 }
@@ -2609,16 +3546,20 @@ fn count_non_local_names_in_binding_pattern(pattern: &ast::BindingPattern, count
     }
 }
 
-fn for_each_binding_pattern_identifier(pattern: &ast::BindingPattern, callback: &mut dyn FnMut(&Rc<ast::Identifier>)) {
+fn for_each_binding_pattern_identifier(
+    pattern: &ast::BindingPattern,
+    arena: &ast::AstArena,
+    callback: &mut dyn FnMut(&ast::Identifier),
+) {
     for entry in &pattern.entries {
         match &entry.alias {
-            Some(ast::BindingEntryAlias::Identifier(ident)) => callback(ident),
+            Some(ast::BindingEntryAlias::Identifier(id)) => callback(&arena.identifiers[*id]),
             Some(ast::BindingEntryAlias::BindingPattern(sub)) => {
-                for_each_binding_pattern_identifier(sub, callback);
+                for_each_binding_pattern_identifier(sub, arena, callback);
             }
             None => {
-                if let Some(ast::BindingEntryName::Identifier(ident)) = &entry.name {
-                    callback(ident);
+                if let Some(ast::BindingEntryName::Identifier(id)) = &entry.name {
+                    callback(&arena.identifiers[*id]);
                 }
             }
             Some(ast::BindingEntryAlias::MemberExpression(_)) => {}
@@ -2633,6 +3574,7 @@ unsafe extern "C" {
         this_value_needs_environment_resolution: bool,
         function_environment_needed: bool,
         function_environment_bindings_count: usize,
+        var_environment_bindings_count: usize,
         might_need_arguments_object: bool,
         contains_direct_call_to_eval: bool,
     );
@@ -2685,5 +3627,156 @@ pub unsafe extern "C" fn rust_tokenize(
                 }
             }
         });
+    }
+}
+
+/// Validate the structural integrity of a packed bytecode buffer along with
+/// the structural metadata that travels with it (basic block offsets,
+/// exception handler ranges, source map entries).
+///
+/// Returns `true` if every instruction is well-formed against the supplied
+/// bounds. On failure, writes the error category, byte offset, and opcode
+/// into `*error_out` (when non-null) and returns `false`.
+///
+/// # Safety
+/// - `bytecode_ptr` must point to a buffer of `bytecode_len` bytes, aligned
+///   to 8 bytes (matching `alignof(Instruction)`). May be null only when
+///   `bytecode_len` is zero.
+/// - `bounds` must point to a valid `FFIValidatorBounds`.
+/// - `extras` must point to a valid `FFIValidatorExtras`. Each
+///   inner pointer may be null only when its corresponding count is zero.
+/// - `error_out` must be either null or a writable `FFIValidationError`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_validate_bytecode(
+    bytecode_ptr: *const u8,
+    bytecode_len: usize,
+    bounds: *const bytecode::validator::FFIValidatorBounds,
+    extras: *const bytecode::validator::FFIValidatorExtras,
+    error_out: *mut bytecode::validator::FFIValidationError,
+) -> bool {
+    unsafe {
+        abort_on_panic(|| {
+            use bytecode::validator::FFIValidationError;
+            use bytecode::validator::ValidationErrorKind;
+            use bytecode::validator::validate_bytecode;
+
+            let write_error = |err: FFIValidationError| {
+                if !error_out.is_null() {
+                    *error_out = err;
+                }
+            };
+
+            if bytecode_len > 0 && bytecode_ptr.is_null() {
+                write_error(FFIValidationError::new(ValidationErrorKind::TruncatedInstruction, 0, 0));
+                return false;
+            }
+            if !bytecode_ptr.is_null() && !(bytecode_ptr as usize).is_multiple_of(8) {
+                write_error(FFIValidationError::new(ValidationErrorKind::BufferNotAligned, 0, 0));
+                return false;
+            }
+            if bounds.is_null() || extras.is_null() {
+                write_error(FFIValidationError::new(ValidationErrorKind::TruncatedInstruction, 0, 0));
+                return false;
+            }
+
+            let bytes = if bytecode_ptr.is_null() {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(bytecode_ptr, bytecode_len)
+            };
+
+            let extras_ref = &*extras;
+            let basic_block_offsets = if extras_ref.basic_block_count == 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(extras_ref.basic_block_offsets, extras_ref.basic_block_count)
+            };
+            let exception_handlers = if extras_ref.exception_handler_count == 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(extras_ref.exception_handlers, extras_ref.exception_handler_count)
+            };
+            let source_map_offsets = if extras_ref.source_map_count == 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(extras_ref.source_map_offsets, extras_ref.source_map_count)
+            };
+
+            match validate_bytecode(
+                bytes,
+                &*bounds,
+                basic_block_offsets,
+                exception_handlers,
+                source_map_offsets,
+            ) {
+                Ok(()) => true,
+                Err(err) => {
+                    write_error(err);
+                    false
+                }
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+
+    static FREED_FOREIGN_OWNERS: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C" fn count_freed_foreign_owner(owner: *mut c_void) {
+        FREED_FOREIGN_OWNERS.fetch_add(1, Ordering::Relaxed);
+        unsafe {
+            drop(Box::from_raw(owner.cast::<u8>()));
+        }
+    }
+
+    unsafe extern "C" fn clone_foreign_owner(owner: *const c_void) -> *mut c_void {
+        let value = unsafe { *owner.cast::<u8>() };
+        Box::into_raw(Box::new(value)).cast()
+    }
+
+    fn new_foreign_owner() -> *mut c_void {
+        Box::into_raw(Box::new(0u8)).cast()
+    }
+
+    #[test]
+    fn decode_blob_with_owner_frees_owner_on_early_rejection() {
+        FREED_FOREIGN_OWNERS.store(0, Ordering::Relaxed);
+        let source_hash = [0u8; 32];
+
+        let blob = unsafe {
+            rust_decode_bytecode_cache_blob_with_owner(
+                std::ptr::null(),
+                0,
+                0,
+                source_hash.as_ptr(),
+                source_hash.len(),
+                new_foreign_owner(),
+                clone_foreign_owner,
+                count_freed_foreign_owner,
+            )
+        };
+        assert!(blob.is_null());
+        assert_eq!(FREED_FOREIGN_OWNERS.load(Ordering::Relaxed), 1);
+
+        let bytes = [0u8; 1];
+        let blob = unsafe {
+            rust_decode_bytecode_cache_blob_with_owner(
+                bytes.as_ptr(),
+                bytes.len(),
+                2,
+                source_hash.as_ptr(),
+                source_hash.len(),
+                new_foreign_owner(),
+                clone_foreign_owner,
+                count_freed_foreign_owner,
+            )
+        };
+        assert!(blob.is_null());
+        assert_eq!(FREED_FOREIGN_OWNERS.load(Ordering::Relaxed), 2);
     }
 }

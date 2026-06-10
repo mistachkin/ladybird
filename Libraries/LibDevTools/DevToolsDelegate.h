@@ -8,6 +8,8 @@
 
 #include <AK/Error.h>
 #include <AK/Function.h>
+#include <AK/JsonArray.h>
+#include <AK/JsonObject.h>
 #include <AK/JsonValue.h>
 #include <AK/Time.h>
 #include <AK/Vector.h>
@@ -32,6 +34,9 @@ public:
 
     virtual Vector<TabDescription> tab_list() const { return {}; }
     virtual Vector<CSSProperty> css_property_list() const { return {}; }
+    virtual void navigate_tab(TabDescription const&, String const&) const { }
+    virtual void reload_tab(TabDescription const&, bool bypass_cache) const { (void)bypass_cache; }
+    virtual void traverse_the_history_by_delta(TabDescription const&, int) const { }
 
     using OnTabInspectionComplete = Function<void(ErrorOr<JsonValue>)>;
     virtual void inspect_tab(TabDescription const&, OnTabInspectionComplete) const { }
@@ -42,11 +47,39 @@ public:
     using OnDOMNodePropertiesReceived = Function<void(WebView::DOMNodeProperties)>;
     virtual void listen_for_dom_properties(TabDescription const&, OnDOMNodePropertiesReceived) const { }
     virtual void stop_listening_for_dom_properties(TabDescription const&) const { }
-    virtual void inspect_dom_node(TabDescription const&, WebView::DOMNodeProperties::Type, Web::UniqueNodeID, Optional<Web::CSS::PseudoElement>) const { }
+    virtual void inspect_dom_node(TabDescription const&, WebView::DOMNodeProperties::Type, Web::UniqueNodeID, Optional<Web::CSS::PseudoElement>, JsonObject options = {}) const { (void)options; }
     virtual void clear_inspected_dom_node(TabDescription const&) const { }
+
+    struct NodePickerEvent {
+        enum class Type : u8 {
+            Hovered,
+            Picked,
+            Previewed,
+            Canceled,
+        };
+
+        Type type;
+        Optional<Web::UniqueNodeID> node_id;
+    };
+
+    using OnNodePickerEvent = Function<void(NodePickerEvent)>;
+    virtual void start_node_picker(TabDescription const&, OnNodePickerEvent) const { }
+    virtual void stop_node_picker(TabDescription const&) const { }
+    virtual void clear_node_picker(TabDescription const&) const { }
+
+    using OnGridLayoutsReceived = Function<void(JsonArray)>;
+    using OnCurrentGridReceived = Function<void(Optional<JsonObject>)>;
+    using OnCurrentFlexboxReceived = Function<void(Optional<JsonObject>)>;
+    virtual void inspect_grid_layouts(TabDescription const&, Web::UniqueNodeID, OnGridLayoutsReceived) const { }
+    virtual void inspect_current_grid(TabDescription const&, Web::UniqueNodeID, OnCurrentGridReceived) const { }
+    virtual void inspect_current_flexbox(TabDescription const&, Web::UniqueNodeID, bool, OnCurrentFlexboxReceived) const { }
 
     virtual void highlight_dom_node(TabDescription const&, Web::UniqueNodeID, Optional<Web::CSS::PseudoElement>) const { }
     virtual void clear_highlighted_dom_node(TabDescription const&) const { }
+    virtual void highlight_flexbox(TabDescription const&, Web::UniqueNodeID, JsonValue) const { }
+    virtual void clear_flexbox_highlight(TabDescription const&, Web::UniqueNodeID) const { }
+    virtual void highlight_grid(TabDescription const&, Web::UniqueNodeID, JsonValue) const { }
+    virtual void clear_grid_highlight(TabDescription const&, Web::UniqueNodeID) const { }
 
     using OnDOMMutationReceived = Function<void(WebView::Mutation)>;
     virtual void listen_for_dom_mutations(TabDescription const&, OnDOMMutationReceived) const { }

@@ -25,7 +25,7 @@ public:
     ThrowCompletionOr<void> set_synthetic_module_export(Utf16FlyString const& export_name, Value export_value);
 
     virtual PromiseCapability& load_requested_modules(GC::Ptr<GraphLoadingState::HostDefined>) override;
-    virtual Vector<Utf16FlyString> get_exported_names(VM& vm, HashTable<Module const*>& export_star_set) override;
+    virtual Vector<Utf16FlyString> get_exported_names(VM& vm, GC::RootHashTable<GC::Ref<Module const>>& export_star_set) override;
     virtual ResolvedBinding resolve_export(VM& vm, Utf16FlyString const& export_name, Vector<ResolvedBinding> resolve_set) override;
     virtual ThrowCompletionOr<void> link(VM& vm) override;
     virtual ThrowCompletionOr<GC::Ref<PromiseCapability>> evaluate(VM& vm) override;
@@ -34,6 +34,7 @@ private:
     SyntheticModule(Realm& realm, Vector<Utf16FlyString> export_names, EvaluationFunction evaluation_steps, ByteString filename);
 
     virtual void visit_edges(Cell::Visitor&) override;
+    virtual size_t external_memory_size() const override;
 
     Vector<Utf16FlyString> m_export_names; // [[ExportNames]]
     EvaluationFunction m_evaluation_steps; // [[EvaluationSteps]]

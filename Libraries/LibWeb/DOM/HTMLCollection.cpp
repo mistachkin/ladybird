@@ -25,6 +25,7 @@ GC::Ref<HTMLCollection> HTMLCollection::create(ParentNode& root, Scope scope, Fu
 
 HTMLCollection::HTMLCollection(ParentNode& root, Scope scope, Function<bool(Element const&)> filter, Function<bool(Element const&, Element const&)> sort)
     : PlatformObject(root.realm())
+    , GC::WeakContainer(heap())
     , m_root(root)
     , m_filter(move(filter))
     , m_sort(move(sort))
@@ -49,6 +50,27 @@ void HTMLCollection::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
     visitor.visit(m_root);
+    visitor.visit_possible_values(m_filter.raw_capture_range());
+    visitor.visit_possible_values(m_sort.raw_capture_range());
+}
+
+GC::Cell const& HTMLCollection::owner_cell(Badge<GC::Heap>) const
+{
+    return *this;
+}
+
+void HTMLCollection::remove_dead_cells(Badge<GC::Heap>)
+{
+    m_cached_elements.remove_all_matching([&](GC::RawPtr<Element> const& element) {
+        auto* block = GC::HeapBlock::from_cell(element);
+        return !heap().is_live_heap_block(block) || element->state() != Cell::State::Live || !element->is_marked();
+    });
+    if (m_cached_name_to_element_mappings) {
+        m_cached_name_to_element_mappings->remove_all_matching([&](FlyString const&, GC::RawPtr<Element> const& element) {
+            auto* block = GC::HeapBlock::from_cell(element);
+            return !heap().is_live_heap_block(block) || element->state() != Cell::State::Live || !element->is_marked();
+        });
+    }
 }
 
 void HTMLCollection::update_name_to_element_mappings_if_needed() const
@@ -56,7 +78,7 @@ void HTMLCollection::update_name_to_element_mappings_if_needed() const
     update_cache_if_needed();
     if (m_cached_name_to_element_mappings)
         return;
-    m_cached_name_to_element_mappings = make<OrderedHashMap<FlyString, GC::Weak<Element>>>();
+    m_cached_name_to_element_mappings = make<OrderedHashMap<FlyString, GC::RawPtr<Element>>>();
     for (auto const& element : m_cached_elements) {
         // 1. If element has an ID which is not in result, append element’s ID to result.
         if (auto const& id = element->id(); id.has_value()) {
@@ -107,7 +129,7 @@ void HTMLCollection::update_cache_if_needed() const
 GC::RootVector<GC::Ref<Element>> HTMLCollection::collect_matching_elements() const
 {
     update_cache_if_needed();
-    GC::RootVector<GC::Ref<Element>> elements(heap());
+    GC::RootVector<GC::Ref<Element>> elements;
     for (auto& element : m_cached_elements)
         elements.append(*element);
     return elements;

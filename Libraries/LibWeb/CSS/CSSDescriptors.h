@@ -21,10 +21,10 @@ public:
 
     virtual size_t length() const override;
     virtual String item(size_t index) const override;
-    virtual WebIDL::ExceptionOr<void> set_property(FlyString const& property, StringView value, StringView priority) override;
-    virtual WebIDL::ExceptionOr<String> remove_property(FlyString const& property) override;
-    virtual String get_property_value(FlyString const& property) const override;
-    virtual StringView get_property_priority(FlyString const& property) const override;
+    virtual WebIDL::ExceptionOr<void> set_property(Utf16FlyString const& property, StringView value, StringView priority) override;
+    virtual WebIDL::ExceptionOr<String> remove_property(Utf16FlyString const& property) override;
+    virtual String get_property_value(Utf16FlyString const& property) const override;
+    virtual StringView get_property_priority(Utf16FlyString const& property) const override;
 
     Vector<Descriptor> const& descriptors() const { return m_descriptors; }
     RefPtr<StyleValue const> descriptor(DescriptorNameAndID const&) const;
@@ -38,8 +38,6 @@ protected:
 
 private:
     bool set_a_css_declaration(DescriptorNameAndID const&, NonnullRefPtr<StyleValue const>, Important);
-
-    virtual void visit_edges(Visitor&) override;
 
     AtRuleID m_at_rule_id;
     Vector<Descriptor> m_descriptors;

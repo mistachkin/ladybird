@@ -21,9 +21,9 @@ def run_command(
     stdin = subprocess.PIPE if type(input) is str else None
     stdout = subprocess.PIPE if return_output else None
 
-    try:
-        # FIXME: For Windows, set the working directory so DLLs are found.
-        with subprocess.Popen(command, stdin=stdin, stdout=stdout, text=True, cwd=cwd) as process:
+    # FIXME: For Windows, set the working directory so DLLs are found.
+    with subprocess.Popen(command, stdin=stdin, stdout=stdout, text=True, cwd=cwd) as process:
+        try:
             (output, _) = process.communicate(input=input)
 
             if process.returncode != 0:
@@ -31,11 +31,11 @@ def run_command(
                     sys.exit(process.returncode)
                 return None
 
-    except KeyboardInterrupt:
-        process.send_signal(signal.SIGINT)
-        process.wait()
+        except KeyboardInterrupt:
+            process.send_signal(signal.SIGINT)
+            process.wait()
 
-        sys.exit(process.returncode)
+            sys.exit(process.returncode)
 
     if return_output:
         return output.strip()
@@ -63,6 +63,36 @@ def title_casify(dashy_name: str) -> str:
     return "".join(part[0].upper() + part[1:] for part in dashy_name.split("-") if part)
 
 
+def string_to_cpp_enum_name(value: str) -> str:
+    if not value:
+        return "Empty"
+
+    def title_case_words(text: str) -> str:
+        result = ""
+        word = ""
+        for ch in text:
+            if ch.isalnum():
+                word += ch
+            elif word:
+                result += word[0].upper() + word[1:].lower()
+                word = ""
+        if word:
+            result += word[0].upper() + word[1:].lower()
+        return result
+
+    name = ""
+    for i, slash_segment in enumerate(value.split("/")):
+        combined = "".join(title_case_words(s) for s in slash_segment.replace(".", "+").split("+"))
+        if combined:
+            name += ("_" if i > 0 else "") + combined
+
+    if not name:
+        return "Empty"
+    if name[0].isdigit():
+        name = f"_{name}"
+    return make_name_acceptable_cpp(name)
+
+
 def camel_casify(dashy_name: str) -> str:
     parts = [part for part in dashy_name.split("-") if part]
     if not parts:
@@ -80,6 +110,18 @@ def snake_casify(dashy_name: str, trim_leading_underscores: bool = False) -> str
     return snake_case
 
 
+def title_case_to_snake_case(value: str) -> str:
+    parts = []
+    for index, character in enumerate(value):
+        if character.isupper() and index > 0:
+            previous_character = value[index - 1]
+            next_character = value[index + 1] if index + 1 < len(value) else ""
+            if previous_character.islower() or next_character.islower():
+                parts.append("_")
+        parts.append(character.lower())
+    return "".join(parts)
+
+
 def underlying_type_for_enum(member_count: int) -> str:
     if member_count <= 0xFF:
         return "u8"
@@ -91,6 +133,23 @@ def underlying_type_for_enum(member_count: int) -> str:
 
 
 def make_name_acceptable_cpp(name: str) -> str:
-    if name == "float":
-        return "float_"
+    if name in (
+        "break",
+        "char",
+        "class",
+        "continue",
+        "default",
+        "delete",
+        "float",
+        "for",
+        "initialize",
+        "inline",
+        "mutable",
+        "namespace",
+        "operator",
+        "register",
+        "switch",
+        "template",
+    ):
+        return f"{name}_"
     return name

@@ -7,11 +7,12 @@
  */
 
 #include <AK/StringConversions.h>
-#include <LibGfx/ImmutableBitmap.h>
+#include <LibGfx/DecodedImageFrame.h>
 #include <LibWeb/Bindings/SVGFilterElement.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/PropertyID.h>
 #include <LibWeb/DOM/Text.h>
+#include <LibWeb/HTML/DecodedImageData.h>
 #include <LibWeb/Layout/Node.h>
 #include <LibWeb/Painting/PaintableBox.h>
 #include <LibWeb/SVG/SVGComponentTransferFunctionElement.h>
@@ -260,8 +261,12 @@ Optional<Gfx::Filter> SVGFilterElement::gfx_filter(Layout::NodeWithStyle const& 
                 dbgln("SVGFEColorMatrixElement: Unknown type '{}' — skipping filter primitive", type_value);
             }
         } else if (auto* image_primitive = as_if<SVGFEImageElement>(node)) {
-            auto bitmap = image_primitive->current_image_bitmap({});
-            if (!bitmap)
+            auto image_data = image_primitive->image_data();
+            if (!image_data)
+                return IterationDecision::Continue;
+
+            auto frame = image_data->frame(0, {});
+            if (!frame.has_value())
                 return IterationDecision::Continue;
 
             auto src_rect = image_primitive->content_rect();
@@ -276,13 +281,13 @@ Optional<Gfx::Filter> SVGFilterElement::gfx_filter(Layout::NodeWithStyle const& 
             //     during layout update, before the layout-is-up-to-date flag
             //     has been set. The paintable is valid since layout has already
             //     been performed at this point.
-            auto* paintable_box = dom_node->unsafe_paintable_box();
+            auto paintable_box = dom_node->unsafe_paintable_box();
             if (!paintable_box)
                 return IterationDecision::Continue;
 
             auto dest_rect = Gfx::enclosing_int_rect(paintable_box->absolute_rect().to_type<float>());
             auto scaling_mode = CSS::to_gfx_scaling_mode(paintable_box->computed_values().image_rendering(), src_rect->size(), dest_rect.size());
-            root_filter = Gfx::Filter::image(*bitmap, *src_rect, dest_rect, scaling_mode);
+            root_filter = Gfx::Filter::image(*frame, *src_rect, dest_rect, scaling_mode);
             update_result_map(*image_primitive);
         } else if (auto* merge_primitive = as_if<SVGFEMergeElement>(node)) {
             Vector<Optional<Gfx::Filter>> merge_inputs;

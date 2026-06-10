@@ -12,14 +12,14 @@
 #include <LibJS/Runtime/NativeFunction.h>
 #include <LibJS/Runtime/TypedArray.h>
 #include <LibWeb/Bindings/ExceptionOrUtils.h>
+#include <LibWeb/Bindings/MessagePort.h>
+#include <LibWeb/Bindings/QueuingStrategy.h>
 #include <LibWeb/DOM/IDLEventListener.h>
 #include <LibWeb/HTML/EventNames.h>
 #include <LibWeb/HTML/MessageEvent.h>
 #include <LibWeb/HTML/MessagePort.h>
 #include <LibWeb/HTML/StructuredSerialize.h>
-#include <LibWeb/HTML/StructuredSerializeOptions.h>
 #include <LibWeb/Streams/AbstractOperations.h>
-#include <LibWeb/Streams/QueuingStrategy.h>
 #include <LibWeb/Streams/ReadableStream.h>
 #include <LibWeb/Streams/ReadableStreamDefaultController.h>
 #include <LibWeb/Streams/ReadableStreamOperations.h>
@@ -34,7 +34,7 @@
 namespace Web::Streams {
 
 // https://streams.spec.whatwg.org/#validate-and-normalize-high-water-mark
-WebIDL::ExceptionOr<double> extract_high_water_mark(QueuingStrategy const& strategy, double default_hwm)
+WebIDL::ExceptionOr<double> extract_high_water_mark(Bindings::QueuingStrategy const& strategy, double default_hwm)
 {
     // 1. If strategy["highWaterMark"] does not exist, return defaultHWM.
     if (!strategy.high_water_mark.has_value())
@@ -52,7 +52,7 @@ WebIDL::ExceptionOr<double> extract_high_water_mark(QueuingStrategy const& strat
 }
 
 // https://streams.spec.whatwg.org/#make-size-algorithm-from-size-function
-GC::Ref<SizeAlgorithm> extract_size_algorithm(JS::VM& vm, QueuingStrategy const& strategy)
+GC::Ref<SizeAlgorithm> extract_size_algorithm(JS::VM& vm, Bindings::QueuingStrategy const& strategy)
 {
     // 1. If strategy["size"] does not exist, return an algorithm that returns 1.
     if (!strategy.size)
@@ -126,7 +126,7 @@ WebIDL::ExceptionOr<void> pack_and_post_message(JS::Realm& realm, HTML::MessageP
     auto target_port = port.entangled_port();
 
     // 5. Let options be «[ "transfer" → « » ]».
-    HTML::StructuredSerializeOptions options { .transfer = {} };
+    Bindings::StructuredSerializeOptions options;
 
     // 6. Run the message port post message steps providing targetPort, message, and options.
     return port.message_port_post_message_steps(target_port, message, options);
@@ -465,15 +465,15 @@ WebIDL::ExceptionOr<GC::Ref<JS::ArrayBuffer>> transfer_array_buffer(JS::Realm& r
     // 2. Let arrayBufferData be O.[[ArrayBufferData]].
     // 3. Let arrayBufferByteLength be O.[[ArrayBufferByteLength]].
     // 4. Perform ? DetachArrayBuffer(O).
-    // NB: We steal the underlying bytes and detach atomically so the transfer is zero-copy.
-    auto array_buffer = TRY(buffer.detach_and_take_bytes(vm));
+    // NB: We steal the underlying data block and detach atomically so the transfer is zero-copy.
+    auto block = TRY(buffer.detach_and_take_data_block(vm));
 
     // 5. Return a new ArrayBuffer object, created in the current Realm, whose [[ArrayBufferData]] internal slot value is arrayBufferData and whose [[ArrayBufferByteLength]] internal slot value is arrayBufferByteLength.
-    return JS::ArrayBuffer::create(realm, move(array_buffer));
+    return JS::ArrayBuffer::create(realm, move(block));
 }
 
 // https://streams.spec.whatwg.org/#abstract-opdef-cloneasuint8array
-WebIDL::ExceptionOr<JS::Value> clone_as_uint8_array(JS::Realm& realm, WebIDL::ArrayBufferView& view)
+WebIDL::ExceptionOr<JS::Value> clone_as_uint8_array(JS::Realm& realm, WebIDL::ArrayBufferView view)
 {
     auto& vm = realm.vm();
 

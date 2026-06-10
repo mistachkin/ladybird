@@ -137,6 +137,7 @@
     M(OutOfMemory, "Out of memory")                                                                                                 \
     M(OverloadResolutionFailed, "Overload resolution failed")                                                                       \
     M(PrivateFieldAlreadyDeclared, "Private field '{}' has already been declared")                                                  \
+    M(PrivateFieldNotDeclared, "Reference to undeclared private field or method '{}'")                                              \
     M(PrivateFieldDoesNotExistOnObject, "Private field '{}' does not exist on object")                                              \
     M(PrivateFieldGetAccessorWithoutGetter, "Cannot get private field '{}' as accessor without getter")                             \
     M(PrivateFieldSetAccessorWithoutSetter, "Cannot set private field '{}' as accessor without setter")                             \
@@ -286,6 +287,7 @@
     M(ToObjectNullOrUndefinedWithProperty, "Cannot access property \"{}\" on {} object")                                            \
     M(ToObjectNullOrUndefinedWithPropertyAndName, "Cannot access property \"{}\" on {} object \"{}\"")                              \
     M(TopLevelVariableAlreadyDeclared, "Redeclaration of top level variable '{}'")                                                  \
+    M(EvalVarHoistingConflict, "Cannot declare var '{}': there is already a lexical declaration with that name in scope")           \
     M(ToPrimitiveReturnedObject, "Can't convert {} to primitive with hint \"{}\", its @@toPrimitive method returned an object")     \
     M(TypedArrayContentTypeMismatch, "Can't create {} from {}")                                                                     \
     M(TypedArrayInvalidBufferLength, "Invalid buffer length for {}: must be a multiple of {}, got {}")                              \
@@ -312,7 +314,7 @@ namespace JS {
 class JS_API ErrorType {
 public:
 #define __ENUMERATE_JS_ERROR(name, message) \
-    static const ErrorType name;
+    static ErrorType const& name;
     JS_ENUMERATE_ERROR_TYPES(__ENUMERATE_JS_ERROR)
 #undef __ENUMERATE_JS_ERROR
 

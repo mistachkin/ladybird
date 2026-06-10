@@ -681,7 +681,7 @@ ThrowCompletionOr<GC::RootVector<Value>> ProxyObject::internal_own_property_keys
     auto trap_result_array = TRY(call(vm, *trap, m_handler, m_target));
 
     // 8. Let trapResult be ? CreateListFromArrayLike(trapResultArray, « String, Symbol »).
-    HashTable<PropertyKey> unique_keys;
+    GC::ConservativeHashTable<PropertyKey> unique_keys;
     auto trap_result = TRY(create_list_from_array_like(vm, trap_result_array, [&](auto value) -> ThrowCompletionOr<void> {
         if (!value.is_string() && !value.is_symbol())
             return vm.throw_completion<TypeError>(ErrorType::ProxyOwnPropertyKeysNotStringOrSymbol);
@@ -704,10 +704,10 @@ ThrowCompletionOr<GC::RootVector<Value>> ProxyObject::internal_own_property_keys
     // 13. Assert: targetKeys contains no duplicate entries.
 
     // 14. Let targetConfigurableKeys be a new empty List.
-    auto target_configurable_keys = GC::RootVector<Value> { heap() };
+    GC::RootVector<Value> target_configurable_keys;
 
     // 15. Let targetNonconfigurableKeys be a new empty List.
-    auto target_nonconfigurable_keys = GC::RootVector<Value> { heap() };
+    GC::RootVector<Value> target_nonconfigurable_keys;
 
     // 16. For each element key of targetKeys, do
     for (auto& key : target_keys) {
@@ -735,7 +735,7 @@ ThrowCompletionOr<GC::RootVector<Value>> ProxyObject::internal_own_property_keys
     }
 
     // 18. Let uncheckedResultKeys be a List whose elements are the elements of trapResult.
-    auto unchecked_result_keys = GC::RootVector<Value> { heap() };
+    GC::RootVector<Value> unchecked_result_keys;
     unchecked_result_keys.extend(trap_result);
 
     // 19. For each element key of targetNonconfigurableKeys, do

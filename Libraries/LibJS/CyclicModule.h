@@ -49,9 +49,10 @@ protected:
     CyclicModule(Realm& realm, StringView filename, bool has_top_level_await, Vector<ModuleRequest> requested_modules, Script::HostDefined* host_defined);
 
     virtual void visit_edges(Cell::Visitor&) override;
+    virtual size_t external_memory_size() const override;
 
-    virtual ThrowCompletionOr<u32> inner_module_linking(VM& vm, Vector<Module*>& stack, u32 index) override final;
-    virtual ThrowCompletionOr<u32> inner_module_evaluation(VM& vm, Vector<Module*>& stack, u32 index) override final;
+    virtual ThrowCompletionOr<u32> inner_module_linking(VM& vm, GC::RootVector<GC::Ref<Module>>& stack, u32 index) override final;
+    virtual ThrowCompletionOr<u32> inner_module_evaluation(VM& vm, GC::RootVector<GC::Ref<Module>>& stack, u32 index) override final;
 
     virtual ThrowCompletionOr<void> initialize_environment(VM& vm);
     virtual ThrowCompletionOr<void> execute_module(VM& vm, GC::Ptr<PromiseCapability> capability = {});
@@ -59,7 +60,7 @@ protected:
     [[nodiscard]] GC::Ref<Module> get_imported_module(ModuleRequest const& request);
 
     void execute_async_module(VM& vm);
-    void gather_available_ancestors(Vector<CyclicModule*>& exec_list);
+    void gather_available_ancestors(GC::RootVector<GC::Ptr<CyclicModule>>& exec_list);
     void async_module_execution_fulfilled(VM& vm);
     void async_module_execution_rejected(VM& vm, Value error);
 
@@ -71,7 +72,7 @@ protected:
     Vector<LoadedModuleRequest> m_loaded_modules;         // [[LoadedModules]]
     GC::Ptr<CyclicModule> m_cycle_root;                   // [[CycleRoot]]
     bool m_has_top_level_await { false };                 // [[HasTLA]]
-    bool m_async_evaluation { false };                    // [[AsyncEvaluation]]
+    Optional<u64> m_async_evaluation_order;               // [[AsyncEvaluationOrder]]
     GC::Ptr<PromiseCapability> m_top_level_capability;    // [[TopLevelCapability]]
     Vector<GC::Ptr<CyclicModule>> m_async_parent_modules; // [[AsyncParentModules]]
     Optional<u32> m_pending_async_dependencies;           // [[PendingAsyncDependencies]]

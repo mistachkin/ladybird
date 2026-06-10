@@ -10,15 +10,26 @@
 //! needed for bytecode generation from the AST.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::rc::Rc;
 
-use super::basic_block::{BasicBlock, SourceMapEntry};
-use super::ffi::{AbstractOperationKind, WellKnownSymbolKind};
+use super::basic_block::BasicBlock;
+use super::basic_block::SourceMapEntry;
+use super::ffi::AbstractOperationKind;
+use super::ffi::WellKnownSymbolKind;
 use super::instruction::Instruction;
 use super::operand::*;
-use crate::ast::{FunctionData, FunctionId, FunctionTable, LocalType, Position, Utf16String};
+use crate::ast::AstArena;
+use crate::ast::FunctionData;
+use crate::ast::FunctionId;
+use crate::ast::FunctionTable;
+use crate::ast::IdentifierId;
+use crate::ast::LocalType;
+use crate::ast::Position;
+use crate::ast::Utf16String;
 use crate::u32_from_usize;
+use std::sync::Arc;
 
 /// Identifies an operand that auto-frees its register when the last
 /// clone is dropped.
@@ -39,6 +50,7 @@ pub(crate) struct ScopedOperandInner {
 pub struct PendingSharedFunctionData {
     pub function_data: Option<Box<FunctionData>>,
     pub subtable: Option<FunctionTable>,
+    pub arena: Option<Arc<AstArena>>,
     pub name_override: Option<Utf16String>,
     pub class_field_initializer_name: Option<(Utf16String, bool)>,
     pub should_eager_compile: bool,
@@ -46,6 +58,7 @@ pub struct PendingSharedFunctionData {
 }
 
 /// Metadata computed from scope analysis for a SharedFunctionInstanceData.
+#[derive(Clone)]
 pub struct FunctionSfdMetadata {
     pub uses_this: bool,
     pub this_value_needs_environment_resolution: bool,
@@ -94,6 +107,25 @@ pub struct PendingClassBlueprint {
     pub has_name: bool,
     pub elements: Vec<PendingClassElement>,
 }
+
+struct EnvironmentCoordinateScope {
+    bindings: HashMap<Utf16String, u32>,
+    next_binding_index: u32,
+    kind: EnvironmentCoordinateScopeKind,
+}
+
+#[derive(PartialEq)]
+enum EnvironmentCoordinateScopeKind {
+    // A declarative environment whose bindings are created by bytecode we emit.
+    // The binding indexes are therefore known while generating the instruction
+    // stream and can be embedded in EnvironmentCoordinate operands.
+    Static,
+    // An object environment, such as `with`, can intercept any name. Once one
+    // is between the current point and a binding, resolution must stay dynamic.
+    Dynamic,
+}
+
+const ENVIRONMENT_MODE_LEXICAL: u32 = 0;
 
 impl std::fmt::Debug for ScopedOperandInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -219,6 +251,14 @@ pub struct Generator {
     pub breakable_scopes: Vec<LabelableScope>,
     pub pending_labels: Vec<Utf16String>,
     pub lexical_environment_register_stack: Vec<ScopedOperand>,
+    // Mirrors lexical_environment_register_stack for environments whose binding
+    // layout is known to codegen. This lets us emit immutable coordinates
+    // instead of runtime-updated caches in common lexical lookup instructions.
+    environment_coordinate_scope_stack: Vec<EnvironmentCoordinateScope>,
+    // `var` binding instructions start from vm.variable_environment(), not the
+    // current lexical environment. Keep a separate anchor so a var write inside
+    // a nested block does not accidentally count the block as a hop.
+    variable_environment_coordinate_scope_index: Option<usize>,
     pub home_objects: Vec<ScopedOperand>,
 
     // --- Finally context ---
@@ -230,6 +270,7 @@ pub struct Generator {
     // --- Various counters ---
     pub next_property_lookup_cache: u32,
     pub next_global_variable_cache: u32,
+    pub next_environment_coordinate_cache: u32,
     pub next_template_object_cache: u32,
     pub next_object_shape_cache: u32,
     pub next_object_property_iterator_cache: u32,
@@ -300,6 +341,20 @@ pub struct Generator {
     // Side table owning all FunctionData from the parser. Codegen
     // takes ownership of individual entries via `take()`.
     pub function_table: crate::ast::FunctionTable,
+
+    // --- AST arena ---
+    // Shared (read-only post-parse) storage for identifiers, scopes, and
+    // interned strings. Cloning is a refcount bump — multiple generators
+    // (top-level + nested IIFE + lazy children) share the same arena.
+    pub arena: Arc<AstArena>,
+}
+
+impl Generator {
+    /// Convenience: look up an identifier by ID in this generator's arena.
+    #[inline]
+    pub fn identifier(&self, id: IdentifierId) -> &crate::ast::Identifier {
+        &self.arena.identifiers[id]
+    }
 }
 
 macro_rules! singleton_constant {
@@ -374,11 +429,14 @@ impl Generator {
             breakable_scopes: Vec::new(),
             pending_labels: Vec::new(),
             lexical_environment_register_stack: Vec::new(),
+            environment_coordinate_scope_stack: Vec::new(),
+            variable_environment_coordinate_scope_index: None,
             home_objects: Vec::new(),
             finally_contexts: Vec::new(),
             current_finally_context: None,
             next_property_lookup_cache: 0,
             next_global_variable_cache: 0,
+            next_environment_coordinate_cache: 0,
             next_template_object_cache: 0,
             next_object_shape_cache: 0,
             next_object_property_iterator_cache: 0,
@@ -425,6 +483,7 @@ impl Generator {
             source_code_ptr: std::ptr::null(),
             source_len: 0,
             function_table: crate::ast::FunctionTable::new(),
+            arena: Arc::new(AstArena::new()),
             free_register_pool,
         }
     }
@@ -626,6 +685,30 @@ impl Generator {
         property_key_table_index
     );
 
+    /// Convenience: look up a `StringId` in the AST interner and intern the
+    /// resulting slice into the bytecode identifier table.
+    pub fn intern_identifier_id(&mut self, id: crate::ast::StringId) -> IdentifierTableIndex {
+        let arena = self.arena.clone();
+        let slice = arena.strings[id].as_slice();
+        self.intern_identifier(slice)
+    }
+
+    /// Convenience: look up a `StringId` in the AST interner and intern the
+    /// resulting slice into the bytecode property key table.
+    pub fn intern_property_key_id(&mut self, id: crate::ast::StringId) -> PropertyKeyTableIndex {
+        let arena = self.arena.clone();
+        let slice = arena.strings[id].as_slice();
+        self.intern_property_key(slice)
+    }
+
+    /// Convenience: look up a `StringId` in the AST interner and intern the
+    /// resulting slice into the bytecode string table.
+    pub fn intern_string_id(&mut self, id: crate::ast::StringId) -> StringTableIndex {
+        let arena = self.arena.clone();
+        let slice = arena.strings[id].as_slice();
+        self.intern_string(slice)
+    }
+
     /// If `operand` is a constant string that is not an array index, intern it
     /// as a property key and return the index. Uses split borrows to avoid
     /// cloning the string when it is already interned (the common case).
@@ -742,13 +825,40 @@ impl Generator {
         if self.is_current_block_terminated() {
             return;
         }
+        // Keep coordinate scopes in lockstep with the actual declarative
+        // environment shape. Most bindings are created explicitly, while
+        // CreateArguments can implicitly create an `arguments` binding.
+        if let Instruction::CreateVariable {
+            identifier,
+            mode,
+            is_global,
+            ..
+        } = &instruction
+            && !is_global
+        {
+            let name = self.identifier_table[identifier.0 as usize].clone();
+            if *mode == ENVIRONMENT_MODE_LEXICAL {
+                self.record_environment_binding(name);
+            } else {
+                self.record_variable_environment_binding(name);
+            }
+        }
+        if let Instruction::CreateMutableBinding { identifier, .. }
+        | Instruction::CreateImmutableBinding { identifier, .. } = &instruction
+        {
+            let name = self.identifier_table[identifier.0 as usize].clone();
+            self.record_environment_binding(name);
+        }
+        if let Instruction::CreateArguments { dst: None, .. } = &instruction {
+            self.record_environment_binding(Utf16String::from(utf16!("arguments")));
+        }
         let source_map = SourceMapEntry {
             bytecode_offset: 0, // filled during flattening
-            source_start: self.current_source_start,
-            source_end: self.current_source_end,
+            line: self.current_source_start.line,
+            column: self.current_source_start.column,
         };
         let block = &mut self.basic_blocks[self.current_block_index.basic_block_index()];
-        block.append(instruction, source_map);
+        block.append(instruction, source_map, self.strict);
     }
 
     /// Emit a Mov instruction (optimized away if src == dst).
@@ -783,7 +893,7 @@ impl Generator {
         // instruction is a comparison whose dst matches condition, fuse into a JumpXxx.
         if condition.operand().is_register() && std::rc::Rc::strong_count(&condition.inner) == 1 {
             let block = &mut self.basic_blocks[self.current_block_index.basic_block_index()];
-            if let Some((last_instruction, _)) = block.instructions.last() {
+            if let Some((last_instruction, _, _)) = block.instructions.last() {
                 let fused = match last_instruction {
                     Instruction::LessThan { dst, lhs, rhs } if *dst == condition.operand() => {
                         Some(Instruction::JumpLessThan {
@@ -871,6 +981,7 @@ impl Generator {
 
     next_cache_method!(next_property_lookup_cache, next_property_lookup_cache);
     next_cache_method!(next_global_variable_cache, next_global_variable_cache);
+    next_cache_method!(next_environment_coordinate_cache, next_environment_coordinate_cache);
     next_cache_method!(next_template_object_cache, next_template_object_cache);
     next_cache_method!(next_object_shape_cache, next_object_shape_cache);
     next_cache_method!(next_object_property_iterator_cache, next_object_property_iterator_cache);
@@ -887,12 +998,19 @@ impl Generator {
     pub fn capture_saved_lexical_environment(&mut self) {
         let env_reg = self.scoped_operand(Operand::register(Register::SAVED_LEXICAL_ENVIRONMENT));
         self.emit(Instruction::GetLexicalEnvironment { dst: env_reg.operand() });
-        self.lexical_environment_register_stack.push(env_reg);
+        self.push_untracked_lexical_environment(env_reg);
+    }
+
+    pub fn capture_saved_lexical_environment_with_coordinates(&mut self) {
+        let env_reg = self.scoped_operand(Operand::register(Register::SAVED_LEXICAL_ENVIRONMENT));
+        self.emit(Instruction::GetLexicalEnvironment { dst: env_reg.operand() });
+        self.push_static_lexical_environment(env_reg);
+        self.variable_environment_coordinate_scope_index = self.environment_coordinate_scope_stack.len().checked_sub(1);
     }
 
     pub fn end_variable_scope(&mut self) {
         self.end_boundary(BlockBoundaryType::LeaveLexicalEnvironment);
-        self.lexical_environment_register_stack.pop();
+        self.pop_tracked_lexical_environment();
         if !self.is_current_block_terminated() {
             let parent = self.current_lexical_environment();
             self.emit(Instruction::SetLexicalEnvironment {
@@ -913,15 +1031,140 @@ impl Generator {
     }
 
     pub fn push_new_lexical_environment(&mut self, capacity: u32) -> ScopedOperand {
+        self.push_new_lexical_environment_impl(capacity, false)
+    }
+
+    pub fn push_new_catch_lexical_environment(&mut self, capacity: u32) -> ScopedOperand {
+        self.push_new_lexical_environment_impl(capacity, true)
+    }
+
+    fn push_new_lexical_environment_impl(&mut self, capacity: u32, is_catch_environment: bool) -> ScopedOperand {
         let parent = self.current_lexical_environment();
         let new_env = self.allocate_register();
         self.emit(Instruction::CreateLexicalEnvironment {
             dst: new_env.operand(),
             parent: parent.operand(),
             capacity,
+            is_catch_environment,
         });
-        self.lexical_environment_register_stack.push(new_env.clone());
+        self.push_static_lexical_environment(new_env.clone());
         new_env
+    }
+
+    pub fn push_untracked_lexical_environment(&mut self, environment: ScopedOperand) {
+        self.lexical_environment_register_stack.push(environment);
+    }
+
+    pub fn push_static_lexical_environment(&mut self, environment: ScopedOperand) {
+        self.push_untracked_lexical_environment(environment);
+        self.push_environment_coordinate_scope(EnvironmentCoordinateScopeKind::Static);
+    }
+
+    pub fn push_dynamic_lexical_environment(&mut self, environment: ScopedOperand) {
+        self.push_untracked_lexical_environment(environment);
+        self.push_environment_coordinate_scope(EnvironmentCoordinateScopeKind::Dynamic);
+    }
+
+    pub fn push_static_variable_environment(&mut self, environment: ScopedOperand) {
+        self.push_static_lexical_environment(environment);
+        self.variable_environment_coordinate_scope_index = self.environment_coordinate_scope_stack.len().checked_sub(1);
+    }
+
+    pub fn pop_untracked_lexical_environment(&mut self) -> Option<ScopedOperand> {
+        self.lexical_environment_register_stack.pop()
+    }
+
+    pub fn pop_tracked_lexical_environment(&mut self) -> Option<ScopedOperand> {
+        self.pop_environment_coordinate_scope();
+        self.pop_untracked_lexical_environment()
+    }
+
+    fn push_environment_coordinate_scope(&mut self, kind: EnvironmentCoordinateScopeKind) {
+        self.environment_coordinate_scope_stack
+            .push(EnvironmentCoordinateScope {
+                bindings: HashMap::new(),
+                next_binding_index: 0,
+                kind,
+            });
+    }
+
+    fn pop_environment_coordinate_scope(&mut self) {
+        self.environment_coordinate_scope_stack.pop();
+    }
+
+    fn record_environment_binding(&mut self, name: Utf16String) {
+        let Some(scope_index) = self.environment_coordinate_scope_stack.len().checked_sub(1) else {
+            return;
+        };
+        self.record_environment_binding_at_scope_index(name, scope_index);
+    }
+
+    fn record_variable_environment_binding(&mut self, name: Utf16String) {
+        let Some(scope_index) = self.variable_environment_coordinate_scope_index else {
+            return;
+        };
+        self.record_environment_binding_at_scope_index(name, scope_index);
+    }
+
+    fn record_environment_binding_at_scope_index(&mut self, name: Utf16String, scope_index: usize) {
+        let Some(scope) = self.environment_coordinate_scope_stack.get_mut(scope_index) else {
+            return;
+        };
+        if scope.kind == EnvironmentCoordinateScopeKind::Dynamic {
+            return;
+        }
+        // DeclarativeEnvironment appends duplicate bindings and resolves the
+        // name to the newest slot, so mirror that layout here.
+        scope.bindings.insert(name, scope.next_binding_index);
+        scope.next_binding_index += 1;
+    }
+
+    pub fn environment_coordinate_for(&self, name: &[u16]) -> Option<EnvironmentCoordinate> {
+        self.environment_coordinate_for_from_scope_index(
+            name,
+            self.environment_coordinate_scope_stack.len().checked_sub(1)?,
+        )
+    }
+
+    fn environment_coordinate_for_from_scope_index(
+        &self,
+        name: &[u16],
+        scope_index: usize,
+    ) -> Option<EnvironmentCoordinate> {
+        // Coordinates are only safe through fully-known declarative scopes. If
+        // any dynamic scope is crossed, preserve the runtime lookup semantics.
+        for (hops, scope) in self.environment_coordinate_scope_stack[..=scope_index]
+            .iter()
+            .rev()
+            .enumerate()
+        {
+            if scope.kind == EnvironmentCoordinateScopeKind::Dynamic {
+                return None;
+            }
+            if let Some(index) = scope.bindings.get(name) {
+                return Some(EnvironmentCoordinate {
+                    hops: u32_from_usize(hops),
+                    index: *index,
+                });
+            }
+        }
+        None
+    }
+
+    pub fn environment_coordinate_for_identifier(
+        &self,
+        identifier: IdentifierTableIndex,
+    ) -> Option<EnvironmentCoordinate> {
+        let name = &self.identifier_table[identifier.0 as usize];
+        self.environment_coordinate_for(name)
+    }
+
+    pub fn variable_environment_coordinate_for_identifier(
+        &self,
+        identifier: IdentifierTableIndex,
+    ) -> Option<EnvironmentCoordinate> {
+        let name = &self.identifier_table[identifier.0 as usize];
+        self.environment_coordinate_for_from_scope_index(name, self.variable_environment_coordinate_scope_index?)
     }
 
     // --- Boundary management ---
@@ -1331,6 +1574,7 @@ impl Generator {
                     Instruction::GetLexicalEnvironment {
                         dst,
                     },
+                    _,
                     _
                 )) if *dst == saved_environment
             )
@@ -1342,7 +1586,7 @@ impl Generator {
                     .instructions
                     .iter()
                     .enumerate()
-                    .any(|(instruction_index, (instruction, _))| {
+                    .any(|(instruction_index, (instruction, _, _))| {
                         if block_index == load_block_index && instruction_index == 0 {
                             return false;
                         }
@@ -1378,8 +1622,9 @@ impl Generator {
         let number_of_constants = u32_from_usize(self.constants.len());
 
         // Phase 1: Operand rewriting
+        let mut max_argument_index: Option<u32> = None;
         for block in &mut self.basic_blocks {
-            for (instruction, _) in &mut block.instructions {
+            for (instruction, _, _) in &mut block.instructions {
                 instruction.visit_operands(&mut |op: &mut Operand| {
                     match op.operand_type() {
                         OperandType::Register => {} // stays as-is
@@ -1388,12 +1633,15 @@ impl Generator {
                             op.offset_index_by(number_of_registers + number_of_locals);
                         }
                         OperandType::Argument => {
+                            let index = op.index();
+                            max_argument_index = Some(max_argument_index.map_or(index, |m| m.max(index)));
                             op.offset_index_by(number_of_registers + number_of_locals + number_of_constants);
                         }
                     }
                 });
             }
         }
+        let number_of_arguments = max_argument_index.map_or(0, |m| m + 1);
 
         // Phase 1b: Peephole optimization - merge consecutive Mov instructions into Mov2/Mov3.
         for block in &mut self.basic_blocks {
@@ -1497,7 +1745,7 @@ impl Generator {
             block_offsets.push(offset);
             let block = &self.basic_blocks[block_index];
             let mut block_actions = Vec::with_capacity(block.instructions.len());
-            for (instruction, _) in &block.instructions {
+            for (instruction, _, _) in &block.instructions {
                 match instruction {
                     Instruction::Jump { target } => {
                         let target_block = target.0 as usize;
@@ -1588,7 +1836,7 @@ impl Generator {
 
         // Phase 3: Patch labels (block index → byte offset)
         for block in &mut self.basic_blocks {
-            for (instruction, _) in &mut block.instructions {
+            for (instruction, _, _) in &mut block.instructions {
                 instruction.visit_labels(&mut |label: &mut Label| {
                     let block_index = label.0 as usize;
                     label.0 = u32_from_usize(block_offsets[block_index]);
@@ -1600,6 +1848,15 @@ impl Generator {
         let mut bytecode: Vec<u8> = Vec::with_capacity(offset);
         let mut source_map: Vec<SourceMapEntry> = Vec::new();
         let mut exception_handlers: Vec<ExceptionHandler> = Vec::new();
+        fn push_source_map_entry(source_map: &mut Vec<SourceMapEntry>, entry: SourceMapEntry) {
+            let should_push = source_map
+                .last()
+                .is_none_or(|previous| previous.line != entry.line || previous.column != entry.column);
+            if should_push {
+                source_map.push(entry);
+            }
+        }
+
         // Track which blocks actually produced instructions.
         let mut basic_block_start_offsets: Vec<usize> = Vec::with_capacity(num_blocks);
 
@@ -1609,7 +1866,7 @@ impl Generator {
             let handler = block.handler;
             let block_actions = &actions[block_index];
 
-            for (instruction_index, (instruction, sm)) in block.instructions.iter().enumerate() {
+            for (instruction_index, (instruction, sm, strict)) in block.instructions.iter().enumerate() {
                 let action = block_actions[instruction_index];
                 match action {
                     InstAction::Skip => {
@@ -1621,57 +1878,72 @@ impl Generator {
                     }
                     InstAction::Emit => {
                         let instruction_offset = bytecode.len();
-                        source_map.push(SourceMapEntry {
-                            bytecode_offset: u32_from_usize(instruction_offset),
-                            source_start: sm.source_start,
-                            source_end: sm.source_end,
-                        });
-                        instruction.encode(self.strict, &mut bytecode);
+                        push_source_map_entry(
+                            &mut source_map,
+                            SourceMapEntry {
+                                bytecode_offset: u32_from_usize(instruction_offset),
+                                line: sm.line,
+                                column: sm.column,
+                            },
+                        );
+                        instruction.encode(*strict, &mut bytecode);
                     }
                     InstAction::JumpToReturn(value) => {
                         let instruction_offset = bytecode.len();
-                        source_map.push(SourceMapEntry {
-                            bytecode_offset: u32_from_usize(instruction_offset),
-                            source_start: sm.source_start,
-                            source_end: sm.source_end,
-                        });
+                        push_source_map_entry(
+                            &mut source_map,
+                            SourceMapEntry {
+                                bytecode_offset: u32_from_usize(instruction_offset),
+                                line: sm.line,
+                                column: sm.column,
+                            },
+                        );
                         let replacement = Instruction::Return { value };
-                        replacement.encode(self.strict, &mut bytecode);
+                        replacement.encode(*strict, &mut bytecode);
                     }
                     InstAction::JumpToEnd(value) => {
                         let instruction_offset = bytecode.len();
-                        source_map.push(SourceMapEntry {
-                            bytecode_offset: u32_from_usize(instruction_offset),
-                            source_start: sm.source_start,
-                            source_end: sm.source_end,
-                        });
+                        push_source_map_entry(
+                            &mut source_map,
+                            SourceMapEntry {
+                                bytecode_offset: u32_from_usize(instruction_offset),
+                                line: sm.line,
+                                column: sm.column,
+                            },
+                        );
                         let replacement = Instruction::End { value };
-                        replacement.encode(self.strict, &mut bytecode);
+                        replacement.encode(*strict, &mut bytecode);
                     }
                     InstAction::EmitJumpFalse { condition, mut target } => {
                         // Patch label for the target
                         let target_block = target.0 as usize;
                         target.0 = u32_from_usize(block_offsets[target_block]);
                         let instruction_offset = bytecode.len();
-                        source_map.push(SourceMapEntry {
-                            bytecode_offset: u32_from_usize(instruction_offset),
-                            source_start: sm.source_start,
-                            source_end: sm.source_end,
-                        });
+                        push_source_map_entry(
+                            &mut source_map,
+                            SourceMapEntry {
+                                bytecode_offset: u32_from_usize(instruction_offset),
+                                line: sm.line,
+                                column: sm.column,
+                            },
+                        );
                         let replacement = Instruction::JumpFalse { condition, target };
-                        replacement.encode(self.strict, &mut bytecode);
+                        replacement.encode(*strict, &mut bytecode);
                     }
                     InstAction::EmitJumpTrue { condition, mut target } => {
                         let target_block = target.0 as usize;
                         target.0 = u32_from_usize(block_offsets[target_block]);
                         let instruction_offset = bytecode.len();
-                        source_map.push(SourceMapEntry {
-                            bytecode_offset: u32_from_usize(instruction_offset),
-                            source_start: sm.source_start,
-                            source_end: sm.source_end,
-                        });
+                        push_source_map_entry(
+                            &mut source_map,
+                            SourceMapEntry {
+                                bytecode_offset: u32_from_usize(instruction_offset),
+                                line: sm.line,
+                                column: sm.column,
+                            },
+                        );
                         let replacement = Instruction::JumpTrue { condition, target };
-                        replacement.encode(self.strict, &mut bytecode);
+                        replacement.encode(*strict, &mut bytecode);
                     }
                 }
             }
@@ -1682,19 +1954,14 @@ impl Generator {
                 undef_rewritten.offset_index_by(number_of_registers + number_of_locals);
                 let end_instruction = Instruction::End { value: undef_rewritten };
                 let instruction_offset = bytecode.len();
-                source_map.push(SourceMapEntry {
-                    bytecode_offset: u32_from_usize(instruction_offset),
-                    source_start: Position {
+                push_source_map_entry(
+                    &mut source_map,
+                    SourceMapEntry {
+                        bytecode_offset: u32_from_usize(instruction_offset),
                         line: 0,
                         column: 0,
-                        offset: 0,
                     },
-                    source_end: Position {
-                        line: 0,
-                        column: 0,
-                        offset: 0,
-                    },
-                });
+                );
                 end_instruction.encode(self.strict, &mut bytecode);
             }
 
@@ -1728,6 +1995,7 @@ impl Generator {
             exception_handlers: merged_handlers,
             basic_block_start_offsets,
             number_of_registers,
+            number_of_arguments,
         }
     }
 }
@@ -1739,6 +2007,10 @@ pub struct AssembledBytecode {
     pub exception_handlers: Vec<ExceptionHandler>,
     pub basic_block_start_offsets: Vec<usize>,
     pub number_of_registers: u32,
+    /// One past the highest `Operand::argument` index referenced by any
+    /// instruction, or 0 if the bytecode never reads an argument. Used by
+    /// the validator as the upper bound for argument operands.
+    pub number_of_arguments: u32,
 }
 
 /// Exception handler range (with byte offsets, post-linking).

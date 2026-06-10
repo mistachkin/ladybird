@@ -79,7 +79,7 @@ void InlineLevelIterator::enter_node_with_box_model_metrics(Layout::NodeWithStyl
     // Now's our chance to resolve the inset properties for this node.
     m_inline_formatting_context.compute_inset(node, m_inline_formatting_context.content_box_rect(m_containing_block_used_values).size());
 
-    m_box_model_node_stack.append(node);
+    m_box_model_node_stack.append(&node);
 }
 
 void InlineLevelIterator::exit_node_with_box_model_metrics()
@@ -87,7 +87,7 @@ void InlineLevelIterator::exit_node_with_box_model_metrics()
     if (!m_extra_trailing_metrics.has_value())
         m_extra_trailing_metrics = ExtraBoxMetrics {};
 
-    auto& node = m_box_model_node_stack.last();
+    auto& node = *m_box_model_node_stack.last();
     auto& used_values = m_layout_state.get_mutable(node);
 
     m_extra_trailing_metrics->margin += used_values.margin_right;
@@ -136,7 +136,7 @@ void InlineLevelIterator::compute_next()
     if (m_next_node == nullptr)
         return;
     do {
-        m_next_node = next_inline_node_in_pre_order(*m_next_node, m_containing_block);
+        m_next_node = next_inline_node_in_pre_order(*m_next_node, &m_containing_block);
         if (m_next_node && m_next_node->is_svg_mask_box()) {
             // NOTE: It is possible to encounter SVGMaskBox nodes while doing layout of formatting context established by <foreignObject> with a mask.
             //       We should skip and let SVGFormattingContext take care of them.
@@ -158,7 +158,7 @@ void InlineLevelIterator::skip_to_next()
     compute_next();
 }
 
-Optional<InlineLevelIterator::Item> InlineLevelIterator::next()
+Optional<InlineLevelIterator::Item&> InlineLevelIterator::next()
 {
     if (m_next_item_index >= m_items.size())
         return {};
@@ -194,8 +194,9 @@ Gfx::GlyphRun::TextType InlineLevelIterator::resolve_text_direction_from_context
     // Search forward in the pre-generated chunks array to find the next chunk with known direction.
     // Since chunks are pre-generated, this is just O(1) array access per iteration.
     Optional<Gfx::GlyphRun::TextType> next_known_direction;
-    for (size_t i = m_text_node_context->next_chunk_index; i < m_text_node_context->chunks.size(); ++i) {
-        auto const& chunk = m_text_node_context->chunks[i];
+    auto const& chunks = m_text_node_context->chunk_list->chunks;
+    for (size_t i = m_text_node_context->next_chunk_index; i < chunks.size(); ++i) {
+        auto const& chunk = chunks[i];
         if (chunk.text_type == Gfx::GlyphRun::TextType::Ltr || chunk.text_type == Gfx::GlyphRun::TextType::Rtl) {
             next_known_direction = chunk.text_type;
             break;
@@ -205,7 +206,7 @@ Gfx::GlyphRun::TextType InlineLevelIterator::resolve_text_direction_from_context
     auto last_known_direction = m_text_node_context->last_known_direction;
 
     if (last_known_direction.has_value() && next_known_direction.has_value() && *last_known_direction != *next_known_direction) {
-        switch (m_containing_block->computed_values().direction()) {
+        switch (m_containing_block.computed_values().direction()) {
         case CSS::Direction::Ltr:
             return Gfx::GlyphRun::TextType::Ltr;
         case CSS::Direction::Rtl:
@@ -235,20 +236,23 @@ Optional<InlineLevelIterator::Item> InlineLevelIterator::generate_next_item()
 
         // Get the next chunk from the pre-generated array
         Optional<TextNode::Chunk> chunk_opt;
-        if (m_text_node_context->next_chunk_index < m_text_node_context->chunks.size()) {
-            chunk_opt = m_text_node_context->chunks[m_text_node_context->next_chunk_index++];
+        auto const& chunks = m_text_node_context->chunk_list->chunks;
+        if (m_text_node_context->next_chunk_index < chunks.size()) {
+            chunk_opt = chunks[m_text_node_context->next_chunk_index++];
         }
 
-        bool is_last_chunk = (m_text_node_context->next_chunk_index >= m_text_node_context->chunks.size());
+        bool is_last_chunk = (m_text_node_context->next_chunk_index >= chunks.size());
 
         auto is_empty_editable = false;
         if (!chunk_opt.has_value()) {
             auto const is_only_chunk = is_first_chunk && is_last_chunk;
             if (is_only_chunk && text_node->text_for_rendering().is_empty()) {
-                if (auto const* shadow_root = as_if<DOM::ShadowRoot>(text_node->dom_node().root()))
-                    if (auto const* form_associated_element = as_if<HTML::FormAssociatedTextControlElement>(shadow_root->host()))
-                        is_empty_editable = form_associated_element->text_control_to_html_element().is_mutable();
-                is_empty_editable |= text_node->dom_node().parent() && text_node->dom_node().parent()->is_editing_host();
+                if (auto const* dom_text = text_node->dom_text()) {
+                    if (auto const* shadow_root = as_if<DOM::ShadowRoot>(dom_text->root()))
+                        if (auto const* form_associated_element = as_if<HTML::FormAssociatedTextControlElement>(shadow_root->host()))
+                            is_empty_editable = form_associated_element->text_control_to_html_element().is_mutable();
+                    is_empty_editable |= dom_text->parent() && dom_text->parent()->is_editing_host();
+                }
             }
 
             if (is_empty_editable) {
@@ -423,21 +427,14 @@ void InlineLevelIterator::enter_text_node(Layout::TextNode const& text_node)
     bool do_wrap_lines = text_wrap_mode == CSS::TextWrapMode::Wrap;
     bool do_respect_linebreaks = first_is_one_of(white_space_collapse, CSS::WhiteSpaceCollapse::Preserve, CSS::WhiteSpaceCollapse::PreserveBreaks, CSS::WhiteSpaceCollapse::BreakSpaces);
 
-    // Pre-generate all chunks for this text node upfront.
-    // This allows O(1) peek() and next() operations instead of lazy generation with O(n) queue operations.
-    TextNode::ChunkIterator chunk_iterator { text_node, do_wrap_lines, do_respect_linebreaks };
-    Vector<TextNode::Chunk> chunks;
-    while (true) {
-        auto chunk = chunk_iterator.next();
-        if (!chunk.has_value())
-            break;
-        chunks.append(chunk.release_value());
-    }
+    auto const& chunks = text_node.chunks_for_layout(do_wrap_lines, do_respect_linebreaks);
 
     m_text_node_context = TextNodeContext {
-        .chunks = move(chunks),
+        // OPTIMIZATION: The chunk list is cached by the TextNode and only read by this iterator, so keep a pointer
+        //               to it instead of copying every chunk when entering a text node.
+        .chunk_list = &chunks,
         .next_chunk_index = 0,
-        .should_collapse_whitespace = chunk_iterator.should_collapse_whitespace(),
+        .should_collapse_whitespace = chunks.should_collapse_whitespace,
         .should_wrap_lines = do_wrap_lines,
         .should_respect_linebreaks = do_respect_linebreaks,
     };

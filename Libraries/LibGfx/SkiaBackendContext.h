@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, Aliaksandr Kalenik <kalenik.aliaksandr@gmail.com>
+ * Copyright (c) 2024-2026, Aliaksandr Kalenik <kalenik.aliaksandr@gmail.com>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -7,8 +7,8 @@
 #pragma once
 
 #include <AK/AtomicRefCounted.h>
+#include <AK/Function.h>
 #include <AK/Noncopyable.h>
-#include <LibThreading/Mutex.h>
 
 #ifdef USE_VULKAN
 #    include <LibGfx/VulkanContext.h>
@@ -40,22 +40,26 @@ public:
 #endif
 
     static void initialize_gpu_backend();
-    static RefPtr<SkiaBackendContext> the();
+    static RefPtr<SkiaBackendContext> create_independent_gpu_backend();
+    static RefPtr<SkiaBackendContext> the_main_thread_context();
 
     SkiaBackendContext() { }
     virtual ~SkiaBackendContext() { }
 
-    virtual void flush_and_submit(SkSurface*) { }
+    void flush_and_submit(SkSurface*);
+    void flush_and_submit_async(SkSurface*, Function<void()>&&);
+    void check_async_work_completion();
     virtual GrDirectContext* sk_context() const = 0;
 
     virtual MetalContext& metal_context() = 0;
     virtual VulkanContext const& vulkan_context() = 0;
 
-    void lock() { m_mutex.lock(); }
-    void unlock() { m_mutex.unlock(); }
+protected:
+    virtual void flush_and_submit_impl(SkSurface*) = 0;
+    virtual void flush_and_submit_async_impl(SkSurface*, Function<void()>&&) = 0;
 
 private:
-    Threading::Mutex m_mutex;
+    void perform_post_flush_cleanup();
 };
 
 }

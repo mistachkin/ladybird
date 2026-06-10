@@ -7,12 +7,13 @@
 
 #include <AK/Enumerate.h>
 #include <AK/StringView.h>
+#include <LibCore/TimeZone.h>
 #include <LibJS/Runtime/ArrayBuffer.h>
 #include <LibJS/Runtime/Date.h>
+#include <LibJS/Runtime/FinalizationRegistry.h>
 #include <LibJS/Runtime/TypedArray.h>
 #include <LibJS/Runtime/ValueInlines.h>
 #include <LibTest/JavaScriptTestRunner.h>
-#include <LibUnicode/TimeZone.h>
 
 TEST_ROOT("Tests/LibJS/Runtime");
 
@@ -46,9 +47,33 @@ TESTJS_GLOBAL_FUNCTION(evaluate_source, evaluateSource)
     return vm.run(script.value());
 }
 
+TESTJS_GLOBAL_FUNCTION(evaluate_module, evaluateModule)
+{
+    auto& realm = *vm.current_realm();
+
+    auto path = TRY(vm.argument(0).to_string(vm));
+    auto module = Test::JS::parse_module(path.to_byte_string(), realm);
+    if (module.is_error())
+        return vm.throw_completion<JS::SyntaxError>(module.error().error.to_string());
+
+    return vm.run(module.value());
+}
+
 TESTJS_GLOBAL_FUNCTION(run_queued_promise_jobs, runQueuedPromiseJobs)
 {
     vm.run_queued_promise_jobs();
+    return JS::js_undefined();
+}
+
+TESTJS_GLOBAL_FUNCTION(clear_kept_objects, clearKeptObjects)
+{
+    vm.finish_execution_generation();
+    return JS::js_undefined();
+}
+
+TESTJS_GLOBAL_FUNCTION(run_queued_finalization_registry_cleanup_jobs, runQueuedFinalizationRegistryCleanupJobs)
+{
+    vm.run_queued_finalization_registry_cleanup_jobs();
     return JS::js_undefined();
 }
 
@@ -58,7 +83,7 @@ TESTJS_GLOBAL_FUNCTION(get_weak_set_size, getWeakSetSize)
     if (!is<JS::WeakSet>(*object))
         return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotAnObjectOfType, "WeakSet");
     auto& weak_set = static_cast<JS::WeakSet&>(*object);
-    return JS::Value(weak_set.values().size());
+    return JS::Value(weak_set.weak_set_size());
 }
 
 TESTJS_GLOBAL_FUNCTION(get_weak_map_size, getWeakMapSize)
@@ -67,7 +92,7 @@ TESTJS_GLOBAL_FUNCTION(get_weak_map_size, getWeakMapSize)
     if (!is<JS::WeakMap>(*object))
         return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotAnObjectOfType, "WeakMap");
     auto& weak_map = static_cast<JS::WeakMap&>(*object);
-    return JS::Value(weak_map.values().size());
+    return JS::Value(weak_map.weak_map_size());
 }
 
 TESTJS_GLOBAL_FUNCTION(mark_as_garbage, markAsGarbage)
@@ -92,9 +117,28 @@ TESTJS_GLOBAL_FUNCTION(mark_as_garbage, markAsGarbage)
     if (!can_be_held_weakly(value))
         return vm.throw_completion<JS::TypeError>(JS::ErrorType::CannotBeHeldWeakly, ByteString::formatted("Variable with name {}", variable_name.utf8_string_view()));
 
+    TRY(reference.put_value(vm, JS::js_undefined()));
+    (void)TRY(reference.delete_(vm));
     vm.heap().uproot_cell(&value.as_cell());
-    TRY(reference.delete_(vm));
 
+    return JS::js_undefined();
+}
+
+TESTJS_GLOBAL_FUNCTION(cleanup_finalization_registry, cleanupFinalizationRegistry)
+{
+    auto finalization_registry = vm.argument(0).as_if<JS::FinalizationRegistry>();
+    if (!finalization_registry)
+        return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotAnObjectOfType, "FinalizationRegistry");
+
+    auto callback = vm.argument(1);
+    if (vm.argument_count() > 1 && !callback.is_function())
+        return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotAFunction, callback);
+
+    GC::Ptr<JS::JobCallback> cleanup_callback;
+    if (!callback.is_undefined())
+        cleanup_callback = vm.host_make_job_callback(callback.as_function());
+
+    TRY(finalization_registry->cleanup(cleanup_callback));
     return JS::js_undefined();
 }
 
@@ -110,10 +154,10 @@ TESTJS_GLOBAL_FUNCTION(detach_array_buffer, detachArrayBuffer)
 
 TESTJS_GLOBAL_FUNCTION(set_time_zone, setTimeZone)
 {
-    auto current_time_zone = JS::PrimitiveString::create(vm, Unicode::current_time_zone());
+    auto current_time_zone = JS::PrimitiveString::create(vm, Core::TimeZone::current_time_zone());
     auto time_zone = TRY(vm.argument(0).to_string(vm));
 
-    if (auto result = Unicode::set_current_time_zone(time_zone); result.is_error())
+    if (auto result = Core::TimeZone::set_current_time_zone(time_zone); result.is_error())
         return vm.throw_completion<JS::InternalError>(MUST(String::formatted("Could not set time zone: {}", result.error())));
 
     JS::clear_system_time_zone_cache();

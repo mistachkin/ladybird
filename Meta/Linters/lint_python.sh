@@ -7,6 +7,16 @@ cd "${script_path}/../.." || exit 1
 
 overwrite=0
 
+is_ignored_python_file() {
+    case "$1" in
+        Tests/LibWeb/Text/input/wpt-import/*)
+            return 0
+            ;;
+    esac
+
+    return 1
+}
+
 if [ "$#" -gt "0" ]; then
     if  [ "--overwrite-inplace" = "$1" ] ; then
         overwrite=1
@@ -17,24 +27,33 @@ fi
 if [ "$#" -eq "0" ]; then
     files=()
     while IFS= read -r file; do
-        files+=("$file")
+        if ! is_ignored_python_file "$file"; then
+            files+=("$file")
+        fi
     done <  <(
         git ls-files '*.py'
     )
 else
     files=()
     for file in "$@"; do
-        if [[ "${file}" == *".py" ]]; then
+        if [[ "${file}" == *".py" ]] && ! is_ignored_python_file "$file"; then
             files+=("${file}")
         fi
     done
 fi
 
 if (( ${#files[@]} )); then
+    if ! command -v pyright >/dev/null 2>&1 ; then
+        echo "Please install pyright: pip3 install pyright"
+        exit 1
+    fi
+
     if ! command -v ruff >/dev/null 2>&1 ; then
         echo "Please install ruff: pip3 install ruff"
         exit 1
     fi
+
+    pyright "${files[@]}"
 
     if [[ ${overwrite} -eq 0 ]] ; then
         ruff check "${files[@]}"

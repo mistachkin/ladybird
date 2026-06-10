@@ -410,7 +410,7 @@ JS::ThrowCompletionOr<GC::RootVector<JS::Value>> PlatformObject::internal_own_pr
     auto& vm = this->vm();
 
     // 1. Let keys be a new empty list of ECMAScript String and Symbol values.
-    GC::RootVector<JS::Value> keys { heap() };
+    GC::RootVector<JS::Value> keys;
 
     // 2. If O supports indexed properties, then for each index of O’s supported property indices, in ascending numerical order, append ! ToString(index) to keys.
     if (m_legacy_platform_object_flags->supports_indexed_properties) {
@@ -432,16 +432,16 @@ JS::ThrowCompletionOr<GC::RootVector<JS::Value>> PlatformObject::internal_own_pr
 
     // 4. For each P of O’s own property keys that is a String, in ascending chronological order of property creation, append P to keys.
     // NB: A PropertyKey containing a number is a String (it can only be a String or a Symbol, the number representation is an optimization).
-    for (auto& it : shape().property_table()) {
-        if (it.key.is_string() || it.key.is_number())
-            keys.append(it.key.to_value(vm));
-    }
+    shape().for_each_property_in_insertion_order([&](auto const& property_key, auto const&) {
+        if (property_key.is_string() || property_key.is_number())
+            keys.append(property_key.to_value(vm));
+    });
 
     // 5. For each P of O’s own property keys that is a Symbol, in ascending chronological order of property creation, append P to keys.
-    for (auto& it : shape().property_table()) {
-        if (it.key.is_symbol())
-            keys.append(it.key.to_value(vm));
-    }
+    shape().for_each_property_in_insertion_order([&](auto const& property_key, auto const&) {
+        if (property_key.is_symbol())
+            keys.append(property_key.to_value(vm));
+    });
 
     // FIXME: 6. Assert: keys has no duplicate items.
 

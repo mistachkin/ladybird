@@ -9,8 +9,11 @@
 #include <LibWeb/CSS/Invalidation/InvalidationSetMatcher.h>
 #include <LibWeb/CSS/InvalidationSet.h>
 #include <LibWeb/CSS/Selector.h>
+#include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Element.h>
 #include <LibWeb/DOM/Text.h>
+#include <LibWeb/HTML/HTMLElement.h>
+#include <LibWeb/HTML/HTMLFormElement.h>
 #include <LibWeb/HTML/HTMLHtmlElement.h>
 #include <LibWeb/HTML/HTMLInputElement.h>
 #include <LibWeb/HTML/HTMLSelectElement.h>
@@ -18,16 +21,98 @@
 
 namespace Web::CSS::Invalidation {
 
+static bool element_may_have_attribute_matching_selector(DOM::Element const& element, Selector::SimpleSelector::Attribute const& attribute)
+{
+    auto const& attribute_name = attribute.qualified_name.name.name;
+    if (element.has_attribute(attribute_name))
+        return true;
+
+    auto const& lowercase_attribute_name = attribute.qualified_name.name.lowercase_name;
+    return lowercase_attribute_name != attribute_name && element.has_attribute(lowercase_attribute_name);
+}
+
+static bool compound_may_match_element_impl(DOM::Element const& element, Selector::CompoundSelector const& compound_selector, Optional<PseudoClass> ignored_pseudo_class, bool in_selector_list_argument)
+{
+    for (auto const& simple_selector : compound_selector.simple_selectors) {
+        switch (simple_selector.type) {
+        case Selector::SimpleSelector::Type::Universal:
+            break;
+        case Selector::SimpleSelector::Type::Nesting:
+        case Selector::SimpleSelector::Type::Invalid:
+            return true;
+        case Selector::SimpleSelector::Type::PseudoElement:
+            if (in_selector_list_argument)
+                return false;
+            break;
+        case Selector::SimpleSelector::Type::TagName:
+            if (element.lowercased_local_name() != simple_selector.qualified_name().name.lowercase_name)
+                return false;
+            break;
+        case Selector::SimpleSelector::Type::Id: {
+            auto id = element.id();
+            if (!id.has_value() || *id != simple_selector.name())
+                return false;
+            break;
+        }
+        case Selector::SimpleSelector::Type::Class:
+            if (!element.class_names().contains_slow(simple_selector.name()))
+                return false;
+            break;
+        case Selector::SimpleSelector::Type::Attribute:
+            if (!element_may_have_attribute_matching_selector(element, simple_selector.attribute()))
+                return false;
+            break;
+        case Selector::SimpleSelector::Type::PseudoClass: {
+            auto const& pseudo_class = simple_selector.pseudo_class();
+            if (ignored_pseudo_class.has_value() && pseudo_class.type == *ignored_pseudo_class)
+                break;
+            switch (pseudo_class.type) {
+            case PseudoClass::Is:
+            case PseudoClass::Where: {
+                bool argument_may_match = false;
+                for (auto const& argument_selector : pseudo_class.argument_selector_list) {
+                    if (compound_may_match_element_impl(element, argument_selector->compound_selectors().last(), ignored_pseudo_class, true)) {
+                        argument_may_match = true;
+                        break;
+                    }
+                }
+                if (!argument_may_match)
+                    return false;
+                break;
+            }
+            case PseudoClass::Root:
+                if (&element != element.document().document_element())
+                    return false;
+                break;
+            default:
+                break;
+            }
+            break;
+        }
+        }
+    }
+    return true;
+}
+
+bool compound_may_match_element(DOM::Element const& element, Selector::CompoundSelector const& compound_selector, Optional<PseudoClass> ignored_pseudo_class)
+{
+    return compound_may_match_element_impl(element, compound_selector, ignored_pseudo_class, false);
+}
+
 bool element_matches_any_invalidation_set_property(DOM::Element const& element, InvalidationSet const& set)
 {
     auto includes_property = [&](InvalidationSet::Property const& property) {
         switch (property.type) {
-        case InvalidationSet::Property::Type::Class:
-            return element.class_names().contains_slow(property.name());
+        case InvalidationSet::Property::Type::Class: {
+            auto case_sensitivity = CaseSensitivity::CaseSensitive;
+            if (element.document().in_quirks_mode())
+                case_sensitivity = CaseSensitivity::CaseInsensitive;
+            return element.has_class(property.name(), case_sensitivity);
+        }
         case InvalidationSet::Property::Type::Id:
             return element.id() == property.name();
         case InvalidationSet::Property::Type::TagName:
-            return element.local_name() == property.name();
+            return element.lowercased_local_name() == property.name();
         case InvalidationSet::Property::Type::Attribute:
             return element.has_attribute(property.name()) || element.has_removed_attribute_for_style_invalidation(property.name());
         case InvalidationSet::Property::Type::PseudoClass: {
@@ -74,6 +159,41 @@ bool element_matches_any_invalidation_set_property(DOM::Element const& element, 
                 return is<HTML::HTMLInputElement>(element)
                     || is<HTML::HTMLSelectElement>(element)
                     || is<HTML::HTMLTextAreaElement>(element);
+            case PseudoClass::Valid:
+            case PseudoClass::Invalid: {
+                auto const* html_element = as_if<HTML::HTMLElement>(element);
+                return (html_element && html_element->is_form_associated_element())
+                    || is<HTML::HTMLFormElement>(element);
+            }
+            case PseudoClass::UserValid:
+            case PseudoClass::UserInvalid:
+                return is<HTML::HTMLInputElement>(element)
+                    || is<HTML::HTMLSelectElement>(element)
+                    || is<HTML::HTMLTextAreaElement>(element);
+            case PseudoClass::Hover: {
+                auto* hovered = element.document().hovered_node();
+                if (!hovered)
+                    return false;
+                if (hovered == &element)
+                    return true;
+                return element.is_shadow_including_ancestor_of(*hovered);
+            }
+            case PseudoClass::Focus:
+                return element.is_focused();
+            case PseudoClass::FocusVisible:
+                return element.is_focused() && element.should_indicate_focus();
+            case PseudoClass::FocusWithin:
+                return element.matches_focus_within_pseudo_class();
+            case PseudoClass::Active:
+                return element.is_being_activated();
+            case PseudoClass::Target:
+                return element.document().target_element() == &element;
+            case PseudoClass::FirstChild:
+                return !element.previous_element_sibling();
+            case PseudoClass::LastChild:
+                return !element.next_element_sibling();
+            case PseudoClass::OnlyChild:
+                return !element.previous_element_sibling() && !element.next_element_sibling();
             default:
                 VERIFY_NOT_REACHED();
             }

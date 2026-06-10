@@ -6,7 +6,9 @@
 
 #pragma once
 
+#include <AK/Concepts.h>
 #include <AK/Optional.h>
+#include <LibGfx/DecodedImageFrame.h>
 #include <LibWeb/ARIA/ARIAMixin.h>
 #include <LibWeb/Animations/Animatable.h>
 #include <LibWeb/Bindings/Element.h>
@@ -36,36 +38,6 @@
 #include <LibWeb/WebIDL/Types.h>
 
 namespace Web::DOM {
-
-struct ShadowRootInit {
-    Bindings::ShadowRootMode mode;
-    bool delegates_focus = false;
-    Bindings::SlotAssignmentMode slot_assignment { Bindings::SlotAssignmentMode::Named };
-    bool clonable = false;
-    bool serializable = false;
-    Optional<GC::Ptr<HTML::CustomElementRegistry>> custom_element_registry {};
-};
-
-struct GetHTMLOptions {
-    bool serializable_shadow_roots { false };
-    Vector<GC::Root<ShadowRoot>> shadow_roots {};
-};
-
-// https://w3c.github.io/csswg-drafts/cssom-view-1/#dictdef-scrollintoviewoptions
-struct ScrollIntoViewOptions : public HTML::ScrollOptions {
-    Bindings::ScrollLogicalPosition block { Bindings::ScrollLogicalPosition::Start };
-    Bindings::ScrollLogicalPosition inline_ { Bindings::ScrollLogicalPosition::Nearest };
-    Bindings::ScrollIntoViewContainer container { Bindings::ScrollIntoViewContainer::All };
-};
-
-// https://drafts.csswg.org/cssom-view-1/#dictdef-checkvisibilityoptions
-struct CheckVisibilityOptions {
-    bool check_opacity = false;
-    bool check_visibility_css = false;
-    bool content_visibility_auto = false;
-    bool opacity_property = false;
-    bool visibility_property = false;
-};
 
 // https://html.spec.whatwg.org/multipage/custom-elements.html#upgrade-reaction
 // An upgrade reaction, which will upgrade the custom element and contains a custom element definition; or
@@ -101,9 +73,9 @@ enum class ProximityToTheViewport : u8 {
     NotDetermined,
 };
 
-// https://w3c.github.io/pointerlock/#pointerlockoptions-dictionary
-struct PointerLockOptions {
-    bool unadjusted_movement = false;
+enum class ScheduleAnimationUpdate : u8 {
+    No,
+    Yes,
 };
 
 class WEB_API Element
@@ -163,10 +135,10 @@ public:
     Optional<String> lang() const;
     void invalidate_lang_value();
 
-    WebIDL::ExceptionOr<void> set_attribute_for_bindings(FlyString qualified_name, Variant<GC::Root<TrustedTypes::TrustedHTML>, GC::Root<TrustedTypes::TrustedScript>, GC::Root<TrustedTypes::TrustedScriptURL>, Utf16String> const& value);
-    WebIDL::ExceptionOr<void> set_attribute_for_bindings(FlyString qualified_name, Variant<GC::Root<TrustedTypes::TrustedHTML>, GC::Root<TrustedTypes::TrustedScript>, GC::Root<TrustedTypes::TrustedScriptURL>, String> const& value);
+    WebIDL::ExceptionOr<void> set_attribute_for_bindings(FlyString qualified_name, Variant<GC::Ref<TrustedTypes::TrustedHTML>, GC::Ref<TrustedTypes::TrustedScript>, GC::Ref<TrustedTypes::TrustedScriptURL>, Utf16String> const& value);
+    WebIDL::ExceptionOr<void> set_attribute_for_bindings(FlyString qualified_name, Variant<GC::Ref<TrustedTypes::TrustedHTML>, GC::Ref<TrustedTypes::TrustedScript>, GC::Ref<TrustedTypes::TrustedScriptURL>, String> const& value);
 
-    WebIDL::ExceptionOr<void> set_attribute_ns_for_bindings(Optional<FlyString> const& namespace_, FlyString const& qualified_name, Variant<GC::Root<TrustedTypes::TrustedHTML>, GC::Root<TrustedTypes::TrustedScript>, GC::Root<TrustedTypes::TrustedScriptURL>, Utf16String> const& value);
+    WebIDL::ExceptionOr<void> set_attribute_ns_for_bindings(Optional<FlyString> const& namespace_, FlyString const& qualified_name, Variant<GC::Ref<TrustedTypes::TrustedHTML>, GC::Ref<TrustedTypes::TrustedScript>, GC::Ref<TrustedTypes::TrustedScriptURL>, Utf16String> const& value);
     void set_attribute_value(FlyString const& local_name, String const& value, Optional<FlyString> const& prefix = {}, Optional<FlyString> const& namespace_ = {});
     WebIDL::ExceptionOr<GC::Ptr<Attr>> set_attribute_node_for_bindings(Attr&);
     WebIDL::ExceptionOr<GC::Ptr<Attr>> set_attribute_node_ns_for_bindings(Attr&);
@@ -195,7 +167,7 @@ public:
     GC::Ref<DOMTokenList> part_list();
     ReadonlySpan<FlyString> part_names() const { return m_parts; }
 
-    WebIDL::ExceptionOr<GC::Ref<ShadowRoot>> attach_shadow(ShadowRootInit init);
+    WebIDL::ExceptionOr<GC::Ref<ShadowRoot>> attach_shadow(Bindings::ShadowRootInit const&);
     WebIDL::ExceptionOr<void> attach_a_shadow_root(Bindings::ShadowRootMode mode, bool clonable, bool serializable, bool delegates_focus, Bindings::SlotAssignmentMode slot_assignment, GC::Ptr<HTML::CustomElementRegistry> registry);
     GC::Ptr<ShadowRoot> shadow_root_for_bindings() const;
 
@@ -208,6 +180,7 @@ public:
     int client_height() const;
     [[nodiscard]] double current_css_zoom() const;
 
+    void for_each_attribute(Function<void(Attr&)>);
     void for_each_attribute(Function<void(Attr const&)>) const;
 
     void for_each_attribute(Function<void(FlyString const&, String const&)>) const;
@@ -219,30 +192,74 @@ public:
     virtual bool supports_dimension_attributes() const { return false; }
 
     virtual bool is_presentational_hint(FlyString const&) const { return false; }
-    virtual void apply_presentational_hints(Vector<CSS::StyleProperty>&) const { }
+    virtual void apply_presentational_hints(Vector<CSS::StyleProperty>&) const;
 
     void run_attribute_change_steps(FlyString const& local_name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_);
 
     CSS::RequiredInvalidationAfterStyleChange recompute_style(bool& did_change_custom_properties);
-    CSS::RequiredInvalidationAfterStyleChange recompute_inherited_style();
+    CSS::RequiredInvalidationAfterStyleChange recompute_inherited_style(ScheduleAnimationUpdate = ScheduleAnimationUpdate::No);
 
-    Optional<CSS::PseudoElement> use_pseudo_element() const { return m_use_pseudo_element; }
-    void set_use_pseudo_element(Optional<CSS::PseudoElement> use_pseudo_element) { m_use_pseudo_element = move(use_pseudo_element); }
+    Optional<CSS::PseudoElement> associated_shadow_host_pseudo_element() const { return m_associated_shadow_host_pseudo_element; }
+    void set_associated_shadow_host_pseudo_element(CSS::PseudoElement pseudo_element);
 
-    GC::Ptr<Layout::NodeWithStyle> layout_node();
-    GC::Ptr<Layout::NodeWithStyle const> layout_node() const;
+    Layout::NodeWithStyle* layout_node();
+    Layout::NodeWithStyle const* layout_node() const;
 
-    GC::Ptr<Layout::NodeWithStyle> unsafe_layout_node();
-    GC::Ptr<Layout::NodeWithStyle const> unsafe_layout_node() const;
+    Layout::NodeWithStyle* unsafe_layout_node();
+    Layout::NodeWithStyle const* unsafe_layout_node() const;
 
-    GC::Ptr<CSS::ComputedProperties> computed_properties(Optional<CSS::PseudoElement> = {});
-    GC::Ptr<CSS::ComputedProperties const> computed_properties(Optional<CSS::PseudoElement> = {}) const;
-    void set_computed_properties(Optional<CSS::PseudoElement>, GC::Ptr<CSS::ComputedProperties>);
+    RefPtr<CSS::ComputedProperties> computed_properties(Optional<CSS::PseudoElement> = {});
+    RefPtr<CSS::ComputedProperties const> computed_properties(Optional<CSS::PseudoElement> = {}) const;
+    void set_computed_properties(Optional<CSS::PseudoElement>, RefPtr<CSS::ComputedProperties>);
 
-    [[nodiscard]] GC::Ptr<CSS::CascadedProperties> cascaded_properties(Optional<CSS::PseudoElement>) const;
-    void set_cascaded_properties(Optional<CSS::PseudoElement>, GC::Ptr<CSS::CascadedProperties>);
-
+    Optional<SyntheticPseudoElement&> get_synthetic_pseudo_element(CSS::PseudoElement) const;
     Optional<PseudoElement&> get_pseudo_element(CSS::PseudoElement) const;
+
+    template<typename Callback>
+    void for_each_synthetic_pseudo_element(Callback const& callback)
+    {
+        if (!m_pseudo_element_data)
+            return;
+
+        for (auto i = to_underlying(CSS::first_synthetic_pseudo_element); i <= to_underlying(CSS::last_synthetic_pseudo_element); ++i) {
+            auto type = static_cast<CSS::PseudoElement>(i);
+            auto pseudo_element = m_pseudo_element_data->get(type);
+            if (!pseudo_element.has_value())
+                continue;
+
+            using ReturnType = InvokeResult<Callback, CSS::PseudoElement, SyntheticPseudoElement&>;
+            if constexpr (IsSame<ReturnType, IterationDecision>) {
+                if (callback(type, as<SyntheticPseudoElement>(*pseudo_element.release_value())) == IterationDecision::Break)
+                    return;
+            } else {
+                static_assert(IsSame<ReturnType, void>);
+                callback(type, as<SyntheticPseudoElement>(*pseudo_element.release_value()));
+            }
+        }
+    }
+
+    template<typename Callback>
+    void for_each_synthetic_pseudo_element(Callback const& callback) const
+    {
+        if (!m_pseudo_element_data)
+            return;
+
+        for (auto i = to_underlying(CSS::first_synthetic_pseudo_element); i <= to_underlying(CSS::last_synthetic_pseudo_element); ++i) {
+            auto type = static_cast<CSS::PseudoElement>(i);
+            auto pseudo_element = m_pseudo_element_data->get(type);
+            if (!pseudo_element.has_value())
+                continue;
+
+            using ReturnType = InvokeResult<Callback, CSS::PseudoElement, SyntheticPseudoElement&>;
+            if constexpr (IsSame<ReturnType, IterationDecision>) {
+                if (callback(type, as<SyntheticPseudoElement>(*pseudo_element.release_value())) == IterationDecision::Break)
+                    return;
+            } else {
+                static_assert(IsSame<ReturnType, void>);
+                callback(type, as<SyntheticPseudoElement>(*pseudo_element.release_value()));
+            }
+        }
+    }
 
     GC::Ptr<CSS::CSSStyleProperties> inline_style() { return m_inline_style; }
     GC::Ptr<CSS::CSSStyleProperties const> inline_style() const { return m_inline_style; }
@@ -263,7 +280,7 @@ public:
 
     WebIDL::ExceptionOr<void> set_html_unsafe(TrustedTypes::TrustedHTMLOrString const&);
 
-    WebIDL::ExceptionOr<String> get_html(GetHTMLOptions const&) const;
+    WebIDL::ExceptionOr<String> get_html(Bindings::GetHTMLOptions const&) const;
 
     WebIDL::ExceptionOr<void> insert_adjacent_html(String const& position, TrustedTypes::TrustedHTMLOrString const&);
 
@@ -305,6 +322,8 @@ public:
     void set_custom_property_data(Optional<CSS::PseudoElement>, RefPtr<CSS::CustomPropertyData const>);
     [[nodiscard]] RefPtr<CSS::CustomPropertyData const> custom_property_data(Optional<CSS::PseudoElement>) const;
 
+    [[nodiscard]] bool refresh_inherited_custom_property_data();
+
     bool style_uses_attr_css_function() const { return m_style_uses_attr_css_function; }
     void set_style_uses_attr_css_function() { m_style_uses_attr_css_function = true; }
     bool style_uses_var_css_function() const { return m_style_uses_var_css_function; }
@@ -321,6 +340,8 @@ public:
     void set_style_uses_if_css_function() { m_style_uses_if_css_function = true; }
     bool style_uses_inherit_css_function() const { return m_style_uses_inherit_css_function; }
     void set_style_uses_inherit_css_function() { m_style_uses_inherit_css_function = true; }
+    bool style_depends_on_size_container_query() const { return m_style_depends_on_size_container_query; }
+    void set_style_depends_on_size_container_query() { m_style_depends_on_size_container_query = true; }
 
     bool child_style_uses_tree_counting_function() const { return m_child_style_uses_tree_counting_function; }
     void set_child_style_uses_tree_counting_function() { m_child_style_uses_tree_counting_function = true; }
@@ -337,7 +358,10 @@ public:
     [[nodiscard]] Vector<CSSPixelRect> get_client_rects() const;
     [[nodiscard]] GC::Ref<Geometry::DOMRectList> get_client_rects_for_bindings() const;
 
-    virtual GC::Ptr<Layout::Node> create_layout_node(GC::Ref<CSS::ComputedProperties>);
+    [[nodiscard]] Vector<CSSPixelRect> client_rects_assuming_layout_clean() const;
+    [[nodiscard]] CSSPixelRect bounding_client_rect_assuming_layout_clean() const;
+
+    virtual RefPtr<Layout::Node> create_layout_node(CSS::ComputedProperties const&);
     virtual void adjust_computed_style(CSS::ComputedProperties&) { }
 
     virtual void did_receive_focus() { }
@@ -345,9 +369,8 @@ public:
     bool should_indicate_focus() const;
     virtual bool is_focusable() const override;
 
-    static GC::Ptr<Layout::NodeWithStyle> create_layout_node_for_display_type(DOM::Document&, CSS::Display const&, GC::Ref<CSS::ComputedProperties>, Element*);
+    static RefPtr<Layout::NodeWithStyle> create_layout_node_for_display_type(DOM::Document&, CSS::Display const&, CSS::ComputedProperties const&, Element*);
 
-    [[nodiscard]] bool affected_by_pseudo_class(CSS::PseudoClass) const;
     void clear_removed_attributes_for_style_invalidation() { m_removed_attributes_for_style_invalidation.clear(); }
     bool has_removed_attribute_for_style_invalidation(FlyString const& attribute_name) const
     {
@@ -359,12 +382,14 @@ public:
             m_removed_attributes_for_style_invalidation.append(attribute_name);
     }
 
-    void set_pseudo_element_node(Badge<Layout::TreeBuilder>, CSS::PseudoElement, GC::Ptr<Layout::NodeWithStyle>);
-    GC::Ptr<Layout::NodeWithStyle> get_pseudo_element_node(CSS::PseudoElement) const;
-    bool has_pseudo_element(CSS::PseudoElement) const;
-    bool has_pseudo_elements() const;
-    void clear_pseudo_element_nodes(Badge<Layout::TreeBuilder>);
-    void clear_pseudo_element_layout_nodes(Badge<Document>);
+    void set_synthetic_pseudo_element_node(Badge<Layout::TreeBuilder>, CSS::PseudoElement, Layout::NodeWithStyle*);
+
+    Layout::NodeWithStyle* pseudo_element_layout_node(CSS::PseudoElement) const;
+    Layout::NodeWithStyle* pseudo_element_unsafe_layout_node(CSS::PseudoElement) const;
+
+    bool has_synthetic_pseudo_elements() const;
+    template<OneOf<Layout::TreeBuilder, Document, Node> T>
+    void clear_synthetic_pseudo_element_layout_nodes(Badge<T>) { clear_synthetic_pseudo_element_layout_nodes(); }
 
     void serialize_children_as_json(JsonObjectSerializer<StringBuilder>&) const;
 
@@ -392,7 +417,7 @@ public:
     WebIDL::ExceptionOr<void> insert_adjacent_text(String const& where, Utf16String const& data);
 
     // https://w3c.github.io/csswg-drafts/cssom-view-1/#dom-element-scrollintoview
-    GC::Ref<WebIDL::Promise> scroll_into_view(Optional<Variant<bool, ScrollIntoViewOptions>> = {});
+    GC::Ref<WebIDL::Promise> scroll_into_view(Optional<Variant<bool, Bindings::ScrollIntoViewOptions>> = {});
 
     // https://www.w3.org/TR/wai-aria-1.2/#ARIAMixin
 #define __ENUMERATE_ARIA_ATTRIBUTE(name, attribute) \
@@ -437,12 +462,12 @@ public:
     void set_custom_element_state(CustomElementState);
     void setup_custom_element_from_constructor(HTML::CustomElementDefinition& custom_element_definition, Optional<String> const& is_value);
 
-    GC::Ref<WebIDL::Promise> scroll(HTML::ScrollToOptions);
+    GC::Ref<WebIDL::Promise> scroll(Bindings::ScrollToOptions);
     GC::Ref<WebIDL::Promise> scroll(double x, double y);
-    GC::Ref<WebIDL::Promise> scroll_by(HTML::ScrollToOptions);
+    GC::Ref<WebIDL::Promise> scroll_by(Bindings::ScrollToOptions);
     GC::Ref<WebIDL::Promise> scroll_by(double x, double y);
 
-    bool check_visibility(Optional<CheckVisibilityOptions>);
+    bool check_visibility(Optional<Bindings::CheckVisibilityOptions>);
 
     void register_intersection_observer(Badge<IntersectionObserver::IntersectionObserver>, GC::Ref<IntersectionObserver::IntersectionObserver>);
     void unregister_intersection_observer(Badge<IntersectionObserver::IntersectionObserver>, GC::Ref<IntersectionObserver::IntersectionObserver>);
@@ -506,7 +531,9 @@ public:
     bool matches_unchecked_pseudo_class() const;
     bool matches_placeholder_shown_pseudo_class() const;
     bool matches_link_pseudo_class() const;
+    bool matches_visited_pseudo_class() const;
     bool matches_local_link_pseudo_class() const;
+    bool matches_focus_within_pseudo_class() const;
 
     bool affected_by_has_pseudo_class_in_subject_position() const { return m_affected_by_has_pseudo_class_in_subject_position; }
     void set_affected_by_has_pseudo_class_in_subject_position(bool value) { m_affected_by_has_pseudo_class_in_subject_position = value; }
@@ -582,11 +609,13 @@ public:
     // https://drafts.csswg.org/css-images-4/#element-not-rendered
     bool not_rendered() const;
 
+    bool meets_focusable_area_rendering_requirements() const;
+
     // https://drafts.csswg.org/css-view-transitions-1/#document-scoped-view-transition-name
     Optional<FlyString> document_scoped_view_transition_name();
 
     // https://drafts.csswg.org/css-view-transitions-1/#capture-the-image
-    RefPtr<Gfx::ImmutableBitmap> capture_the_image();
+    Optional<Gfx::DecodedImageFrame> capture_the_image();
 
     void set_pointer_capture(WebIDL::Long pointer_id);
     void release_pointer_capture(WebIDL::Long pointer_id);
@@ -610,7 +639,7 @@ public:
 
     double ensure_css_random_base_value(CSS::RandomCachingKey const&);
 
-    GC::Ref<WebIDL::Promise> request_pointer_lock(Optional<PointerLockOptions>);
+    GC::Ref<WebIDL::Promise> request_pointer_lock(Optional<Bindings::PointerLockOptions>);
 
     GC::Ptr<HTML::CustomElementRegistry> custom_element_registry() const { return m_custom_element_registry; }
     void set_custom_element_registry(GC::Ptr<HTML::CustomElementRegistry> registry) { m_custom_element_registry = registry; }
@@ -639,11 +668,14 @@ protected:
     GC::Ptr<HTML::CustomElementDefinition> custom_element_definition() const { return m_custom_element_definition; }
 
     void play_or_cancel_animations_after_display_property_change();
+    void clear_element_reference_pseudo_elements();
 
 private:
     FlyString make_html_uppercased_qualified_name() const;
 
     void exit_fullscreen_on_element_removal();
+    CSS::RequiredInvalidationAfterStyleChange recompute_pseudo_element_styles(bool& did_change_custom_properties, bool had_list_marker);
+    void apply_computed_style_to_layout_node_if_needed(CSS::RequiredInvalidationAfterStyleChange const&);
 
     WebIDL::ExceptionOr<GC::Ptr<Node>> insert_adjacent(StringView where, GC::Ref<Node> node);
 
@@ -672,15 +704,16 @@ private:
     GC::Ptr<ShadowRoot> m_shadow_root;
     GC::Ptr<DOMTokenList> m_part_list;
 
-    GC::Ptr<CSS::CascadedProperties> m_cascaded_properties;
-    GC::Ptr<CSS::ComputedProperties> m_computed_properties;
+    RefPtr<CSS::ComputedProperties> m_computed_properties;
     RefPtr<CSS::CustomPropertyData const> m_custom_property_data;
 
     using PseudoElementData = HashMap<CSS::PseudoElement, GC::Ref<PseudoElement>>;
     mutable OwnPtr<PseudoElementData> m_pseudo_element_data;
-    PseudoElement& ensure_pseudo_element(CSS::PseudoElement) const;
+    void register_element_reference_pseudo_element(CSS::PseudoElement type, GC::Ref<Element> element);
+    SyntheticPseudoElement& ensure_synthetic_pseudo_element(CSS::PseudoElement) const;
+    void clear_synthetic_pseudo_element_layout_nodes();
 
-    Optional<CSS::PseudoElement> m_use_pseudo_element;
+    Optional<CSS::PseudoElement> m_associated_shadow_host_pseudo_element;
 
     Vector<FlyString> m_classes;
     Vector<FlyString> m_parts;
@@ -726,6 +759,7 @@ private:
     bool m_style_uses_tree_counting_function : 1 { false };
     bool m_style_uses_if_css_function : 1 { false };
     bool m_style_uses_inherit_css_function : 1 { false };
+    bool m_style_depends_on_size_container_query : 1 { false };
     bool m_child_style_uses_tree_counting_function : 1 { false };
     bool m_affected_by_has_pseudo_class_in_subject_position : 1 { false };
     bool m_affected_by_has_pseudo_class_in_non_subject_position : 1 { false };
@@ -796,18 +830,6 @@ inline bool Element::has_class(FlyString const& class_name, CaseSensitivity case
     return any_of(m_classes, [&](auto& it) {
         return it.equals_ignoring_ascii_case(class_name);
     });
-}
-
-inline bool Element::has_pseudo_element(CSS::PseudoElement type) const
-{
-    if (!m_pseudo_element_data)
-        return false;
-    if (!CSS::Selector::PseudoElementSelector::is_known_pseudo_element_type(type))
-        return false;
-    auto pseudo_element = m_pseudo_element_data->get(type);
-    if (!pseudo_element.has_value())
-        return false;
-    return pseudo_element.value()->layout_node();
 }
 
 bool is_valid_namespace_prefix(FlyString const&);

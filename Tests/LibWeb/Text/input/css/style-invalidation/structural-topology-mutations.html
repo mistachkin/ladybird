@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+<meta charset="utf-8">
 <script src="../../include.js"></script>
 <script src="structural-matrix.js"></script>
 <script>
@@ -11,8 +12,10 @@
             const target = context.target;
             if (!mode.includes("cold")) {
                 assertEqual(`${selectorCase.name} ${mode} initial`, readProbe(target), selectorCase.initial ? MATCH : BASE);
+                flushPendingStyleWork();
+            } else {
+                resetStyleCounters();
             }
-            resetStyleCounters();
             if (mode.includes("detached"))
                 fixture.remove();
             selectorCase.mutate(context, fixture);
@@ -23,6 +26,7 @@
         } finally {
             style.remove();
             fixture.remove();
+            flushPendingStyleWork();
         }
     }
 

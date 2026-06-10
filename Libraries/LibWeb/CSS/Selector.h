@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2018-2025, Andreas Kling <andreas@ladybird.org>
- * Copyright (c) 2021-2025, Sam Atkins <sam@ladybird.org>
+ * Copyright (c) 2021-2026, Sam Atkins <sam@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -11,6 +11,7 @@
 #include <AK/RefCounted.h>
 #include <AK/String.h>
 #include <AK/Vector.h>
+#include <LibGC/Ptr.h>
 #include <LibWeb/CSS/Keyword.h>
 #include <LibWeb/CSS/Parser/ComponentValue.h>
 #include <LibWeb/CSS/PseudoClass.h>
@@ -196,12 +197,14 @@ public:
         NextSibling,       // +
         SubsequentSibling, // ~
         Column,            // ||
+        PseudoElement,     // Internal-only transition to a different AbstractElement
     };
 
     struct CompoundSelector {
         // Spec-wise, the <combinator> is not part of a <compound-selector>,
         // but it is more understandable to put them together.
         Combinator combinator { Combinator::None };
+        bool is_implicit_universal_anchor { false };
         Vector<SimpleSelector> simple_selectors;
 
         Optional<CompoundSelector> absolutized(SimpleSelector const& selector_for_nesting) const;
@@ -215,7 +218,8 @@ public:
     ~Selector() = default;
 
     Vector<CompoundSelector> const& compound_selectors() const { return m_compound_selectors; }
-    Optional<PseudoElementSelector> const& target_pseudo_element() const { return m_target_pseudo_element; }
+    Optional<PseudoElement> target_pseudo_element() const { return m_target_pseudo_element; }
+    bool contains_pseudo_element_transition() const { return m_contains_pseudo_element_transition; }
     NonnullRefPtr<Selector> relative_to(SimpleSelector const&) const;
     bool contains_the_nesting_selector() const { return m_contains_the_nesting_selector; }
     bool contains_pseudo_class(PseudoClass pseudo_class) const { return m_contained_pseudo_classes.get(pseudo_class); }
@@ -231,8 +235,7 @@ public:
 
     size_t sibling_invalidation_distance() const;
 
-    // FIXME: Assess these once we fully support multiple pseudo-elements in one selector.
-    bool is_slotted() const { return m_target_pseudo_element.has_value() && m_target_pseudo_element->type() == PseudoElement::Slotted; }
+    bool is_slotted() const { return m_contains_slotted_pseudo_element; }
     bool has_part_pseudo_element() const { return m_contains_part_pseudo_element; }
 
 private:
@@ -240,11 +243,13 @@ private:
 
     Vector<CompoundSelector> m_compound_selectors;
     mutable Optional<u32> m_specificity;
-    Optional<PseudoElementSelector> m_target_pseudo_element;
+    Optional<PseudoElement> m_target_pseudo_element;
     mutable Optional<size_t> m_sibling_invalidation_distance;
     bool m_can_use_fast_matches { false };
     bool m_can_use_ancestor_filter { false };
     bool m_contains_the_nesting_selector { false };
+    bool m_contains_pseudo_element_transition { false };
+    bool m_contains_slotted_pseudo_element { false };
     bool m_contains_part_pseudo_element { false };
 
     PseudoClassBitmap m_contained_pseudo_classes;
@@ -258,7 +263,14 @@ bool is_legacy_single_colon_pseudo_element(PseudoElement);
 
 String serialize_a_group_of_selectors(SelectorList const& selectors);
 
-SelectorList adapt_nested_relative_selector_list(SelectorList const&);
+enum class StyleNestingParent : u8 {
+    None,
+    Style,
+    Scope,
+};
+SelectorList adapt_nested_relative_selector_list(SelectorList const&, StyleNestingParent);
+
+SelectorList absolutize_selectors_relative_to(SelectorList const&, GC::Ptr<CSSRule const> parent);
 
 }
 

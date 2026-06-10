@@ -6,6 +6,7 @@
 
 #include <LibJS/Runtime/PromiseCapability.h>
 #include <LibWeb/Bindings/Intrinsics.h>
+#include <LibWeb/Bindings/UnderlyingSink.h>
 #include <LibWeb/Bindings/WritableStream.h>
 #include <LibWeb/HTML/MessagePort.h>
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
@@ -13,7 +14,6 @@
 #include <LibWeb/Streams/AbstractOperations.h>
 #include <LibWeb/Streams/ReadableStream.h>
 #include <LibWeb/Streams/ReadableStreamOperations.h>
-#include <LibWeb/Streams/UnderlyingSink.h>
 #include <LibWeb/Streams/WritableStream.h>
 #include <LibWeb/Streams/WritableStreamDefaultController.h>
 #include <LibWeb/Streams/WritableStreamDefaultWriter.h>
@@ -25,17 +25,17 @@ namespace Web::Streams {
 GC_DEFINE_ALLOCATOR(WritableStream);
 
 // https://streams.spec.whatwg.org/#ws-constructor
-WebIDL::ExceptionOr<GC::Ref<WritableStream>> WritableStream::construct_impl(JS::Realm& realm, Optional<GC::Root<JS::Object>> const& underlying_sink_object, QueuingStrategy const& strategy)
+WebIDL::ExceptionOr<GC::Ref<WritableStream>> WritableStream::construct_impl(JS::Realm& realm, GC::Ptr<JS::Object> underlying_sink_object, Bindings::QueuingStrategy const& strategy)
 {
     auto& vm = realm.vm();
 
     auto writable_stream = realm.create<WritableStream>(realm);
 
     // 1. If underlyingSink is missing, set it to null.
-    auto underlying_sink = underlying_sink_object.has_value() ? JS::Value(underlying_sink_object.value()) : JS::js_null();
+    auto underlying_sink = underlying_sink_object ? JS::Value(underlying_sink_object) : JS::js_null();
 
     // 2. Let underlyingSinkDict be underlyingSink, converted to an IDL value of type UnderlyingSink.
-    auto underlying_sink_dict = TRY(UnderlyingSink::from_value(vm, underlying_sink));
+    auto underlying_sink_dict = TRY(Bindings::convert_to_idl_value_for_underlying_sink(vm, underlying_sink));
 
     // 3. If underlyingSinkDict["type"] exists, throw a RangeError exception.
     if (underlying_sink_dict.type.has_value())
@@ -113,7 +113,7 @@ GC::Ref<WebIDL::Promise> WritableStream::close()
 }
 
 // https://streams.spec.whatwg.org/#ws-abort
-GC::Ref<WebIDL::Promise> WritableStream::abort(JS::Value reason)
+GC::Ref<WebIDL::Promise> WritableStream::abort(Optional<JS::Value> reason)
 {
     auto& realm = this->realm();
 
@@ -124,7 +124,7 @@ GC::Ref<WebIDL::Promise> WritableStream::abort(JS::Value reason)
     }
 
     // 2. Return ! WritableStreamAbort(this, reason).
-    return writable_stream_abort(*this, reason);
+    return writable_stream_abort(*this, reason.value_or(JS::js_undefined()));
 }
 
 // https://streams.spec.whatwg.org/#ws-get-writer
@@ -168,7 +168,7 @@ WebIDL::ExceptionOr<void> WritableStream::transfer_steps(HTML::TransferDataEncod
     WebIDL::mark_promise_as_handled(promise);
 
     // 9. Set dataHolder.[[port]] to ! StructuredSerializeWithTransfer(port2, « port2 »).
-    auto result = MUST(HTML::structured_serialize_with_transfer(vm, port2, { { GC::Root { port2 } } }));
+    auto result = MUST(HTML::structured_serialize_with_transfer(vm, port2, { { port2 } }));
     data_holder.extend(move(result.transfer_data_holders));
 
     return {};

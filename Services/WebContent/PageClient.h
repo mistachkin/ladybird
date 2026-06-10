@@ -9,15 +9,14 @@
 #pragma once
 
 #include <LibGfx/Rect.h>
-#include <LibGfx/SharedImage.h>
 #include <LibWeb/CSS/StyleSheetIdentifier.h>
 #include <LibWeb/HTML/AudioPlayState.h>
 #include <LibWeb/HTML/FileFilter.h>
 #include <LibWeb/Page/Page.h>
-#include <LibWeb/Painting/BackingStoreManager.h>
 #include <LibWeb/PixelUnits.h>
 #include <LibWeb/StorageAPI/StorageEndpoint.h>
 #include <LibWebView/Forward.h>
+#include <LibWebView/Mutation.h>
 #include <LibWebView/StorageSetResult.h>
 #include <WebContent/Forward.h>
 
@@ -43,14 +42,18 @@ public:
     virtual bool is_headless() const override;
     static void set_is_headless(bool);
 
+    static void set_async_scrolling_enabled(bool);
+
     virtual Web::Page& page() override { return *m_page; }
     virtual Web::Page const& page() const override { return *m_page; }
+    virtual bool has_focus() const override { return m_has_focus; }
 
     ErrorOr<void> connect_to_webdriver(ByteString const& webdriver_endpoint);
     ErrorOr<void> connect_to_web_ui(IPC::TransportHandle);
 
     virtual Queue<Web::QueuedInputEvent>& input_event_queue() override;
     virtual void report_finished_handling_input_event(u64 page_id, Web::EventResult event_was_handled) override;
+    virtual Web::Compositor::CompositorContextId allocate_compositor_context_id(Web::Compositor::PagePresentationRegistration) override;
 
     void set_palette_impl(Gfx::PaletteImpl&);
     void set_viewport(Web::DevicePixelSize const&, double device_pixel_ratio);
@@ -68,6 +71,7 @@ public:
     void set_is_scripting_enabled(bool);
     void set_window_position(Web::DevicePixelPoint);
     void set_window_size(Web::DevicePixelSize);
+    void compositor_process_reconnected();
 
     void toggle_media_play_state();
     void toggle_media_mute_state();
@@ -84,8 +88,7 @@ public:
     void did_connect_devtools_client();
     void did_disconnect_devtools_client();
     bool has_devtools_client() const { return m_devtools_client_count > 0; }
-
-    void ready_to_paint();
+    virtual bool has_active_devtools_client() const override { return has_devtools_client(); }
 
     void initialize_js_console(Web::DOM::Document& document);
     void js_console_input(StringView js_source);
@@ -101,10 +104,21 @@ public:
     virtual double device_pixels_per_css_pixel() const override { return m_device_pixel_ratio * m_zoom_level; }
 
     virtual Web::DisplayListPlayerType display_list_player_type() const override;
+    virtual bool supports_compositor() const override { return true; }
+    virtual void ensure_compositor_host() override;
+    virtual Web::Compositor::CompositorHost* compositor_host() override;
+    virtual Web::Compositor::CompositorHost const* compositor_host() const override;
 
     void queue_screenshot_task(Optional<Web::UniqueNodeID> node_id);
+    void send_current_needs_beforeunload_check();
+    void clear_pending_dom_mutations();
 
 private:
+    struct PendingDOMMutation {
+        GC::Ref<Web::DOM::Node> target;
+        WebView::Mutation mutation;
+    };
+
     PageClient(PageHost&, u64 id);
 
     virtual void visit_edges(JS::Cell::Visitor&) override;
@@ -139,7 +153,7 @@ private:
     virtual void page_did_unhover_link() override;
     virtual void page_did_click_link(URL::URL const&, ByteString const& target, unsigned modifiers) override;
     virtual void page_did_middle_click_link(URL::URL const&, ByteString const& target, unsigned modifiers) override;
-    virtual void page_did_request_context_menu(Web::CSSPixelPoint) override;
+    virtual void page_did_request_context_menu(Web::CSSPixelPoint, Web::ContextMenuForInputEventsTarget) override;
     virtual void page_did_request_link_context_menu(Web::CSSPixelPoint, URL::URL const&, ByteString const& target, unsigned modifiers) override;
     virtual void page_did_request_image_context_menu(Web::CSSPixelPoint, URL::URL const&, ByteString const& target, unsigned modifiers, Optional<Gfx::Bitmap const*>) override;
     virtual void page_did_request_media_context_menu(Web::CSSPixelPoint, ByteString const& target, unsigned modifiers, Web::Page::MediaContextMenu const&) override;
@@ -165,6 +179,8 @@ private:
     virtual void page_did_set_cookie(URL::URL const&, HTTP::Cookie::ParsedCookie const&, HTTP::Cookie::Source) override;
     virtual void page_did_update_cookie(HTTP::Cookie::Cookie const&) override;
     virtual void page_did_expire_cookies_with_time_offset(AK::Duration) override;
+    virtual void page_did_store_hsts_policy(String const&, HTTP::HSTS::ParsedHSTSPolicy const&) override;
+    virtual bool page_did_is_known_hsts_host(String const&) override;
     virtual Optional<String> page_did_request_storage_item(Web::StorageAPI::StorageEndpointType storage_endpoint, String const& storage_key, String const& bottle_key) override;
     virtual WebView::StorageSetResult page_did_set_storage_item(Web::StorageAPI::StorageEndpointType storage_endpoint, String const& storage_key, String const& bottle_key, String const& value) override;
     virtual void page_did_remove_storage_item(Web::StorageAPI::StorageEndpointType storage_endpoint, String const& storage_key, String const& bottle_key) override;
@@ -174,6 +190,7 @@ private:
     virtual NewWebViewResult page_did_request_new_web_view(Web::HTML::ActivateTab, Web::HTML::WebViewHints, Web::HTML::TokenizedFeature::NoOpener) override;
     virtual void page_did_request_activate_tab() override;
     virtual void page_did_close_top_level_traversable() override;
+    virtual void page_did_change_needs_beforeunload_check(bool needs_beforeunload_check) override;
     virtual void page_did_update_navigation_buttons_state(bool back_enabled, bool forward_enabled) override;
     virtual void request_file(Web::FileRequest) override;
     virtual void page_did_request_color_picker(Color current_color) override;
@@ -182,17 +199,19 @@ private:
     virtual void page_did_finish_test(String const& text) override;
     virtual void page_did_set_test_timeout(double milliseconds) override;
     virtual void page_did_receive_reference_test_metadata(JsonValue) override;
-    virtual void page_did_receive_test_variant_metadata(JsonValue) override;
     virtual void page_did_set_browser_zoom(double factor) override;
     virtual void page_did_set_device_pixel_ratio_for_testing(double ratio) override;
     virtual void page_did_change_theme_color(Gfx::Color color) override;
+    virtual void page_did_change_background_color(Gfx::Color color) override;
     virtual void page_did_insert_clipboard_entry(Web::Clipboard::SystemClipboardRepresentation const&, StringView presentation_style) override;
     virtual void page_did_request_clipboard_entries(u64 request_id) override;
+    virtual void page_did_request_primary_paste() override;
+    virtual void page_did_update_primary_selection(String const&) override;
     virtual void page_did_change_audio_play_state(Web::HTML::AudioPlayState) override;
-    virtual void page_did_allocate_backing_stores(i32 front_bitmap_id, Gfx::SharedImage front_backing_store, i32 back_bitmap_id, Gfx::SharedImage back_backing_store) override;
-    virtual WorkerAgentResponse request_worker_agent(Web::Bindings::AgentType) override;
+    virtual Web::HTML::WorkerAgentId start_worker_agent(Web::HTML::WorkerAgentStartRequest&&) override;
+    virtual void close_worker_agent(Web::HTML::WorkerAgentId, Web::HTML::WorkerAgentOwnerToken) override;
     virtual void page_did_mutate_dom(FlyString const& type, Web::DOM::Node const& target, Web::DOM::NodeList& added_nodes, Web::DOM::NodeList& removed_nodes, GC::Ptr<Web::DOM::Node> previous_sibling, GC::Ptr<Web::DOM::Node> next_sibling, Optional<String> const& attribute_name) override;
-    virtual void page_did_paint(Gfx::IntRect const& content_rect, i32 bitmap_id) override;
+    virtual void flush_pending_dom_mutations() override;
     virtual void page_did_take_screenshot(Gfx::ShareableBitmap const& screenshot) override;
     virtual void received_message_from_web_ui(String const& name, JS::Value data) override;
     virtual void page_did_start_network_request(u64 request_id, URL::URL const&, ByteString const&, Vector<HTTP::Header> const&, ReadonlyBytes, Optional<String>) override;
@@ -203,6 +222,7 @@ private:
 
     void setup_palette();
     ConnectionFromClient& client() const;
+    void send_dom_mutation(Web::DOM::Node const& target, WebView::Mutation mutation);
 
     PageHost& m_owner;
     GC::Ref<Web::Page> m_page;
@@ -214,7 +234,7 @@ private:
     double m_zoom_level { 1.0 };
     double m_maximum_frames_per_second { 60.0 };
     u64 m_id { 0 };
-    bool m_has_focus { false };
+    bool m_has_focus { true };
 
     Web::CSS::PreferredColorScheme m_preferred_color_scheme { Web::CSS::PreferredColorScheme::Auto };
     Web::CSS::PreferredContrast m_preferred_contrast { Web::CSS::PreferredContrast::NoPreference };
@@ -229,6 +249,7 @@ private:
 
     RefPtr<Core::Timer> m_frame_timer;
     Optional<double> m_last_frame_dispatch_time;
+    Queue<PendingDOMMutation> m_pending_dom_mutations;
 
     u64 m_devtools_client_count { 0 };
 };

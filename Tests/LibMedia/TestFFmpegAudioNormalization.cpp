@@ -11,7 +11,8 @@
 #include <LibCore/EventLoop.h>
 #include <LibMedia/FFmpeg/FFmpegDemuxer.h>
 #include <LibMedia/IncrementallyPopulatedStream.h>
-#include <LibMedia/Providers/AudioDataProvider.h>
+#include <LibMedia/PipelineStatus.h>
+#include <LibMedia/Producers/DecodedAudioProducer.h>
 #include <LibTest/TestCase.h>
 
 template<typename Integer>
@@ -78,48 +79,50 @@ static void decode_and_expect()
 
     auto tracks = TRY_OR_FAIL(demuxer->get_tracks_for_type(Media::TrackType::Audio));
     VERIFY(!tracks.is_empty());
-    auto provider = TRY_OR_FAIL(Media::AudioDataProvider::try_create(Core::EventLoop::current_weak(), demuxer, tracks[0]));
+    auto producer = TRY_OR_FAIL(Media::DecodedAudioProducer::try_create(loop, demuxer, tracks[0]));
 
-    bool reached_end_of_stream = false;
-    provider->set_error_handler([&](Media::DecoderError&& error) {
-        if (error.category() == Media::DecoderErrorCategory::EndOfStream) {
-            reached_end_of_stream = true;
-            return;
-        }
+    producer->set_error_handler([&](Media::DecoderError&&) {
         FAIL("An error occurred while decoding generated WAV data.");
     });
-    provider->start();
+    producer->start();
 
     bool saw_negative_full_scale_sample = false;
     bool saw_positive_peak_sample = false;
-    size_t decoded_sample_count = 0;
+    size_t decoded_frame_count = 0;
+    bool reached_end_of_stream = false;
 
     MonotonicTime deadline = MonotonicTime::now_coarse() + AK::Duration::from_seconds(1);
     while (MonotonicTime::now_coarse() < deadline) {
-        auto block = provider->retrieve_block();
-        if (block.is_empty()) {
-            if (reached_end_of_stream)
-                break;
-        } else {
-            for (float sample : block.data()) {
-                EXPECT(sample >= -1.0f);
-                if constexpr (sizeof(Sample) >= sizeof(i32))
-                    EXPECT(sample <= 1.0f);
-                else
-                    EXPECT(sample < 1.0f);
-                if (sample == -1.0f)
-                    saw_negative_full_scale_sample = true;
-                if (sample > 0.0f)
-                    saw_positive_peak_sample = true;
+        Media::AudioBlock block;
+        auto status = producer->status();
+        if (status == Media::PipelineStatus::HaveData)
+            producer->pull(block);
+        if (status == Media::PipelineStatus::HaveData) {
+            EXPECT(!block.is_empty());
+            for (size_t channel = 0; channel < block.channel_count(); ++channel) {
+                for (float sample : block.channel_data(channel)) {
+                    EXPECT(sample >= -1.0f);
+                    if constexpr (sizeof(Sample) >= sizeof(i32))
+                        EXPECT(sample <= 1.0f);
+                    else
+                        EXPECT(sample < 1.0f);
+                    if (sample == -1.0f)
+                        saw_negative_full_scale_sample = true;
+                    if (sample > 0.0f)
+                        saw_positive_peak_sample = true;
+                }
             }
-            decoded_sample_count += block.sample_count();
+            decoded_frame_count += block.frame_count();
+        } else if (status == Media::PipelineStatus::EndOfStream) {
+            reached_end_of_stream = true;
+            break;
         }
 
         loop.pump(Core::EventLoop::WaitMode::PollForEvents);
     }
 
     EXPECT(reached_end_of_stream);
-    EXPECT_EQ(decoded_sample_count, sample_count);
+    EXPECT_EQ(decoded_frame_count, sample_count);
     EXPECT(saw_negative_full_scale_sample);
     EXPECT(saw_positive_peak_sample);
 }

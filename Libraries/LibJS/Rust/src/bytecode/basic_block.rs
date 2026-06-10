@@ -6,14 +6,13 @@
 
 use super::instruction::Instruction;
 use super::operand::Label;
-use crate::ast::Position;
 
-/// A source map entry mapping a bytecode offset to a source range.
+/// A source map entry mapping a bytecode offset to a source position.
 #[derive(Debug, Clone, Copy)]
 pub struct SourceMapEntry {
     pub bytecode_offset: u32,
-    pub source_start: Position,
-    pub source_end: Position,
+    pub line: u32,
+    pub column: u32,
 }
 
 /// A basic block in the bytecode generator.
@@ -23,7 +22,7 @@ pub struct SourceMapEntry {
 /// serialized into the final byte stream.
 pub struct BasicBlock {
     pub index: u32,
-    pub instructions: Vec<(Instruction, SourceMapEntry)>,
+    pub instructions: Vec<(Instruction, SourceMapEntry, bool)>,
     pub handler: Option<Label>,
     pub terminated: bool,
     pub resolved_this: bool,
@@ -40,9 +39,9 @@ impl BasicBlock {
         }
     }
 
-    pub fn append(&mut self, instruction: Instruction, source_map: SourceMapEntry) {
+    pub fn append(&mut self, instruction: Instruction, source_map: SourceMapEntry, strict: bool) {
         let is_terminator = instruction.is_terminator();
-        self.instructions.push((instruction, source_map));
+        self.instructions.push((instruction, source_map, strict));
         if is_terminator {
             self.terminated = true;
         }

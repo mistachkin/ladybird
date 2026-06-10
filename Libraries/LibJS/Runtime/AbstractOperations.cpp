@@ -155,7 +155,7 @@ ThrowCompletionOr<size_t> length_of_array_like(VM& vm, Object const& object)
         return object.indexed_array_like_size();
 
     // 1. Return ℝ(? ToLength(? Get(obj, "length"))).
-    static Bytecode::StaticPropertyLookupCache cache;
+    static auto& cache = *new Bytecode::StaticPropertyLookupCache;
     return TRY(object.get(vm.names.length, cache)).to_length(vm);
 }
 
@@ -174,7 +174,7 @@ ThrowCompletionOr<GC::RootVector<Value>> create_list_from_array_like(VM& vm, Val
     auto length = TRY(length_of_array_like(vm, array_like));
 
     // 4. Let list be a new empty List.
-    auto list = GC::RootVector<Value> { vm.heap() };
+    GC::RootVector<Value> list;
     list.ensure_capacity(length);
 
     // 5. Let index be 0.
@@ -202,7 +202,7 @@ ThrowCompletionOr<GC::RootVector<Value>> create_list_from_array_like(VM& vm, Val
 ThrowCompletionOr<FunctionObject*> species_constructor(VM& vm, Object const& object, FunctionObject& default_constructor)
 {
     // 1. Let C be ? Get(O, "constructor").
-    static Bytecode::StaticPropertyLookupCache cache;
+    static auto& cache = *new Bytecode::StaticPropertyLookupCache;
     auto constructor = TRY(object.get(vm.names.constructor, cache));
 
     // 2. If C is undefined, return defaultConstructor.
@@ -214,7 +214,7 @@ ThrowCompletionOr<FunctionObject*> species_constructor(VM& vm, Object const& obj
         return vm.throw_completion<TypeError>(ErrorType::NotAConstructor, constructor);
 
     // 4. Let S be ? Get(C, @@species).
-    static Bytecode::StaticPropertyLookupCache cache2;
+    static auto& cache2 = *new Bytecode::StaticPropertyLookupCache;
     auto species = TRY(constructor.as_object().get(vm.well_known_symbol_species(), cache2));
 
     // 5. If S is either undefined or null, return defaultConstructor.
@@ -414,7 +414,7 @@ ThrowCompletionOr<Object*> get_prototype_from_constructor(VM& vm, FunctionObject
     // 1. Assert: intrinsicDefaultProto is this specification's name of an intrinsic object. The corresponding object must be an intrinsic that is intended to be used as the [[Prototype]] value of an object.
 
     // 2. Let proto be ? Get(constructor, "prototype").
-    static Bytecode::StaticPropertyLookupCache cache;
+    static auto& cache = *new Bytecode::StaticPropertyLookupCache;
     auto prototype = TRY(constructor.get(vm.names.prototype, cache));
 
     // 3. If Type(proto) is not Object, then
@@ -820,11 +820,16 @@ ThrowCompletionOr<void> eval_declaration_instantiation(VM& vm, EvalDeclarationDa
                 for (auto const& name : data.var_names) {
                     // a. If ! thisEnv.HasBinding(name) is true, then
                     if (MUST(this_environment->has_binding(name))) {
-                        // i. Throw a SyntaxError exception.
-                        return vm.throw_completion<SyntaxError>(ErrorType::TopLevelVariableAlreadyDeclared, name);
-
-                        // FIXME: ii. NOTE: Annex B.3.4 defines alternate semantics for the above step.
-                        // In particular it only throw the syntax error if it is not an environment from a catchclause.
+                        // B.3.4 Changes to EvalDeclarationInstantiation, https://tc39.es/ecma262/#sec-evaldeclarationinstantiation
+                        // i. Normative Optional
+                        //     If the host is a web browser or otherwise supports VariableStatements in Catch Blocks, then
+                        //         i. If thisEnv is not the Environment Record for a Catch clause, throw a SyntaxError exception.
+                        // ii. Else,
+                        //     i. Throw a SyntaxError exception.
+                        // AD-HOC: We are a web browser, so we only implement the web browser branch.
+                        if (!this_environment->is_catch_environment()) {
+                            return vm.throw_completion<SyntaxError>(ErrorType::EvalVarHoistingConflict, name);
+                        }
                     }
                     // b. NOTE: A direct eval will not hoist var declaration over a like-named lexical declaration.
                 }
@@ -843,7 +848,10 @@ ThrowCompletionOr<void> eval_declaration_instantiation(VM& vm, EvalDeclarationDa
     //         i. If privateIdentifiers does not contain binding.[[Description]], append binding.[[Description]] to privateIdentifiers.
     //     b. Set pointer to pointer.[[OuterPrivateEnvironment]].
     // 7. If AllPrivateIdentifiersValid of body with argument privateIdentifiers is false, throw a SyntaxError exception.
-    // FIXME: Add Private identifiers check here.
+    for (auto const& name : data.referenced_private_names) {
+        if (!private_environment || !private_environment->contains_private_identifier(name))
+            return vm.throw_completion<SyntaxError>(ErrorType::PrivateFieldNotDeclared, name);
+    }
 
     // 8. Let functionsToInitialize be a new empty List.
     // 9. Let declaredFunctionNames be a new empty List.

@@ -17,13 +17,7 @@ namespace Web::HTML {
 
 // https://html.spec.whatwg.org/multipage/canvas.html#offscreenrenderingcontext
 // NOTE: This is the Variant created by the IDL wrapper generator, and needs to be updated accordingly.
-using OffscreenRenderingContext = Variant<GC::Root<OffscreenCanvasRenderingContext2D>, GC::Root<WebGL::WebGLRenderingContext>, GC::Root<WebGL::WebGL2RenderingContext>, Empty>;
-
-// https://html.spec.whatwg.org/multipage/canvas.html#imageencodeoptions
-struct ImageEncodeOptions {
-    FlyString type { "image/png"_fly_string };
-    Optional<double> quality;
-};
+using OffscreenRenderingContext = Variant<GC::Ref<OffscreenCanvasRenderingContext2D>, GC::Ref<WebGL::WebGLRenderingContext>, GC::Ref<WebGL::WebGL2RenderingContext>, Empty>;
 
 // https://html.spec.whatwg.org/multipage/canvas.html#offscreencanvas
 class OffscreenCanvas : public DOM::EventTarget
@@ -60,7 +54,7 @@ public:
 
     WebIDL::ExceptionOr<GC::Ref<ImageBitmap>> transfer_to_image_bitmap();
 
-    GC::Ref<WebIDL::Promise> convert_to_blob(Optional<ImageEncodeOptions> options);
+    GC::Ref<WebIDL::Promise> convert_to_blob(Optional<Bindings::ImageEncodeOptions> options);
 
     void set_oncontextlost(GC::Ptr<WebIDL::CallbackType>);
     GC::Ptr<WebIDL::CallbackType> oncontextlost();

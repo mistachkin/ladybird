@@ -38,6 +38,7 @@
 #include <LibWeb/CSS/StyleValues/ColorMixStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ColorStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ConicGradientStyleValue.h>
+#include <LibWeb/CSS/StyleValues/ContrastColorStyleValue.h>
 #include <LibWeb/CSS/StyleValues/CounterDefinitionsStyleValue.h>
 #include <LibWeb/CSS/StyleValues/CounterStyleStyleValue.h>
 #include <LibWeb/CSS/StyleValues/CounterStyleValue.h>
@@ -79,6 +80,7 @@
 #include <LibWeb/CSS/StyleValues/URLStyleValue.h>
 #include <LibWeb/CSS/StyleValues/UnicodeRangeStyleValue.h>
 #include <LibWeb/CSS/StyleValues/UnresolvedStyleValue.h>
+#include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Element.h>
 #include <LibWeb/Dump.h>
 #include <LibWeb/Infra/CharacterTypes.h>
@@ -113,97 +115,106 @@ RefPtr<StyleValueList const> Parser::parse_comma_separated_value_list(TokenStrea
     return StyleValueList::create(move(values), StyleValueList::Separator::Comma);
 }
 
-// https://drafts.csswg.org/css-syntax/#typedef-declaration-value
-Optional<Vector<ComponentValue>> Parser::parse_declaration_value(TokenStream<ComponentValue>& tokens, Optional<Token::Type> end_token_type)
+enum class DeclarationValueNested : u8 {
+    No,
+    Yes,
+};
+
+static void consume_declaration_value(TokenStream<ComponentValue>& tokens, Optional<Token::Type> end_token_type, DeclarationValueNested nested)
 {
     // The <declaration-value> production matches any sequence of one or more tokens, so long as the sequence does not
     // contain <bad-string-token>, <bad-url-token>, unmatched <)-token>, <]-token>, or <}-token>, or top-level
     // <semicolon-token> tokens or <delim-token> tokens with a value of "!". It represents the entirety of what a valid
     // declaration can have as its value.
-    Vector<ComponentValue> top_level_declaration_value;
+    auto transaction = tokens.begin_transaction();
+    while (tokens.has_next_token()) {
+        auto const& peek = tokens.next_token();
 
-    AK::Function<void(TokenStream<ComponentValue>&, Nested)> const parse_declaration_value_impl = [&](TokenStream<ComponentValue>& current_tokens, Nested nested) {
-        auto consume_a_token = [&]() {
-            if (nested == Nested::No)
-                top_level_declaration_value.append(current_tokens.consume_a_token());
-            else
-                current_tokens.discard_a_token();
-        };
-
-        auto transaction = current_tokens.begin_transaction();
-        while (current_tokens.has_next_token()) {
-            auto const& peek = current_tokens.next_token();
-
-            if (peek.is_block()) {
-                TokenStream block_stream { peek.block().value };
-                parse_declaration_value_impl(block_stream, Nested::Yes);
-                if (block_stream.is_empty()) {
-                    consume_a_token();
-                    continue;
-                }
-
-                break;
-            }
-
-            if (peek.is_function()) {
-                TokenStream function_stream { peek.function().value };
-                parse_declaration_value_impl(function_stream, Nested::Yes);
-                if (function_stream.is_empty()) {
-                    consume_a_token();
-                    continue;
-                }
-
-                break;
-            }
-
-            if (!peek.is_token()) {
-                consume_a_token();
+        if (peek.is_block()) {
+            TokenStream block_stream { peek.block().value };
+            consume_declaration_value(block_stream, end_token_type, DeclarationValueNested::Yes);
+            if (block_stream.is_empty()) {
+                tokens.discard_a_token();
                 continue;
             }
 
-            bool valid = true;
-            switch (peek.token().type()) {
-            case Token::Type::Invalid:
-            case Token::Type::EndOfFile:
-            case Token::Type::BadString:
-            case Token::Type::BadUrl:
-                // NB: We're dealing with ComponentValues, so all valid function and block-related tokens will already be
-                //     converted to Function or SimpleBlock ComponentValues. Any remaining ones are invalid.
-            case Token::Type::Function:
-            case Token::Type::OpenCurly:
-            case Token::Type::OpenParen:
-            case Token::Type::OpenSquare:
-            case Token::Type::CloseCurly:
-            case Token::Type::CloseParen:
-            case Token::Type::CloseSquare:
-                valid = false;
-                break;
-            case Token::Type::Semicolon:
-                valid = nested == Nested::Yes;
-                break;
-            case Token::Type::Delim:
-                valid = nested == Nested::Yes || peek.token().delim() != '!';
-                break;
-            default:
-                valid = nested == Nested::Yes || !end_token_type.has_value() || !peek.is(end_token_type.value());
-                break;
-            }
-
-            if (!valid)
-                break;
-
-            consume_a_token();
+            break;
         }
 
-        transaction.commit();
-    };
+        if (peek.is_function()) {
+            TokenStream function_stream { peek.function().value };
+            consume_declaration_value(function_stream, end_token_type, DeclarationValueNested::Yes);
+            if (function_stream.is_empty()) {
+                tokens.discard_a_token();
+                continue;
+            }
 
-    parse_declaration_value_impl(tokens, Nested::No);
+            break;
+        }
 
-    if (top_level_declaration_value.is_empty())
+        if (!peek.is_token()) {
+            tokens.discard_a_token();
+            continue;
+        }
+
+        bool valid = true;
+        switch (peek.token().type()) {
+        case Token::Type::Invalid:
+        case Token::Type::EndOfFile:
+        case Token::Type::BadString:
+        case Token::Type::BadUrl:
+            // NB: We're dealing with ComponentValues, so all valid function and block-related tokens will already be
+            //     converted to Function or SimpleBlock ComponentValues. Any remaining ones are invalid.
+        case Token::Type::Function:
+        case Token::Type::OpenCurly:
+        case Token::Type::OpenParen:
+        case Token::Type::OpenSquare:
+        case Token::Type::CloseCurly:
+        case Token::Type::CloseParen:
+        case Token::Type::CloseSquare:
+            valid = false;
+            break;
+        case Token::Type::Semicolon:
+            valid = nested == DeclarationValueNested::Yes;
+            break;
+        case Token::Type::Delim:
+            valid = nested == DeclarationValueNested::Yes || peek.token().delim() != '!';
+            break;
+        default:
+            valid = nested == DeclarationValueNested::Yes || !end_token_type.has_value() || !peek.is(end_token_type.value());
+            break;
+        }
+
+        if (!valid)
+            break;
+
+        tokens.discard_a_token();
+    }
+
+    transaction.commit();
+}
+
+// https://drafts.csswg.org/css-syntax/#typedef-declaration-value
+Optional<ReadonlySpan<ComponentValue>> Parser::parse_declaration_value_as_span(TokenStream<ComponentValue>& tokens, Optional<Token::Type> end_token_type)
+{
+    auto start_index = tokens.current_index();
+    consume_declaration_value(tokens, end_token_type, DeclarationValueNested::No);
+
+    auto declaration_value = tokens.tokens_since(start_index);
+    if (declaration_value.is_empty())
         return OptionalNone {};
 
-    return top_level_declaration_value;
+    return declaration_value;
+}
+
+// https://drafts.csswg.org/css-syntax/#typedef-declaration-value
+Optional<Vector<ComponentValue>> Parser::parse_declaration_value(TokenStream<ComponentValue>& tokens, Optional<Token::Type> end_token_type)
+{
+    auto declaration_value = parse_declaration_value_as_span(tokens, end_token_type);
+    if (!declaration_value.has_value())
+        return OptionalNone {};
+
+    return Vector<ComponentValue> { declaration_value.value() };
 }
 
 // https://drafts.csswg.org/css-fonts-4/#family-name-syntax
@@ -1242,11 +1253,11 @@ RefPtr<StyleValue const> Parser::parse_keyword_value(TokenStream<ComponentValue>
     return nullptr;
 }
 
-RefPtr<StyleValue const> Parser::parse_specific_keyword_value(TokenStream<ComponentValue>& tokens, Keyword keyword)
+RefPtr<StyleValue const> Parser::parse_specific_keyword_value(TokenStream<ComponentValue>& tokens, ReadonlySpan<Keyword> allowed_keywords)
 {
     auto transaction = tokens.begin_transaction();
 
-    if (auto keyword_value = parse_keyword_value(tokens); keyword_value && keyword_value->to_keyword() == keyword) {
+    if (auto keyword_value = parse_keyword_value(tokens); keyword_value && allowed_keywords.contains_slow(keyword_value->to_keyword())) {
         transaction.commit();
         return keyword_value;
     }
@@ -2177,6 +2188,31 @@ RefPtr<StyleValue const> Parser::parse_light_dark_color_value(TokenStream<Compon
     return LightDarkStyleValue::create(light.release_nonnull(), dark.release_nonnull());
 }
 
+// https://drafts.csswg.org/css-color-5/#contrast-color
+RefPtr<StyleValue const> Parser::parse_contrast_color_value(TokenStream<ComponentValue>& outer_tokens)
+{
+    auto transaction = outer_tokens.begin_transaction();
+
+    outer_tokens.discard_whitespace();
+    auto const& function_token = outer_tokens.consume_a_token();
+    if (!function_token.is_function("contrast-color"sv))
+        return {};
+
+    auto inner_tokens = TokenStream { function_token.function().value };
+
+    inner_tokens.discard_whitespace();
+    auto color = parse_color_value(inner_tokens);
+    if (!color)
+        return {};
+
+    inner_tokens.discard_whitespace();
+    if (inner_tokens.has_next_token())
+        return {};
+
+    transaction.commit();
+    return ContrastColorStyleValue::create(color.release_nonnull());
+}
+
 // https://www.w3.org/TR/css-color-4/#color-syntax
 RefPtr<StyleValue const> Parser::parse_color_value(TokenStream<ComponentValue>& tokens)
 {
@@ -2213,6 +2249,8 @@ RefPtr<StyleValue const> Parser::parse_color_value(TokenStream<ComponentValue>& 
         return oklch;
     if (auto light_dark = parse_light_dark_color_value(tokens))
         return light_dark;
+    if (auto contrast_color = parse_contrast_color_value(tokens))
+        return contrast_color;
 
     auto transaction = tokens.begin_transaction();
     tokens.discard_whitespace();
@@ -2685,6 +2723,7 @@ RefPtr<ImageSetStyleValue const> Parser::parse_image_set_function(TokenStream<Co
 
     Vector<ImageSetStyleValue::Option> options;
     options.ensure_capacity(image_set_options_tokens.size());
+    auto style_resource_base_url = m_document ? Optional<::URL::URL> { m_document->base_url() } : Optional<::URL::URL> {};
     for (auto const& option_tokens_list : image_set_options_tokens) {
         if (option_tokens_list.first_matching([](auto const& component_value) { return component_value.contains_attr_tainted_value(); }).has_value())
             return nullptr;
@@ -2695,7 +2734,7 @@ RefPtr<ImageSetStyleValue const> Parser::parse_image_set_function(TokenStream<Co
         RefPtr<AbstractImageStyleValue const> image;
         if (option_tokens.next_token().is(Token::Type::String)) {
             auto url = URL { option_tokens.consume_a_token().token().string().to_string() };
-            image = ImageStyleValue::create(url);
+            image = ImageStyleValue::create(url, style_resource_base_url);
         } else {
             image = parse_image_value(option_tokens, AllowImageSet::No);
         }
@@ -2759,7 +2798,8 @@ RefPtr<AbstractImageStyleValue const> Parser::parse_image_value(TokenStream<Comp
         // FIXME: Remove this special case once mask-image accepts `<image>`.
         if (!url->url().starts_with('#')) {
             tokens.discard_a_mark();
-            return ImageStyleValue::create(url.release_value());
+            auto style_resource_base_url = m_document ? Optional<::URL::URL> { m_document->base_url() } : Optional<::URL::URL> {};
+            return ImageStyleValue::create(url.release_value(), move(style_resource_base_url));
         }
         tokens.restore_a_mark();
         return nullptr;
@@ -2779,51 +2819,6 @@ RefPtr<AbstractImageStyleValue const> Parser::parse_image_value(TokenStream<Comp
 
     if (auto radial_gradient = parse_radial_gradient_function(tokens))
         return radial_gradient;
-
-    return nullptr;
-}
-
-// https://svgwg.org/svg2-draft/painting.html#SpecifyingPaint
-RefPtr<StyleValue const> Parser::parse_paint_value(TokenStream<ComponentValue>& tokens)
-{
-    // `<paint> = none | <color> | <url> [none | <color>]? | context-fill | context-stroke`
-
-    auto parse_color_or_none = [&]() -> Optional<RefPtr<StyleValue const>> {
-        if (auto color = parse_color_value(tokens))
-            return color;
-
-        // NOTE: <color> also accepts identifiers, so we do this identifier check last.
-        if (tokens.next_token().is(Token::Type::Ident)) {
-            auto maybe_keyword = keyword_from_string(tokens.next_token().token().ident());
-            if (maybe_keyword.has_value()) {
-                // FIXME: Accept `context-fill` and `context-stroke`
-                switch (*maybe_keyword) {
-                case Keyword::None:
-                    tokens.discard_a_token();
-                    return KeywordStyleValue::create(*maybe_keyword);
-                default:
-                    return nullptr;
-                }
-            }
-        }
-
-        return OptionalNone {};
-    };
-
-    // FIXME: Allow context-fill/context-stroke here
-    if (auto color_or_none = parse_color_or_none(); color_or_none.has_value())
-        return *color_or_none;
-
-    if (auto url = parse_url_value(tokens)) {
-        tokens.discard_whitespace();
-        if (auto color_or_none = parse_color_or_none(); color_or_none == nullptr) {
-            // Fail to parse if the fallback is invalid, but otherwise ignore it.
-            return nullptr;
-        } else if (color_or_none.has_value() && *color_or_none && (*color_or_none)->has_color()) {
-            return URLStyleValue::create(url->as_url().url(), color_or_none->release_nonnull());
-        }
-        return url;
-    }
 
     return nullptr;
 }
@@ -3641,7 +3636,7 @@ RefPtr<StyleValue const> Parser::parse_font_variant_alternates_value(TokenStream
         tokens.discard_whitespace();
 
         // historical-forms
-        if (auto maybe_historical_forms = parse_specific_keyword_value(tokens, Keyword::HistoricalForms)) {
+        if (auto maybe_historical_forms = parse_specific_keyword_value(tokens, { { Keyword::HistoricalForms } })) {
             if (historical_forms)
                 return nullptr;
 
@@ -4687,6 +4682,67 @@ Optional<GridRepeat> Parser::parse_grid_fixed_repeat(TokenStream<ComponentValue>
     return parse_grid_track_repeat_impl(tokens, parse_repeat_type, parse_track);
 }
 
+// https://drafts.csswg.org/css-grid-2/#typedef-name-repeat
+Optional<GridRepeat> Parser::parse_grid_name_repeat(TokenStream<ComponentValue>& tokens)
+{
+    // <name-repeat> = repeat( [ <integer [1,∞]> | auto-fill ] , <line-names>+ )
+
+    auto transaction = tokens.begin_transaction();
+    tokens.discard_whitespace();
+
+    if (!tokens.has_next_token())
+        return {};
+
+    auto const& token = tokens.consume_a_token();
+    if (!token.is_function())
+        return {};
+
+    auto const& function_token = token.function();
+    if (!function_token.name.equals_ignoring_ascii_case("repeat"sv))
+        return {};
+    auto context_guard = push_temporary_value_parsing_context(FunctionContext { function_token.name });
+
+    auto function_tokens = TokenStream(function_token.value);
+    auto comma_separated_list = parse_a_comma_separated_list_of_component_values(function_tokens);
+    if (comma_separated_list.size() != 2)
+        return {};
+
+    TokenStream first_arg_tokens { comma_separated_list[0] };
+    first_arg_tokens.discard_whitespace();
+    Optional<GridRepeatParams> repeat_params;
+    if (auto maybe_integer = parse_integer_value(first_arg_tokens, { .min = 1, .max = NumericLimits<i32>::max() })) {
+        repeat_params = GridRepeatParams { GridRepeatType::Fixed, maybe_integer };
+    } else if (first_arg_tokens.has_next_token() && first_arg_tokens.next_token().is_ident("auto-fill"sv)) {
+        first_arg_tokens.discard_a_token(); // auto-fill
+        repeat_params = GridRepeatParams { GridRepeatType::AutoFill };
+    } else {
+        return {};
+    }
+    first_arg_tokens.discard_whitespace();
+    if (first_arg_tokens.has_next_token())
+        return {};
+
+    TokenStream second_arg_tokens { comma_separated_list[1] };
+    GridTrackSizeList line_name_list = GridTrackSizeList::make_line_name_list();
+    size_t parsed_line_name_count = 0;
+    second_arg_tokens.discard_whitespace();
+    while (second_arg_tokens.has_next_token()) {
+        if (!second_arg_tokens.next_token().is_block() || !second_arg_tokens.next_token().block().is_square())
+            return {};
+        auto line_names = parse_grid_line_names(second_arg_tokens);
+        if (!line_names.has_value())
+            return {};
+        line_name_list.append(line_names.release_value());
+        ++parsed_line_name_count;
+        second_arg_tokens.discard_whitespace();
+    }
+    if (parsed_line_name_count == 0)
+        return {};
+
+    transaction.commit();
+    return GridRepeat(move(line_name_list), repeat_params.release_value());
+}
+
 // https://www.w3.org/TR/css-grid-2/#typedef-track-size
 Optional<ExplicitGridTrack> Parser::parse_grid_track_size(TokenStream<ComponentValue>& tokens)
 {
@@ -5571,7 +5627,7 @@ NonnullRefPtr<StyleValue const> Parser::resolve_unresolved_style_value(DOM::Abst
 
     // 1. Substitute arbitrary substitution functions in prop’s value, given «"property", prop’s name» as the
     //    substitution context. Let result be the returned component value sequence.
-    auto result = substitute_arbitrary_substitution_functions(element, guarded_contexts, unresolved.values(), SubstitutionContext { SubstitutionContext::DependencyType::Property, property.name().to_string() });
+    auto result = substitute_arbitrary_substitution_functions(element, guarded_contexts, unresolved.values(), SubstitutionContext { SubstitutionContext::DependencyType::Property, property.to_string() });
 
     // 2. If result contains the guaranteed-invalid value, prop is invalid at computed-value time; return.
     if (contains_guaranteed_invalid_value(result))
@@ -5580,8 +5636,10 @@ NonnullRefPtr<StyleValue const> Parser::resolve_unresolved_style_value(DOM::Abst
     // 3. Parse result according to prop’s grammar. If this returns failure, prop is invalid at computed-value time; return.
     // NB: Custom properties have no grammar as such, so we skip this step for them.
     // FIXME: Parse according to @property syntax once we support that.
-    if (property.is_custom_property())
-        return UnresolvedStyleValue::create(move(result), {});
+    if (property.is_custom_property()) {
+        auto contains_attr_tainted_values = result.first_matching([](auto const& component_value) { return component_value.contains_attr_tainted_value(); }).has_value();
+        return UnresolvedStyleValue::create(move(result), {}, {}, UnresolvedStyleValue::SourceTextMode::Trim, contains_attr_tainted_values);
+    }
 
     auto expanded_value_tokens = TokenStream { result };
     auto parsed_value = parse_css_value(property.id(), expanded_value_tokens);

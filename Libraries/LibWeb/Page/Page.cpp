@@ -12,11 +12,15 @@
 #include <LibWeb/Bindings/ExceptionOrUtils.h>
 #include <LibWeb/CSS/StyleComputer.h>
 #include <LibWeb/Clipboard/SystemClipboard.h>
+#include <LibWeb/Compositor/CompositorHost.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Element.h>
 #include <LibWeb/DOM/Range.h>
+#include <LibWeb/Fetch/Infrastructure/HTTP/Bodies.h>
+#include <LibWeb/Fetch/Infrastructure/HTTP/Responses.h>
 #include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/EventLoop/EventLoop.h>
+#include <LibWeb/HTML/EventNames.h>
 #include <LibWeb/HTML/HTMLIFrameElement.h>
 #include <LibWeb/HTML/HTMLInputElement.h>
 #include <LibWeb/HTML/HTMLMediaElement.h>
@@ -26,6 +30,7 @@
 #include <LibWeb/HTML/SelectedFile.h>
 #include <LibWeb/HTML/TraversableNavigable.h>
 #include <LibWeb/HTML/Window.h>
+#include <LibWeb/Loader/ContentBlocker.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/Platform/EventLoopPlugin.h>
 #include <LibWeb/Selection/Selection.h>
@@ -45,6 +50,33 @@ Page::Page(GC::Ref<PageClient> client)
 }
 
 Page::~Page() = default;
+
+bool Page::has_compositor_host() const
+{
+    return m_client->compositor_host();
+}
+
+void Page::ensure_compositor_host()
+{
+    if (!m_client->supports_compositor())
+        return;
+
+    m_client->ensure_compositor_host();
+}
+
+Compositor::CompositorHost& Page::compositor_host()
+{
+    auto* compositor_host = m_client->compositor_host();
+    VERIFY(compositor_host);
+    return *compositor_host;
+}
+
+Compositor::CompositorHost const& Page::compositor_host() const
+{
+    auto const* compositor_host = m_client->compositor_host();
+    VERIFY(compositor_host);
+    return *compositor_host;
+}
 
 void Page::visit_edges(JS::Cell::Visitor& visitor)
 {
@@ -98,6 +130,31 @@ void Page::load_html(StringView html)
         .source_document = *top_level_traversable()->active_document(),
         .document_resource = String::from_utf8(html).release_value_but_fixme_should_propagate_errors(),
         .user_involvement = HTML::UserNavigationInvolvement::BrowserUI });
+}
+
+void Page::load_html(StringView html, URL::URL const& url)
+{
+    // FIXME: #23909 Figure out why GC threshold does not stay low when repeatedly loading html from the WebView
+    heap().collect_garbage();
+
+    auto document = top_level_traversable()->active_document();
+    auto& realm = document->realm();
+    auto html_string = String::from_utf8(html).release_value_but_fixme_should_propagate_errors();
+
+    auto response = Fetch::Infrastructure::Response::create(realm.vm());
+    response->url_list().append(url);
+    response->header_list()->append({ "Content-Type"sv, "text/html"sv });
+    response->set_body(Fetch::Infrastructure::byte_sequence_as_body(realm, html_string.bytes()));
+
+    HTML::Navigable::NavigateParams params { .url = url,
+        .source_document = *document,
+        .response = response,
+        .user_involvement = HTML::UserNavigationInvolvement::BrowserUI };
+
+    if (url == URL::about_srcdoc())
+        params.document_resource = move(html_string);
+
+    (void)top_level_traversable()->navigate(move(params));
 }
 
 void Page::reload()
@@ -159,6 +216,9 @@ CSSPixelRect Page::web_exposed_available_screen_area() const
 
 CSS::PreferredColorScheme Page::preferred_color_scheme() const
 {
+    if (m_preferred_color_scheme_override_for_testing.has_value())
+        return *m_preferred_color_scheme_override_for_testing;
+
     auto preferred_color_scheme = m_client->preferred_color_scheme();
 
     if (preferred_color_scheme == CSS::PreferredColorScheme::Auto)
@@ -267,9 +327,18 @@ EventResult Page::handle_mouseleave()
     return top_level_traversable()->event_handler().handle_mouseleave();
 }
 
-EventResult Page::handle_mousewheel(DevicePixelPoint position, DevicePixelPoint screen_position, unsigned button, unsigned buttons, unsigned modifiers, DevicePixels wheel_delta_x, DevicePixels wheel_delta_y)
+UniqueNodeID Page::node_id_at_position(DevicePixelPoint position)
 {
-    return top_level_traversable()->event_handler().handle_mousewheel(device_to_css_point(position), device_to_css_point(screen_position), button, buttons, modifiers, wheel_delta_x.value(), wheel_delta_y.value());
+    auto node = top_level_traversable()->event_handler().target_node_for_mouse_position(device_to_css_point(position));
+    if (!node)
+        return 0;
+
+    return node->unique_id();
+}
+
+EventResult Page::handle_mousewheel(DevicePixelPoint position, DevicePixelPoint screen_position, unsigned button, unsigned buttons, unsigned modifiers, double wheel_delta_x, double wheel_delta_y, bool async_scroll_performed_default_action, Optional<AsyncScrollOperation>* async_scroll_operation)
+{
+    return top_level_traversable()->event_handler().handle_mousewheel(device_to_css_point(position), device_to_css_point(screen_position), button, buttons, modifiers, wheel_delta_x, wheel_delta_y, async_scroll_performed_default_action, async_scroll_operation);
 }
 
 EventResult Page::handle_drag_and_drop_event(DragEvent::Type type, DevicePixelPoint position, DevicePixelPoint screen_position, unsigned button, unsigned buttons, unsigned modifiers, Vector<HTML::SelectedFile> files)
@@ -277,14 +346,14 @@ EventResult Page::handle_drag_and_drop_event(DragEvent::Type type, DevicePixelPo
     return top_level_traversable()->event_handler().handle_drag_and_drop_event(type, device_to_css_point(position), device_to_css_point(screen_position), button, buttons, modifiers, move(files));
 }
 
-EventResult Page::handle_pinch_event(DevicePixelPoint position, double scale)
+EventResult Page::handle_pinch_event(DevicePixelPoint position, unsigned modifiers, double scale)
 {
-    return top_level_traversable()->event_handler().handle_pinch_event(device_to_css_point(position), scale);
+    return top_level_traversable()->event_handler().handle_pinch_event(device_to_css_point(position), modifiers, scale);
 }
 
-EventResult Page::handle_keydown(UIEvents::KeyCode key, unsigned modifiers, u32 code_point, bool repeat)
+EventResult Page::handle_keydown(UIEvents::KeyCode key, unsigned modifiers, u32 code_point, bool repeat, bool should_insert_text)
 {
-    return focused_navigable().event_handler().handle_keydown(key, modifiers, code_point, repeat);
+    return focused_navigable().event_handler().handle_keydown(key, modifiers, code_point, repeat, should_insert_text);
 }
 
 EventResult Page::handle_keyup(UIEvents::KeyCode key, unsigned modifiers, u32 code_point, bool repeat)
@@ -297,11 +366,51 @@ void Page::handle_sdl_input_events()
     top_level_traversable()->event_handler().handle_sdl_input_events();
 }
 
+void Page::invalidate_compositor_wheel_event_listener_state()
+{
+    ++m_wheel_event_listener_state_generation;
+
+    if (!m_async_scrolling_enabled || !top_level_traversable_is_initialized() || !top_level_traversable()->has_compositor_context())
+        return;
+
+    top_level_traversable()->compositor_context().invalidate_wheel_event_listener_state(m_wheel_event_listener_state_generation);
+}
+
+void Page::update_needs_beforeunload_check()
+{
+    auto needs_beforeunload_check = [&] {
+        if (!top_level_traversable_is_initialized())
+            return true;
+
+        auto top_level_traversable = this->top_level_traversable();
+        auto active_document = top_level_traversable->active_document();
+        if (!active_document)
+            return true;
+        if (active_document->navigable() != top_level_traversable.ptr())
+            return true;
+
+        for (auto const& navigable : active_document->inclusive_descendant_navigables()) {
+            auto window = navigable->active_window();
+            if (window && window->has_event_listener(HTML::EventNames::beforeunload))
+                return true;
+        }
+
+        return false;
+    }();
+
+    if (m_needs_beforeunload_check == needs_beforeunload_check)
+        return;
+
+    m_needs_beforeunload_check = needs_beforeunload_check;
+    client().page_did_change_needs_beforeunload_check(m_needs_beforeunload_check);
+}
+
 void Page::set_top_level_traversable(GC::Ref<HTML::TraversableNavigable> navigable)
 {
     VERIFY(!m_top_level_traversable); // Replacement is not allowed!
     VERIFY(&navigable->page() == this);
     m_top_level_traversable = navigable;
+    update_needs_beforeunload_check();
 }
 
 bool Page::top_level_traversable_is_initialized() const
@@ -594,6 +703,13 @@ void Page::present_all_canvas_element_surfaces()
     });
 }
 
+void Page::republish_all_canvas_element_surfaces()
+{
+    for_each_canvas_element([](auto& canvas_element) {
+        canvas_element.republish_compositor_surface();
+    });
+}
+
 void Page::did_request_media_context_menu(UniqueNodeID media_id, CSSPixelPoint position, ByteString const& target, unsigned modifiers, MediaContextMenu const& menu)
 {
     m_media_context_menu_element_id = media_id;
@@ -693,12 +809,41 @@ GC::Ptr<HTML::HTMLMediaElement> Page::media_context_menu_element()
 void Page::set_user_style(String source)
 {
     m_user_style_sheet_source = source;
-    if (top_level_traversable_is_initialized() && top_level_traversable()->active_document()) {
-        auto& document = *top_level_traversable()->active_document();
+    invalidate_user_style();
+}
+
+void Page::set_content_blocking_enabled(bool enabled)
+{
+    auto& blocker = ContentBlocker::the();
+    if (blocker.filtering_enabled() == enabled)
+        return;
+
+    auto has_cosmetic_rules = blocker.has_cosmetic_rules();
+    blocker.set_filtering_enabled(enabled);
+    if (has_cosmetic_rules)
+        invalidate_user_style();
+}
+
+void Page::invalidate_user_style()
+{
+    if (!top_level_traversable_is_initialized() || !top_level_traversable()->active_document())
+        return;
+
+    auto invalidate_document = [](DOM::Document& document) {
+        document.invalidate_content_blocker_style_sheet();
         document.style_scope().invalidate_rule_cache();
         document.for_each_shadow_root([](auto& shadow_root) {
-            shadow_root.style_scope().invalidate_rule_cache();
+            shadow_root.invalidate_style(DOM::StyleInvalidationReason::StyleSheetReplace);
         });
+        document.invalidate_style(DOM::StyleInvalidationReason::StyleSheetReplace);
+    };
+
+    auto& active_document = *top_level_traversable()->active_document();
+    invalidate_document(active_document);
+
+    for (auto& navigable : active_document.descendant_navigables()) {
+        if (auto document = navigable->active_document())
+            invalidate_document(*document);
     }
 }
 
@@ -796,7 +941,7 @@ Page::FindInPageResult Page::perform_find_in_page_query(FindInPageQuery const& q
         }
     }
 
-    update_find_in_page_selection(all_matches);
+    update_find_in_page_selection(all_matches, query.clear_selection_on_no_match);
 
     return Page::FindInPageResult {
         .current_match_index = m_find_in_page_match_index,
@@ -841,10 +986,13 @@ Page::FindInPageResult Page::find_in_page_previous_match()
     return result;
 }
 
-void Page::update_find_in_page_selection(Vector<GC::Root<DOM::Range>> matches)
+void Page::update_find_in_page_selection(Vector<GC::Root<DOM::Range>> matches, ClearSelectionOnNoMatch clear_selection_on_no_match)
 {
-    if (matches.is_empty())
+    if (matches.is_empty()) {
+        if (clear_selection_on_no_match == ClearSelectionOnNoMatch::Yes)
+            clear_selection();
         return;
+    }
 
     clear_selection();
 
@@ -861,7 +1009,7 @@ void Page::update_find_in_page_selection(Vector<GC::Root<DOM::Range>> matches)
     selection->add_range(*current_range);
 
     if (auto element = common_ancestor_container->parent_element()) {
-        DOM::ScrollIntoViewOptions scroll_options;
+        Bindings::ScrollIntoViewOptions scroll_options;
         scroll_options.block = Bindings::ScrollLogicalPosition::Nearest;
         scroll_options.inline_ = Bindings::ScrollLogicalPosition::Nearest;
         scroll_options.behavior = Bindings::ScrollBehavior::Instant;

@@ -23,7 +23,7 @@ GC_DEFINE_ALLOCATOR(DataTransfer);
 
 namespace DataTransferEffect {
 
-#define __ENUMERATE_DATA_TRANSFER_EFFECT(name) FlyString name = #name##_fly_string;
+#define __ENUMERATE_DATA_TRANSFER_EFFECT(name) FlyString const& name = *new FlyString(#name##_fly_string);
 ENUMERATE_DATA_TRANSFER_EFFECTS
 #undef __ENUMERATE_DATA_TRANSFER_EFFECT
 
@@ -252,10 +252,10 @@ GC::Ref<FileAPI::FileList> DataTransfer::files() const
         auto file_name = MUST(String::from_byte_string(item.file_name));
 
         // FIXME: Fill in other fields (e.g. last_modified).
-        FileAPI::FilePropertyBag options {};
+        Bindings::FilePropertyBag options {};
         options.type = item.type_string;
 
-        auto file = MUST(FileAPI::File::create(realm, { GC::make_root(blob) }, file_name, move(options)));
+        auto file = MUST(FileAPI::File::create(realm, { { blob } }, file_name, move(options)));
         files->add_file(file);
     }
 
@@ -319,16 +319,11 @@ void DataTransfer::clear_data(Optional<String> maybe_format)
         return;
 
     auto remove_items_from_drag_data_store = [&](Optional<String> const& format = {}) {
-        auto did_remove_item = false;
         for (size_t i = m_associated_drag_data_store->item_list().size(); i > 0; --i) {
             auto const& item = m_associated_drag_data_store->item_list().at(i - 1);
-            if (item.kind == DragDataStoreItem::Kind::Text && (!format.has_value() || item.type_string == *format)) {
-                m_associated_drag_data_store->remove_item_at(i - 1);
-                did_remove_item = true;
-            }
+            if (item.kind == DragDataStoreItem::Kind::Text && (!format.has_value() || item.type_string == *format))
+                remove_item(i - 1);
         }
-        if (did_remove_item)
-            update_data_transfer_types_list();
     };
 
     // 3. If the method was called with no arguments, remove each item in the drag data store item list whose kind is

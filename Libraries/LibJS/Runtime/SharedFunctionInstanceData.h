@@ -6,15 +6,22 @@
 
 #pragma once
 
+#include <AK/IntrusiveList.h>
 #include <LibGC/Cell.h>
 #include <LibJS/Export.h>
 #include <LibJS/Forward.h>
 #include <LibJS/LocalVariable.h>
+#include <LibJS/Runtime/EnvironmentShape.h>
 #include <LibJS/Runtime/FunctionKind.h>
 #include <LibJS/Runtime/PrivateEnvironment.h>
 #include <LibJS/Runtime/PropertyKey.h>
 
 namespace JS {
+
+class SharedFunctionInstanceDataList;
+
+struct NoSharedFunctionDataList {
+};
 
 // NB: This mirrors Identifier::Local from AST.h, defined here to avoid
 //     including the full AST header in this file.
@@ -45,9 +52,13 @@ enum class ConstructorKind : u8 {
 class JS_API SharedFunctionInstanceData final : public GC::Cell {
     GC_CELL(SharedFunctionInstanceData, GC::Cell);
     GC_DECLARE_ALLOCATOR(SharedFunctionInstanceData);
+    friend class SharedFunctionInstanceDataList;
     static constexpr bool OVERRIDES_FINALIZE = true;
 
 public:
+    IntrusiveListNode<SharedFunctionInstanceData> m_script_or_module_list_node;
+    SharedFunctionInstanceDataList* m_owner_shared_function_data_list { nullptr };
+
     static constexpr u64 asm_call_metadata_can_inline_call = 1ull << 32;
     static constexpr u64 asm_call_metadata_needs_environment_or_this_value_resolution = 1ull << 33;
     static constexpr u64 asm_call_metadata_uses_this = 1ull << 34;
@@ -66,6 +77,20 @@ public:
         bool is_arrow_function,
         bool has_simple_parameter_list,
         Vector<Utf16FlyString> parameter_names_for_mapped_arguments,
+        SharedFunctionInstanceDataList&,
+        void* rust_function_ast);
+
+    SharedFunctionInstanceData(
+        VM& vm,
+        FunctionKind,
+        Utf16FlyString name,
+        i32 function_length,
+        u32 formal_parameter_count,
+        bool strict,
+        bool is_arrow_function,
+        bool has_simple_parameter_list,
+        Vector<Utf16FlyString> parameter_names_for_mapped_arguments,
+        NoSharedFunctionDataList,
         void* rust_function_ast);
 
     void set_executable(GC::Ptr<Bytecode::Executable>);
@@ -78,12 +103,25 @@ public:
 
     Utf16FlyString m_name;
 
-    // NB: m_source_text is normally a view into the underlying JS::SourceCode we parsed the AST from,
-    //     kept alive by m_source_code. m_source_text_owner is used if the source text needs to be
-    //     owned by the function data (e.g. for dynamically created functions via Function constructor).
+    Utf16String source_text() const;
+    void set_source_text(Utf16View);
+    void set_source_text_range(SourceCode const&, size_t source_text_offset, size_t source_text_length);
+
+    // NB: m_source_text_offset and m_source_text_length normally refer to
+    //     ranges within the underlying JS::SourceCode we parsed the AST from,
+    //     kept alive by m_source_code. m_source_text_owner is used if the
+    //     source text needs to be owned by the function data (e.g. for
+    //     dynamically created functions via Function constructor).
     RefPtr<SourceCode const> m_source_code;
-    Utf16String m_source_text_owner;
-    Utf16View m_source_text; // [[SourceText]]
+    Utf16String mutable m_source_text_owner;
+    size_t m_source_text_offset { 0 };
+    size_t m_source_text_length { 0 }; // [[SourceText]]
+
+    // NB: Some runtime operations replace [[SourceText]] with a wider range
+    //     (e.g. class constructors use the full class source). Keep the
+    //     original parsed function range for bytecode cache identity.
+    size_t m_bytecode_cache_source_text_offset { 0 };
+    size_t m_bytecode_cache_source_text_length { 0 };
 
     Vector<LocalVariable> m_local_variables_names;
 
@@ -100,6 +138,7 @@ public:
     bool m_is_arrow_function { false };
     bool m_has_simple_parameter_list { false };
     bool m_is_module_wrapper { false };
+    bool m_has_bytecode_cache_source_text_range { false };
 
     struct VarBinding {
         Utf16FlyString name;
@@ -139,6 +178,8 @@ public:
     size_t m_function_environment_bindings_count { 0 };
     size_t m_var_environment_bindings_count { 0 };
     size_t m_lex_environment_bindings_count { 0 };
+    mutable GC::Ptr<EnvironmentShape> m_function_environment_shape;
+    mutable GC::Ptr<EnvironmentShape> m_var_environment_shape;
 
     Variant<PropertyKey, PrivateName, Empty> m_class_field_initializer_name; // [[ClassFieldInitializerName]]
     ConstructorKind m_constructor_kind : 1 { ConstructorKind::Base };        // [[ConstructorKind]]
@@ -147,15 +188,54 @@ public:
     // NB: When non-null, points to a Rust Box<FunctionData> used for
     //     lazy compilation through the Rust pipeline.
     void* m_rust_function_ast { nullptr };
+    // NB: When non-null, points to a Rust Box<DecodedExecutableRecord> used
+    //     for lazy materialization from the bytecode cache.
+    void* m_cached_bytecode_executable { nullptr };
+    // NB: When non-null, points to a Rust Box<PrecompiledFunction> used for
+    //     lazy materialization from freshly compiled bytecode.
+    void* m_precompiled_bytecode_executable { nullptr };
     bool m_use_rust_compilation { false };
 
     void clear_compile_inputs();
+    void clear_non_bytecode_cache_compile_inputs();
 
 private:
+    void initialize_after_construction();
+
     virtual void visit_edges(Visitor&) override;
+    virtual size_t external_memory_size() const override;
     void update_can_inline_call();
 
     bool m_can_inline_call { false };
+};
+
+class JS_API SharedFunctionInstanceDataList {
+    friend class SharedFunctionInstanceData;
+
+public:
+    ~SharedFunctionInstanceDataList();
+
+    void append(SharedFunctionInstanceData&);
+    void visit_edges(GC::Cell::Visitor&);
+    void clear_non_bytecode_cache_compile_inputs();
+    [[nodiscard]] size_t size_slow() const { return m_list.size_slow(); }
+    [[nodiscard]] bool contains_rust_function_ast() const;
+    [[nodiscard]] bool contains_precompiled_bytecode() const;
+
+    template<typename Callback>
+    void for_each(Callback callback)
+    {
+        for (auto& shared_data : m_list)
+            callback(shared_data);
+    }
+
+private:
+    using List = IntrusiveList<&SharedFunctionInstanceData::m_script_or_module_list_node>;
+
+    void clear();
+    void remove(SharedFunctionInstanceData&);
+
+    List m_list;
 };
 
 }

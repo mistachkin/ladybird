@@ -1,12 +1,14 @@
 /*
  * Copyright (c) 2018-2020, Andreas Kling <andreas@ladybird.org>
- * Copyright (c) 2021-2025, Sam Atkins <sam@ladybird.org>
+ * Copyright (c) 2021-2026, Sam Atkins <sam@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #include "Selector.h"
 #include <AK/GenericShorthands.h>
+#include <AK/NeverDestroyed.h>
+#include <LibWeb/CSS/CSSStyleRule.h>
 #include <LibWeb/CSS/Parser/ErrorReporter.h>
 #include <LibWeb/CSS/Serialize.h>
 
@@ -76,15 +78,28 @@ static bool can_selector_use_fast_matches(Selector const& selector)
 Selector::Selector(Vector<CompoundSelector>&& compound_selectors)
     : m_compound_selectors(move(compound_selectors))
 {
-    // FIXME: This assumes that only one pseudo-element is allowed in a selector, and that it appears at the end.
-    //        This is not true in Selectors-4!
+    for (auto const& compound_selector : m_compound_selectors) {
+        if (compound_selector.combinator == Combinator::PseudoElement)
+            m_contains_pseudo_element_transition = true;
+
+        for (auto const& simple_selector : compound_selector.simple_selectors) {
+            if (simple_selector.type != SimpleSelector::Type::PseudoElement)
+                continue;
+
+            if (simple_selector.pseudo_element().type() == PseudoElement::Slotted)
+                m_contains_slotted_pseudo_element = true;
+            if (simple_selector.pseudo_element().type() == PseudoElement::Part)
+                m_contains_part_pseudo_element = true;
+        }
+    }
+
     if (!m_compound_selectors.is_empty()) {
-        for (auto const& simple_selector : m_compound_selectors.last().simple_selectors) {
-            if (simple_selector.type == SimpleSelector::Type::PseudoElement) {
-                if (simple_selector.pseudo_element().type() == PseudoElement::Part)
-                    m_contains_part_pseudo_element = true;
-                m_target_pseudo_element = simple_selector.pseudo_element();
-            }
+        auto const& rightmost_compound = m_compound_selectors.last();
+        if (!rightmost_compound.simple_selectors.is_empty()
+            && rightmost_compound.simple_selectors.first().type == SimpleSelector::Type::PseudoElement) {
+            auto pseudo_element = rightmost_compound.simple_selectors.first().pseudo_element().type();
+            if (!first_is_one_of(pseudo_element, PseudoElement::Slotted, PseudoElement::Part))
+                m_target_pseudo_element = pseudo_element;
         }
     }
 
@@ -186,7 +201,9 @@ void Selector::collect_ancestor_hashes()
         switch (combinator_to_right) {
         case Combinator::Descendant:
         case Combinator::ImmediateChild:
-            // This compound is on the ancestor axis (directly, or as a shared ancestor past a sibling boundary).
+        case Combinator::PseudoElement:
+            // This compound is on the ancestor axis (directly, as the originating element for a pseudo-element,
+            // or as a shared ancestor past a sibling boundary).
             if (append_hashes_from_compound(compound_selector)) {
                 m_can_use_ancestor_filter = (next_hash_index > 0);
                 return;
@@ -584,18 +601,34 @@ String Selector::serialize() const
         case Combinator::Column:
             s.append("|| "sv);
             break;
+        case Combinator::PseudoElement:
         default:
             break;
         }
     }
 
-    // To serialize a selector let s be the empty string, run the steps below for each part of the chain of the selector, and finally return s:
+    // To serialize a selector let s be the empty string, run the steps below for each part of the chain of the
+    // selector, and finally return s:
     for (size_t i = 0; i < compound_selectors().size(); ++i) {
         auto const& compound_selector = compound_selectors()[i];
-        // 1. If there is only one simple selector in the compound selectors which is a universal selector, append the result of serializing the universal selector to s.
+        // 1. If there is only one simple selector in the compound selectors which is a universal selector, append the
+        //    result of serializing the universal selector to s.
         if (compound_selector.simple_selectors.size() == 1
-            && compound_selector.simple_selectors.first().type == Selector::SimpleSelector::Type::Universal) {
-            s.append(compound_selector.simple_selectors.first().serialize());
+            && compound_selector.simple_selectors.first().type == SimpleSelector::Type::Universal) {
+            // NB: Because we've split any compound selectors that contain pseudo-elements, eg `*::before` becomes two
+            //     CompoundSelectors, we have to include the following CompoundSelector as well.
+            bool should_serialize_universal = !compound_selector.is_implicit_universal_anchor;
+            if (should_serialize_universal
+                && i != compound_selectors().size() - 1
+                && compound_selectors()[i + 1].combinator == Combinator::PseudoElement) {
+                auto qualified_name = compound_selector.simple_selectors.first().qualified_name();
+                if (qualified_name.namespace_type == SimpleSelector::QualifiedName::NamespaceType::Default
+                    || qualified_name.namespace_type == SimpleSelector::QualifiedName::NamespaceType::Any) {
+                    should_serialize_universal = false;
+                }
+            }
+            if (should_serialize_universal)
+                s.append(compound_selector.simple_selectors.first().serialize());
         }
         // 2. Otherwise, for each simple selector in the compound selectors that is not a universal selector
         //    of which the namespace prefix maps to a namespace that is not the default namespace
@@ -603,6 +636,8 @@ String Selector::serialize() const
         else {
             for (auto& simple_selector : compound_selector.simple_selectors) {
                 if (simple_selector.type == SimpleSelector::Type::Universal) {
+                    if (compound_selector.is_implicit_universal_anchor)
+                        continue;
                     auto qualified_name = simple_selector.qualified_name();
                     if (qualified_name.namespace_type == SimpleSelector::QualifiedName::NamespaceType::Default
                         || qualified_name.namespace_type == SimpleSelector::QualifiedName::NamespaceType::Any)
@@ -641,6 +676,7 @@ String Selector::serialize() const
             case Combinator::Column:
                 s.append(" || "sv);
                 break;
+            case Combinator::PseudoElement:
             default:
                 break;
             }
@@ -750,6 +786,7 @@ Optional<Selector::CompoundSelector> Selector::CompoundSelector::absolutized(Sel
 
     return CompoundSelector {
         .combinator = this->combinator,
+        .is_implicit_universal_anchor = this->is_implicit_universal_anchor,
         .simple_selectors = absolutized_simple_selectors,
     };
 }
@@ -846,7 +883,7 @@ size_t Selector::sibling_invalidation_distance() const
     m_sibling_invalidation_distance = 0;
     size_t current_distance = 0;
     for (auto const& compound_selector : compound_selectors()) {
-        if (compound_selector.combinator == Combinator::None)
+        if (compound_selector.combinator == Combinator::None || compound_selector.combinator == Combinator::PseudoElement)
             continue;
 
         if (compound_selector.combinator == Combinator::SubsequentSibling) {
@@ -868,7 +905,7 @@ size_t Selector::sibling_invalidation_distance() const
     return *m_sibling_invalidation_distance;
 }
 
-SelectorList adapt_nested_relative_selector_list(SelectorList const& selectors)
+SelectorList adapt_nested_relative_selector_list(SelectorList const& selectors, StyleNestingParent style_nesting_parent)
 {
     // "Nested style rules differ from non-nested rules in the following ways:
     // - A nested style rule accepts a <relative-selector-list> as its prelude (rather than just a <selector-list>).
@@ -878,29 +915,95 @@ SelectorList adapt_nested_relative_selector_list(SelectorList const& selectors)
     // https://drafts.csswg.org/css-nesting-1/#syntax
     // NOTE: We already parsed the selectors as a <relative-selector-list>
 
-    // Nested relative selectors get a `&` inserted at the beginning.
-    // This is, handily, how the spec wants them serialized:
-    // "When serializing a relative selector in a nested style rule, the selector must be absolutized,
-    // with the implied nesting selector inserted."
-    // - https://drafts.csswg.org/css-nesting-1/#cssom
-
-    CSS::SelectorList new_list;
+    SelectorList new_list;
     new_list.ensure_capacity(selectors.size());
     for (auto const& selector : selectors) {
         auto first_combinator = selector->compound_selectors().first().combinator;
-        if (!first_is_one_of(first_combinator, CSS::Selector::Combinator::None, CSS::Selector::Combinator::Descendant)
-            || !selector->contains_the_nesting_selector()) {
-            new_list.append(selector->relative_to(CSS::Selector::SimpleSelector { .type = CSS::Selector::SimpleSelector::Type::Nesting }));
-        } else if (first_combinator == CSS::Selector::Combinator::Descendant) {
+
+        // Nested relative selectors get a `&` inserted at the beginning.
+        // This is, handily, how the spec wants them serialized:
+        // "When serializing a relative selector in a nested style rule, the selector must be absolutized, with the
+        // implied nesting selector inserted."
+        // - https://drafts.csswg.org/css-nesting-1/#cssom
+        // However, if we are directly inside a @scope rule and contain `:scope`, then we do not insert the `&`.
+        bool insert_leading_ampersand = !first_is_one_of(first_combinator, Selector::Combinator::None, Selector::Combinator::Descendant);
+        if (!selector->contains_the_nesting_selector() && style_nesting_parent != StyleNestingParent::Scope)
+            insert_leading_ampersand = true;
+
+        if (insert_leading_ampersand) {
+            new_list.append(selector->relative_to(Selector::SimpleSelector { .type = Selector::SimpleSelector::Type::Nesting }));
+        } else if (first_combinator == Selector::Combinator::Descendant) {
             // Replace leading descendant combinator (whitespace) with none, because we're not actually relative.
             auto copied_compound_selectors = selector->compound_selectors();
-            copied_compound_selectors.first().combinator = CSS::Selector::Combinator::None;
-            new_list.append(CSS::Selector::create(move(copied_compound_selectors)));
+            copied_compound_selectors.first().combinator = Selector::Combinator::None;
+            new_list.append(Selector::create(move(copied_compound_selectors)));
         } else {
             new_list.append(selector);
         }
     }
     return new_list;
+}
+
+SelectorList absolutize_selectors_relative_to(SelectorList const& selectors, GC::Ptr<CSSRule const> parent)
+{
+    // NB: We use `:where(:scope)` to avoid adding specificity.
+    static NeverDestroyed<Selector::SimpleSelector> where_scope_selector { Selector::SimpleSelector {
+        .type = Selector::SimpleSelector::Type::PseudoClass,
+        .value = Selector::SimpleSelector::PseudoClassSelector {
+            .type = PseudoClass::Where,
+            .argument_selector_list = {
+                Selector::create({
+                    Selector::CompoundSelector {
+                        .combinator = Selector::Combinator::None,
+                        .simple_selectors = {
+                            Selector::SimpleSelector {
+                                .type = Selector::SimpleSelector::Type::PseudoClass,
+                                .value = Selector::SimpleSelector::PseudoClassSelector {
+                                    .type = PseudoClass::Scope,
+                                },
+                            },
+                        },
+                    },
+                }),
+            },
+        },
+    } };
+
+    // Replace all occurrences of `&` with the nearest ancestor style rule's selector list wrapped in `:is(...)`,
+    // or if we have no such ancestor, with `:scope`.
+
+    // If we don't have any nesting selectors, we can just use our selectors as they are.
+    if (!any_of(selectors, [](auto const& selector) { return selector->contains_the_nesting_selector(); }))
+        return selectors;
+
+    // Otherwise, build up a new list of selectors with the `&` replaced.
+
+    // First, figure out what we should replace `&` with.
+    // "When used in the selector of a nested style rule, the nesting selector represents the elements matched by the
+    // parent rule. When used in any other context, it represents the same elements as :scope in that context (unless
+    // otherwise defined)."
+    // https://drafts.csswg.org/css-nesting-1/#nest-selector
+    auto parent_selector = [&] -> Selector::SimpleSelector {
+        if (auto const* parent_style_rule = as_if<CSSStyleRule const>(parent.ptr())) {
+            // TODO: If there's only 1, we don't have to use `:is()` for it
+            return Selector::SimpleSelector {
+                .type = Selector::SimpleSelector::Type::PseudoClass,
+                .value = Selector::SimpleSelector::PseudoClassSelector {
+                    .type = PseudoClass::Is,
+                    .argument_selector_list = parent_style_rule->absolutized_selectors(),
+                },
+            };
+        }
+
+        return *where_scope_selector;
+    }();
+
+    SelectorList absolutized_selectors;
+    for (auto const& selector : selectors) {
+        if (auto absolutized = selector->absolutized(parent_selector))
+            absolutized_selectors.append(absolutized.release_nonnull());
+    }
+    return absolutized_selectors;
 }
 
 // https://drafts.csswg.org/css-syntax-3/#anb-microsyntax

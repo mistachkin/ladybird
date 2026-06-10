@@ -33,17 +33,20 @@ public:
     GC::Ref<HTMLCollection> get_elements_by_tag_name(FlyString const&);
     GC::Ref<HTMLCollection> get_elements_by_tag_name_ns(Optional<FlyString>, FlyString const&);
 
-    WebIDL::ExceptionOr<void> prepend(Vector<Variant<GC::Root<Node>, Utf16String>> const& nodes);
-    WebIDL::ExceptionOr<void> append(Vector<Variant<GC::Root<Node>, Utf16String>> const& nodes);
-    WebIDL::ExceptionOr<void> replace_children(Vector<Variant<GC::Root<Node>, Utf16String>> const& nodes);
+    WebIDL::ExceptionOr<void> prepend(ReadonlySpan<Variant<GC::Ref<Node>, Utf16String>> const& nodes);
+    WebIDL::ExceptionOr<void> append(ReadonlySpan<Variant<GC::Ref<Node>, Utf16String>> const& nodes);
+    WebIDL::ExceptionOr<void> replace_children(ReadonlySpan<Variant<GC::Ref<Node>, Utf16String>> const& nodes);
     WebIDL::ExceptionOr<void> move_before(GC::Ref<Node> node, GC::Ptr<Node> child);
 
     GC::Ref<HTMLCollection> get_elements_by_class_name(StringView);
 
     GC::Ptr<Element> get_element_by_id(FlyString const& id) const;
 
-    bool has_child_affected_by_backward_structural_changes() const { return m_has_child_affected_by_backward_structural_changes; }
-    void set_has_child_affected_by_backward_structural_changes(bool value) { m_has_child_affected_by_backward_structural_changes = value; }
+    bool has_child_affected_by_last_child_pseudo_class() const { return m_has_child_affected_by_last_child_pseudo_class; }
+    void set_has_child_affected_by_last_child_pseudo_class(bool value) { m_has_child_affected_by_last_child_pseudo_class = value; }
+
+    bool has_child_affected_by_backward_positional_pseudo_class() const { return m_has_child_affected_by_backward_positional_pseudo_class; }
+    void set_has_child_affected_by_backward_positional_pseudo_class(bool value) { m_has_child_affected_by_backward_positional_pseudo_class = value; }
 
 protected:
     ParentNode(JS::Realm& realm, Document& document, NodeType type)
@@ -60,7 +63,8 @@ protected:
 
 private:
     GC::Ptr<HTMLCollection> m_children;
-    bool m_has_child_affected_by_backward_structural_changes { false };
+    bool m_has_child_affected_by_last_child_pseudo_class { false };
+    bool m_has_child_affected_by_backward_positional_pseudo_class { false };
 };
 
 template<>

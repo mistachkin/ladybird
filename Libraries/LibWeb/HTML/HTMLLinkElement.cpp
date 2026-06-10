@@ -9,8 +9,9 @@
 
 #include <AK/ByteBuffer.h>
 #include <AK/Debug.h>
+#include <LibCore/ImmutableBytes.h>
 #include <LibGfx/Bitmap.h>
-#include <LibGfx/ImmutableBitmap.h>
+#include <LibGfx/DecodedImageFrame.h>
 #include <LibTextCodec/Decoder.h>
 #include <LibURL/URL.h>
 #include <LibWeb/Bindings/HTMLLinkElement.h>
@@ -20,6 +21,7 @@
 #include <LibWeb/DOM/DOMTokenList.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Event.h>
+#include <LibWeb/DOM/HTMLCollection.h>
 #include <LibWeb/DOM/ShadowRoot.h>
 #include <LibWeb/DOMURL/DOMURL.h>
 #include <LibWeb/Fetch/Fetching/Fetching.h>
@@ -148,6 +150,11 @@ void HTMLLinkElement::finished_loading_critical_style_subresources(AnyFailed)
 bool HTMLLinkElement::has_loaded_icon() const
 {
     return m_relationship & Relationship::Icon && m_loaded_icon.has_value();
+}
+
+bool HTMLLinkElement::has_icon_keyword() const
+{
+    return m_relationship & Relationship::Icon;
 }
 
 void HTMLLinkElement::attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
@@ -392,8 +399,15 @@ GC::Ptr<Fetch::Infrastructure::Request> HTMLLinkElement::create_link_request(HTM
 // https://html.spec.whatwg.org/multipage/semantics.html#fetch-and-process-the-linked-resource
 void HTMLLinkElement::fetch_and_process_linked_resource()
 {
+    auto fetch_generation = ++m_current_fetch_generation;
+
+    if (m_fetch_controller) {
+        m_fetch_controller->stop_fetch();
+        document().script_blocking_style_sheet_set().remove(*this);
+    }
+
     if (m_relationship & ~(Relationship::DNSPrefetch | Relationship::Preconnect | Relationship::Preload))
-        default_fetch_and_process_linked_resource();
+        default_fetch_and_process_linked_resource(fetch_generation);
     else if (m_relationship & Relationship::Preload)
         fetch_and_process_linked_preload_resource();
     else if (m_relationship & Relationship::Preconnect)
@@ -403,7 +417,7 @@ void HTMLLinkElement::fetch_and_process_linked_resource()
 }
 
 // https://html.spec.whatwg.org/multipage/semantics.html#default-fetch-and-process-the-linked-resource
-void HTMLLinkElement::default_fetch_and_process_linked_resource()
+void HTMLLinkElement::default_fetch_and_process_linked_resource(u64 fetch_generation)
 {
     // https://html.spec.whatwg.org/multipage/semantics.html#the-link-element:attr-link-href-4
     // If both the href and imagesrcset attributes are absent, then the element does not define a link.
@@ -437,23 +451,28 @@ void HTMLLinkElement::default_fetch_and_process_linked_resource()
 
     // 7. Fetch request with processResponseConsumeBody set to the following steps given response response and null, failure, or a byte sequence bodyBytes:
     Fetch::Infrastructure::FetchAlgorithms::Input fetch_algorithms_input {};
-    fetch_algorithms_input.process_response_consume_body = [this](auto response, auto body_bytes) {
+    fetch_algorithms_input.process_response_consume_body = [this, fetch_generation](auto response, auto body_bytes) {
+        // "if, since the resource in question was fetched, it has become appropriate to fetch it again"
+        if (fetch_generation != m_current_fetch_generation)
+            return;
+        m_fetch_controller = nullptr;
+
         // FIXME: If the response is CORS cross-origin, we must use its internal response to query any of its data. See:
         //        https://github.com/whatwg/html/issues/9355
         response = response->unsafe_response();
 
         // 1. Let success be true.
         bool success = true;
-        ByteBuffer successful_body_bytes;
+        Core::ImmutableBytes const* successful_body_bytes = nullptr;
 
         // 2. If either of the following conditions are met:
         // - bodyBytes is null or failure; or
         // - response's status is not an ok status,
         // then set success to false.
         body_bytes.visit(
-            [&](ByteBuffer& body_bytes) {
+            [&](Core::ImmutableBytes& body_bytes) {
                 if (Fetch::Infrastructure::is_ok_status(response->status()))
-                    successful_body_bytes = move(body_bytes);
+                    successful_body_bytes = &body_bytes;
                 else
                     success = false;
             },
@@ -462,11 +481,9 @@ void HTMLLinkElement::default_fetch_and_process_linked_resource()
         // FIXME: 3. Otherwise, wait for the link resource's critical subresources to finish loading.
 
         // 4. Process the linked resource given el, success, response, and bodyBytes.
-        process_linked_resource(success, response, move(successful_body_bytes));
+        process_linked_resource(success, response, successful_body_bytes);
     };
 
-    if (m_fetch_controller)
-        m_fetch_controller->abort(realm(), {});
     m_fetch_controller = Fetch::Fetching::fetch(realm(), *request, Fetch::Infrastructure::FetchAlgorithms::create(vm(), move(fetch_algorithms_input)));
 }
 
@@ -489,7 +506,9 @@ void HTMLLinkElement::fetch_and_process_linked_dns_prefetch_resource()
 
     // 4. The user agent should resolve an origin given partitionKey and url's origin.
     // FIXME: This should go through Fetch: https://fetch.spec.whatwg.org/#resolve-an-origin
-    ResourceLoader::the().prefetch_dns(url.value());
+    if (!ResourceLoader::is_initialized())
+        return;
+    ResourceLoader::the().prefetch_dns(url.value(), document().fallback_base_url());
 }
 
 // https://html.spec.whatwg.org/multipage/links.html#link-type-preconnect:fetch-and-process-the-linked-resource-2
@@ -519,13 +538,20 @@ void HTMLLinkElement::fetch_and_process_linked_preload_resource()
     options->destination = destination.get<Optional<Fetch::Infrastructure::Request::Destination>>();
 
     // 6. Preload options, with the following steps given a response response:
-    preload(options, GC::Function<void(Fetch::Infrastructure::Response&)>::create(heap(), [this](Fetch::Infrastructure::Response& response) {
+    GC::Weak weak_this { *this };
+    auto fetch_generation = m_current_fetch_generation;
+    preload(options, [weak_this, fetch_generation](Fetch::Infrastructure::Response& response) {
         // 1. If response is a network error, fire an event named error at el. Otherwise, fire an event named load at el.
-        if (response.is_network_error())
-            dispatch_event(DOM::Event::create(realm(), HTML::EventNames::error));
-        else
-            dispatch_event(DOM::Event::create(realm(), HTML::EventNames::load));
-    }));
+        if (auto link_element = weak_this.ptr()) {
+            if (fetch_generation != link_element->m_current_fetch_generation)
+                return;
+            link_element->m_fetch_controller = nullptr;
+            if (response.is_network_error())
+                link_element->dispatch_event(DOM::Event::create(link_element->realm(), HTML::EventNames::error));
+            else
+                link_element->dispatch_event(DOM::Event::create(link_element->realm(), HTML::EventNames::load));
+        }
+    });
 }
 
 // https://html.spec.whatwg.org/multipage/semantics.html#linked-resource-fetch-setup-steps
@@ -605,7 +631,10 @@ void HTMLLinkElement::preconnect(LinkProcessingOptions const& options)
 
     // 8. The user agent should obtain a connection given partitionKey, url's origin, and useCredentials.
     // FIXME: This should go through Fetch: https://fetch.spec.whatwg.org/#concept-connection-obtain
-    ResourceLoader::the().preconnect(*url);
+    if (!ResourceLoader::is_initialized())
+        return;
+    auto source_url = options.document ? options.document->fallback_base_url() : options.environment->api_base_url();
+    ResourceLoader::the().preconnect(*url, source_url);
 }
 
 // https://html.spec.whatwg.org/multipage/links.html#match-preload-type
@@ -663,7 +692,7 @@ static bool type_matches_destination(StringView type, Optional<Fetch::Infrastruc
 }
 
 // https://html.spec.whatwg.org/multipage/links.html#preload
-void HTMLLinkElement::preload(LinkProcessingOptions& options, GC::Ptr<GC::Function<void(Fetch::Infrastructure::Response&)>> process_response)
+void HTMLLinkElement::preload(LinkProcessingOptions& options, Function<void(Fetch::Infrastructure::Response&)> process_response)
 {
     auto& realm = this->realm();
     auto& vm = realm.vm();
@@ -708,14 +737,14 @@ void HTMLLinkElement::preload(LinkProcessingOptions& options, GC::Ptr<GC::Functi
     // 11. Set controller to the result of fetching request, with processResponseConsumeBody set to the following steps
     //     given a response response and null, failure, or a byte sequence bodyBytes:
     Fetch::Infrastructure::FetchAlgorithms::Input fetch_algorithms_input {};
-    fetch_algorithms_input.process_response_consume_body = [&realm, options = GC::Ref { options }, process_response, entry, report_timing](GC::Ref<Fetch::Infrastructure::Response> response, Fetch::Infrastructure::FetchAlgorithms::BodyBytes body_bytes) {
+    fetch_algorithms_input.process_response_consume_body = [&realm, options = GC::Ref { options }, process_response = move(process_response), entry, report_timing](GC::Ref<Fetch::Infrastructure::Response> response, Fetch::Infrastructure::FetchAlgorithms::BodyBytes body_bytes) {
         // FIXME: If the response is CORS cross-origin, we must use its internal response to query any of its data. See:
         //        https://github.com/whatwg/html/issues/9355
         response = response->unsafe_response();
 
         // 1. If bodyBytes is a byte sequence, then set response's body to bodyBytes as a body.
-        if (auto* byte_sequence = body_bytes.get_pointer<ByteBuffer>())
-            response->set_body(Fetch::Infrastructure::byte_sequence_as_body(realm, *byte_sequence));
+        if (auto* byte_sequence = body_bytes.get_pointer<Core::ImmutableBytes>())
+            response->set_body(Fetch::Infrastructure::byte_sequence_as_body(realm, byte_sequence->bytes()));
         // 2. Otherwise, set response to a network error.
         else
             response = Fetch::Infrastructure::Response::network_error(realm.vm(), "Expected preload response to contain a body"_string);
@@ -735,7 +764,7 @@ void HTMLLinkElement::preload(LinkProcessingOptions& options, GC::Ptr<GC::Functi
 
         // 6. If processResponse is given, then call processResponse with response.
         if (process_response)
-            process_response->function()(response);
+            process_response(response);
     };
 
     m_fetch_controller = Fetch::Fetching::fetch(realm, *request, Fetch::Infrastructure::FetchAlgorithms::create(vm, move(fetch_algorithms_input)));
@@ -760,12 +789,19 @@ void HTMLLinkElement::preload(LinkProcessingOptions& options, GC::Ptr<GC::Functi
 }
 
 // https://html.spec.whatwg.org/multipage/semantics.html#process-the-linked-resource
-void HTMLLinkElement::process_linked_resource(bool success, Fetch::Infrastructure::Response const& response, ByteBuffer body_bytes)
+void HTMLLinkElement::process_linked_resource(bool success, Fetch::Infrastructure::Response const& response, Core::ImmutableBytes const* body_bytes)
 {
-    if (m_relationship & Relationship::Icon)
-        process_icon_resource(success, response, move(body_bytes));
-    else if (m_relationship & Relationship::Stylesheet)
-        process_stylesheet_resource(success, response, move(body_bytes));
+    if (success)
+        VERIFY(body_bytes);
+
+    if (m_relationship & Relationship::Icon) {
+        ByteBuffer icon_bytes;
+        if (success)
+            icon_bytes = body_bytes->copy_to_byte_buffer().release_value_but_fixme_should_propagate_errors();
+        process_icon_resource(success, response, move(icon_bytes));
+    } else if (m_relationship & Relationship::Stylesheet) {
+        process_stylesheet_resource(success, response, success ? body_bytes->bytes() : ReadonlyBytes {});
+    }
 }
 
 // AD-HOC: The spec is underspecified for fetching and processing rel="icon" See:
@@ -780,7 +816,7 @@ void HTMLLinkElement::process_icon_resource(bool success, Fetch::Infrastructure:
 }
 
 // https://html.spec.whatwg.org/multipage/links.html#link-type-stylesheet:process-the-linked-resource
-void HTMLLinkElement::process_stylesheet_resource(bool success, Fetch::Infrastructure::Response const& response, ByteBuffer body_bytes)
+void HTMLLinkElement::process_stylesheet_resource(bool success, Fetch::Infrastructure::Response const& response, ReadonlyBytes body_bytes)
 {
     if (!document().is_fully_active())
         return;
@@ -799,8 +835,10 @@ void HTMLLinkElement::process_stylesheet_resource(bool success, Fetch::Infrastru
     if (mime_type_string.has_value() && mime_type_string != "text/css"sv)
         success = false;
 
-    // FIXME: 2. If el no longer creates an external resource link that contributes to the styling processing model,
-    //           or if, since the resource in question was fetched, it has become appropriate to fetch it again, then return.
+    // 2. If el no longer creates an external resource link that contributes to the styling processing model, or
+    //    if, since the resource in question was fetched, it has become appropriate to fetch it again, then return.
+    // NB: The "fetch it again" case is handled by the fetch generation check in
+    //     default_fetch_and_process_linked_resource().
 
     // 3. If el has an associated CSS style sheet, remove the CSS style sheet.
     if (m_loaded_style_sheet) {
@@ -893,9 +931,9 @@ void HTMLLinkElement::process_stylesheet_resource(bool success, Fetch::Infrastru
     }
 }
 
-static NonnullRefPtr<Core::Promise<bool>> decode_favicon(ReadonlyBytes favicon_data, URL::URL const& favicon_url, GC::Ref<DOM::Document> document)
+static NonnullRefPtr<Core::Promise<NonnullRefPtr<Gfx::Bitmap const>>> decode_favicon(ReadonlyBytes favicon_data, URL::URL const& favicon_url, GC::Ref<DOM::Document> document)
 {
-    auto promise = Core::Promise<bool>::construct();
+    auto promise = Core::Promise<NonnullRefPtr<Gfx::Bitmap const>>::construct();
 
     if (favicon_url.basename().ends_with(".svg"sv)) {
         auto result = SVG::SVGDecodedImageData::create(document->realm(), document->page(), favicon_url, favicon_data);
@@ -906,16 +944,13 @@ static NonnullRefPtr<Core::Promise<bool>> decode_favicon(ReadonlyBytes favicon_d
 
         // FIXME: Calculate size based on device pixel ratio
         Gfx::IntSize size { 32, 32 };
-        auto immutable_bitmap = result.release_value()->bitmap(0, size);
-        if (!immutable_bitmap) {
+        auto decoded_frame = result.release_value()->frame(0, size);
+        if (!decoded_frame.has_value()) {
             promise->reject(Error::from_string_view("Failed to get bitmap from SVG favicon"sv));
             return promise;
         }
-        auto bitmap = immutable_bitmap->bitmap();
-        auto navigable = document->navigable();
-        if (navigable && navigable->is_traversable())
-            navigable->traversable_navigable()->page().client().page_did_change_favicon(*bitmap);
-        promise->resolve(true);
+
+        promise->resolve(decoded_frame->bitmap_ref());
         return promise;
     }
 
@@ -928,11 +963,7 @@ static NonnullRefPtr<Core::Promise<bool>> decode_favicon(ReadonlyBytes favicon_d
         auto favicon_bitmap = decoded_image.frames[0].bitmap;
         dbgln_if(IMAGE_DECODER_DEBUG, "Decoded favicon, {}", favicon_bitmap->size());
 
-        auto navigable = document->navigable();
-        if (navigable && navigable->is_traversable())
-            navigable->traversable_navigable()->page().client().page_did_change_favicon(*favicon_bitmap);
-
-        promise->resolve(true);
+        promise->resolve(favicon_bitmap.release_nonnull());
         return {};
     };
 
@@ -941,15 +972,17 @@ static NonnullRefPtr<Core::Promise<bool>> decode_favicon(ReadonlyBytes favicon_d
     return promise;
 }
 
-bool HTMLLinkElement::load_favicon_and_use_if_window_is_active()
+RefPtr<Gfx::Bitmap const> HTMLLinkElement::load_favicon_if_window_is_active()
 {
     if (!has_loaded_icon())
-        return false;
+        return {};
 
     // FIXME: Refactor the caller(s) to handle the async nature of image loading
     auto promise = decode_favicon(m_loaded_icon->icon, m_loaded_icon->url, document());
-    auto result = promise->await();
-    return !result.is_error();
+
+    if (auto result = promise->await(); !result.is_error())
+        return result.release_value();
+    return {};
 }
 
 // https://html.spec.whatwg.org/multipage/links.html#rel-icon:the-link-element-3
@@ -963,6 +996,14 @@ void HTMLLinkElement::load_fallback_favicon_if_needed(GC::Ref<DOM::Document> doc
     if (document->has_active_favicon())
         return;
     if (!document->url().scheme().is_one_of("http"sv, "https"sv))
+        return;
+    auto icon_link_elements = DOM::HTMLCollection::create(*document, DOM::HTMLCollection::Scope::Descendants, [](DOM::Element const& element) {
+        if (!is<HTMLLinkElement>(element))
+            return false;
+
+        return static_cast<HTMLLinkElement const&>(element).has_icon_keyword();
+    });
+    if (icon_link_elements->length() != 0)
         return;
 
     // AD-HOC: Don't load fallback favicon for auxiliary browsing contexts (popup windows).
@@ -996,7 +1037,11 @@ void HTMLLinkElement::load_fallback_favicon_if_needed(GC::Ref<DOM::Document> doc
         auto global = GC::Ref { realm.global_object() };
 
         auto process_body = GC::create_function(realm.heap(), [document, request](ByteBuffer body) {
-            (void)decode_favicon(body, request->url(), document);
+            decode_favicon(body, request->url(), document)
+                ->when_resolved(GC::weak_callback(*document, [](DOM::Document& document, NonnullRefPtr<Gfx::Bitmap const>& favicon) {
+                    if (auto navigable = document.navigable(); navigable && navigable->is_traversable())
+                        navigable->traversable_navigable()->page().client().page_did_change_favicon(*favicon);
+                }));
         });
         auto process_body_error = GC::create_function(realm.heap(), [](JS::Value) {
         });

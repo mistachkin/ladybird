@@ -13,15 +13,16 @@
 #include <QAction>
 #include <QMenu>
 #include <QPointer>
+#include <QToolButton>
 #include <QWidget>
 
 namespace Ladybird {
 
 class ActionObserver final : public WebView::Action::Observer {
 public:
-    static NonnullOwnPtr<ActionObserver> create(WebView::Action& action, QAction& qaction)
+    static NonnullOwnPtr<ActionObserver> create(WebView::Action& action, QAction& qaction, IncludeActionIcon include_action_icon)
     {
-        return adopt_own(*new ActionObserver(action, qaction));
+        return adopt_own(*new ActionObserver(action, qaction, include_action_icon));
     }
 
     virtual void on_text_changed(WebView::Action& action) override
@@ -44,23 +45,40 @@ public:
 
     virtual void on_visible_state_changed(WebView::Action& action) override
     {
-        if (m_action)
+        if (m_action) {
             m_action->setVisible(action.visible());
+
+            for (auto* object : m_action->associatedObjects()) {
+                if (auto* tool_button = as_if<QToolButton>(object))
+                    tool_button->setVisible(action.visible());
+            }
+        }
     }
 
     virtual void on_engaged_state_changed(WebView::Action& action) override
     {
+        if (m_include_action_icon == IncludeActionIcon::No)
+            return;
+
         if (!m_action)
             return;
 
         switch (action.id()) {
+        case WebView::ActionID::ToggleVerticalTabsExpanded:
+            if (auto* parent = as_if<QWidget>(m_action->parent())) {
+                auto icon = action.engaged() ? ChromeIcon::VerticalTabBarCollapse : ChromeIcon::VerticalTabBarExpand;
+                m_action->setIcon(create_chrome_icon(icon, parent->palette()));
+            }
+            break;
+
         case WebView::ActionID::ToggleBookmark:
         case WebView::ActionID::ToggleBookmarkViaToolbar:
             if (auto* parent = as_if<QWidget>(m_action->parent())) {
-                auto const* icon = action.engaged() ? "star-filled" : "star-countour";
-                m_action->setIcon(create_tvg_icon_with_theme_colors(icon, parent->palette()));
+                auto icon = action.engaged() ? ChromeIcon::StarFilled : ChromeIcon::Star;
+                m_action->setIcon(create_chrome_icon(icon, parent->palette()));
             }
             break;
+
         default:
             break;
         }
@@ -73,8 +91,9 @@ public:
     }
 
 private:
-    ActionObserver(WebView::Action& action, QAction& qaction)
+    ActionObserver(WebView::Action& action, QAction& qaction, IncludeActionIcon include_action_icon)
         : m_action(&qaction)
+        , m_include_action_icon(include_action_icon)
     {
         QObject::connect(m_action, &QAction::triggered, [weak_action = action.make_weak_ptr()](bool checked) {
             if (auto action = weak_action.strong_ref()) {
@@ -90,6 +109,29 @@ private:
     }
 
     QPointer<QAction> m_action;
+    IncludeActionIcon m_include_action_icon { IncludeActionIcon::Yes };
+};
+
+class MenuObserver final : public WebView::Menu::Observer {
+public:
+    static NonnullOwnPtr<MenuObserver> create(QMenu& qmenu)
+    {
+        return adopt_own(*new MenuObserver(qmenu));
+    }
+
+    virtual void on_visible_state_changed(WebView::Menu& menu) override
+    {
+        if (m_menu && m_menu->menuAction())
+            m_menu->menuAction()->setVisible(menu.visible());
+    }
+
+private:
+    explicit MenuObserver(QMenu& qmenu)
+        : m_menu(&qmenu)
+    {
+    }
+
+    QPointer<QMenu> m_menu;
 };
 
 template<typename T>
@@ -111,44 +153,56 @@ static QIcon icon_from_base64_png(StringView favicon_base64_png)
     if (!pixmap.loadFromData(decoded.value().data(), static_cast<uint>(decoded.value().size()), "PNG"))
         return {};
 
-    return pixmap.scaled(MENU_ICON_SIZE, MENU_ICON_SIZE, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    QIcon icon;
+    for (auto device_pixel_ratio : ICON_DEVICE_PIXEL_RATIOS) {
+        auto size = MENU_ICON_SIZE * device_pixel_ratio;
+        auto scaled_pixmap = pixmap.scaled(size, size, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        scaled_pixmap.setDevicePixelRatio(device_pixel_ratio);
+        icon.addPixmap(scaled_pixmap);
+    }
+    return icon;
 }
 
-static void initialize_native_control(WebView::Action& action, QAction& qaction, QPalette const& palette)
+static void initialize_native_control(WebView::Action& action, QAction& qaction, QPalette const& palette, IncludeActionIcon include_action_icon)
 {
     switch (action.id()) {
     case WebView::ActionID::NavigateBack:
-        qaction.setIcon(create_tvg_icon_with_theme_colors("back", palette));
+        if (include_action_icon == IncludeActionIcon::Yes)
+            qaction.setIcon(create_chrome_icon(ChromeIcon::Back, palette));
         qaction.setShortcut(QKeySequence::StandardKey::Back);
         break;
     case WebView::ActionID::NavigateForward:
-        qaction.setIcon(create_tvg_icon_with_theme_colors("forward", palette));
+        if (include_action_icon == IncludeActionIcon::Yes)
+            qaction.setIcon(create_chrome_icon(ChromeIcon::Forward, palette));
         qaction.setShortcut(QKeySequence::StandardKey::Forward);
         break;
     case WebView::ActionID::Reload:
-        qaction.setIcon(create_tvg_icon_with_theme_colors("reload", palette));
+        if (include_action_icon == IncludeActionIcon::Yes)
+            qaction.setIcon(create_chrome_icon(ChromeIcon::Reload, palette));
         qaction.setShortcuts({ QKeySequence(Qt::CTRL | Qt::Key_R), QKeySequence(Qt::Key_F5) });
         break;
 
     case WebView::ActionID::CopySelection:
-        qaction.setIcon(load_icon_from_uri("resource://icons/16x16/edit-copy.png"sv));
         qaction.setShortcut(QKeySequence::StandardKey::Copy);
         break;
+    case WebView::ActionID::CutSelection:
+        qaction.setShortcut(QKeySequence::StandardKey::Cut);
+        break;
     case WebView::ActionID::Paste:
-        qaction.setIcon(load_icon_from_uri("resource://icons/16x16/paste.png"sv));
         qaction.setShortcut(QKeySequence::StandardKey::Paste);
         break;
     case WebView::ActionID::SelectAll:
-        qaction.setIcon(load_icon_from_uri("resource://icons/16x16/select-all.png"sv));
         qaction.setShortcut(QKeySequence::StandardKey::SelectAll);
         break;
 
-    case WebView::ActionID::SearchSelectedText:
-        qaction.setIcon(load_icon_from_uri("resource://icons/16x16/find.png"sv));
-        break;
-
     case WebView::ActionID::ToggleBookmark:
+        if (include_action_icon == IncludeActionIcon::Yes)
+            qaction.setIcon(create_chrome_icon(action.engaged() ? ChromeIcon::StarFilled : ChromeIcon::Star, palette));
         qaction.setShortcut(QKeySequence(Qt::CTRL | Qt::Key_D));
+        break;
+    case WebView::ActionID::ToggleBookmarkViaToolbar:
+        if (include_action_icon == IncludeActionIcon::Yes)
+            qaction.setIcon(create_chrome_icon(action.engaged() ? ChromeIcon::StarFilled : ChromeIcon::Star, palette));
         break;
     case WebView::ActionID::ToggleBookmarksBar:
         qaction.setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_B));
@@ -157,19 +211,16 @@ static void initialize_native_control(WebView::Action& action, QAction& qaction,
         if (auto icon = action.base64_png_icon(); icon.has_value())
             qaction.setIcon(icon_from_base64_png(*icon));
         else
-            qaction.setIcon(create_tvg_icon_with_theme_colors("globe", palette));
+            qaction.setIcon(create_chrome_icon(ChromeIcon::Globe, palette));
         break;
 
     case WebView::ActionID::OpenProcessesPage:
-        qaction.setIcon(load_icon_from_uri("resource://icons/16x16/app-system-monitor.png"sv));
         qaction.setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_M));
         break;
     case WebView::ActionID::OpenSettingsPage:
-        qaction.setIcon(load_icon_from_uri("resource://icons/16x16/settings.png"sv));
         qaction.setShortcut(QKeySequence::StandardKey::Preferences);
         break;
     case WebView::ActionID::ToggleDevTools:
-        qaction.setIcon(load_icon_from_uri("resource://icons/browser/dom-tree.png"sv));
         qaction.setShortcuts({
             QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_I),
             QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_C),
@@ -177,58 +228,10 @@ static void initialize_native_control(WebView::Action& action, QAction& qaction,
         });
         break;
     case WebView::ActionID::ViewSource:
-        qaction.setIcon(load_icon_from_uri("resource://icons/16x16/filetype-html.png"sv));
         qaction.setShortcut(QKeySequence(Qt::CTRL | Qt::Key_U));
         break;
 
-    case WebView::ActionID::TakeVisibleScreenshot:
-    case WebView::ActionID::TakeFullScreenshot:
-        qaction.setIcon(load_icon_from_uri("resource://icons/16x16/filetype-image.png"sv));
-        break;
-
-    case WebView::ActionID::OpenInNewTab:
-        qaction.setIcon(load_icon_from_uri("resource://icons/16x16/new-tab.png"sv));
-        break;
-    case WebView::ActionID::CopyURL:
-        qaction.setIcon(load_icon_from_uri("resource://icons/16x16/edit-copy.png"sv));
-        break;
-
-    case WebView::ActionID::OpenImage:
-        qaction.setIcon(load_icon_from_uri("resource://icons/16x16/filetype-image.png"sv));
-        break;
-    case WebView::ActionID::SaveImage:
-        qaction.setIcon(load_icon_from_uri("resource://icons/16x16/download.png"sv));
-        break;
-    case WebView::ActionID::CopyImage:
-        qaction.setIcon(load_icon_from_uri("resource://icons/16x16/edit-copy.png"sv));
-        break;
-
-    case WebView::ActionID::OpenAudio:
-        qaction.setIcon(load_icon_from_uri("resource://icons/16x16/filetype-sound.png"sv));
-        break;
-    case WebView::ActionID::OpenVideo:
-        qaction.setIcon(load_icon_from_uri("resource://icons/16x16/filetype-video.png"sv));
-        break;
-    case WebView::ActionID::PlayMedia:
-        qaction.setIcon(load_icon_from_uri("resource://icons/16x16/play.png"sv));
-        break;
-    case WebView::ActionID::PauseMedia:
-        qaction.setIcon(load_icon_from_uri("resource://icons/16x16/pause.png"sv));
-        break;
-    case WebView::ActionID::MuteMedia:
-        qaction.setIcon(load_icon_from_uri("resource://icons/16x16/audio-volume-muted.png"sv));
-        break;
-    case WebView::ActionID::UnmuteMedia:
-        qaction.setIcon(load_icon_from_uri("resource://icons/16x16/audio-volume-high.png"sv));
-        break;
-    case WebView::ActionID::EnterFullscreen:
-    case WebView::ActionID::ExitFullscreen: // FIXME: Create a separate icon for exiting fullscreen.
-        qaction.setIcon(load_icon_from_uri("resource://icons/16x16/fullscreen.png"sv));
-        break;
-
     case WebView::ActionID::ZoomIn: {
-        qaction.setIcon(load_icon_from_uri("resource://icons/16x16/zoom-in.png"sv));
-
         auto zoom_in_shortcuts = QKeySequence::keyBindings(QKeySequence::StandardKey::ZoomIn);
         auto secondary_zoom_in_shortcut = QKeySequence(Qt::CTRL | Qt::Key_Equal);
 
@@ -239,47 +242,10 @@ static void initialize_native_control(WebView::Action& action, QAction& qaction,
         break;
     }
     case WebView::ActionID::ZoomOut:
-        qaction.setIcon(load_icon_from_uri("resource://icons/16x16/zoom-out.png"sv));
         qaction.setShortcut(QKeySequence::StandardKey::ZoomOut);
         break;
     case WebView::ActionID::ResetZoom:
-        qaction.setIcon(load_icon_from_uri("resource://icons/16x16/zoom-reset.png"sv));
         qaction.setShortcut(QKeySequence(Qt::CTRL | Qt::Key_0));
-        break;
-
-    case WebView::ActionID::DumpSessionHistoryTree:
-        qaction.setIcon(load_icon_from_uri("resource://icons/16x16/history.png"sv));
-        break;
-    case WebView::ActionID::DumpDOMTree:
-        qaction.setIcon(load_icon_from_uri("resource://icons/browser/dom-tree.png"sv));
-        break;
-    case WebView::ActionID::DumpLayoutTree:
-    case WebView::ActionID::DumpPaintTree:
-    case WebView::ActionID::DumpDisplayList:
-        qaction.setIcon(load_icon_from_uri("resource://icons/16x16/layout.png"sv));
-        break;
-    case WebView::ActionID::DumpStackingContextTree:
-        qaction.setIcon(load_icon_from_uri("resource://icons/16x16/layers.png"sv));
-        break;
-    case WebView::ActionID::DumpStyleSheets:
-    case WebView::ActionID::DumpStyles:
-        qaction.setIcon(load_icon_from_uri("resource://icons/16x16/filetype-css.png"sv));
-        break;
-    case WebView::ActionID::DumpCSSErrors:
-        qaction.setIcon(load_icon_from_uri("resource://icons/16x16/error.png"sv));
-        break;
-    case WebView::ActionID::DumpCookies:
-        qaction.setIcon(load_icon_from_uri("resource://icons/browser/cookie.png"sv));
-        break;
-    case WebView::ActionID::DumpLocalStorage:
-        qaction.setIcon(load_icon_from_uri("resource://icons/browser/local-storage.png"sv));
-        break;
-    case WebView::ActionID::ShowLineBoxBorders:
-        qaction.setIcon(load_icon_from_uri("resource://icons/16x16/box.png"sv));
-        break;
-    case WebView::ActionID::CollectGarbage:
-        qaction.setIcon(load_icon_from_uri("resource://icons/16x16/trash-can.png"sv));
-        qaction.setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_G));
         break;
 
     default:
@@ -289,31 +255,27 @@ static void initialize_native_control(WebView::Action& action, QAction& qaction,
     if (action.is_checkable())
         qaction.setCheckable(true);
 
-    action.add_observer(ActionObserver::create(action, qaction));
+    action.add_observer(ActionObserver::create(action, qaction, include_action_icon));
     add_properties(qaction, action);
 }
 
 static void add_items_to_menu(QMenu& qmenu, QWidget& parent, WebView::Menu& menu)
 {
+    menu.add_observer(MenuObserver::create(qmenu));
     add_properties(qmenu, menu);
 
     for (auto& menu_item : menu.items()) {
         menu_item.visit(
             [&](NonnullRefPtr<WebView::Action>& action) {
-                auto* qaction = create_application_action(parent, action);
+                auto* qaction = create_application_action(parent, action, IncludeActionIcon::No);
                 qmenu.addAction(qaction);
-
-                if (action->id() == WebView::ActionID::SpoofUserAgent || action->id() == WebView::ActionID::NavigatorCompatibilityMode) {
-                    if (qmenu.icon().isNull())
-                        qmenu.setIcon(load_icon_from_uri("resource://icons/16x16/spoof.png"sv));
-                }
             },
             [&](NonnullRefPtr<WebView::Menu> const& submenu) {
                 auto* qsubmenu = new QMenu(qstring_from_ak_string(submenu->title()), &qmenu);
                 add_items_to_menu(*qsubmenu, parent, submenu);
 
                 if (submenu->render_group_icon())
-                    qsubmenu->setIcon(create_tvg_icon_with_theme_colors("folder", parent.palette()));
+                    qsubmenu->setIcon(create_chrome_icon(ChromeIcon::Folder, parent.palette()));
 
                 add_properties(*qsubmenu, *submenu);
                 qmenu.addMenu(qsubmenu);
@@ -349,10 +311,10 @@ QMenu* create_context_menu(QWidget& parent, WebContentView& view, WebView::Menu&
     return application_menu;
 }
 
-QAction* create_application_action(QWidget& parent, WebView::Action& action)
+QAction* create_application_action(QWidget& parent, WebView::Action& action, IncludeActionIcon include_action_icon)
 {
     auto* qaction = new QAction(&parent);
-    initialize_native_control(action, *qaction, parent.palette());
+    initialize_native_control(action, *qaction, parent.palette(), include_action_icon);
     return qaction;
 }
 

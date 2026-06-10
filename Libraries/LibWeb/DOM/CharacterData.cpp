@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibJS/Runtime/ExternalMemory.h>
 #include <LibUnicode/Segmenter.h>
 #include <LibWeb/Bindings/CharacterData.h>
 #include <LibWeb/CSS/Invalidation/LanguageInvalidator.h>
@@ -12,7 +13,9 @@
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/MutationType.h>
 #include <LibWeb/DOM/Range.h>
+#include <LibWeb/DOM/Text.h>
 #include <LibWeb/Layout/TextNode.h>
+#include <LibWeb/Layout/TextOffsetMapping.h>
 
 namespace Web::DOM {
 
@@ -30,6 +33,11 @@ void CharacterData::initialize(JS::Realm& realm)
 {
     WEB_SET_PROTOTYPE_FOR_INTERFACE(CharacterData);
     Base::initialize(realm);
+}
+
+size_t CharacterData::external_memory_size() const
+{
+    return Node::external_memory_size() + JS::utf16_string_external_memory_size(m_data);
 }
 
 // https://dom.spec.whatwg.org/#dom-characterdata-data
@@ -132,22 +140,30 @@ WebIDL::ExceptionOr<void> CharacterData::replace_data(size_t offset, size_t coun
         return {};
 
     // NB: Called during DOM text mutation, layout is stale.
-    if (auto* text_node = as_if<Layout::TextNode>(unsafe_layout_node())) {
-        // NOTE: Since the text node's data has changed, we need to invalidate the text for rendering.
-        //       This ensures that the new text is reflected in layout, even if we don't end up
-        //       doing a full layout tree rebuild.
-        text_node->invalidate_text_for_rendering();
+    if (is<Text>(*this)) {
+        if (is<Layout::TextSliceNode>(unsafe_layout_node())) {
+            // NB: Slice nodes cache data that is calculated at layout tree construction time.
+            // So for them, we need to invalidate the layout tree, not just layout.
+            if (parent())
+                parent()->set_needs_layout_tree_update(true, SetNeedsLayoutTreeUpdateReason::CharacterDataReplaceData);
+        } else if (auto* text_layout_node = as_if<Layout::TextNode>(unsafe_layout_node())) {
+            // NB: Since the text node's data has changed, we need to invalidate the text for rendering.
+            //     This ensures that the new text is reflected in layout, even if we don't end up doing a full layout
+            //     tree rebuild.
+            text_layout_node->invalidate_text_for_rendering();
 
-        // We also need to relayout.
-        text_node->set_needs_layout_update(SetNeedsLayoutReason::CharacterDataReplaceData);
+            // We also need to relayout.
+            text_layout_node->set_needs_layout_update(SetNeedsLayoutReason::CharacterDataReplaceData);
+        }
     }
 
     document().bump_character_data_version();
 
     if (m_grapheme_segmenter)
         m_grapheme_segmenter->set_segmented_text(m_data);
-    if (m_line_segmenter)
-        m_line_segmenter->set_segmented_text(m_data);
+    // The line segmenter may be the ASCII fast-path variant, which only accepts a subset of inputs; let the
+    // lazy getter re-pick the implementation against the new data.
+    m_line_segmenter = nullptr;
     if (m_word_segmenter)
         m_word_segmenter->set_segmented_text(m_data);
 
@@ -190,8 +206,12 @@ Unicode::Segmenter& CharacterData::grapheme_segmenter() const
 Unicode::Segmenter& CharacterData::line_segmenter() const
 {
     if (!m_line_segmenter) {
-        m_line_segmenter = document().line_segmenter().clone();
-        m_line_segmenter->set_segmented_text(m_data);
+        if (auto ascii = Unicode::Segmenter::try_create_for_ascii_line(m_data.utf16_view())) {
+            m_line_segmenter = ascii.release_nonnull();
+        } else {
+            m_line_segmenter = document().line_segmenter().clone();
+            m_line_segmenter->set_segmented_text(m_data);
+        }
     }
 
     return *m_line_segmenter;

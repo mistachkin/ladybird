@@ -27,6 +27,7 @@ public:
     virtual void attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
 
     void svg_element_changed(SVGElement&);
+    void svg_element_changed_before_document_complete(SVGElement&);
     void svg_element_removed(SVGElement&);
 
     GC::Ref<SVGAnimatedLength> x() const;
@@ -47,7 +48,7 @@ private:
 
     virtual bool is_svg_use_element() const override { return true; }
 
-    virtual GC::Ptr<Layout::Node> create_layout_node(GC::Ref<CSS::ComputedProperties>) override;
+    virtual RefPtr<Layout::Node> create_layout_node(CSS::ComputedProperties const&) override;
 
     void process_the_url(Optional<String> const& href);
 
@@ -65,6 +66,7 @@ private:
 
     Optional<float> m_x;
     Optional<float> m_y;
+    bool m_needs_document_complete_reclone { false };
 
     Optional<URL::URL> m_href;
 

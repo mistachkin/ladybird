@@ -31,6 +31,8 @@ class SkSurface;
 
 namespace Gfx {
 
+class SharedImage;
+
 class PaintingSurface : public AtomicRefCounted<PaintingSurface> {
 public:
     enum class Origin {
@@ -40,7 +42,7 @@ public:
 
     Function<void(PaintingSurface&)> on_flush;
 
-    static NonnullRefPtr<PaintingSurface> create_with_size(IntSize size, BitmapFormat color_type, AlphaType alpha_type);
+    static NonnullRefPtr<PaintingSurface> create_with_size(IntSize size, BitmapFormat color_type, AlphaType alpha_type, RefPtr<SkiaBackendContext> = {});
     static NonnullRefPtr<PaintingSurface> wrap_bitmap(Bitmap&);
 
 #ifdef AK_OS_MACOS
@@ -51,7 +53,10 @@ public:
     static NonnullRefPtr<PaintingSurface> create_from_vkimage(NonnullRefPtr<SkiaBackendContext> context, NonnullRefPtr<VulkanImage> vulkan_image, Origin origin);
 #endif
 
-    void read_into_bitmap(Bitmap&);
+    NonnullRefPtr<Bitmap> snapshot_bitmap() const;
+    SharedImage snapshot_into_shared_image() const;
+
+    void read_into_bitmap(Bitmap&) const;
     void write_from_bitmap(Bitmap const&);
 
     void notify_content_will_change();
@@ -70,9 +75,6 @@ public:
     void flush();
 
     ~PaintingSurface();
-
-    void lock_context() const;
-    void unlock_context() const;
 
 private:
     struct Impl;

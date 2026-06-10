@@ -8,6 +8,7 @@
 
 #include <LibUnicode/CharacterTypes.h>
 #include <LibUnicode/Segmenter.h>
+#include <LibWeb/CSS/Invalidation/FormControlInvalidator.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/EditingHostManager.h>
 #include <LibWeb/DOM/Event.h>
@@ -79,7 +80,7 @@ void FormAssociatedElement::reset_algorithm()
     if (!html_element.is_form_associated_custom_element())
         return;
 
-    GC::RootVector<JS::Value> empty_arguments { html_element.heap() };
+    GC::RootVector<JS::Value> empty_arguments;
     html_element.enqueue_a_custom_element_callback_reaction(CustomElementReactionNames::formResetCallback, move(empty_arguments));
 }
 
@@ -109,6 +110,9 @@ void FormAssociatedElement::set_custom_validity(String& error)
 
     // 2. Set the custom validity error message to error.
     m_custom_validity_error_message = error;
+
+    // AD-HOC: Setting a custom validity error changes which validity pseudo-classes match.
+    CSS::Invalidation::invalidate_style_after_validity_change(form_associated_element_to_html_element());
 }
 
 bool FormAssociatedElement::enabled() const
@@ -254,7 +258,7 @@ void FormAssociatedElement::reset_form_owner()
 
     // See the AD-HOC comment above.
     if (m_form != old_form && html_element.is_form_associated_custom_element()) {
-        GC::RootVector<JS::Value> arguments { html_element.heap() };
+        GC::RootVector<JS::Value> arguments;
         arguments.append(JS::Value(m_form.ptr()));
         html_element.enqueue_a_custom_element_callback_reaction(CustomElementReactionNames::formAssociatedCallback, move(arguments));
     }
@@ -297,7 +301,7 @@ void FormAssociatedElement::update_face_disabled_state()
 
     m_face_disabled_state = is_disabled;
 
-    GC::RootVector<JS::Value> arguments { html_element.heap() };
+    GC::RootVector<JS::Value> arguments;
     arguments.append(JS::Value(is_disabled));
     html_element.enqueue_a_custom_element_callback_reaction(CustomElementReactionNames::formDisabledCallback, move(arguments));
 }
@@ -321,8 +325,7 @@ String FormAssociatedElement::form_action() const
         return html_element.document().url_string();
     }
 
-    auto document_base_url = html_element.document().base_url();
-    if (auto maybe_url = document_base_url.complete_url(form_action_attribute.value()); maybe_url.has_value())
+    if (auto maybe_url = html_element.document().encoding_parse_url(form_action_attribute.value()); maybe_url.has_value())
         return maybe_url->to_string();
     return {};
 }
@@ -407,7 +410,7 @@ bool FormAssociatedElement::report_validity_steps()
         // FIXME: Does this align with other browsers?
         if (report && element.check_visibility({})) {
             run_focusing_steps(&element);
-            DOM::ScrollIntoViewOptions scroll_options;
+            Bindings::ScrollIntoViewOptions scroll_options;
             scroll_options.block = Bindings::ScrollLogicalPosition::Nearest;
             scroll_options.inline_ = Bindings::ScrollLogicalPosition::Nearest;
             scroll_options.behavior = Bindings::ScrollBehavior::Instant;
@@ -592,7 +595,7 @@ bool FormAssociatedElement::suffering_from_a_custom_error() const
     return !m_custom_validity_error_message.is_empty();
 }
 
-void FormAssociatedElement::set_face_validity_flags(Badge<ElementInternals>, ValidityStateFlags const& value)
+void FormAssociatedElement::set_face_validity_flags(Badge<ElementInternals>, Bindings::ValidityStateFlags const& value)
 {
     m_face_validity_flags = value;
 }
@@ -1118,7 +1121,7 @@ void FormAssociatedTextControlElement::scroll_cursor_into_view()
     if (!text_node)
         return;
 
-    auto* paintable = text_node->paintable();
+    auto paintable = text_node->paintable();
     if (!paintable)
         return;
 
@@ -1140,7 +1143,7 @@ void FormAssociatedTextControlElement::selection_was_changed(SelectionSource sou
     if (!text_node)
         return;
     // NB: Called during selection change handling, layout may be stale.
-    auto* text_paintable = text_node->unsafe_paintable();
+    auto text_paintable = text_node->unsafe_paintable();
     if (!text_paintable)
         return;
 
@@ -1215,6 +1218,34 @@ void FormAssociatedTextControlElement::move_cursor_to_end(CollapseSelection coll
         collapse_selection_to_offset(text_node->length());
     } else {
         m_selection_end = text_node->length();
+    }
+    selection_was_changed(SelectionSource::UI);
+}
+
+void FormAssociatedTextControlElement::move_cursor_to_start_of_current_line(CollapseSelection collapse)
+{
+    auto text_node = form_associated_element_to_text_node();
+    if (!text_node)
+        return;
+    auto new_offset = find_line_start(text_node->data().utf16_view(), m_selection_end);
+    if (collapse == CollapseSelection::Yes) {
+        collapse_selection_to_offset(new_offset);
+    } else {
+        m_selection_end = new_offset;
+    }
+    selection_was_changed(SelectionSource::UI);
+}
+
+void FormAssociatedTextControlElement::move_cursor_to_end_of_current_line(CollapseSelection collapse)
+{
+    auto text_node = form_associated_element_to_text_node();
+    if (!text_node)
+        return;
+    auto new_offset = find_line_end(text_node->data().utf16_view(), m_selection_end);
+    if (collapse == CollapseSelection::Yes) {
+        collapse_selection_to_offset(new_offset);
+    } else {
+        m_selection_end = new_offset;
     }
     selection_was_changed(SelectionSource::UI);
 }
@@ -1354,6 +1385,26 @@ GC::Ptr<DOM::Position> FormAssociatedTextControlElement::cursor_position() const
 GC::Ref<JS::Cell> FormAssociatedTextControlElement::as_cell()
 {
     return text_control_to_html_element();
+}
+
+}
+
+namespace Web::DOM {
+
+template<>
+HTML::FormAssociatedTextControlElement* Node::fast_as<HTML::FormAssociatedTextControlElement>()
+{
+    if (auto* input = as_if<HTML::HTMLInputElement>(*this))
+        return input;
+    if (auto* textarea = as_if<HTML::HTMLTextAreaElement>(*this))
+        return textarea;
+    return nullptr;
+}
+
+template<>
+HTML::FormAssociatedTextControlElement const* Node::fast_as<HTML::FormAssociatedTextControlElement>() const
+{
+    return const_cast<Node&>(*this).fast_as<HTML::FormAssociatedTextControlElement>();
 }
 
 }

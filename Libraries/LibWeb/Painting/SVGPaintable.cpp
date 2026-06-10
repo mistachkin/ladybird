@@ -64,19 +64,21 @@ CSSPixelRect SVGPaintable::compute_absolute_rect() const
 {
     if (auto* svg_svg_box = layout_box().first_ancestor_of_type<Layout::SVGSVGBox>()) {
         CSSPixelRect rect { offset(), content_size() };
-        for (Layout::Box const* ancestor = svg_svg_box; ancestor; ancestor = ancestor->containing_block())
-            rect.translate_by(ancestor->paintable_box()->offset());
+        for (Layout::Box const* ancestor = svg_svg_box; ancestor; ancestor = ancestor->containing_block()) {
+            if (auto paintable_box = ancestor->paintable_box())
+                rect.translate_by(paintable_box->offset());
+        }
         return rect;
     }
     return PaintableBox::compute_absolute_rect();
 }
 
-ShouldAntiAlias SVGPaintable::should_anti_alias() const
+Gfx::ShouldAntiAlias SVGPaintable::should_anti_alias() const
 {
     auto shape_rendering = computed_values().shape_rendering();
     if (first_is_one_of(shape_rendering, CSS::ShapeRendering::Optimizespeed, CSS::ShapeRendering::Crispedges))
-        return ShouldAntiAlias::No;
-    return ShouldAntiAlias::Yes;
+        return Gfx::ShouldAntiAlias::No;
+    return Gfx::ShouldAntiAlias::Yes;
 }
 
 }

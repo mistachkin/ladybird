@@ -146,15 +146,6 @@
     }
 }
 
-- (void)updateBookmarksBarDisplay:(bool)show_bookmarks_bar
-{
-    for (TabController* controller in self.managed_tabs) {
-        if (auto* tab = (Tab*)[controller window]; ([tab styleMask] & NSWindowStyleMaskFullScreen) == 0) {
-            [tab updateBookmarksBarDisplay:show_bookmarks_bar];
-        }
-    }
-}
-
 - (void)onDevtoolsEnabled
 {
     if (!self.info_bar) {
@@ -191,6 +182,13 @@
 
     auto* controller = (TabController*)[current_tab windowController];
     [controller focusLocationToolbarItem];
+}
+
+- (void)createNewWindow:(id)sender
+{
+    [self createNewTab:WebView::Application::settings().new_tab_page_url()
+               fromTab:nil
+           activateTab:Web::HTML::ActivateTab::Yes];
 }
 
 - (nonnull TabController*)createChildTab:(Web::HTML::ActivateTab)activate_tab
@@ -270,6 +268,9 @@
     auto* menu = [[NSMenuItem alloc] init];
     auto* submenu = [[NSMenu alloc] initWithTitle:@"File"];
 
+    [submenu addItem:[[NSMenuItem alloc] initWithTitle:@"New Window"
+                                                action:@selector(createNewWindow:)
+                                         keyEquivalent:@"n"]];
     [submenu addItem:[[NSMenuItem alloc] initWithTitle:@"New Tab"
                                                 action:@selector(createNewTab:)
                                          keyEquivalent:@"t"]];
@@ -299,10 +300,7 @@
                                          keyEquivalent:@"y"]];
     [submenu addItem:[NSMenuItem separatorItem]];
 
-    [submenu addItem:[[NSMenuItem alloc] initWithTitle:@"Cut"
-                                                action:@selector(cut:)
-                                         keyEquivalent:@"x"]];
-
+    [submenu addItem:Ladybird::create_application_menu_item(WebView::Application::the().cut_selection_action())];
     [submenu addItem:Ladybird::create_application_menu_item(WebView::Application::the().copy_selection_action())];
     [submenu addItem:Ladybird::create_application_menu_item(WebView::Application::the().paste_action())];
     [submenu addItem:[NSMenuItem separatorItem]];
@@ -332,35 +330,11 @@
     auto* menu = [[NSMenuItem alloc] init];
     auto* submenu = [[NSMenu alloc] initWithTitle:@"View"];
 
-    auto* zoom_menu = Ladybird::create_application_menu(WebView::Application::the().zoom_menu());
-    auto* zoom_menu_item = [[NSMenuItem alloc] initWithTitle:[zoom_menu title]
-                                                      action:nil
-                                               keyEquivalent:@""];
-    [zoom_menu_item setSubmenu:zoom_menu];
-
-    auto* color_scheme_menu = Ladybird::create_application_menu(WebView::Application::the().color_scheme_menu());
-    auto* color_scheme_menu_item = [[NSMenuItem alloc] initWithTitle:[color_scheme_menu title]
-                                                              action:nil
-                                                       keyEquivalent:@""];
-    [color_scheme_menu_item setSubmenu:color_scheme_menu];
-
-    auto* contrast_menu = Ladybird::create_application_menu(WebView::Application::the().contrast_menu());
-    auto* contrast_menu_item = [[NSMenuItem alloc] initWithTitle:[contrast_menu title]
-                                                          action:nil
-                                                   keyEquivalent:@""];
-    [contrast_menu_item setSubmenu:contrast_menu];
-
-    auto* motion_menu = Ladybird::create_application_menu(WebView::Application::the().motion_menu());
-    auto* motion_menu_item = [[NSMenuItem alloc] initWithTitle:[motion_menu title]
-                                                        action:nil
-                                                 keyEquivalent:@""];
-    [motion_menu_item setSubmenu:motion_menu];
-
-    [submenu addItem:zoom_menu_item];
+    [submenu addItem:Ladybird::create_application_menu_item(WebView::Application::the().zoom_menu())];
     [submenu addItem:[NSMenuItem separatorItem]];
-    [submenu addItem:color_scheme_menu_item];
-    [submenu addItem:contrast_menu_item];
-    [submenu addItem:motion_menu_item];
+    [submenu addItem:Ladybird::create_application_menu_item(WebView::Application::the().color_scheme_menu())];
+    [submenu addItem:Ladybird::create_application_menu_item(WebView::Application::the().contrast_menu())];
+    [submenu addItem:Ladybird::create_application_menu_item(WebView::Application::the().motion_menu())];
     [submenu addItem:[NSMenuItem separatorItem]];
 
     [menu setSubmenu:submenu];
@@ -387,32 +361,19 @@
 
 - (NSMenuItem*)createBookmarksMenu
 {
-    auto* menu = [[NSMenuItem alloc] init];
-
-    self.bookmarks_menu = Ladybird::create_application_menu(WebView::Application::the().bookmarks_menu());
-    [menu setSubmenu:self.bookmarks_menu];
-
+    auto* menu = Ladybird::create_application_menu_item(WebView::Application::the().bookmarks_menu());
+    self.bookmarks_menu = [menu submenu];
     return menu;
 }
 
 - (NSMenuItem*)createInspectMenu
 {
-    auto* menu = [[NSMenuItem alloc] init];
-
-    auto* submenu = Ladybird::create_application_menu(WebView::Application::the().inspect_menu());
-    [menu setSubmenu:submenu];
-
-    return menu;
+    return Ladybird::create_application_menu_item(WebView::Application::the().inspect_menu());
 }
 
 - (NSMenuItem*)createDebugMenu
 {
-    auto* menu = [[NSMenuItem alloc] init];
-
-    auto* submenu = Ladybird::create_application_menu(WebView::Application::the().debug_menu());
-    [menu setSubmenu:submenu];
-
-    return menu;
+    return Ladybird::create_application_menu_item(WebView::Application::the().debug_menu());
 }
 
 - (NSMenuItem*)createWindowMenu

@@ -12,32 +12,21 @@
 #include <LibWeb/Bindings/FontFace.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/CSS/ParsedFontFace.h>
+#include <LibWeb/CSS/StyleValues/ComputationContext.h>
+#include <LibWeb/WebIDL/Buffers.h>
 
 namespace Web::CSS {
 
 class FontLoader;
-
-struct FontFaceDescriptors {
-    String style = "normal"_string;
-    String weight = "normal"_string;
-    String stretch = "normal"_string;
-    String unicode_range = "U+0-10FFFF"_string;
-    String feature_settings = "normal"_string;
-    String variation_settings = "normal"_string;
-    String display = "auto"_string;
-    String ascent_override = "normal"_string;
-    String descent_override = "normal"_string;
-    String line_gap_override = "normal"_string;
-};
 
 class FontFace final : public Bindings::PlatformObject {
     WEB_PLATFORM_OBJECT(FontFace, Bindings::PlatformObject);
     GC_DECLARE_ALLOCATOR(FontFace);
 
 public:
-    using FontFaceSource = Variant<String, GC::Root<WebIDL::BufferSource>>;
+    using FontFaceSource = FlattenVariant<Variant<String>, WebIDL::BufferSourceVariant>;
 
-    [[nodiscard]] static GC::Ref<FontFace> construct_impl(JS::Realm&, String family, FontFaceSource source, FontFaceDescriptors const& descriptors);
+    [[nodiscard]] static GC::Ref<FontFace> construct_impl(JS::Realm&, String family, FontFaceSource source, Bindings::FontFaceDescriptors const& descriptors);
     [[nodiscard]] static GC::Ref<FontFace> create_css_connected(JS::Realm&, CSSFontFaceRule&);
     virtual ~FontFace() override;
 
@@ -129,6 +118,8 @@ private:
     void reject_status_promise(JS::Value reason);
 
     Optional<FontComputer&> font_computer() const;
+
+    [[nodiscard]] Optional<ComputationContext> computation_context() const;
 
     // FIXME: Should we be storing StyleValues instead?
     String m_family;

@@ -6,12 +6,13 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/ByteBuffer.h>
 #include <AK/Debug.h>
 #include <AK/LexicalPath.h>
+#include <AK/NeverDestroyed.h>
 #include <AK/Utf16FlyString.h>
 #include <LibCore/Promise.h>
 #include <LibCore/Resource.h>
-#include <LibGfx/ImageFormats/ImageDecoder.h>
 #include <LibJS/Runtime/NativeFunction.h>
 #include <LibTextCodec/Decoder.h>
 #include <LibURL/URL.h>
@@ -46,6 +47,14 @@ static void convert_to_xml_error_document(DOM::Document& document, Utf16String e
     MUST(body_element->append_child(document.realm().create<DOM::Text>(document, move(error_string))));
     document.remove_all_children();
     MUST(document.append_child(html_element));
+
+    if (document.ready_for_post_load_tasks())
+        return;
+
+    if (!document.is_completely_loaded())
+        document.completely_finish_loading();
+
+    document.set_ready_for_post_load_tasks(true);
 }
 
 bool build_xml_document(DOM::Document& document, ByteBuffer const& data, Optional<String> content_encoding)
@@ -56,8 +65,11 @@ bool build_xml_document(DOM::Document& document, ByteBuffer const& data, Optiona
     if (content_encoding.has_value())
         decoder = TextCodec::decoder_for(*content_encoding);
     if (!decoder.has_value()) {
-        auto encoding = HTML::run_encoding_sniffing_algorithm(document, data);
-        decoder = TextCodec::decoder_for(encoding);
+        // https://www.w3.org/TR/xml/#charencoding
+        // [...] it is a fatal error [...] for an entity which begins with neither a Byte Order Mark nor an encoding
+        // declaration to use an encoding other than UTF-8.
+        auto bom_encoding = HTML::run_bom_sniff(data);
+        decoder = TextCodec::decoder_for(bom_encoding.value_or("UTF-8"));
     }
     VERIFY(decoder.has_value());
     // Well-formed XML documents contain only properly encoded characters
@@ -86,6 +98,8 @@ static WebIDL::ExceptionOr<GC::Ref<DOM::Document>> load_html_document(HTML::Navi
     if (document->url_string() == "about:blank"_string
         && navigation_params.response->body()->length().value_or(0) == 0) {
         TRY(document->populate_with_html_head_and_body());
+        if (navigation_params.navigable && navigation_params.navigable->is_top_level_traversable())
+            document->set_supported_color_schemes({ "light"_string, "dark"_string });
         HTML::HTMLParser::the_end(document);
     }
 
@@ -176,8 +190,11 @@ static WebIDL::ExceptionOr<GC::Ref<DOM::Document>> load_xml_document(HTML::Navig
         if (content_encoding.has_value())
             decoder = TextCodec::decoder_for(*content_encoding);
         if (!decoder.has_value()) {
-            auto encoding = HTML::run_encoding_sniffing_algorithm(document, data, mime);
-            decoder = TextCodec::decoder_for(encoding);
+            // https://www.w3.org/TR/xml/#charencoding
+            // [...] it is a fatal error [...] for an entity which begins with neither a Byte Order Mark nor an encoding
+            // declaration to use an encoding other than UTF-8.
+            auto bom_encoding = HTML::run_bom_sniff(data);
+            decoder = TextCodec::decoder_for(bom_encoding.value_or("UTF-8"));
         }
         VERIFY(decoder.has_value());
         // Well-formed XML documents contain only properly encoded characters
@@ -185,9 +202,6 @@ static WebIDL::ExceptionOr<GC::Ref<DOM::Document>> load_xml_document(HTML::Navig
             // FIXME: Insert error message into the document.
             dbgln("XML Document contains improperly-encoded characters");
             convert_to_xml_error_document(document, "XML Document contains improperly-encoded characters"_utf16);
-
-            // NB: This ensures that the `load` event gets fired for the frame loading this document.
-            document->completely_finish_loading();
             return;
         }
         auto source = decoder->to_utf8(data);
@@ -195,9 +209,6 @@ static WebIDL::ExceptionOr<GC::Ref<DOM::Document>> load_xml_document(HTML::Navig
             // FIXME: Insert error message into the document.
             dbgln("Failed to decode XML document: {}", source.error());
             convert_to_xml_error_document(document, Utf16String::formatted("Failed to decode XML document: {}", source.error()));
-
-            // NB: This ensures that the `load` event gets fired for the frame loading this document.
-            document->completely_finish_loading();
             return;
         }
         auto run_xml_parser = [document, source_string = source.release_value()] {
@@ -208,8 +219,6 @@ static WebIDL::ExceptionOr<GC::Ref<DOM::Document>> load_xml_document(HTML::Navig
                 // FIXME: Insert error message into the document.
                 dbgln("Failed to parse XML document: {}", result.error());
                 convert_to_xml_error_document(document, Utf16String::formatted("Failed to parse XML document: {}", result.error()));
-
-                // NB: XMLDocumentBuilder ensures that the `load` event gets fired. We don't need to do anything else here.
             }
         };
         if (document->ready_to_run_scripts()) {
@@ -413,7 +422,7 @@ static GC::Ref<DOM::Document> load_pdf_document(HTML::NavigationParams const& na
     VERIFY(navigation_params.response->url().has_value());
     auto pdf_url = navigation_params.response->url().value();
 
-    static auto const s_viewer_bytes = MUST(Core::Resource::load_from_uri("resource://ladybird/pdfjs/web/viewer.html"sv))->clone_data();
+    static NeverDestroyed<ByteBuffer> viewer_bytes { MUST(Core::Resource::load_from_uri("resource://ladybird/pdfjs/web/viewer.html"sv))->clone_data() };
 
     auto document = MUST(DOM::Document::create_and_initialize(DOM::Document::Type::HTML, "text/html"_string, navigation_params));
     document->set_origin(URL::Origin("resource"_string, String {}, {}));
@@ -423,7 +432,7 @@ static GC::Ref<DOM::Document> load_pdf_document(HTML::NavigationParams const& na
 
     auto listener_fn = JS::NativeFunction::create(
         realm, [document, js_response](JS::VM&) mutable -> JS::ThrowCompletionOr<JS::Value> {
-            DOM::CustomEventInit init;
+            Bindings::CustomEventInit init;
             init.detail = JS::Value(js_response.ptr());
             document->dispatch_event(*DOM::CustomEvent::create(document->realm(), "ladybirdpdf"_fly_string, init));
             return JS::js_undefined();
@@ -433,7 +442,7 @@ static GC::Ref<DOM::Document> load_pdf_document(HTML::NavigationParams const& na
     document->add_event_listener_without_options("ladybirdviewerready"_fly_string, *DOM::IDLEventListener::create(realm, *callback));
 
     Platform::EventLoopPlugin::the().deferred_invoke(GC::create_function(document->heap(), [document, pdf_url] {
-        auto parser = HTML::HTMLParser::create_with_uncertain_encoding(document, s_viewer_bytes);
+        auto parser = HTML::HTMLParser::create_with_uncertain_encoding(document, *viewer_bytes);
         if (document->ready_to_run_scripts()) {
             parser->run(pdf_url);
         } else {

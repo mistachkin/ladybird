@@ -18,10 +18,6 @@
 #    cmakedefine01 BMP_DEBUG
 #endif
 
-#ifndef BINDINGS_GENERATOR_DEBUG
-#    cmakedefine01 BINDINGS_GENERATOR_DEBUG
-#endif
-
 #ifndef CACHE_DEBUG
 #    cmakedefine01 CACHE_DEBUG
 #endif
@@ -36,6 +32,10 @@
 
 #ifndef CRYPTO_DEBUG
 #    cmakedefine01 CRYPTO_DEBUG
+#endif
+
+#ifndef COMPOSITOR_DEBUG
+#    cmakedefine01 COMPOSITOR_DEBUG
 #endif
 
 #ifndef CSS_LOADER_DEBUG
@@ -88,6 +88,10 @@
 
 #ifndef HEAP_DEBUG
 #    cmakedefine01 HEAP_DEBUG
+#endif
+
+#ifndef INCREMENTAL_SWEEP_DEBUG
+#    cmakedefine01 INCREMENTAL_SWEEP_DEBUG
 #endif
 
 #ifndef HIGHLIGHT_FOCUSED_FRAME_DEBUG
@@ -272,6 +276,10 @@
 
 #ifndef WASM_BINPARSER_DEBUG
 #    cmakedefine01 WASM_BINPARSER_DEBUG
+#endif
+
+#ifndef WASM_CRANELIFT_DEBUG
+#    cmakedefine01 WASM_CRANELIFT_DEBUG
 #endif
 
 #ifndef WASM_TRACE_DEBUG

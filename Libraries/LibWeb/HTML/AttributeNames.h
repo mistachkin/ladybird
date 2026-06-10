@@ -294,6 +294,7 @@ namespace AttributeNames {
     __ENUMERATE_HTML_ATTRIBUTE(shadowrootdelegatesfocus, "shadowrootdelegatesfocus")               \
     __ENUMERATE_HTML_ATTRIBUTE(shadowrootmode, "shadowrootmode")                                   \
     __ENUMERATE_HTML_ATTRIBUTE(shadowrootserializable, "shadowrootserializable")                   \
+    __ENUMERATE_HTML_ATTRIBUTE(shadowrootslotassignment, "shadowrootslotassignment")               \
     __ENUMERATE_HTML_ATTRIBUTE(shape, "shape")                                                     \
     __ENUMERATE_HTML_ATTRIBUTE(size, "size")                                                       \
     __ENUMERATE_HTML_ATTRIBUTE(sizes, "sizes")                                                     \
@@ -330,7 +331,7 @@ namespace AttributeNames {
     __ENUMERATE_HTML_ATTRIBUTE(wrap, "wrap")                                                       \
     __ENUMERATE_HTML_ATTRIBUTE(writingsuggestions, "writingsuggestions")
 
-#define __ENUMERATE_HTML_ATTRIBUTE(name, attribute) extern WEB_API FlyString name;
+#define __ENUMERATE_HTML_ATTRIBUTE(name, attribute) extern WEB_API FlyString const& name;
 ENUMERATE_HTML_ATTRIBUTES
 #undef __ENUMERATE_HTML_ATTRIBUTE
 

@@ -11,14 +11,12 @@
 
 namespace Web::Layout {
 
-GC_DEFINE_ALLOCATOR(SVGImageBox);
-
-SVGImageBox::SVGImageBox(DOM::Document& document, SVG::SVGGraphicsElement& element, GC::Ref<CSS::ComputedProperties> style)
+SVGImageBox::SVGImageBox(DOM::Document& document, SVG::SVGGraphicsElement& element, CSS::ComputedProperties const& style)
     : SVGGraphicsBox(document, element, style)
 {
 }
 
-GC::Ptr<Painting::Paintable> SVGImageBox::create_paintable() const
+RefPtr<Painting::Paintable> SVGImageBox::create_paintable() const
 {
     return Painting::ImagePaintable::create(*this);
 }

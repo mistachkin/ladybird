@@ -10,10 +10,11 @@
 
 #include <AK/HashTable.h>
 #include <AK/JsonObjectSerializer.h>
+#include <AK/NeverDestroyed.h>
 #include <AK/StringBuilder.h>
 #include <LibGC/DeferGC.h>
-#include <LibIPC/Decoder.h>
-#include <LibIPC/Encoder.h>
+#include <LibGC/WeakHashMap.h>
+#include <LibJS/Runtime/ExternalMemory.h>
 #include <LibJS/Runtime/FunctionObject.h>
 #include <LibWeb/Animations/Animation.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
@@ -67,6 +68,7 @@
 #include <LibWeb/InvalidateDisplayList.h>
 #include <LibWeb/Layout/Node.h>
 #include <LibWeb/Layout/TextNode.h>
+#include <LibWeb/Layout/TextOffsetMapping.h>
 #include <LibWeb/MathML/MathMLElement.h>
 #include <LibWeb/Namespace.h>
 #include <LibWeb/Page/Page.h>
@@ -79,32 +81,36 @@
 namespace Web::DOM {
 
 static UniqueNodeID s_next_unique_id;
-static HashMap<UniqueNodeID, Node*> s_node_directory;
+static GC::WeakHashMap<UniqueNodeID, Node>& node_directory()
+{
+    static NeverDestroyed<GC::WeakHashMap<UniqueNodeID, Node>> directory;
+    return *directory;
+}
 
-static UniqueNodeID allocate_unique_id(Node* node)
+static UniqueNodeID allocate_unique_id(Node& node)
 {
     auto id = s_next_unique_id;
     ++s_next_unique_id;
-    s_node_directory.set(id, node);
+    node_directory().set(id, node);
     return id;
 }
 
 static void deallocate_unique_id(UniqueNodeID node_id)
 {
-    if (!s_node_directory.remove(node_id))
+    if (!node_directory().remove(node_id))
         VERIFY_NOT_REACHED();
 }
 
 Node* Node::from_unique_id(UniqueNodeID unique_id)
 {
-    return s_node_directory.get(unique_id).value_or(nullptr);
+    return node_directory().get(unique_id);
 }
 
 Node::Node(JS::Realm& realm, Document& document, NodeType type)
     : EventTarget(realm)
     , m_document(&document)
     , m_type(type)
-    , m_unique_id(allocate_unique_id(this))
+    , m_unique_id(allocate_unique_id(*this))
 {
     // A Document is its own shadow-including root, so it is always connected.
     if (type == NodeType::DOCUMENT_NODE)
@@ -131,12 +137,17 @@ void Node::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_document);
     visitor.visit(m_child_nodes);
 
-    visitor.visit(m_layout_node);
-    visitor.visit(m_paintable);
-
     if (m_registered_observer_list) {
         visitor.visit(*m_registered_observer_list);
     }
+}
+
+size_t Node::external_memory_size() const
+{
+    auto size = Base::external_memory_size();
+    if (m_registered_observer_list)
+        size = JS::saturating_add_external_memory_size(size, JS::vector_external_memory_size(*m_registered_observer_list));
+    return size;
 }
 
 // https://dom.spec.whatwg.org/#dom-node-baseuri
@@ -680,7 +691,7 @@ void Node::insert_before(GC::Ref<Node> node, GC::Ptr<Node> child, bool suppress_
                 // 2. If inclusiveDescendant is custom, then enqueue a custom element callback reaction with
                 //    inclusiveDescendant, callback name "connectedCallback", and « ».
                 if (element->is_custom()) {
-                    GC::RootVector<JS::Value> empty_arguments { vm().heap() };
+                    GC::RootVector<JS::Value> empty_arguments;
                     element->enqueue_a_custom_element_callback_reaction(HTML::CustomElementReactionNames::connectedCallback, move(empty_arguments));
                 }
 
@@ -718,7 +729,7 @@ void Node::insert_before(GC::Ref<Node> node, GC::Ptr<Node> child, bool suppress_
     //       post-connection steps while we’re traversing the node tree. This is because the post-connection steps can
     //       modify the tree’s structure, making live traversal unsafe, possibly leading to the post-connection steps
     //       being called multiple times on the same node.
-    GC::RootVector<GC::Ref<Node>> static_node_list(heap());
+    GC::RootVector<GC::Ref<Node>> static_node_list;
 
     // 11. For each node of nodes, in tree order:
     for (auto& node : nodes) {
@@ -738,7 +749,7 @@ void Node::insert_before(GC::Ref<Node> node, GC::Ptr<Node> child, bool suppress_
 
     if (is_connected()) {
         // NB: Called during DOM insertion, layout is not up to date.
-        if (unsafe_layout_node() && unsafe_layout_node()->display().is_contents() && parent_element()) {
+        if (auto* element = as_if<Element>(*this); element && element->computed_properties() && element->computed_properties()->display().is_contents() && parent_element()) {
             parent_element()->set_needs_layout_tree_update(true, SetNeedsLayoutTreeUpdateReason::NodeInsertBeforeWithDisplayContents);
         }
         set_needs_layout_tree_update(true, SetNeedsLayoutTreeUpdateReason::NodeInsertBefore);
@@ -934,7 +945,7 @@ void Node::remove(bool suppress_observers)
     //            This might change in the future if there is a need.
     if (auto* element = as_if<DOM::Element>(*this)) {
         if (element->is_custom() && is_parent_connected) {
-            GC::RootVector<JS::Value> empty_arguments { vm().heap() };
+            GC::RootVector<JS::Value> empty_arguments;
             element->enqueue_a_custom_element_callback_reaction(HTML::CustomElementReactionNames::disconnectedCallback, move(empty_arguments));
         }
     }
@@ -948,7 +959,7 @@ void Node::remove(bool suppress_observers)
         //    with descendant, callback name "disconnectedCallback", and « ».
         if (auto* element = as_if<DOM::Element>(descendant)) {
             if (element->is_custom() && is_parent_connected) {
-                GC::RootVector<JS::Value> empty_arguments { vm().heap() };
+                GC::RootVector<JS::Value> empty_arguments;
                 element->enqueue_a_custom_element_callback_reaction(HTML::CustomElementReactionNames::disconnectedCallback, move(empty_arguments));
             }
         }
@@ -1336,7 +1347,7 @@ WebIDL::ExceptionOr<void> Node::move_node(Node& new_parent, Node* child)
         //    reaction with inclusiveDescendant, callback name "connectedMoveCallback", and « ».
         if (auto* element = as_if<DOM::Element>(inclusive_descendant)) {
             if (element->is_custom() && new_parent.is_connected()) {
-                GC::RootVector<JS::Value> empty_arguments { vm().heap() };
+                GC::RootVector<JS::Value> empty_arguments;
                 element->enqueue_a_custom_element_callback_reaction(HTML::CustomElementReactionNames::connectedMoveCallback, move(empty_arguments));
             }
         }
@@ -1531,10 +1542,15 @@ void Node::set_document(Document& document)
     if (m_document.ptr() == &document)
         return;
 
+    auto& old_document = *m_document;
     bool const node_needs_style_update = needs_style_update();
     bool const subtree_needs_style_update = entire_subtree_needs_style_update();
     bool const descendants_need_style_update = child_needs_style_update();
     m_document = &document;
+
+    if (auto* animatable = as_if<Animations::Animatable>(*this))
+        animatable->on_document_changed(old_document, document);
+
     if (node_needs_style_update) {
         // NOTE: We unset and reset the "needs style update" flag here.
         //       This ensures that there's a pending style update in the new document
@@ -1656,19 +1672,23 @@ GC::Ptr<Node> Node::editing_host()
     return {};
 }
 
-void Node::set_layout_node(Badge<Layout::Node>, GC::Ref<Layout::Node> layout_node)
+void Node::set_layout_node(Badge<Layout::Node>, Layout::Node& layout_node)
 {
     m_layout_node = layout_node;
 }
 
 void Node::clear_layout_node_and_paintable(Badge<Document>)
 {
+    if (m_layout_node)
+        m_layout_node->prepare_for_detach_from_layout_tree();
     m_layout_node = nullptr;
     m_paintable = nullptr;
 }
 
 void Node::detach_layout_node(Badge<Layout::TreeBuilder>)
 {
+    if (m_layout_node)
+        m_layout_node->prepare_for_detach_from_layout_tree();
     m_layout_node = nullptr;
 }
 
@@ -1737,7 +1757,7 @@ void Node::set_needs_layout_tree_update(bool value, SetNeedsLayoutTreeUpdateReas
             // If the layout node has an anonymous parent, rebuild from the nearest non-anonymous ancestor.
             // FIXME: This is not optimal, and we should figure out how to rebuild a smaller part of the tree.
             if (layout_node->parent() && layout_node->parent()->is_anonymous()) {
-                GC::Ptr<Layout::Node> ancestor = layout_node->parent();
+                auto* ancestor = layout_node->parent();
                 while (ancestor && ancestor->is_anonymous())
                     ancestor = ancestor->parent();
                 if (ancestor)
@@ -1780,6 +1800,7 @@ void Node::inserted()
         m_is_connected = parent()->is_connected();
 
     recompute_editable_subtree_flag();
+    update_inside_blocking_wheel_event_handler_state();
     set_needs_style_update(true);
 }
 
@@ -1787,14 +1808,50 @@ void Node::removed_from(IsSubtreeRoot, Node*, Node&)
 {
     m_is_connected = false;
     m_in_editable_subtree = false;
+    m_inside_blocking_wheel_event_handler = false;
+    if (m_layout_node)
+        m_layout_node->clear_paintables();
     m_layout_node = nullptr;
     m_paintable = nullptr;
+
+    if (auto* element = as_if<Element>(*this))
+        element->clear_synthetic_pseudo_element_layout_nodes(Badge<Node> {});
 }
 
 // https://dom.spec.whatwg.org/#concept-node-move-ext
 void Node::moved_from(IsSubtreeRoot, GC::Ptr<Node>)
 {
     recompute_editable_subtree_flag();
+    update_inside_blocking_wheel_event_handler_state();
+}
+
+static bool is_root_wheel_event_target(Node const& node)
+{
+    auto& document = node.document();
+    return &node == &document || &node == document.document_element() || &node == document.body();
+}
+
+void Node::update_inside_blocking_wheel_event_handler_state()
+{
+    m_inside_blocking_wheel_event_handler = false;
+    if (auto* parent = parent_or_shadow_host_node())
+        m_inside_blocking_wheel_event_handler = parent->inside_blocking_wheel_event_handler();
+
+    if (!m_inside_blocking_wheel_event_handler && !is_root_wheel_event_target(*this) && has_blocking_wheel_event_listener())
+        m_inside_blocking_wheel_event_handler = true;
+}
+
+void Node::update_inside_blocking_wheel_event_handler_state_for_subtree()
+{
+    if (is_root_wheel_event_target(*this)) {
+        update_inside_blocking_wheel_event_handler_state();
+        return;
+    }
+
+    for_each_shadow_including_inclusive_descendant([](Node& node) {
+        node.update_inside_blocking_wheel_event_handler_state();
+        return TraversalDecision::Continue;
+    });
 }
 
 ParentNode* Node::parent_or_shadow_host()
@@ -2059,6 +2116,7 @@ void Node::serialize_tree_as_json(JsonObjectSerializer<StringBuilder>& object) c
         }
 
         if (paintable_box()) {
+            MUST(object.add("display"sv, paintable_box()->computed_values().display().to_string()));
             if (paintable_box()->could_be_scrolled_by_wheel_event()) {
                 MUST(object.add("scrollable"sv, true));
             }
@@ -2594,7 +2652,7 @@ bool Node::in_a_document_tree() const
 }
 
 // https://dom.spec.whatwg.org/#dom-node-getrootnode
-GC::Ref<Node> Node::get_root_node(GetRootNodeOptions const& options)
+GC::Ref<Node> Node::get_root_node(Bindings::GetRootNodeOptions const& options)
 {
     // The getRootNode(options) method steps are to return this’s shadow-including root if options["composed"] is true;
     if (options.composed)
@@ -2647,7 +2705,7 @@ Layout::Node* Node::layout_node()
     return m_layout_node;
 }
 
-void Node::set_paintable(GC::Ptr<Painting::Paintable> paintable)
+void Node::set_paintable(WeakPtr<Painting::Paintable> paintable)
 {
     m_paintable = paintable;
 }
@@ -2661,7 +2719,7 @@ void Node::set_needs_repaint(InvalidateDisplayList should_invalidate_display_lis
 {
     if (auto* layout_node = unsafe_layout_node()) {
         for (auto& paintable : layout_node->paintables())
-            paintable.set_needs_repaint(should_invalidate_display_list);
+            paintable->set_needs_repaint(should_invalidate_display_list);
     }
 }
 
@@ -2673,45 +2731,55 @@ void Node::set_needs_layout_update(SetNeedsLayoutReason reason)
     }
 }
 
-Painting::Paintable const* Node::paintable() const
+RefPtr<Painting::Paintable const> Node::paintable() const
 {
     if (m_paintable)
         VERIFY(document().layout_is_up_to_date());
-    return m_paintable;
+    return m_paintable.strong_ref();
 }
 
-Painting::Paintable* Node::paintable()
+RefPtr<Painting::Paintable> Node::paintable()
 {
     if (m_paintable)
         VERIFY(document().layout_is_up_to_date());
-    return m_paintable;
+    return m_paintable.strong_ref();
 }
 
-Painting::PaintableBox const* Node::paintable_box() const
+RefPtr<Painting::Paintable const> Node::unsafe_paintable() const
 {
-    if (auto* p = paintable(); p && p->is_paintable_box())
-        return static_cast<Painting::PaintableBox const*>(p);
+    return m_paintable.strong_ref();
+}
+
+RefPtr<Painting::Paintable> Node::unsafe_paintable()
+{
+    return m_paintable.strong_ref();
+}
+
+RefPtr<Painting::PaintableBox const> Node::paintable_box() const
+{
+    if (auto p = paintable(); p && p->is_paintable_box())
+        return static_cast<Painting::PaintableBox const&>(*p);
     return nullptr;
 }
 
-Painting::PaintableBox* Node::paintable_box()
+RefPtr<Painting::PaintableBox> Node::paintable_box()
 {
-    if (auto* p = paintable(); p && p->is_paintable_box())
-        return static_cast<Painting::PaintableBox*>(p);
+    if (auto p = paintable(); p && p->is_paintable_box())
+        return static_cast<Painting::PaintableBox&>(*p);
     return nullptr;
 }
 
-Painting::PaintableBox const* Node::unsafe_paintable_box() const
+RefPtr<Painting::PaintableBox const> Node::unsafe_paintable_box() const
 {
-    if (m_paintable && m_paintable->is_paintable_box())
-        return static_cast<Painting::PaintableBox const*>(m_paintable.ptr());
+    if (auto paintable = m_paintable.strong_ref(); paintable && paintable->is_paintable_box())
+        return static_cast<Painting::PaintableBox const&>(*paintable);
     return nullptr;
 }
 
-Painting::PaintableBox* Node::unsafe_paintable_box()
+RefPtr<Painting::PaintableBox> Node::unsafe_paintable_box()
 {
-    if (m_paintable && m_paintable->is_paintable_box())
-        return static_cast<Painting::PaintableBox*>(m_paintable.ptr());
+    if (auto paintable = m_paintable.strong_ref(); paintable && paintable->is_paintable_box())
+        return static_cast<Painting::PaintableBox&>(*paintable);
     return nullptr;
 }
 
@@ -3180,7 +3248,10 @@ ErrorOr<String> Node::name_or_description(NameOrDescription target, Document con
             // b. For ::after pseudo elements, User agents MUST append CSS textual content, without a space, to the textual
             //    content of the current node. NOTE: The code for handling the ::after pseudo elements case is further below,
             //    following the “iii. For each child node of the current node” code.
-            if (auto before = element->get_pseudo_element_node(CSS::PseudoElement::Before)) {
+
+            // FIXME: Do we need to update layout before checking this? If so we can avoid using the unsafe layout node
+            //        getter here.
+            if (auto before = element->pseudo_element_unsafe_layout_node(CSS::PseudoElement::Before)) {
                 // NB: We know that content has a value since we set it immediately when creating a ::before pseudo
                 //     element node.
                 auto const& content = before->computed_values().content().value();
@@ -3244,7 +3315,9 @@ ErrorOr<String> Node::name_or_description(NameOrDescription target, Document con
             }
 
             // NOTE: See step ii.b above.
-            if (auto after = element->get_pseudo_element_node(CSS::PseudoElement::After)) {
+            // FIXME: Do we need to update layout before checking this? If so we can avoid using the unsafe layout node
+            //        getter here.
+            if (auto after = element->pseudo_element_unsafe_layout_node(CSS::PseudoElement::After)) {
                 // NB: We know that content has a value since we set it immediately when creating an ::after pseudo
                 //     element node.
                 auto const& content = after->computed_values().content().value();
@@ -3277,8 +3350,15 @@ ErrorOr<String> Node::name_or_description(NameOrDescription target, Document con
     // cause traversal through element subtrees in way that’s necessary to check for descendants that are referenced by
     // aria-labelledby or aria-describedby and/or un-hidden. See the comment for substep A above.
     if (is_text() && (!parent_element() || (parent_element()->is_referenced() || !parent_element()->is_hidden() || !parent_element()->has_hidden_ancestor() || parent_element()->has_referenced_and_hidden_ancestor()))) {
-        if (layout_node() && layout_node()->is_text_node())
-            return as<Layout::TextNode>(layout_node())->text_for_rendering().to_utf8_but_should_be_ported_to_utf16();
+        if (layout_node()) {
+            StringBuilder builder { StringBuilder::Mode::UTF16 };
+            Layout::TextOffsetMapping mapping { static_cast<DOM::Text const&>(*this) };
+            mapping.for_each_fragment([&](Layout::TextNode const& slice) {
+                builder.append(slice.text_for_rendering());
+            });
+            if (!builder.is_empty())
+                return builder.to_utf16_string().to_utf8_but_should_be_ported_to_utf16();
+        }
         return text_content()->to_utf8_but_should_be_ported_to_utf16();
     }
 
@@ -3400,23 +3480,6 @@ GC::Ptr<ShadowRoot> Node::containing_shadow_root()
     if (auto* shadow_root = as_if<ShadowRoot>(root()))
         return shadow_root;
     return nullptr;
-}
-
-}
-
-namespace IPC {
-
-template<>
-ErrorOr<void> encode(Encoder& encoder, Web::UniqueNodeID const& value)
-{
-    return encode(encoder, value.value());
-}
-
-template<>
-ErrorOr<Web::UniqueNodeID> decode(Decoder& decoder)
-{
-    auto value = TRY(decoder.decode<i64>());
-    return Web::UniqueNodeID(value);
 }
 
 }

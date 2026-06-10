@@ -9,15 +9,20 @@
 
 #include <AK/Forward.h>
 #include <AK/Function.h>
+#include <AK/JsonArray.h>
 #include <AK/JsonObject.h>
+#include <AK/JsonValue.h>
 #include <AK/LexicalPath.h>
 #include <AK/OwnPtr.h>
 #include <AK/Queue.h>
 #include <AK/String.h>
 #include <AK/Utf16String.h>
+#include <LibCore/AnonymousBuffer.h>
 #include <LibCore/Forward.h>
 #include <LibCore/Promise.h>
 #include <LibCore/SharedVersion.h>
+#include <LibDevTools/DevToolsDelegate.h>
+#include <LibGfx/Color.h>
 #include <LibGfx/Cursor.h>
 #include <LibGfx/Forward.h>
 #include <LibGfx/SharedImage.h>
@@ -90,6 +95,7 @@ public:
     void reset_zoom();
     double zoom_level() const { return m_zoom_level; }
     double device_pixel_ratio() const { return m_device_pixel_ratio; }
+    Optional<u64> display_id() const { return m_display_id; }
     double maximum_frames_per_second() const { return m_maximum_frames_per_second; }
 
     void enqueue_input_event(Web::InputEvent);
@@ -104,6 +110,7 @@ public:
     Optional<Core::SharedVersion> document_cookie_version(URL::URL const&) const;
 
     ByteString selected_text();
+    ByteString cut_selected_text();
     Optional<String> selected_text_with_whitespace_collapsed();
     void select_all();
     void find_in_page(String const& query, CaseSensitivity = CaseSensitivity::CaseInsensitive);
@@ -115,12 +122,27 @@ public:
     void inspect_dom_tree();
     void inspect_accessibility_tree();
     void get_hovered_node_id();
+    void start_node_picker(DevTools::DevToolsDelegate::OnNodePickerEvent);
+    void stop_node_picker();
+    void clear_node_picker();
+    bool is_node_picker_active() const { return m_node_picker_active; }
+    void node_picker_hover(Web::DevicePixelPoint);
+    void node_picker_pick(Web::DevicePixelPoint);
+    void node_picker_preview(Web::DevicePixelPoint);
+    void node_picker_cancel();
 
-    void inspect_dom_node(Web::UniqueNodeID node_id, DOMNodeProperties::Type, Optional<Web::CSS::PseudoElement> pseudo_element);
+    void inspect_dom_node(Web::UniqueNodeID node_id, DOMNodeProperties::Type, Optional<Web::CSS::PseudoElement> pseudo_element, JsonValue options = {});
+    void inspect_grid_layouts(Web::UniqueNodeID root_node_id);
+    void inspect_current_grid(Web::UniqueNodeID node_id);
+    void inspect_current_flexbox(Web::UniqueNodeID node_id, bool only_look_at_parents);
     void clear_inspected_dom_node();
 
     void highlight_dom_node(Web::UniqueNodeID node_id, Optional<Web::CSS::PseudoElement> pseudo_element);
     void clear_highlighted_dom_node();
+    void highlight_flexbox(Web::UniqueNodeID node_id, JsonValue options);
+    void clear_flexbox_highlight(Web::UniqueNodeID node_id);
+    void highlight_grid(Web::UniqueNodeID node_id, JsonValue options);
+    void clear_grid_highlight(Web::UniqueNodeID node_id);
 
     void set_listen_for_dom_mutations(bool);
     void did_connect_devtools_client();
@@ -142,6 +164,7 @@ public:
     void request_style_sheet_source(Web::CSS::StyleSheetIdentifier const&);
 
     void debug_request(ByteString const& request, ByteString const& argument = {});
+    void set_content_blockers(Core::AnonymousBuffer const& patterns);
 
     void run_javascript(String const&);
     void js_console_input(String const&);
@@ -160,6 +183,14 @@ public:
     void paste_text_from_clipboard();
     void retrieved_clipboard_entries(u64 request_id, ReadonlySpan<Web::Clipboard::SystemClipboardItem>);
 
+    // Used by platform input methods to drive marked/preedit-text composition, and to query the on-screen caret
+    // position for placing IME overlays.
+    void set_marked_text_from_input_method(Utf16String const& text);
+    void commit_text_from_input_method(Utf16String const& text);
+    void unmark_text_from_input_method();
+    Optional<Web::DevicePixelRect> get_input_caret_rect();
+    void set_input_caret_rect(Badge<WebContentClient>, Optional<Web::DevicePixelRect>);
+
     Web::HTML::MuteState page_mute_state() const { return m_mute_state; }
     void toggle_page_mute_state();
 
@@ -167,6 +198,9 @@ public:
     Web::HTML::AudioPlayState audio_play_state() const { return m_audio_play_state; }
 
     void did_update_navigation_buttons_state(Badge<WebContentClient>, bool back_enabled, bool forward_enabled) const;
+    void did_change_needs_beforeunload_check(Badge<WebContentClient>, bool needs_beforeunload_check);
+    void did_change_background_color(Badge<WebContentClient>, Gfx::Color);
+    Gfx::Color page_background_color() const { return m_page_background_color; }
 
     void did_allocate_backing_stores(Badge<WebContentClient>, i32 front_bitmap_id, Gfx::SharedImage front_backing_store, i32 back_bitmap_id, Gfx::SharedImage back_backing_store);
 
@@ -184,11 +218,10 @@ public:
     ErrorOr<LexicalPath> dump_gc_graph();
 
     void set_user_style_sheet(String const& source);
-    // Load Native.css as the User style sheet, which attempts to make WebView content look as close to
-    // native GUI widgets as possible.
-    void use_native_user_style_sheet();
 
     void request_close();
+    Function<void()> prepare_for_immediate_close();
+    bool needs_beforeunload_check() const { return m_needs_beforeunload_check; }
 
     Function<void()> on_ready_to_paint;
     Function<String(Web::HTML::ActivateTab, Web::HTML::WebViewHints, Optional<u64>)> on_new_web_view;
@@ -223,6 +256,9 @@ public:
     Function<void()> on_request_dismiss_dialog;
     Function<void(JsonObject)> on_received_dom_tree;
     Function<void(DOMNodeProperties)> on_received_dom_node_properties;
+    Function<void(JsonArray)> on_received_grid_layouts;
+    Function<void(Optional<JsonObject>)> on_received_current_grid;
+    Function<void(Optional<JsonObject>)> on_received_current_flexbox;
     Function<void(JsonObject)> on_received_accessibility_tree;
     Function<void(Web::UniqueNodeID)> on_received_hovered_node_id;
     Function<void(Mutation)> on_dom_mutation_received;
@@ -252,9 +288,9 @@ public:
     Function<void(String const&)> on_test_finish;
     Function<void(double milliseconds)> on_set_test_timeout;
     Function<void(JsonValue)> on_reference_test_metadata;
-    Function<void(JsonValue)> on_test_variant_metadata;
     Function<void(size_t current_match_index, Optional<size_t> const& total_match_count)> on_find_in_page;
     Function<void(Gfx::Color)> on_theme_color_change;
+    Function<void(Gfx::Color)> on_page_background_color_change;
     Function<void(Web::HTML::AudioPlayState)> on_audio_play_state_changed;
     Function<void()> on_web_content_crashed;
     Function<void()> on_web_content_process_change_for_cross_site_navigation;
@@ -264,7 +300,7 @@ public:
     Menu& image_context_menu() { return *m_image_context_menu; }
     Menu& media_context_menu() { return *m_media_context_menu; }
 
-    void did_request_page_context_menu(Badge<WebContentClient>, Gfx::IntPoint content_position);
+    void did_request_page_context_menu(Badge<WebContentClient>, Gfx::IntPoint content_position, Web::ContextMenuForInputEventsTarget for_input_events_target);
     void did_request_link_context_menu(Badge<WebContentClient>, Gfx::IntPoint content_position, URL::URL url);
     void did_request_image_context_menu(Badge<WebContentClient>, Gfx::IntPoint content_position, URL::URL url, Optional<Gfx::ShareableBitmap> bitmap);
     void did_request_media_context_menu(Badge<WebContentClient>, Gfx::IntPoint content_position, Web::Page::MediaContextMenu menu);
@@ -273,6 +309,9 @@ public:
     Action& navigate_forward_action() { return *m_navigate_forward_action; }
     Action& toggle_bookmark_action() { return *m_toggle_bookmark_action; }
     Action& reset_zoom_action() { return *m_reset_zoom_action; }
+
+    WebContentClient& client();
+    WebContentClient const& client() const;
 
     virtual Web::DevicePixelSize viewport_size() const = 0;
     virtual Gfx::IntPoint to_content_position(Gfx::IntPoint widget_position) const = 0;
@@ -285,15 +324,19 @@ protected:
 
     ViewImplementation();
 
-    WebContentClient& client();
-    WebContentClient const& client() const;
     u64 page_id() const;
 
     void set_url(URL::URL);
 
     virtual void update_zoom();
+    String current_host() const;
+    void apply_zoom_for_current_host();
 
     void handle_resize();
+    void set_page_background_color_to_system_canvas(bool dark);
+    void set_page_background_color(Gfx::Color);
+    Gfx::Color preferred_canvas_background_color() const;
+    void load_crash_page_html(StringView, URL::URL const& crashed_url);
 
     enum class CreateNewClient {
         No,
@@ -308,6 +351,7 @@ protected:
     void handle_web_content_process_crash(LoadErrorPage = LoadErrorPage::Yes);
 
     virtual void default_zoom_level_factor_changed() override;
+    virtual void zoom_per_host_changed(StringView host) override;
     virtual void languages_changed() override;
     virtual void browsing_behavior_changed() override;
     virtual void autoplay_settings_changed() override;
@@ -339,6 +383,7 @@ protected:
 
     double m_zoom_level { 1.0 };
     double m_device_pixel_ratio { 1.0 };
+    Optional<u64> m_display_id;
     double m_maximum_frames_per_second { 60.0 };
 
     RefPtr<Menu> m_page_context_menu;
@@ -360,6 +405,7 @@ protected:
     RefPtr<Action> m_take_full_screenshot_action;
 
     RefPtr<Action> m_open_in_new_tab_action;
+    RefPtr<Action> m_open_in_new_window_action;
     RefPtr<Action> m_copy_url_action;
     URL::URL m_context_menu_url;
 
@@ -386,7 +432,12 @@ protected:
 
     OwnPtr<Gfx::SharedImageBuffer> m_backup_shared_image_buffer;
     Web::DevicePixelSize m_backup_bitmap_size;
+    Gfx::Color m_page_background_color { 255, 255, 255 };
+    Gfx::Color m_system_canvas_background_color { 255, 255, 255 };
+    Web::CSS::PreferredColorScheme m_preferred_color_scheme { Web::CSS::PreferredColorScheme::Auto };
 
+    bool m_should_suppress_history_for_current_load { false };
+    bool m_should_suppress_history_for_next_load { false };
     size_t m_crash_count = 0;
     RefPtr<Core::Timer> m_repeated_crash_timer;
 
@@ -400,6 +451,9 @@ protected:
 
     Web::HTML::MuteState m_mute_state { Web::HTML::MuteState::Unmuted };
 
+    // Most recent caret position pushed by WebContent, Used for placing platform IME overlays without a sync IPC.
+    Optional<Web::DevicePixelRect> m_input_caret_rect;
+
     Web::ViewportIsFullscreen m_is_fullscreen { Web::ViewportIsFullscreen::No };
 
     Core::AnonymousBuffer m_document_cookie_version_buffer;
@@ -412,7 +466,22 @@ protected:
     HashMap<u64, NavigationListener> m_navigation_listeners;
     u64 m_next_navigation_listener_id { 1 };
 
+    enum class NodePickerRequestType : u8 {
+        Hovered,
+        Picked,
+        Previewed,
+    };
+    void request_node_picker_hit_test(NodePickerRequestType, Web::DevicePixelPoint);
+    void did_receive_node_picker_hit_test(u64 request_id, Web::UniqueNodeID);
+
+    bool m_node_picker_active { false };
+    Optional<Web::UniqueNodeID> m_node_picker_hovered_node_id;
+    u64 m_next_node_picker_request_id { 1 };
+    HashMap<u64, NodePickerRequestType> m_pending_node_picker_requests;
+    DevTools::DevToolsDelegate::OnNodePickerEvent m_on_node_picker_event;
+
     bool m_devtools_connected { false };
+    bool m_needs_beforeunload_check { true };
 };
 
 }

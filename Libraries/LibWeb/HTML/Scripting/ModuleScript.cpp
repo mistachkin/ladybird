@@ -12,6 +12,7 @@
 #include <LibWeb/HTML/Scripting/ModuleScript.h>
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/HTML/WindowOrWorkerGlobalScope.h>
+#include <LibWeb/WebAssembly/WebAssemblyModule.h>
 #include <LibWeb/WebIDL/DOMException.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
 #include <LibWeb/WebIDL/QuotaExceededError.h>
@@ -103,6 +104,27 @@ WebIDL::ExceptionOr<GC::Ptr<ModuleScript>> ModuleScript::create_from_pre_compile
     if (result.is_error()) {
         auto& parse_error = result.error().first();
         dbgln("JavaScriptModuleScript: Failed to materialize: {}", parse_error.to_string());
+        script->set_parse_error(JS::SyntaxError::create(realm, parse_error.to_string()));
+        return script;
+    }
+
+    script->m_record = result.value();
+    return script;
+}
+
+WebIDL::ExceptionOr<GC::Ptr<ModuleScript>> ModuleScript::create_from_bytecode_cache(ByteString const& filename, NonnullRefPtr<JS::SourceCode const> source_code, EnvironmentSettingsObject& settings, URL::URL base_url, NonnullRefPtr<JS::RustIntegration::DecodedBytecodeCache> bytecode_cache)
+{
+    auto& realm = settings.realm();
+    auto script = realm.create<ModuleScript>(move(base_url), filename, settings);
+
+    script->set_parse_error(JS::js_null());
+    script->set_error_to_rethrow(JS::js_null());
+
+    auto result = JS::SourceTextModule::parse_from_bytecode_cache(bytecode_cache, move(source_code), realm, script);
+
+    if (result.is_error()) {
+        auto& parse_error = result.error().first();
+        dbgln("JavaScriptModuleScript: Failed to materialize bytecode cache: {}", parse_error.to_string());
         script->set_parse_error(JS::SyntaxError::create(realm, parse_error.to_string()));
         return script;
     }
@@ -279,10 +301,9 @@ WebIDL::Promise* ModuleScript::run(PreventErrorReporting prevent_error_reporting
     // 8. If preventErrorReporting is false, then upon rejection of evaluationPromise with reason, report the exception given by reason for script.
     if (prevent_error_reporting == PreventErrorReporting::No) {
         HTML::TemporaryExecutionContext execution_context { realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
-        evaluation_promise = WebIDL::upon_rejection(*evaluation_promise, GC::create_function(realm.heap(), [&realm](JS::Value reason) -> WebIDL::ExceptionOr<JS::Value> {
-            auto& window_or_worker = as<WindowOrWorkerGlobalScopeMixin>(realm.global_object());
-            window_or_worker.report_an_exception(reason);
-            return throw_completion(reason);
+        WebIDL::upon_rejection(*evaluation_promise, GC::create_function(realm.heap(), [&realm](JS::Value reason) -> WebIDL::ExceptionOr<JS::Value> {
+            as<WindowOrWorkerGlobalScopeMixin>(realm.global_object()).report_an_exception(reason);
+            return JS::js_undefined();
         }));
     }
 
@@ -296,9 +317,7 @@ WebIDL::Promise* ModuleScript::run(PreventErrorReporting prevent_error_reporting
 void ModuleScript::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
-    m_record.visit(
-        [&](Empty) {},
-        [&](auto record) { visitor.visit(record); });
+    visitor.visit(m_record);
 }
 
 }

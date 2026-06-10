@@ -6,15 +6,24 @@
 
 #pragma once
 
+#include <AK/AtomicRefCounted.h>
 #include <AK/Badge.h>
 #include <AK/ByteString.h>
 #include <AK/DistinctNumeric.h>
+#include <AK/FixedArray.h>
+#include <AK/Function.h>
 #include <AK/LEB128.h>
+#include <AK/NumericLimits.h>
+#include <AK/Optional.h>
+#include <AK/OwnPtr.h>
 #include <AK/Result.h>
 #include <AK/String.h>
+#include <AK/Time.h>
 #include <AK/UFixedBigInt.h>
 #include <AK/Variant.h>
 #include <AK/WeakPtr.h>
+#include <LibSync/ConditionVariable.h>
+#include <LibSync/Mutex.h>
 #include <LibWasm/Constants.h>
 #include <LibWasm/Export.h>
 #include <LibWasm/Forward.h>
@@ -80,6 +89,26 @@ AK_TYPEDEF_DISTINCT_ORDERED_ID(u32, GlobalIndex);
 AK_TYPEDEF_DISTINCT_ORDERED_ID(u32, LabelIndex);
 AK_TYPEDEF_DISTINCT_ORDERED_ID(u32, DataIndex);
 AK_TYPEDEF_DISTINCT_NUMERIC_GENERAL(u32, InstructionPointer, Arithmetic, Comparison, Flags, Increment);
+
+}
+
+namespace AK {
+
+template<>
+struct SentinelOptionalTraits<Wasm::InstructionPointer> {
+    static constexpr Wasm::InstructionPointer sentinel_value() { return { NumericLimits<Wasm::InstructionPointer::Type>::max() }; }
+    static constexpr bool is_sentinel(Wasm::InstructionPointer const& value) { return value.value() == NumericLimits<Wasm::InstructionPointer::Type>::max(); }
+};
+
+template<>
+class Optional<Wasm::InstructionPointer> : public SentinelOptional<Wasm::InstructionPointer> {
+public:
+    using SentinelOptional::SentinelOptional;
+};
+
+}
+
+namespace Wasm {
 
 constexpr static inline auto LocalArgumentMarker = static_cast<LocalIndex::Type>(1) << (sizeof(LocalIndex::Type) * 8 - 1);
 
@@ -182,11 +211,11 @@ public:
     {
     }
 
-    template<typename T>
-    explicit ValueType(Kind kind, T argument)
+    explicit ValueType(Kind kind, TypeIndex type_index)
         : m_kind(kind)
-        , m_argument(move(argument))
+        , m_type_index(type_index)
     {
+        VERIFY(kind == TypeUseReference);
     }
 
     bool operator==(ValueType const&) const = default;
@@ -200,7 +229,11 @@ public:
     auto is_typeuse() const { return m_kind == TypeUseReference; }
     auto kind() const { return m_kind; }
 
-    auto unsafe_typeindex() const { return m_argument.unsafe_get<TypeIndex>(); }
+    auto unsafe_typeindex() const
+    {
+        VERIFY(m_kind == TypeUseReference);
+        return m_type_index;
+    }
 
     static ParseResult<ValueType> parse(Stream& stream);
 
@@ -234,8 +267,10 @@ public:
 private:
     Kind m_kind;
     bool m_nullable { true };
-    Variant<TypeIndex, Empty> m_argument;
+    TypeIndex m_type_index;
 };
+
+static_assert(sizeof(ValueType) == 8);
 
 // https://webassembly.github.io/spec/core/bikeshed/#result-types%E2%91%A2
 class ResultType {
@@ -543,16 +578,33 @@ public:
         TableIndex rhs;
     };
 
-    struct StructuredInstructionArgs {
+    template<typename ExtraData>
+    struct StructuredInstructionArgsBase {
+        using Extra = ExtraData;
+
         BlockType block_type;
         InstructionPointer end_ip; // 'end' instruction IP if there is no 'else'; otherwise IP of instruction after 'end'.
-        Optional<InstructionPointer> else_ip;
+        ExtraData extra;
 
         struct Meta {
             u32 arity;
             u32 parameter_count;
+            bool tier_up_eligible;
         };
-        mutable Optional<Meta> meta {};
+        mutable Meta meta {};
+    };
+
+    struct StructuredInstructionArgs : StructuredInstructionArgsBase<Optional<InstructionPointer>> {
+        using Base = StructuredInstructionArgsBase<Optional<InstructionPointer>>;
+        using Meta = typename Base::Meta;
+
+        StructuredInstructionArgs(BlockType block_type, InstructionPointer end_ip, Optional<InstructionPointer> else_ip, Meta meta = {})
+            : Base { block_type, end_ip, else_ip, meta }
+        {
+        }
+
+        auto& else_ip() { return extra; }
+        auto& else_ip() const { return extra; }
     };
 
     struct TableBranchArgs {
@@ -601,9 +653,55 @@ public:
     };
 
     // Proposal "exception-handling"
-    struct TryTableArgs {
-        StructuredInstructionArgs try_; // "else" unused.
-        Vector<Catch> catches;
+    struct TryTableArgs : StructuredInstructionArgsBase<OwnPtr<FixedArray<Catch>>> {
+        using Base = StructuredInstructionArgsBase<OwnPtr<FixedArray<Catch>>>;
+        using Meta = typename Base::Meta;
+
+        TryTableArgs(BlockType block_type, InstructionPointer end_ip, ReadonlySpan<Catch> catches, Meta meta = {})
+            : Base { block_type, end_ip, create_catches(catches), meta }
+        {
+        }
+
+        TryTableArgs(TryTableArgs const& other)
+            : Base { other.block_type, other.end_ip, clone_catches(other.extra), other.meta }
+        {
+        }
+
+        TryTableArgs& operator=(TryTableArgs const& other)
+        {
+            if (this == &other)
+                return *this;
+            block_type = other.block_type;
+            end_ip = other.end_ip;
+            extra = clone_catches(other.extra);
+            meta = other.meta;
+            return *this;
+        }
+
+        TryTableArgs(TryTableArgs&&) = default;
+        TryTableArgs& operator=(TryTableArgs&&) = default;
+
+        ReadonlySpan<Catch> catches() const
+        {
+            if (!extra)
+                return {};
+            return extra->span();
+        }
+
+    private:
+        static OwnPtr<FixedArray<Catch>> create_catches(ReadonlySpan<Catch> catches)
+        {
+            if (catches.is_empty())
+                return nullptr;
+            return make<FixedArray<Catch>>(MUST(FixedArray<Catch>::create(catches)));
+        }
+
+        static OwnPtr<FixedArray<Catch>> clone_catches(OwnPtr<FixedArray<Catch>> const& catches)
+        {
+            if (!catches)
+                return nullptr;
+            return make<FixedArray<Catch>>(MUST(catches->clone()));
+        }
     };
 
     struct ShuffleArgument {
@@ -690,6 +788,30 @@ private:
         m_arguments;
 };
 
+}
+
+namespace AK {
+
+template<>
+struct SentinelOptionalTraits<Wasm::Instruction> {
+    static Wasm::Instruction sentinel_value() { return Wasm::Instruction { Wasm::OpCode { NumericLimits<Wasm::OpCode::Type>::max() } }; }
+    static bool is_sentinel(Wasm::Instruction const& value) { return value.opcode().value() == NumericLimits<Wasm::OpCode::Type>::max(); }
+};
+
+template<>
+class Optional<Wasm::Instruction> : public SentinelOptional<Wasm::Instruction> {
+public:
+    using SentinelOptional::SentinelOptional;
+};
+
+}
+
+namespace Wasm {
+
+static_assert(sizeof(Optional<Instruction>) == sizeof(Instruction));
+
+static_assert(sizeof(Optional<InstructionPointer>) == sizeof(InstructionPointer));
+
 struct Dispatch {
     enum RegisterOrStack : u8 {
         R0,
@@ -723,14 +845,82 @@ union SourcesAndDestination {
     u32 sources_and_destination;
 };
 
+class InstructionStorage {
+    using Chunk = FixedArray<Optional<Instruction>>;
+
+public:
+    InstructionStorage() = default;
+    InstructionStorage(InstructionStorage const&) = delete;
+    InstructionStorage& operator=(InstructionStorage const&) = delete;
+    InstructionStorage(InstructionStorage&&) = default;
+    InstructionStorage& operator=(InstructionStorage&&) = default;
+
+    Instruction& append(Instruction);
+
+    size_t size() const { return m_size; }
+    size_t capacity() const { return m_capacity; }
+    bool is_empty() const { return m_size == 0; }
+
+private:
+    void add_chunk();
+
+    Vector<Chunk, 0, FastLastAccess::Yes> m_chunks;
+    size_t m_size { 0 };
+    size_t m_capacity { 0 };
+    size_t m_next_index_in_last_chunk { 0 };
+};
+
+void free_cranelift_code(void* handle);
+
+struct CraneliftTrap {
+    u32 offset { 0 };
+    u8 code { 0 };
+    u8 _padding[3] { 0, 0, 0 };
+};
+static_assert(sizeof(CraneliftTrap) == 8);
+
 struct CompiledInstructions {
     Vector<Dispatch> dispatches;
     Vector<SourcesAndDestination> src_dst_mappings;
-    Vector<Instruction, 0, FastLastAccess::Yes> extra_instruction_storage;
-    bool direct = false; // true if all dispatches contain handler_ptr, otherwise false and all contain instruction_opcode.
+    InstructionStorage extra_instruction_storage;
+
+    // Pointer/size_t-sized members first, then the u32, then the bools, so the trailing scalars pack
+    // into one word instead of scattering padding between them.
+
+    // Native entry point for this function (conforms to the interpreter handler ABI). Zero until
+    // the background/AOT compile has fully installed the code. Published with an atomic store-release
+    // as the LAST step of install_compiled_function() and read with an atomic load-acquire at every
+    // execution-decision site, so a function can tier up to JIT concurrently with execution without
+    // a reader ever observing a half-installed function. dispatches[0].handler_ptr always stays the
+    // C++ interpreter handler, so the interpreter path is valid regardless of compilation state.
+    FlatPtr cranelift_entry = 0;
+    void* cranelift_code_handle = nullptr; // Owned; freed when the owning Module is destroyed.
+    size_t cranelift_code_size = 0;
+    CraneliftTrap const* cranelift_traps = nullptr; // Owned by cranelift_code_handle.
+    size_t cranelift_trap_count = 0;
     size_t max_call_arg_count = 0;
     size_t max_call_rec_size = 0;
+
+    u32 cranelift_result_arity = 0; // result count to hand to try_cranelift_compile(); only meaningful when cranelift_eligible.
+
+    bool direct = false;                  // true if all dispatches contain handler_ptr, otherwise false and all contain instruction_opcode.
+    bool cranelift_eligible = false;      // true if this expression cleared the Cranelift type/shape checks during validation.
+    bool has_tier_up_checkpoints = false; // true if try_compile_instructions inserted synthetic_tier_up ops (Tier-Up sites).
+    bool cranelift_compiled = false;
 };
+
+// Read the native entry with acquire ordering: a non-zero result means the function is fully
+// installed and every cranelift_* field written before publication is visible to this thread.
+inline FlatPtr cranelift_entry_acquire(CompiledInstructions const& ci)
+{
+    return AK::atomic_load(const_cast<FlatPtr volatile*>(&ci.cranelift_entry), AK::MemoryOrder::memory_order_acquire);
+}
+
+// Publish the native entry with release ordering. Must be the LAST write of install.
+inline void publish_cranelift_entry(CompiledInstructions& ci, FlatPtr entry)
+{
+    AK::atomic_store(&ci.cranelift_entry, entry, AK::MemoryOrder::memory_order_release);
+}
 
 template<Enum auto... Vs>
 consteval auto as_ordered()
@@ -1319,7 +1509,38 @@ private:
     Vector<TagType> m_tags;
 };
 
-class WASM_API Module : public RefCounted<Module>
+enum class CompileToNative : u8 {
+    No,
+    Yes,
+};
+
+// Lightweight per-module compile stats accumulator. Exposed to embedders via record_module_stats() below.
+// The cranelift_* and cache_hit fields are filled in by compile_module_to_native() once native compilation actually runs (possibly on another thread).
+struct ModuleStats {
+    Array<u8, 32> wasm_hash {};
+    size_t input_size_bytes { 0 };
+    AK::Duration parse_time;
+    AK::Duration validate_time;
+    AK::Duration cranelift_time;
+    size_t cranelift_blob_size_bytes { 0 };
+    size_t function_count { 0 };
+    size_t tier_up_function_count { 0 };   // functions instrumented with tier-up checkpoints
+    size_t tier_up_checkpoint_count { 0 }; // total tier-up checkpoints inserted across the module
+    bool cache_hit { false };
+};
+
+// Caller-supplied hooks for the Cranelift on-disk cache.
+//   - `wasm_hash` is a 32-byte digest of the wasm bytes; embedded in produced blobs and verified against `existing_blob` before any install.
+//   - `existing_blob` is the prior cache hit (or empty for a miss); the native-compile pass tries to install it before falling through to cranelift.
+//     Owned, since the compile may run asynchronously long after the config was assembled.
+//   - `on_compiled` is invoked exactly once if a fresh blob was produced; never invoked on a cache hit nor when no cranelift output was captured.
+struct CompileCacheConfig {
+    Array<u8, 32> wasm_hash {};
+    ByteBuffer existing_blob;
+    AK::Function<void(ByteBuffer)> on_compiled;
+};
+
+class WASM_API Module : public AtomicRefCounted<Module>
     , public Weakable<Module> {
 public:
     enum class ValidationStatus {
@@ -1366,6 +1587,36 @@ public:
     ValidationStatus validation_status() const { return m_validation_status; }
     StringView validation_error() const LIFETIME_BOUND { return *m_validation_error; }
     void set_validation_error(ByteString error) { m_validation_error = move(error); }
+    bool has_attempted_cranelift_compilation() const { return m_cranelift_compilation_state.load(AK::MemoryOrder::memory_order_acquire) == 2; }
+    bool try_begin_cranelift_compilation() const
+    {
+        u8 not_started = 0;
+        return m_cranelift_compilation_state.compare_exchange_strong(not_started, 1, AK::MemoryOrder::memory_order_acq_rel);
+    }
+    void finish_cranelift_compilation() const
+    {
+        Sync::MutexLocker locker(m_cranelift_compilation_mutex);
+        m_cranelift_compilation_state.store(2, AK::MemoryOrder::memory_order_release);
+        m_cranelift_compilation_state_changed.broadcast();
+    }
+    void wait_for_cranelift_compilation() const
+    {
+        if (m_cranelift_compilation_state.load(AK::MemoryOrder::memory_order_acquire) != 1)
+            return;
+
+        Sync::MutexLocker locker(m_cranelift_compilation_mutex);
+        m_cranelift_compilation_state_changed.wait_while([this] {
+            return m_cranelift_compilation_state.load(AK::MemoryOrder::memory_order_acquire) == 1;
+        });
+    }
+
+    // Disk-cache config for native compilation. Parked here by the embedder before compilation is kicked off, and consumed by whichever path ends up driving compile_module_to_native() first.
+    void set_cranelift_cache_config(CompileCacheConfig config) { m_cranelift_cache_config = move(config); }
+    Optional<CompileCacheConfig> take_cranelift_cache_config() { return move(m_cranelift_cache_config); }
+
+    // Compile stats parked here by the embedder; compile_module_to_native() fills in the cranelift_* / cache_hit fields once native compilation runs, then records them.
+    void set_compile_stats(ModuleStats stats) { m_compile_stats = move(stats); }
+    Optional<ModuleStats> take_compile_stats() { return move(m_compile_stats); }
 
     static ParseResult<NonnullRefPtr<Module>> parse(Stream& stream);
 
@@ -1393,10 +1644,42 @@ private:
 
     ValidationStatus m_validation_status { ValidationStatus::Unchecked };
     Optional<ByteString> m_validation_error;
+    mutable Atomic<u8> m_cranelift_compilation_state { 0 };
+    mutable Sync::Mutex m_cranelift_compilation_mutex;
+    mutable Sync::ConditionVariable m_cranelift_compilation_state_changed { m_cranelift_compilation_mutex };
+    Optional<CompileCacheConfig> m_cranelift_cache_config;
+    Optional<ModuleStats> m_compile_stats;
 
     size_t m_minimum_call_record_allocation_size { 0 };
 };
 
 CompiledInstructions try_compile_instructions(Expression const&, Span<FunctionType const> functions);
+ErrorOr<void, ValidationError> ensure_cranelift_compiled(Module&);
+WASM_API void start_cranelift_compilation(Module&);
+bool try_cranelift_compile(CompiledInstructions& compiled, u32 result_arity = 0);
+void flush_cranelift_batch();
+void discard_cranelift_batch();
+
+void compile_module_to_native(Module&);
+
+WASM_API void record_module_stats(ModuleStats);
+WASM_API void dump_module_stats();
+
+// Cranelift disk-cache plumbing. Validator drives these around CodeSection validation:
+//   1. set_cranelift_active_function_index() before each function so cache-hit installs
+//      and post-compile capture know which function they're talking about.
+//   2. begin_cranelift_cache_capture() to start collecting compiled bytes + relocs.
+//   3. try_install_cranelift_cache_blob() with the wasm-bytes hash + stored blob; if
+//      it returns true, individual try_cranelift_compile calls will short-circuit by
+//      installing from the stashed records instead of queueing fresh compiles.
+//   4. After flush, serialize_cranelift_cache_blob() returns a blob to hand to the
+//      cache store (or {} if nothing was captured); abort_cranelift_cache_capture()
+//      throws the capture away.
+void set_cranelift_active_function_index(u32 function_index);
+void begin_cranelift_cache_capture();
+void abort_cranelift_cache_capture();
+void abort_cranelift_cache_install();
+Optional<ByteBuffer> serialize_cranelift_cache_blob(ReadonlyBytes wasm_hash);
+bool try_install_cranelift_cache_blob(ReadonlyBytes expected_wasm_hash, ReadonlyBytes blob);
 
 }

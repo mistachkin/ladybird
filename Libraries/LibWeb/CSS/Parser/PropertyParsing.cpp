@@ -47,6 +47,7 @@
 #include <LibWeb/CSS/StyleValues/LengthStyleValue.h>
 #include <LibWeb/CSS/StyleValues/NumberStyleValue.h>
 #include <LibWeb/CSS/StyleValues/OpenTypeTaggedStyleValue.h>
+#include <LibWeb/CSS/StyleValues/OverflowClipMarginStyleValue.h>
 #include <LibWeb/CSS/StyleValues/PercentageStyleValue.h>
 #include <LibWeb/CSS/StyleValues/PositionStyleValue.h>
 #include <LibWeb/CSS/StyleValues/RepeatStyleStyleValue.h>
@@ -79,7 +80,7 @@ RefPtr<StyleValue const> Parser::parse_all_as_single_keyword_value(TokenStream<C
 {
     auto transaction = tokens.begin_transaction();
     tokens.discard_whitespace();
-    auto keyword_value = parse_specific_keyword_value(tokens, keyword);
+    auto keyword_value = parse_specific_keyword_value(tokens, { { keyword } });
     tokens.discard_whitespace();
 
     if (tokens.has_next_token() || !keyword_value)
@@ -432,6 +433,11 @@ Parser::ParseErrorOr<NonnullRefPtr<StyleValue const>> Parser::parse_css_value(Pr
         //       values, only the CSS-wide keywords - this is handled above, and thus, if we have gotten to here, there
         //       is an invalid value which is a syntax error.
         return ParseError::SyntaxError;
+    case PropertyID::AlignItems:
+    case PropertyID::AlignSelf:
+    case PropertyID::JustifyItems:
+    case PropertyID::JustifySelf:
+        return parse_all_as(tokens, [this, property_id](auto& tokens) { return parse_self_alignment_value(property_id, tokens); });
     case PropertyID::AnchorName:
         return parse_all_as(tokens, [this](auto& tokens) { return parse_anchor_name_value(tokens); });
     case PropertyID::AnchorScope:
@@ -487,6 +493,10 @@ Parser::ParseErrorOr<NonnullRefPtr<StyleValue const>> Parser::parse_css_value(Pr
         return parse_all_as(tokens, [this](auto& tokens) { return parse_columns_value(tokens); });
     case PropertyID::Contain:
         return parse_all_as(tokens, [this](auto& tokens) { return parse_contain_value(tokens); });
+    case PropertyID::Container:
+        return parse_all_as(tokens, [this](auto& tokens) { return parse_container_value(tokens); });
+    case PropertyID::ContainerName:
+        return parse_all_as(tokens, [this](auto& tokens) { return parse_container_name_value(tokens); });
     case PropertyID::ContainerType:
         return parse_all_as(tokens, [this](auto& tokens) { return parse_container_type_value(tokens); });
     case PropertyID::Content:
@@ -1024,6 +1034,15 @@ RefPtr<StyleValue const> Parser::parse_anchor_scope_value(TokenStream<ComponentV
     return parse_comma_separated_value_list(tokens, [this](TokenStream<ComponentValue>& inner_tokens) -> RefPtr<StyleValue const> {
         return parse_dashed_ident_value(inner_tokens);
     });
+}
+
+// https://drafts.csswg.org/css-align-3/#overflow-values
+RefPtr<StyleValue const> Parser::parse_self_alignment_value(PropertyID property_id, TokenStream<ComponentValue>& tokens)
+{
+    auto value = parse_css_value_for_property(property_id, tokens);
+    if (value && (value->to_keyword() == Keyword::Safe || value->to_keyword() == Keyword::Unsafe))
+        return nullptr;
+    return value;
 }
 
 // https://www.w3.org/TR/css-sizing-4/#aspect-ratio
@@ -3325,20 +3344,66 @@ RefPtr<StyleValue const> Parser::parse_math_depth_value(TokenStream<ComponentVal
 // https://drafts.csswg.org/css-overflow-4/#overflow-clip-margin
 RefPtr<StyleValue const> Parser::parse_overflow_clip_margin_value(TokenStream<ComponentValue>& tokens)
 {
-    // <visual-box> || <length [0,∞]>
-    // FIXME: Implement the <visual-box> part of this.
+    // <visual-box> || <length>
+    auto parse_visual_box = [this](auto& tokens) -> Optional<BackgroundBox> {
+        auto transaction = tokens.begin_transaction();
+        auto maybe_visual_box = parse_keyword_value(tokens);
+        if (!maybe_visual_box)
+            return {};
 
-    if (auto length = parse_length_value(tokens, non_negative_range)) {
-        return length.release_nonnull();
+        auto keyword = maybe_visual_box->to_keyword();
+        Optional<BackgroundBox> box;
+        if (keyword == Keyword::ContentBox)
+            box = BackgroundBox::ContentBox;
+        else if (keyword == Keyword::PaddingBox)
+            box = BackgroundBox::PaddingBox;
+        else if (keyword == Keyword::BorderBox)
+            box = BackgroundBox::BorderBox;
+        else
+            return {};
+
+        transaction.commit();
+        return box;
+    };
+
+    RefPtr<StyleValue const> length;
+    Optional<BackgroundBox> visual_box;
+
+    for (size_t i = 0; i < 2; ++i) {
+        tokens.discard_whitespace();
+        if (!tokens.has_next_token())
+            break;
+
+        if (!visual_box.has_value()) {
+            if (auto maybe_visual_box = parse_visual_box(tokens); maybe_visual_box.has_value()) {
+                visual_box = maybe_visual_box.release_value();
+                continue;
+            }
+        }
+
+        if (!length) {
+            if (auto maybe_length = parse_length_value(tokens, non_negative_range)) {
+                length = maybe_length.release_nonnull();
+                continue;
+            }
+        }
+
+        return nullptr;
     }
 
-    return nullptr;
+    tokens.discard_whitespace();
+    if (tokens.has_next_token() || (!visual_box.has_value() && !length))
+        return nullptr;
+
+    if (!length)
+        length = LengthStyleValue::create(Length::make_px(0));
+
+    return OverflowClipMarginStyleValue::create(visual_box, length.release_nonnull());
 }
 
 RefPtr<StyleValue const> Parser::parse_overflow_clip_margin_shorthand(PropertyID property_id, TokenStream<ComponentValue>& tokens)
 {
-    // <visual-box> || <length [0,∞]>
-    // FIXME: Implement the <visual-box> part of this.
+    // <visual-box> || <length>
 
     if (auto value = parse_overflow_clip_margin_value(tokens)) {
         auto const& longhands = longhands_for_shorthand(property_id);
@@ -4572,7 +4637,7 @@ RefPtr<StyleValue const> Parser::parse_scroll_timeline_value(TokenStream<Compone
     auto transaction = tokens.begin_transaction();
 
     do {
-        static auto default_axis = property_initial_value(PropertyID::ScrollTimelineAxis)->as_value_list().values()[0];
+        static auto const& default_axis = *new ValueComparingNonnullRefPtr<StyleValue const>(property_initial_value(PropertyID::ScrollTimelineAxis)->as_value_list().values()[0]);
 
         tokens.discard_whitespace();
 
@@ -5269,7 +5334,7 @@ RefPtr<GridAutoFlowStyleValue const> Parser::parse_grid_auto_flow_value(TokenStr
 // https://www.w3.org/TR/css-grid-2/#track-sizing
 RefPtr<StyleValue const> Parser::parse_grid_track_size_list(TokenStream<ComponentValue>& tokens)
 {
-    // none | <track-list> | <auto-track-list> | FIXME: subgrid <line-name-list>?
+    // none | <track-list> | <auto-track-list> | subgrid <line-name-list>?
 
     // none
     {
@@ -5279,6 +5344,40 @@ RefPtr<StyleValue const> Parser::parse_grid_track_size_list(TokenStream<Componen
             tokens.discard_a_token(); // none
             transaction.commit();
             return GridTrackSizeListStyleValue::make_none();
+        }
+    }
+
+    // subgrid <line-name-list>?
+    {
+        auto transaction = tokens.begin_transaction();
+        tokens.discard_whitespace();
+        if (tokens.has_next_token() && tokens.next_token().is_ident("subgrid"sv)) {
+            tokens.discard_a_token(); // subgrid
+
+            auto track_list = GridTrackSizeList::make_subgrid();
+            bool has_auto_fill_repeat = false;
+            tokens.discard_whitespace();
+            while (tokens.has_next_token()) {
+                if (tokens.next_token().is_block() && tokens.next_token().block().is_square()) {
+                    auto line_names = parse_grid_line_names(tokens);
+                    if (!line_names.has_value())
+                        return nullptr;
+                    track_list.append(line_names.release_value());
+                } else if (auto name_repeat = parse_grid_name_repeat(tokens); name_repeat.has_value()) {
+                    if (name_repeat->is_auto_fill()) {
+                        if (has_auto_fill_repeat)
+                            return nullptr;
+                        has_auto_fill_repeat = true;
+                    }
+                    track_list.append(ExplicitGridTrack(name_repeat.release_value()));
+                } else {
+                    return nullptr;
+                }
+                tokens.discard_whitespace();
+            }
+
+            transaction.commit();
+            return GridTrackSizeListStyleValue::create(move(track_list));
         }
     }
 
@@ -5592,6 +5691,40 @@ RefPtr<StyleValue const> Parser::parse_contain_value(TokenStream<ComponentValue>
     return StyleValueList::create(move(containment_values), StyleValueList::Separator::Space);
 }
 
+// https://drafts.csswg.org/css-conditional-5/#propdef-container-name
+RefPtr<StyleValue const> Parser::parse_container_name_value(TokenStream<ComponentValue>& tokens)
+{
+    // none | <custom-ident>+
+    auto transaction = tokens.begin_transaction();
+    tokens.discard_whitespace();
+
+    if (auto none = parse_specific_keyword_value(tokens, { { Keyword::None } })) {
+        transaction.commit();
+        return none;
+    }
+
+    StyleValueVector names;
+    while (tokens.has_next_token()) {
+        // The keywords none, and, not, and or are excluded from this <custom-ident>.
+        auto name = parse_custom_ident_value(tokens, { { "none"sv, "and"sv, "not"sv, "or"sv } });
+        if (!name)
+            break;
+
+        names.append(name.release_nonnull());
+        tokens.discard_whitespace();
+    }
+
+    if (names.is_empty())
+        return {};
+
+    transaction.commit();
+
+    if (names.size() == 1)
+        return names.take_first();
+
+    return StyleValueList::create(move(names), StyleValueList::Separator::Space, StyleValueList::Collapsible::No);
+}
+
 // https://drafts.csswg.org/css-conditional-5/#propdef-container-type
 RefPtr<StyleValue const> Parser::parse_container_type_value(TokenStream<ComponentValue>& tokens)
 {
@@ -5643,6 +5776,43 @@ RefPtr<StyleValue const> Parser::parse_container_type_value(TokenStream<Componen
     transaction.commit();
 
     return StyleValueList::create(move(containment_values), StyleValueList::Separator::Space);
+}
+
+// https://drafts.csswg.org/css-conditional-5/#propdef-container
+RefPtr<StyleValue const> Parser::parse_container_value(TokenStream<ComponentValue>& tokens)
+{
+    // <'container-name'> [ / <'container-type'> ]?
+    auto transaction = tokens.begin_transaction();
+    tokens.discard_whitespace();
+
+    auto name = parse_container_name_value(tokens);
+    if (!name)
+        return {};
+
+    tokens.discard_whitespace();
+
+    RefPtr<StyleValue const> type;
+    if (tokens.has_next_token()) {
+        if (!tokens.next_token().is_delim('/'))
+            return {};
+        tokens.discard_a_token();
+
+        tokens.discard_whitespace();
+        type = parse_container_type_value(tokens);
+        if (!type)
+            return {};
+
+        tokens.discard_whitespace();
+        if (tokens.has_next_token())
+            return {};
+    } else {
+        type = property_initial_value(PropertyID::ContainerType);
+    }
+
+    transaction.commit();
+    return ShorthandStyleValue::create(PropertyID::Container,
+        { PropertyID::ContainerName, PropertyID::ContainerType },
+        { name.release_nonnull(), type.release_nonnull() });
 }
 
 // https://www.w3.org/TR/css-text-4/#white-space-trim
@@ -5811,11 +5981,17 @@ RefPtr<StyleValue const> Parser::parse_view_timeline_value(TokenStream<Component
             VERIFY(name);
             names.append(name.release_nonnull());
 
-            static auto default_axis = property_initial_value(PropertyID::ViewTimelineAxis)->as_value_list().values()[0];
-            static auto default_inset = property_initial_value(PropertyID::ViewTimelineInset)->as_value_list().values()[0];
+            static auto const& default_axis = *new ValueComparingNonnullRefPtr<StyleValue const>(property_initial_value(PropertyID::ViewTimelineAxis)->as_value_list().values()[0]);
+            static auto const& default_inset = *new ValueComparingNonnullRefPtr<StyleValue const>(property_initial_value(PropertyID::ViewTimelineInset)->as_value_list().values()[0]);
 
-            axes.append(axis ? axis.release_nonnull() : default_axis);
-            insets.append(inset ? inset.release_nonnull() : default_inset);
+            if (axis)
+                axes.append(axis.release_nonnull());
+            else
+                axes.append(default_axis);
+            if (inset)
+                insets.append(inset.release_nonnull());
+            else
+                insets.append(default_inset);
         };
 
         tokens.discard_whitespace();

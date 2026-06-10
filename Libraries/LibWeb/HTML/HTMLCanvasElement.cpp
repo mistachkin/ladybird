@@ -7,7 +7,7 @@
 #include <AK/Base64.h>
 #include <AK/Checked.h>
 #include <LibGfx/Bitmap.h>
-#include <LibGfx/ImmutableBitmap.h>
+#include <LibGfx/SharedImage.h>
 #include <LibWeb/Bindings/ExceptionOrUtils.h>
 #include <LibWeb/Bindings/HTMLCanvasElement.h>
 #include <LibWeb/CSS/ComputedProperties.h>
@@ -54,6 +54,7 @@ void HTMLCanvasElement::initialize(JS::Realm& realm)
 
 void HTMLCanvasElement::finalize()
 {
+    clear_compositor_surface();
     Base::finalize();
     document().page().unregister_canvas_element({}, unique_id());
 }
@@ -61,18 +62,7 @@ void HTMLCanvasElement::finalize()
 void HTMLCanvasElement::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
-    m_context.visit(
-        [&](GC::Ref<CanvasRenderingContext2D>& context) {
-            visitor.visit(context);
-        },
-        [&](GC::Ref<WebGL::WebGLRenderingContext>& context) {
-            visitor.visit(context);
-        },
-        [&](GC::Ref<WebGL::WebGL2RenderingContext>& context) {
-            visitor.visit(context);
-        },
-        [](Empty) {
-        });
+    visitor.visit(m_context);
 }
 
 bool HTMLCanvasElement::is_presentational_hint(FlyString const& name) const
@@ -142,17 +132,16 @@ WebIDL::UnsignedLong HTMLCanvasElement::height() const
     return 150;
 }
 
-Painting::ExternalContentSource& HTMLCanvasElement::ensure_external_content_source()
+Painting::CompositorSurfaceId HTMLCanvasElement::ensure_compositor_surface_id()
 {
-    if (!m_external_content_source)
-        m_external_content_source = Painting::ExternalContentSource::create();
-    return *m_external_content_source;
+    if (!m_compositor_surface_id.has_value())
+        m_compositor_surface_id = Painting::allocate_compositor_surface_id();
+    return *m_compositor_surface_id;
 }
 
 void HTMLCanvasElement::reset_context_to_default_state()
 {
-    if (m_external_content_source)
-        m_external_content_source->clear();
+    clear_compositor_surface();
     m_context.visit(
         [](GC::Ref<CanvasRenderingContext2D>& context) {
             context->reset_to_default_state();
@@ -197,7 +186,7 @@ CSS::ComputationContext HTMLCanvasElement::canvas_font_computation_context()
         //     OffscreenCanvas
         .abstract_element = abstract_element,
 
-        // FIXME: Do we require a color scheme to resolve light-dark()?
+        // NB: We don't require a color scheme since this is only used for resolving font values, not colors
         .color_scheme = {}
     };
 }
@@ -250,9 +239,9 @@ void HTMLCanvasElement::attribute_changed(FlyString const& local_name, Optional<
     }
 }
 
-GC::Ptr<Layout::Node> HTMLCanvasElement::create_layout_node(GC::Ref<CSS::ComputedProperties> style)
+RefPtr<Layout::Node> HTMLCanvasElement::create_layout_node(CSS::ComputedProperties const& style)
 {
-    return heap().allocate<Layout::CanvasBox>(document(), *this, move(style));
+    return make_ref_counted<Layout::CanvasBox>(document(), *this, style);
 }
 
 void HTMLCanvasElement::adjust_computed_style(CSS::ComputedProperties& style)
@@ -299,7 +288,7 @@ JS::ThrowCompletionOr<HTMLCanvasElement::RenderingContext> HTMLCanvasElement::ge
     // NOTE: See the spec for the full table.
     if (type == "2d"sv) {
         if (TRY(create_2d_context(options)) == HasOrCreatedContext::Yes)
-            return GC::make_root(*m_context.get<GC::Ref<HTML::CanvasRenderingContext2D>>());
+            return m_context.get<GC::Ref<HTML::CanvasRenderingContext2D>>();
 
         return Empty {};
     }
@@ -307,14 +296,14 @@ JS::ThrowCompletionOr<HTMLCanvasElement::RenderingContext> HTMLCanvasElement::ge
     // NOTE: The WebGL spec says "experimental-webgl" is also acceptable and must be equivalent to "webgl". Other engines accept this, so we do too.
     if (type.is_one_of("webgl"sv, "experimental-webgl"sv)) {
         if (TRY(create_webgl_context<WebGL::WebGLRenderingContext>(options)) == HasOrCreatedContext::Yes)
-            return GC::make_root(*m_context.get<GC::Ref<WebGL::WebGLRenderingContext>>());
+            return m_context.get<GC::Ref<WebGL::WebGLRenderingContext>>();
 
         return Empty {};
     }
 
     if (type == "webgl2"sv) {
         if (TRY(create_webgl_context<WebGL::WebGL2RenderingContext>(options)) == HasOrCreatedContext::Yes)
-            return GC::make_root(*m_context.get<GC::Ref<WebGL::WebGL2RenderingContext>>());
+            return m_context.get<GC::Ref<WebGL::WebGL2RenderingContext>>();
 
         return Empty {};
     }
@@ -342,7 +331,7 @@ Gfx::IntSize HTMLCanvasElement::bitmap_size_for_canvas(size_t minimum_width, siz
 }
 
 // https://html.spec.whatwg.org/multipage/canvas.html#dom-canvas-todataurl
-String HTMLCanvasElement::to_data_url(StringView type, JS::Value js_quality)
+String HTMLCanvasElement::to_data_url(StringView type, Optional<JS::Value> js_quality)
 {
     // It is possible the canvas doesn't have an associated bitmap so create one
     allocate_painting_surface_if_needed();
@@ -361,9 +350,8 @@ String HTMLCanvasElement::to_data_url(StringView type, JS::Value js_quality)
         return "data:,"_string;
 
     // 3. Let file be a serialization of this canvas element's bitmap as a file, passing type and quality if given.
-    auto bitmap = MUST(Gfx::Bitmap::create(Gfx::BitmapFormat::BGRA8888, Gfx::AlphaType::Premultiplied, surface->size()));
-    surface->read_into_bitmap(*bitmap);
-    Optional<double> quality = js_quality.is_number() ? js_quality.as_double() : Optional<double>();
+    auto bitmap = surface->snapshot_bitmap();
+    Optional<double> quality = js_quality.has_value() && js_quality->is_number() ? js_quality->as_double() : Optional<double>();
     auto file = serialize_bitmap(bitmap, type, quality);
 
     // 4. If file is null, then return "data:,".
@@ -381,7 +369,7 @@ String HTMLCanvasElement::to_data_url(StringView type, JS::Value js_quality)
 }
 
 // https://html.spec.whatwg.org/multipage/canvas.html#dom-canvas-toblob
-WebIDL::ExceptionOr<void> HTMLCanvasElement::to_blob(GC::Ref<WebIDL::CallbackType> callback, StringView type, JS::Value js_quality)
+WebIDL::ExceptionOr<void> HTMLCanvasElement::to_blob(GC::Ref<WebIDL::CallbackType> callback, StringView type, Optional<JS::Value> js_quality)
 {
     // FIXME: 1. If this canvas element's bitmap's origin-clean flag is set to false, then throw a "SecurityError" DOMException.
 
@@ -390,7 +378,7 @@ WebIDL::ExceptionOr<void> HTMLCanvasElement::to_blob(GC::Ref<WebIDL::CallbackTyp
     //    then set result to a copy of this canvas element's bitmap.
     auto bitmap_result = get_bitmap_from_surface();
 
-    Optional<double> quality = js_quality.is_number() ? js_quality.as_double() : Optional<double>();
+    Optional<double> quality = js_quality.has_value() && js_quality->is_number() ? js_quality->as_double() : Optional<double>();
 
     // 4. Run these steps in parallel:
     Platform::EventLoopPlugin::the().deferred_invoke(GC::create_function(heap(), [this, callback, bitmap_result, type, quality] {
@@ -432,8 +420,7 @@ RefPtr<Gfx::Bitmap> HTMLCanvasElement::get_bitmap_from_surface()
 
     RefPtr<Gfx::Bitmap> bitmap;
     if (surface) {
-        bitmap = MUST(Gfx::Bitmap::create(Gfx::BitmapFormat::BGRA8888, Gfx::AlphaType::Premultiplied, surface->size()));
-        surface->read_into_bitmap(*bitmap);
+        bitmap = surface->snapshot_bitmap();
     }
 
     return bitmap;
@@ -451,8 +438,8 @@ void HTMLCanvasElement::present()
     m_canvas_content_dirty = false;
 
     m_context.visit(
-        [](GC::Ref<CanvasRenderingContext2D>&) {
-            // Do nothing, CRC2D writes directly to the canvas bitmap.
+        [](GC::Ref<CanvasRenderingContext2D>& context) {
+            context->present();
         },
         [](GC::Ref<WebGL::WebGLRenderingContext>& context) {
             context->present();
@@ -464,11 +451,34 @@ void HTMLCanvasElement::present()
             // Do nothing.
         });
 
+    update_compositor_surface();
+}
+
+void HTMLCanvasElement::republish_compositor_surface()
+{
+    if (m_canvas_content_dirty) {
+        present();
+        return;
+    }
+
+    update_compositor_surface();
+}
+
+void HTMLCanvasElement::update_compositor_surface()
+{
     if (auto surface = this->surface()) {
         surface->flush();
-        auto snapshot = Gfx::ImmutableBitmap::create_snapshot_from_painting_surface(*surface);
-        ensure_external_content_source().update(snapshot);
+        if (auto navigable = document().navigable(); navigable && navigable->has_compositor_context())
+            navigable->compositor_context().update_compositor_surface(ensure_compositor_surface_id(), surface->snapshot_into_shared_image());
     }
+}
+
+void HTMLCanvasElement::clear_compositor_surface()
+{
+    if (!m_compositor_surface_id.has_value())
+        return;
+    if (auto navigable = document().navigable(); navigable && navigable->has_compositor_context())
+        navigable->compositor_context().clear_compositor_surface(*m_compositor_surface_id);
 }
 
 RefPtr<Gfx::PaintingSurface> HTMLCanvasElement::surface() const

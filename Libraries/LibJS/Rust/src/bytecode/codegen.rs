@@ -41,17 +41,29 @@
 use std::collections::HashSet;
 
 use num_bigint::BigInt;
-use num_traits::{One, Signed, ToPrimitive, Zero};
+use num_traits::One;
+use num_traits::Signed;
+use num_traits::ToPrimitive;
+use num_traits::Zero;
 
 use crate::ast::*;
 use crate::lexer::ch;
 use crate::u32_from_usize;
 
-use super::ffi::{AbstractOperationKind, WellKnownSymbolKind};
-use super::generator::{
-    BlockBoundaryType, ConstantValue, FinallyContext, Generator, PendingClassBlueprint, PendingClassElement,
-    PendingLiteralValueKind, PendingSharedFunctionData, ScopedOperand, choose_dst, constant_to_boolean, parse_bigint,
-};
+use super::ffi::AbstractOperationKind;
+use super::ffi::WellKnownSymbolKind;
+use super::generator::BlockBoundaryType;
+use super::generator::ConstantValue;
+use super::generator::FinallyContext;
+use super::generator::Generator;
+use super::generator::PendingClassBlueprint;
+use super::generator::PendingClassElement;
+use super::generator::PendingLiteralValueKind;
+use super::generator::PendingSharedFunctionData;
+use super::generator::ScopedOperand;
+use super::generator::choose_dst;
+use super::generator::constant_to_boolean;
+use super::generator::parse_bigint;
 use super::instruction::Instruction;
 use super::operand::*;
 
@@ -71,6 +83,136 @@ pub fn generate_expression(
     generator.current_source_start = saved_source_start;
     generator.current_source_end = saved_source_end;
     result
+}
+
+fn generate_class_part_expression(
+    expression: &Expression,
+    generator: &mut Generator,
+    preferred_dst: Option<&ScopedOperand>,
+) -> Option<ScopedOperand> {
+    // https://tc39.es/ecma262/#sec-strict-mode-code
+    // All parts of a |ClassDeclaration| or a |ClassExpression| are strict mode code.
+    let saved_strict = generator.strict;
+    generator.strict = true;
+    let result = generate_expression(expression, generator, preferred_dst);
+    generator.strict = saved_strict;
+    result
+}
+
+fn emit_get_binding(
+    generator: &mut Generator,
+    dst: Operand,
+    identifier: IdentifierTableIndex,
+    known_initialized: bool,
+) {
+    // Prefer an eagerly-computed coordinate when the generator can prove that
+    // the binding lives in a known declarative environment. The dynamic forms
+    // remain necessary for outer functions, eval-poisoned scopes, and `with`.
+    match (
+        generator.environment_coordinate_for_identifier(identifier),
+        known_initialized,
+    ) {
+        (Some(cache), true) => generator.emit(Instruction::GetInitializedBinding { dst, identifier, cache }),
+        (Some(cache), false) => generator.emit(Instruction::GetBinding { dst, identifier, cache }),
+        (None, true) => {
+            let cache = generator.next_environment_coordinate_cache();
+            generator.emit(Instruction::DynamicGetInitializedBinding { dst, identifier, cache });
+        }
+        (None, false) => {
+            let cache = generator.next_environment_coordinate_cache();
+            generator.emit(Instruction::DynamicGetBinding { dst, identifier, cache });
+        }
+    }
+}
+
+fn emit_get_callee_and_this_from_environment(
+    generator: &mut Generator,
+    callee: Operand,
+    this_value: Operand,
+    identifier: IdentifierTableIndex,
+) {
+    if let Some(cache) = generator.environment_coordinate_for_identifier(identifier) {
+        generator.emit(Instruction::GetCalleeAndThisFromEnvironment {
+            callee,
+            this_value,
+            identifier,
+            cache,
+        });
+    } else {
+        let cache = generator.next_environment_coordinate_cache();
+        generator.emit(Instruction::DynamicGetCalleeAndThisFromEnvironment {
+            callee,
+            this_value,
+            identifier,
+            cache,
+        });
+    }
+}
+
+fn emit_initialize_lexical_binding(generator: &mut Generator, identifier: IdentifierTableIndex, src: Operand) {
+    if let Some(cache) = generator.environment_coordinate_for_identifier(identifier) {
+        generator.emit(Instruction::InitializeLexicalBinding { identifier, src, cache });
+    } else {
+        let cache = generator.next_environment_coordinate_cache();
+        generator.emit(Instruction::DynamicInitializeLexicalBinding { identifier, src, cache });
+    }
+}
+
+fn emit_initialize_variable_binding(generator: &mut Generator, identifier: IdentifierTableIndex, src: Operand) {
+    // Var bindings are resolved from vm.variable_environment(), not from the
+    // current lexical environment. Use the generator's variable-environment
+    // anchor so nested lexical scopes do not affect the coordinate hops.
+    if let Some(cache) = generator.variable_environment_coordinate_for_identifier(identifier) {
+        generator.emit(Instruction::InitializeVariableBinding { identifier, src, cache });
+    } else {
+        let cache = generator.next_environment_coordinate_cache();
+        generator.emit(Instruction::DynamicInitializeVariableBinding { identifier, src, cache });
+    }
+}
+
+fn emit_set_lexical_binding(generator: &mut Generator, identifier: IdentifierTableIndex, src: Operand) {
+    if let Some(cache) = generator.environment_coordinate_for_identifier(identifier) {
+        generator.emit(Instruction::SetLexicalBinding { identifier, src, cache });
+    } else {
+        let cache = generator.next_environment_coordinate_cache();
+        generator.emit(Instruction::DynamicSetLexicalBinding { identifier, src, cache });
+    }
+}
+
+fn emit_set_variable_binding(generator: &mut Generator, identifier: IdentifierTableIndex, src: Operand) {
+    // See emit_initialize_variable_binding for why var coordinates use a
+    // different lookup anchor than ordinary lexical operations.
+    if let Some(cache) = generator.variable_environment_coordinate_for_identifier(identifier) {
+        generator.emit(Instruction::SetVariableBinding { identifier, src, cache });
+    } else {
+        let cache = generator.next_environment_coordinate_cache();
+        generator.emit(Instruction::DynamicSetVariableBinding { identifier, src, cache });
+    }
+}
+
+fn emit_typeof_binding(generator: &mut Generator, dst: Operand, identifier: IdentifierTableIndex) {
+    if let Some(cache) = generator.environment_coordinate_for_identifier(identifier) {
+        generator.emit(Instruction::TypeofBinding { dst, identifier, cache });
+    } else {
+        let cache = generator.next_environment_coordinate_cache();
+        generator.emit(Instruction::DynamicTypeofBinding { dst, identifier, cache });
+    }
+}
+
+fn set_pending_lhs_name_for_identifier_assignment(
+    generator: &mut Generator,
+    identifier: StringId,
+    lhs_is_parenthesized: bool,
+) {
+    // https://tc39.es/ecma262/#sec-assignment-operators-runtime-semantics-evaluation
+    // If IsAnonymousFunctionDefinition(|AssignmentExpression|) is *true* and IsIdentifierRef of
+    // |LeftHandSideExpression| is *true*, then
+    // A parenthesized identifier can be a simple assignment target, but it is not an IdentifierRef.
+    generator.pending_lhs_name = if lhs_is_parenthesized {
+        None
+    } else {
+        Some(generator.intern_identifier_id(identifier))
+    };
 }
 
 fn generate_expression_inner(
@@ -117,7 +259,7 @@ fn generate_expression_inner(
         }
 
         // === Identifiers ===
-        ExpressionKind::Identifier(ident) => Some(generate_identifier(ident, generator, preferred_dst)),
+        ExpressionKind::Identifier(ident) => Some(generate_identifier(*ident, generator, preferred_dst)),
 
         // === This ===
         ExpressionKind::This => {
@@ -240,9 +382,14 @@ fn generate_expression_inner(
         ExpressionKind::Update(data) => generate_update_expression(generator, data.op, &data.argument, data.prefixed),
 
         // === Assignment ===
-        ExpressionKind::Assignment(data) => {
-            generate_assignment_expression(generator, data.op, &data.lhs, &data.rhs, preferred_dst)
-        }
+        ExpressionKind::Assignment(data) => generate_assignment_expression(
+            generator,
+            data.op,
+            &data.lhs,
+            &data.rhs,
+            data.lhs_is_parenthesized,
+            preferred_dst,
+        ),
 
         // === Template literals ===
         ExpressionKind::TemplateLiteral(data) => generate_template_literal(generator, data, preferred_dst),
@@ -277,6 +424,14 @@ fn generate_expression_inner(
 
         // === SuperCall ===
         ExpressionKind::SuperCall(data) => {
+            // https://tc39.es/ecma262/#sec-super-keyword-runtime-semantics-evaluation
+            // 3. Let _superConstructor_ be GetSuperConstructor().
+            // 4. Let _argList_ be ? ArgumentListEvaluation of |Arguments|.
+            let super_constructor = generator.allocate_register();
+            generator.emit(Instruction::GetSuperConstructor {
+                dst: super_constructor.operand(),
+            });
+
             let arguments = if data.is_synthetic {
                 // Synthetic constructor: super(...arguments) — single spread argument,
                 // don't call @@iterator on %Array.prototype%.
@@ -289,6 +444,7 @@ fn generate_expression_inner(
             let dst = choose_dst(generator, preferred_dst);
             generator.emit(Instruction::SuperCallWithArgumentArray {
                 dst: dst.operand(),
+                super_constructor: super_constructor.operand(),
                 arguments: arguments.operand(),
                 is_synthetic: data.is_synthetic,
             });
@@ -324,16 +480,13 @@ fn generate_unary_expression(
     // evaluating the operand to avoid throwing on unresolvable references.
     // Allocate dst before evaluating typeof/not operands.
     if op == UnaryOp::Typeof {
+        let arena = generator.arena.clone();
         if let ExpressionKind::Identifier(ident) = &operand.inner
-            && !ident.is_local()
+            && !arena.identifiers[*ident].is_local()
         {
             let dst = choose_dst(generator, preferred_dst);
-            let id = generator.intern_identifier(&ident.name);
-            generator.emit(Instruction::TypeofBinding {
-                dst: dst.operand(),
-                identifier: id,
-                cache: EnvironmentCoordinate::empty(),
-            });
+            let id = generator.intern_identifier_id(arena.identifiers[*ident].name);
+            emit_typeof_binding(generator, dst.operand(), id);
             return Some(dst);
         }
         let dst = choose_dst(generator, preferred_dst);
@@ -535,10 +688,13 @@ fn generate_function_expression(
             dst: new_env.operand(),
             parent: parent.operand(),
             capacity: 0,
+            is_catch_environment: false,
         });
-        generator.lexical_environment_register_stack.push(new_env);
+        generator.push_static_lexical_environment(new_env);
 
-        let id = generator.intern_identifier(&data.name.as_ref().expect("function declaration must have a name").name);
+        let name_id = data.name.expect("function declaration must have a name");
+        let arena = generator.arena.clone();
+        let id = generator.intern_identifier_id(arena.identifiers[name_id].name);
         generator.emit(Instruction::CreateVariable {
             identifier: id,
             mode: EnvironmentMode::Lexical as u32,
@@ -578,11 +734,11 @@ fn generate_function_expression(
     });
 
     if has_name {
-        generator.emit(Instruction::InitializeLexicalBinding {
-            identifier: name_id.expect("has_name guarantees name_id is set"),
-            src: dst.operand(),
-            cache: EnvironmentCoordinate::empty(),
-        });
+        emit_initialize_lexical_binding(
+            generator,
+            name_id.expect("has_name guarantees name_id is set"),
+            dst.operand(),
+        );
 
         generator.end_variable_scope();
     }
@@ -711,7 +867,8 @@ fn generate_member_expression(
         if let Some(key) = computed_key {
             emit_get_by_value_with_this(generator, &dst, &super_base, &key, &this_value);
         } else if let ExpressionKind::Identifier(ident) = &property.inner {
-            emit_get_by_id_with_this(generator, &dst, &super_base, &ident.name, &this_value);
+            let arena = generator.arena.clone();
+            emit_get_by_id_with_this(generator, &dst, &super_base, arena.name_slice(*ident), &this_value);
         }
         return Some(dst);
     }
@@ -727,7 +884,8 @@ fn generate_member_expression(
     // Non-computed: property must be an Identifier
     let dst = choose_dst(generator, preferred_dst);
     if let ExpressionKind::Identifier(ident) = &property.inner {
-        emit_get_by_id(generator, &dst, &obj, &ident.name, base_id);
+        let arena = generator.arena.clone();
+        emit_get_by_id(generator, &dst, &obj, arena.name_slice(*ident), base_id);
     } else if let ExpressionKind::PrivateIdentifier(priv_ident) = &property.inner {
         let id = generator.intern_identifier(&priv_ident.name);
         generator.emit(Instruction::GetPrivateById {
@@ -787,7 +945,11 @@ fn generate_yield_expression(
         &received_completion,
         &received_completion_type,
         &received_completion_value,
-        generator.is_in_async_generator_function(),
+        if generator.is_in_async_generator_function() {
+            YieldBehavior::AwaitValue
+        } else {
+            YieldBehavior::Normal
+        },
     );
 
     generator.switch_to_basic_block(continuation_block);
@@ -871,10 +1033,16 @@ pub fn generate_statement(
         StatementKind::Expression(expression) => generate_expression(expression, generator, None),
 
         // === Block ===
-        StatementKind::Block(scope) => generate_block_statement(generator, &scope.borrow(), preferred_dst),
+        StatementKind::Block(scope) => {
+            let arena = generator.arena.clone();
+            generate_block_statement(generator, &arena.scopes[*scope], preferred_dst)
+        }
 
         // === FunctionBody ===
-        StatementKind::FunctionBody { scope, .. } => generate_scope_children(generator, &scope.borrow(), preferred_dst),
+        StatementKind::FunctionBody { scope, .. } => {
+            let arena = generator.arena.clone();
+            generate_scope_children(generator, &arena.scopes[*scope], preferred_dst)
+        }
 
         // === Program ===
         // Note: GlobalDeclarationInstantiation (GDI) runs before this bytecode
@@ -885,11 +1053,12 @@ pub fn generate_statement(
             // GetBinding + SetVariableBinding for AnnexB-hoisted functions
             // (Annex B requires switch cases to copy the block-scoped binding
             // into the var-scoped binding on each case entry).
-            let scope = data.scope.borrow();
+            let arena = generator.arena.clone();
+            let scope = &arena.scopes[data.scope];
             for name in &scope.annexb_function_names {
                 generator.annexb_function_names.insert(name.clone());
             }
-            generate_scope_children(generator, &scope, preferred_dst)
+            generate_scope_children(generator, scope, preferred_dst)
         }
 
         // === If ===
@@ -922,9 +1091,7 @@ pub fn generate_statement(
             let val = match value {
                 Some(expression) => {
                     let v = generate_expression_or_undefined(expression, generator, None);
-                    // Async functions implicitly await an explicit return value.
-                    // Bare `return;` does NOT await (per spec).
-                    if generator.is_in_async_function() {
+                    if generator.is_in_async_generator_function() {
                         let received_completion = generator.allocate_register();
                         let received_completion_type = generator.allocate_register();
                         let received_completion_value = generator.allocate_register();
@@ -982,22 +1149,15 @@ pub fn generate_statement(
 
         // === FunctionDeclaration ===
         StatementKind::FunctionDeclaration(fd) => {
-            if fd.is_hoisted.get() {
+            if fd.is_hoisted {
                 // Annex B.3.3: Copy the function from the lexical (block) scope
                 // to the var scope.
-                if let Some(name_ident) = &fd.name {
-                    let id = generator.intern_identifier(&name_ident.name);
+                if let Some(name_ident) = fd.name {
+                    let arena = generator.arena.clone();
+                    let id = generator.intern_identifier_id(arena.identifiers[name_ident].name);
                     let value = generator.allocate_register();
-                    generator.emit(Instruction::GetBinding {
-                        dst: value.operand(),
-                        identifier: id,
-                        cache: EnvironmentCoordinate::empty(),
-                    });
-                    generator.emit(Instruction::SetVariableBinding {
-                        identifier: id,
-                        src: value.operand(),
-                        cache: EnvironmentCoordinate::empty(),
-                    });
+                    emit_get_binding(generator, value.operand(), id, false);
+                    emit_set_variable_binding(generator, id, value.operand());
                 }
             }
             None
@@ -1011,15 +1171,21 @@ pub fn generate_statement(
                 dst: object_environment.operand(),
                 object: obj.operand(),
             });
-            generator.lexical_environment_register_stack.push(object_environment);
+            generator.push_dynamic_lexical_environment(object_environment);
             generator.start_boundary(BlockBoundaryType::LeaveLexicalEnvironment);
 
-            let result = generate_statement(&data.body, generator, preferred_dst);
+            let with_completion = generator.allocate_completion_register();
+            let result = generate_with_completion(
+                &data.body,
+                generator,
+                with_completion.as_ref(),
+                with_completion.as_ref().or(preferred_dst),
+            );
 
             generator.end_variable_scope();
-            // Per spec 13.11.7 step 10: if body completion value is empty,
-            // return NormalCompletion(undefined).
-            Some(result.unwrap_or_else(|| generator.add_constant_undefined()))
+
+            // Return ? UpdateEmpty(_stmtCompletion_, *undefined*).
+            Some(with_completion.unwrap_or_else(|| result.unwrap_or_else(|| generator.add_constant_undefined())))
         }
 
         // === ForIn / ForOf / ForAwaitOf ===
@@ -1052,18 +1218,15 @@ pub fn generate_statement(
             // (temporal dead zone) until this point, matching `let` semantics.
             // NB: We do NOT mark the local as initialized here, preserving
             // TDZ checks for subsequent uses of the class name.
-            if let Some(name_ident) = &data.name {
+            if let Some(name_ident_id) = data.name {
+                let arena = generator.arena.clone();
+                let name_ident = &arena.identifiers[name_ident_id];
                 if name_ident.is_local() {
-                    let local =
-                        generator.resolve_local(name_ident.local_index.get(), name_ident.local_type.get().unwrap());
+                    let local = generator.resolve_local(name_ident.local_index, name_ident.local_type.unwrap());
                     generator.emit_mov(&local, &value);
                 } else {
-                    let id = generator.intern_identifier(&name_ident.name);
-                    generator.emit(Instruction::InitializeLexicalBinding {
-                        identifier: id,
-                        src: value.operand(),
-                        cache: EnvironmentCoordinate::empty(),
-                    });
+                    let id = generator.intern_identifier_id(name_ident.name);
+                    emit_initialize_lexical_binding(generator, id, value.operand());
                 }
             }
             None
@@ -1093,11 +1256,7 @@ pub fn generate_statement(
                         generator.pending_lhs_name = None;
                         if let Some(value) = value {
                             let local_name = generator.intern_identifier(utf16!("*default*"));
-                            generator.emit(Instruction::InitializeLexicalBinding {
-                                identifier: local_name,
-                                src: value.operand(),
-                                cache: EnvironmentCoordinate::empty(),
-                            });
+                            emit_initialize_lexical_binding(generator, local_name, value.operand());
                             Some(value)
                         } else {
                             None
@@ -1161,6 +1320,13 @@ enum ArgumentsKind {
     Unmapped = 1,
 }
 
+#[repr(u32)]
+enum FunctionNamePrefix {
+    None = 0,
+    Get = 1,
+    Set = 2,
+}
+
 /// Class element kind (ABI-compatible with ClassBlueprint::Element::Kind).
 #[repr(u8)]
 enum ClassElementKind {
@@ -1176,6 +1342,13 @@ enum ClassElementKind {
 enum IteratorHint {
     Sync = 0,
     Async = 1,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum YieldBehavior {
+    Normal,
+    AwaitValue,
+    IteratorResult,
 }
 
 /// Like generate_await but uses caller-provided completion registers.
@@ -1286,7 +1459,7 @@ fn generate_yield_from(
     // =========================================================================
     generator.switch_to_basic_block(type_is_normal_block);
 
-    // i. Let innerResult be ? Call(next, iterator, « received.[[Value]] »).
+    // i. Let _innerResult_ be ? Call(_next_, _iterator_, « _received_.[[Value]] »).
     let inner_result = generator.allocate_register();
     generator.emit(Instruction::Call {
         dst: inner_result.operand(),
@@ -1297,7 +1470,7 @@ fn generate_yield_from(
         arguments: vec![received_completion_value.operand()],
     });
 
-    // ii. If generatorKind is async, set innerResult to ? Await(innerResult).
+    // ii. If _generatorKind_ is ~async~, set _innerResult_ to ? Await(_innerResult_).
     if is_async {
         let awaited = generate_await_with_completions(
             generator,
@@ -1309,16 +1482,16 @@ fn generate_yield_from(
         generator.emit_mov(&inner_result, &awaited);
     }
 
-    // iii. If innerResult is not an Object, throw a TypeError exception.
+    // iii. If _innerResult_ is not an Object, throw a *TypeError* exception.
     generator.emit(Instruction::ThrowIfNotObject {
         src: inner_result.operand(),
     });
 
-    // iv. Let done be ? IteratorComplete(innerResult).
+    // iv. Let _done_ be ? IteratorComplete(_innerResult_).
     let done = generator.allocate_register();
     emit_get_by_id(generator, &done, &inner_result, utf16!("done"), None);
 
-    // v. If done is true, then return ? IteratorValue(innerResult).
+    // v. If _done_ is *true*, then return ? IteratorValue(_innerResult_).
     let type_is_normal_done_block = generator.make_block();
     let type_is_normal_not_done_block = generator.make_block();
     generator.emit_jump_if(&done, type_is_normal_done_block, type_is_normal_not_done_block);
@@ -1328,20 +1501,26 @@ fn generate_yield_from(
     emit_get_by_id(generator, &return_value, &inner_result, utf16!("value"), None);
     generator.emit(Instruction::Jump { target: loop_end_block });
 
-    // vi/vii. Yield IteratorValue(innerResult), receive new completion.
+    // vi. If _generatorKind_ is ~async~, set _received_ to Completion(AsyncGeneratorYield(? IteratorValue(_innerResult_))).
+    // vii. Else, set _received_ to Completion(GeneratorYield(_innerResult_)).
     generator.switch_to_basic_block(type_is_normal_not_done_block);
     {
-        let current_value = generator.allocate_register();
-        emit_get_by_id(generator, &current_value, &inner_result, utf16!("value"), None);
+        let (yield_value, yield_behavior) = if is_async {
+            let current_value = generator.allocate_register();
+            emit_get_by_id(generator, &current_value, &inner_result, utf16!("value"), None);
+            (current_value, YieldBehavior::Normal)
+        } else {
+            (inner_result.clone(), YieldBehavior::IteratorResult)
+        };
 
         generate_yield(
             generator,
             continuation_block,
-            &current_value,
+            &yield_value,
             received_completion,
             received_completion_type,
             received_completion_value,
-            false,
+            yield_behavior,
         );
     }
 
@@ -1362,7 +1541,7 @@ fn generate_yield_from(
 
     generator.switch_to_basic_block(type_is_throw_block);
 
-    // i. Let throw be ? GetMethod(iterator, "throw").
+    // i. Let _throw_ be ? GetMethod(_iterator_, *"throw"*).
     let throw_method = generator.allocate_register();
     let throw_key = generator.intern_property_key(utf16!("throw"));
     generator.emit(Instruction::GetMethod {
@@ -1371,7 +1550,7 @@ fn generate_yield_from(
         property: throw_key,
     });
 
-    // ii. If throw is not undefined, then
+    // ii. If _throw_ is not *undefined*, then
     let throw_method_defined_block = generator.make_block();
     let throw_method_undefined_block = generator.make_block();
     generator.emit(Instruction::JumpUndefined {
@@ -1382,7 +1561,7 @@ fn generate_yield_from(
 
     generator.switch_to_basic_block(throw_method_defined_block);
 
-    // 1. Let innerResult be ? Call(throw, iterator, « received.[[Value]] »).
+    // 1. Let _innerResult_ be ? Call(_throw_, _iterator_, « _received_.[[Value]] »).
     generator.emit(Instruction::Call {
         dst: inner_result.operand(),
         callee: throw_method.operand(),
@@ -1392,7 +1571,7 @@ fn generate_yield_from(
         arguments: vec![received_completion_value.operand()],
     });
 
-    // 2. If generatorKind is async, set innerResult to ? Await(innerResult).
+    // 2. If _generatorKind_ is ~async~, set _innerResult_ to ? Await(_innerResult_).
     if is_async {
         let awaited = generate_await_with_completions(
             generator,
@@ -1404,15 +1583,15 @@ fn generate_yield_from(
         generator.emit_mov(&inner_result, &awaited);
     }
 
-    // 4. If innerResult is not an Object, throw a TypeError exception.
+    // 4. If _innerResult_ is not an Object, throw a *TypeError* exception.
     generator.emit(Instruction::ThrowIfNotObject {
         src: inner_result.operand(),
     });
 
-    // 5. Let done be ? IteratorComplete(innerResult).
+    // 5. Let _done_ be ? IteratorComplete(_innerResult_).
     emit_get_by_id(generator, &done, &inner_result, utf16!("done"), None);
 
-    // 6. If done is true, return ? IteratorValue(innerResult).
+    // 6. If _done_ is *true*, return ? IteratorValue(_innerResult_).
     let type_is_throw_done_block = generator.make_block();
     let type_is_throw_not_done_block = generator.make_block();
     generator.emit_jump_if(&done, type_is_throw_done_block, type_is_throw_not_done_block);
@@ -1421,11 +1600,17 @@ fn generate_yield_from(
     emit_get_by_id(generator, &return_value, &inner_result, utf16!("value"), None);
     generator.emit(Instruction::Jump { target: loop_end_block });
 
-    // 7/8. Yield IteratorValue(innerResult), receive new completion.
+    // 7. If _generatorKind_ is ~async~, set _received_ to Completion(AsyncGeneratorYield(? IteratorValue(_innerResult_))).
+    // 8. Else, set _received_ to Completion(GeneratorYield(_innerResult_)).
     generator.switch_to_basic_block(type_is_throw_not_done_block);
     {
-        let yield_value = generator.allocate_register();
-        emit_get_by_id(generator, &yield_value, &inner_result, utf16!("value"), None);
+        let (yield_value, yield_behavior) = if is_async {
+            let current_value = generator.allocate_register();
+            emit_get_by_id(generator, &current_value, &inner_result, utf16!("value"), None);
+            (current_value, YieldBehavior::Normal)
+        } else {
+            (inner_result.clone(), YieldBehavior::IteratorResult)
+        };
         generate_yield(
             generator,
             continuation_block,
@@ -1433,7 +1618,7 @@ fn generate_yield_from(
             received_completion,
             received_completion_type,
             received_completion_value,
-            false,
+            yield_behavior,
         );
     }
 
@@ -1509,7 +1694,7 @@ fn generate_yield_from(
     // =========================================================================
     generator.switch_to_basic_block(type_is_return_block);
 
-    // ii. Let return be ? GetMethod(iterator, "return").
+    // ii. Let _return_ be ? GetMethod(_iterator_, *"return"*).
     let return_method = generator.allocate_register();
     let return_key = generator.intern_property_key(utf16!("return"));
     generator.emit(Instruction::GetMethod {
@@ -1518,7 +1703,7 @@ fn generate_yield_from(
         property: return_key,
     });
 
-    // iii. If return is undefined, then return received.[[Value]].
+    // iii. If _return_ is *undefined*, then
     let return_is_undefined_block = generator.make_block();
     let return_is_defined_block = generator.make_block();
     generator.emit(Instruction::JumpUndefined {
@@ -1528,7 +1713,7 @@ fn generate_yield_from(
     });
 
     generator.switch_to_basic_block(return_is_undefined_block);
-    // 1. If generatorKind is async, set received.[[Value]] to ? Await(received.[[Value]]).
+    // 1. If _generatorKind_ is ~async~, set _received_.[[Value]] to ? Await(_received_.[[Value]]).
     if is_async {
         generate_await_with_completions(
             generator,
@@ -1538,12 +1723,12 @@ fn generate_yield_from(
             received_completion_value,
         );
     }
-    // 2. Return received (return completion).
+    // 2. Return _received_.
     generator.generate_return(received_completion_value);
 
     generator.switch_to_basic_block(return_is_defined_block);
 
-    // iv. Let innerReturnResult be ? Call(return, iterator, « received.[[Value]] »).
+    // iv. Let _innerReturnResult_ be ? Call(_return_, _iterator_, « _received_.[[Value]] »).
     let inner_return_result = generator.allocate_register();
     generator.emit(Instruction::Call {
         dst: inner_return_result.operand(),
@@ -1554,7 +1739,7 @@ fn generate_yield_from(
         arguments: vec![received_completion_value.operand()],
     });
 
-    // v. If generatorKind is async, set innerReturnResult to ? Await(innerReturnResult).
+    // v. If _generatorKind_ is ~async~, set _innerReturnResult_ to ? Await(_innerReturnResult_).
     if is_async {
         let awaited = generate_await_with_completions(
             generator,
@@ -1566,15 +1751,15 @@ fn generate_yield_from(
         generator.emit_mov(&inner_return_result, &awaited);
     }
 
-    // vi. If innerReturnResult is not an Object, throw a TypeError exception.
+    // vi. If _innerReturnResult_ is not an Object, throw a *TypeError* exception.
     generator.emit(Instruction::ThrowIfNotObject {
         src: inner_return_result.operand(),
     });
 
-    // vii. Let done be ? IteratorComplete(innerReturnResult).
+    // vii. Let _done_ be ? IteratorComplete(_innerReturnResult_).
     emit_get_by_id(generator, &done, &inner_return_result, utf16!("done"), None);
 
-    // viii. If done is true, return IteratorValue(innerReturnResult).
+    // viii. If _done_ is *true*, then
     let type_is_return_done_block = generator.make_block();
     let type_is_return_not_done_block = generator.make_block();
     generator.emit_jump_if(&done, type_is_return_done_block, type_is_return_not_done_block);
@@ -1590,10 +1775,16 @@ fn generate_yield_from(
     );
     generator.generate_return(&inner_return_result_value);
 
-    // ix/x. Yield IteratorValue(innerReturnResult), receive new completion.
+    // ix. If _generatorKind_ is ~async~, set _received_ to Completion(AsyncGeneratorYield(? IteratorValue(_innerReturnResult_))).
+    // x. Else, set _received_ to Completion(GeneratorYield(_innerReturnResult_)).
     generator.switch_to_basic_block(type_is_return_not_done_block);
-    let received = generator.allocate_register();
-    emit_get_by_id(generator, &received, &inner_return_result, utf16!("value"), None);
+    let (received, yield_behavior) = if is_async {
+        let current_value = generator.allocate_register();
+        emit_get_by_id(generator, &current_value, &inner_return_result, utf16!("value"), None);
+        (current_value, YieldBehavior::Normal)
+    } else {
+        (inner_return_result.clone(), YieldBehavior::IteratorResult)
+    };
     generate_yield(
         generator,
         continuation_block,
@@ -1601,7 +1792,7 @@ fn generate_yield_from(
         received_completion,
         received_completion_type,
         received_completion_value,
-        false,
+        yield_behavior,
     );
 
     // =========================================================================
@@ -1638,17 +1829,24 @@ fn generate_yield(
     received_completion: &ScopedOperand,
     received_completion_type: &ScopedOperand,
     received_completion_value: &ScopedOperand,
-    await_before_yield: bool,
+    yield_behavior: YieldBehavior,
 ) {
     if !generator.is_in_async_generator_function() {
-        generator.emit(Instruction::Yield {
-            continuation_label: Some(continuation_label),
-            value: argument.operand(),
-        });
+        if yield_behavior == YieldBehavior::IteratorResult {
+            generator.emit(Instruction::YieldIteratorResult {
+                continuation_label,
+                value: argument.operand(),
+            });
+        } else {
+            generator.emit(Instruction::Yield {
+                continuation_label: Some(continuation_label),
+                value: argument.operand(),
+            });
+        }
         return;
     }
 
-    let argument = if await_before_yield {
+    let argument = if yield_behavior == YieldBehavior::AwaitValue {
         generate_await_with_completions(
             generator,
             argument,
@@ -1730,23 +1928,25 @@ fn generate_yield(
 /// - **Global**: GetGlobal instruction (with inline cache)
 /// - **Environment**: GetBinding/GetInitializedBinding (with environment coordinate cache)
 fn generate_identifier(
-    ident: &Identifier,
+    id: crate::ast::IdentifierId,
     generator: &mut Generator,
     preferred_dst: Option<&ScopedOperand>,
 ) -> ScopedOperand {
+    let arena = generator.arena.clone();
+    let ident = &arena.identifiers[id];
     if ident.is_local() {
-        let local_index = ident.local_index.get();
-        let local = generator.resolve_local(local_index, ident.local_type.get().unwrap());
+        let local_index = ident.local_index;
+        let local = generator.resolve_local(local_index, ident.local_type.unwrap());
         // Check TDZ for uninitialized bindings.
         // Arguments may need TDZ during default parameter evaluation;
         // for variable-type locals, only lexically-declared (let/const) need TDZ.
-        let needs_tdz_check = if ident.local_type.get() == Some(LocalType::Argument) {
+        let needs_tdz_check = if ident.local_type == Some(LocalType::Argument) {
             !generator.is_argument_initialized(local_index)
         } else {
             generator.is_local_lexically_declared(local_index) && !generator.is_local_initialized(local_index)
         };
         if needs_tdz_check {
-            if ident.local_type.get() == Some(LocalType::Argument) {
+            if ident.local_type == Some(LocalType::Argument) {
                 // Arguments are initialized to undefined by default, so we
                 // need to replace the value with the empty sentinel to
                 // trigger the TDZ check.
@@ -1759,35 +1959,27 @@ fn generate_identifier(
     }
 
     // OPTIMIZATION: Generate builtin constants (undefined, NaN, Infinity) directly.
-    if ident.is_global.get()
-        && let Some(constant) = maybe_generate_builtin_constant(generator, &ident.name)
+    if ident.is_global
+        && let Some(constant) = maybe_generate_builtin_constant(generator, arena.name_slice(id))
     {
         return constant;
     }
 
     let dst = choose_dst(generator, preferred_dst);
-    if ident.is_global.get() {
-        let id = generator.intern_identifier(&ident.name);
+    if ident.is_global {
+        let id = generator.intern_identifier_id(ident.name);
         let cache = generator.next_global_variable_cache();
         generator.emit(Instruction::GetGlobal {
             dst: dst.operand(),
             identifier: id,
-            cache: cache as u64,
+            cache,
         });
-    } else if ident.declaration_kind.get() == Some(DeclarationKind::Var) {
-        let id = generator.intern_identifier(&ident.name);
-        generator.emit(Instruction::GetInitializedBinding {
-            dst: dst.operand(),
-            identifier: id,
-            cache: EnvironmentCoordinate::empty(),
-        });
+    } else if ident.declaration_kind == Some(DeclarationKind::Var) {
+        let id = generator.intern_identifier_id(ident.name);
+        emit_get_binding(generator, dst.operand(), id, true);
     } else {
-        let id = generator.intern_identifier(&ident.name);
-        generator.emit(Instruction::GetBinding {
-            dst: dst.operand(),
-            identifier: id,
-            cache: EnvironmentCoordinate::empty(),
-        });
+        let id = generator.intern_identifier_id(ident.name);
+        emit_get_binding(generator, dst.operand(), id, false);
     }
     dst
 }
@@ -2328,7 +2520,7 @@ fn generate_for_statement(
     {
         let mut non_local_names: Vec<(Utf16String, bool)> = Vec::new();
         for declaration in &vd.declarations {
-            collect_target_names(&declaration.target, &mut non_local_names);
+            collect_target_names(&declaration.target, &mut non_local_names, &generator.arena);
         }
         if !non_local_names.is_empty() {
             has_lexical_environment = true;
@@ -2401,7 +2593,7 @@ fn generate_for_statement(
             generator.switch_to_basic_block(end_block);
             if has_lexical_environment {
                 generator.end_boundary(BlockBoundaryType::LeaveLexicalEnvironment);
-                generator.lexical_environment_register_stack.pop();
+                generator.pop_tracked_lexical_environment();
                 if !generator.is_current_block_terminated() {
                     let parent = generator.current_lexical_environment();
                     generator.emit(Instruction::SetLexicalEnvironment {
@@ -2448,7 +2640,7 @@ fn generate_for_statement(
     // end_variable_scope: restore parent environment
     if has_lexical_environment {
         generator.end_boundary(BlockBoundaryType::LeaveLexicalEnvironment);
-        generator.lexical_environment_register_stack.pop();
+        generator.pop_tracked_lexical_environment();
         if !generator.is_current_block_terminated() {
             let parent = generator.current_lexical_environment();
             generator.emit(Instruction::SetLexicalEnvironment {
@@ -2473,17 +2665,13 @@ fn emit_per_iteration_bindings(generator: &mut Generator, bindings: &[Utf16Strin
     for name in bindings {
         let id = generator.intern_identifier(name);
         let reg = generator.allocate_register();
-        generator.emit(Instruction::GetBinding {
-            dst: reg.operand(),
-            identifier: id,
-            cache: EnvironmentCoordinate::empty(),
-        });
+        emit_get_binding(generator, reg.operand(), id, false);
         saved.push((reg, id));
     }
 
     // Pop current environment (end_variable_scope).
     generator.end_boundary(BlockBoundaryType::LeaveLexicalEnvironment);
-    generator.lexical_environment_register_stack.pop();
+    generator.pop_tracked_lexical_environment();
     let parent = generator.current_lexical_environment();
     generator.emit(Instruction::SetLexicalEnvironment {
         environment: parent.operand(),
@@ -2502,11 +2690,7 @@ fn emit_per_iteration_bindings(generator: &mut Generator, bindings: &[Utf16Strin
             is_global: false,
             is_strict: false,
         });
-        generator.emit(Instruction::InitializeLexicalBinding {
-            identifier: *id,
-            src: reg.operand(),
-            cache: EnvironmentCoordinate::empty(),
-        });
+        emit_initialize_lexical_binding(generator, *id, reg.operand());
     }
 }
 
@@ -2581,6 +2765,13 @@ fn emit_lexical_declarations_for_block<'a>(
     children: impl Iterator<Item = &'a Statement>,
 ) {
     for child in children {
+        if let Some(fd) = child.inner.function_declaration_for_labelled_item()
+            && fd.name.is_some()
+        {
+            emit_lexical_function_declaration_for_block(generator, environment, fd);
+            continue;
+        }
+
         match &child.inner {
             StatementKind::VariableDeclaration(vd)
                 if vd.kind == DeclarationKind::Let || vd.kind == DeclarationKind::Const =>
@@ -2588,7 +2779,7 @@ fn emit_lexical_declarations_for_block<'a>(
                 let is_constant = vd.kind == DeclarationKind::Const;
                 for declaration in &vd.declarations {
                     let mut names = Vec::new();
-                    collect_target_names(&declaration.target, &mut names);
+                    collect_target_names(&declaration.target, &mut names, &generator.arena);
                     for (name, _) in &names {
                         let id = generator.intern_identifier(name);
                         if is_constant {
@@ -2610,7 +2801,7 @@ fn emit_lexical_declarations_for_block<'a>(
             StatementKind::UsingDeclaration(declarations) => {
                 for declaration in declarations.iter() {
                     let mut names = Vec::new();
-                    collect_target_names(&declaration.target, &mut names);
+                    collect_target_names(&declaration.target, &mut names, &generator.arena);
                     for (name, _) in &names {
                         let id = generator.intern_identifier(name);
                         generator.emit(Instruction::CreateImmutableBinding {
@@ -2622,50 +2813,17 @@ fn emit_lexical_declarations_for_block<'a>(
                 }
             }
             StatementKind::ClassDeclaration(class_data) => {
-                if let Some(ref name_ident) = class_data.name
-                    && !name_ident.is_local()
-                {
-                    let id = generator.intern_identifier(&name_ident.name);
-                    generator.emit(Instruction::CreateMutableBinding {
-                        environment: environment.operand(),
-                        identifier: id,
-                        can_be_deleted: false,
-                    });
-                }
-            }
-            StatementKind::FunctionDeclaration(fd) if fd.name.is_some() => {
-                let name_ident = fd.name.as_ref().unwrap();
-                // a. Create binding.
-                if !name_ident.is_local() {
-                    let id = generator.intern_identifier(&name_ident.name);
-                    generator.emit(Instruction::CreateMutableBinding {
-                        environment: environment.operand(),
-                        identifier: id,
-                        can_be_deleted: false,
-                    });
-                }
-                // b. Instantiate function object.
-                let function_data = generator.function_table.take(fd.function_id);
-                let sfd_index = emit_new_function(generator, function_data, None);
-                let fo = generator.allocate_register();
-                generator.emit(Instruction::NewFunction {
-                    dst: fo.operand(),
-                    shared_function_data_index: sfd_index,
-                    home_object: None,
-                    lhs_name: None,
-                });
-                if name_ident.is_local() {
-                    let local_index = name_ident.local_index.get();
-                    let local = generator.local(local_index);
-                    generator.emit_mov(&local, &fo);
-                    generator.mark_local_initialized(local_index);
-                } else {
-                    let id = generator.intern_identifier(&name_ident.name);
-                    generator.emit(Instruction::InitializeLexicalBinding {
-                        identifier: id,
-                        src: fo.operand(),
-                        cache: EnvironmentCoordinate::empty(),
-                    });
+                if let Some(name_ident_id) = class_data.name {
+                    let arena = generator.arena.clone();
+                    let name_ident = &arena.identifiers[name_ident_id];
+                    if !name_ident.is_local() {
+                        let id = generator.intern_identifier_id(name_ident.name);
+                        generator.emit(Instruction::CreateMutableBinding {
+                            environment: environment.operand(),
+                            identifier: id,
+                            can_be_deleted: false,
+                        });
+                    }
                 }
             }
             _ => {}
@@ -2673,8 +2831,46 @@ fn emit_lexical_declarations_for_block<'a>(
     }
 }
 
+fn emit_lexical_function_declaration_for_block(
+    generator: &mut Generator,
+    environment: &ScopedOperand,
+    fd: &FunctionDeclarationData,
+) {
+    let name_ident_id = fd.name.unwrap();
+    let arena = generator.arena.clone();
+    let name_ident = &arena.identifiers[name_ident_id];
+    // a. Create binding.
+    if !name_ident.is_local() {
+        let id = generator.intern_identifier_id(name_ident.name);
+        generator.emit(Instruction::CreateMutableBinding {
+            environment: environment.operand(),
+            identifier: id,
+            can_be_deleted: false,
+        });
+    }
+    // b. Instantiate function object.
+    let function_data = generator.function_table.take(fd.function_id);
+    let sfd_index = emit_new_function(generator, function_data, None);
+    let fo = generator.allocate_register();
+    generator.emit(Instruction::NewFunction {
+        dst: fo.operand(),
+        shared_function_data_index: sfd_index,
+        home_object: None,
+        lhs_name: None,
+    });
+    if name_ident.is_local() {
+        let local_index = name_ident.local_index;
+        let local = generator.local(local_index);
+        generator.emit_mov(&local, &fo);
+        generator.mark_local_initialized(local_index);
+    } else {
+        let id = generator.intern_identifier_id(name_ident.name);
+        emit_initialize_lexical_binding(generator, id, fo.operand());
+    }
+}
+
 fn emit_block_declaration_instantiation(generator: &mut Generator, scope: &ScopeData) -> bool {
-    if !needs_block_declaration_instantiation(scope) {
+    if !needs_block_declaration_instantiation(scope, &generator.arena) {
         return false;
     }
 
@@ -2689,21 +2885,77 @@ fn emit_block_declaration_instantiation(generator: &mut Generator, scope: &Scope
 // Variable declaration
 // =============================================================================
 
+struct ResolvedBinding {
+    environment: ScopedOperand,
+    identifier: IdentifierTableIndex,
+}
+
+fn emit_resolve_binding_for_identifier_assignment(
+    generator: &mut Generator,
+    id: crate::ast::IdentifierId,
+) -> Option<ResolvedBinding> {
+    let arena = generator.arena.clone();
+    let ident = &arena.identifiers[id];
+    if ident.is_local() || (ident.is_global && !generator.strict) {
+        return None;
+    }
+
+    // In strict mode, a global-looking identifier may still be unresolvable. Preserve that reference across RHS
+    // evaluation so PutValue throws even if the RHS creates a global property with the same name.
+    let identifier = generator.intern_identifier_id(ident.name);
+    if generator.environment_coordinate_for_identifier(identifier).is_some() {
+        return None;
+    }
+
+    let environment = generator.allocate_register();
+    generator.emit(Instruction::ResolveBinding {
+        dst: environment.operand(),
+        identifier,
+    });
+    Some(ResolvedBinding {
+        environment,
+        identifier,
+    })
+}
+
+fn emit_set_resolved_binding(generator: &mut Generator, resolved_binding: &ResolvedBinding, value: &ScopedOperand) {
+    generator.emit(Instruction::SetResolvedBinding {
+        environment: resolved_binding.environment.operand(),
+        identifier: resolved_binding.identifier,
+        src: value.operand(),
+    });
+}
+
+fn emit_set_variable_or_resolved_binding(
+    generator: &mut Generator,
+    id: crate::ast::IdentifierId,
+    value: &ScopedOperand,
+    resolved_binding: Option<&ResolvedBinding>,
+) {
+    if let Some(resolved_binding) = resolved_binding {
+        emit_set_resolved_binding(generator, resolved_binding, value);
+    } else {
+        emit_set_variable(generator, id, value);
+    }
+}
+
 fn generate_variable_declaration(
     generator: &mut Generator,
     kind: DeclarationKind,
     declarations: &[VariableDeclarator],
 ) {
     for declaration in declarations {
+        let arena = generator.arena.clone();
         // OPTIMIZATION: For let/const declarations where the target is a local identifier,
         // pass the local as preferred_dst to the initializer. This allows NewArray, NewFunction,
         // Add, etc. to write directly to the local instead of temp+Mov.
         // NB: Not safe for `var` since var declarations can have duplicates, meaning the
         // preferred_dst could be used as input in the initializer.
         let init_dst = if kind != DeclarationKind::Var {
-            if let VariableDeclaratorTarget::Identifier(ident) = &declaration.target {
-                if ident.is_local() && ident.local_type.get() == Some(LocalType::Variable) {
-                    Some(generator.local(ident.local_index.get()))
+            if let VariableDeclaratorTarget::Identifier(id) = &declaration.target {
+                let ident = &arena.identifiers[*id];
+                if ident.is_local() && ident.local_type == Some(LocalType::Variable) {
+                    Some(generator.local(ident.local_index))
                 } else {
                     None
                 }
@@ -2714,9 +2966,25 @@ fn generate_variable_declaration(
             None
         };
 
+        // https://tc39.es/ecma262/#sec-variable-statement-runtime-semantics-evaluation
+        // VariableDeclaration : BindingIdentifier Initializer
+        //
+        // 1. Let _bindingId_ be the StringValue of |BindingIdentifier|.
+        // 2. Let _lhs_ be ? ResolveBinding(_bindingId_).
+        let resolved_binding = if kind == DeclarationKind::Var && declaration.init.is_some() {
+            if let VariableDeclaratorTarget::Identifier(id) = &declaration.target {
+                emit_resolve_binding_for_identifier_assignment(generator, *id)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // Set pending LHS name for function name inference.
-        if let VariableDeclaratorTarget::Identifier(ident) = &declaration.target {
-            generator.pending_lhs_name = Some(generator.intern_identifier(&ident.name));
+        if let VariableDeclaratorTarget::Identifier(id) = &declaration.target {
+            let ident = &arena.identifiers[*id];
+            generator.pending_lhs_name = Some(generator.intern_identifier_id(ident.name));
         }
         let init_value = declaration
             .init
@@ -2725,46 +2993,41 @@ fn generate_variable_declaration(
         generator.pending_lhs_name = None;
 
         match &declaration.target {
-            VariableDeclaratorTarget::Identifier(ident) => {
+            VariableDeclaratorTarget::Identifier(id) => {
+                let ident = &arena.identifiers[*id];
                 // var declarations without initializer don't need to assign undefined.
                 // The FDI already handles initialization for var bindings.
                 if init_value.is_none() && kind == DeclarationKind::Var {
                     if ident.is_local() {
-                        generator.mark_local_initialized(ident.local_index.get());
+                        generator.mark_local_initialized(ident.local_index);
                     }
                     continue;
                 }
                 let value = init_value.unwrap_or_else(|| generator.add_constant_undefined());
                 if ident.is_local() {
-                    let local_index = ident.local_index.get();
-                    let local = generator.resolve_local(local_index, ident.local_type.get().unwrap());
+                    let local_index = ident.local_index;
+                    let local = generator.resolve_local(local_index, ident.local_type.unwrap());
                     generator.emit_mov(&local, &value);
                     generator.mark_local_initialized(local_index);
                 } else {
-                    let id = generator.intern_identifier(&ident.name);
+                    let id = generator.intern_identifier_id(ident.name);
                     match kind {
                         DeclarationKind::Var => {
-                            if ident.is_global.get() {
+                            if let Some(resolved_binding) = &resolved_binding {
+                                emit_set_resolved_binding(generator, resolved_binding, &value);
+                            } else if ident.is_global {
                                 let cache = generator.next_global_variable_cache();
                                 generator.emit(Instruction::SetGlobal {
                                     identifier: id,
                                     src: value.operand(),
-                                    cache: cache as u64,
+                                    cache,
                                 });
                             } else {
-                                generator.emit(Instruction::SetLexicalBinding {
-                                    identifier: id,
-                                    src: value.operand(),
-                                    cache: EnvironmentCoordinate::empty(),
-                                });
+                                emit_set_lexical_binding(generator, id, value.operand());
                             }
                         }
                         DeclarationKind::Let | DeclarationKind::Const => {
-                            generator.emit(Instruction::InitializeLexicalBinding {
-                                identifier: id,
-                                src: value.operand(),
-                                cache: EnvironmentCoordinate::empty(),
-                            });
+                            emit_initialize_lexical_binding(generator, id, value.operand());
                         }
                     }
                 }
@@ -2794,8 +3057,9 @@ fn try_generate_builtin_abstract_operation(
     if !generator.builtin_abstract_operations_enabled {
         return None;
     }
+    let arena = generator.arena.clone();
     let name = match &data.callee.inner {
-        ExpressionKind::Identifier(ident) => &ident.name,
+        ExpressionKind::Identifier(ident) => arena.name_slice(*ident),
         _ => return None,
     };
     if data.arguments.iter().any(|a| a.is_spread) {
@@ -2921,8 +3185,9 @@ fn try_generate_builtin_abstract_operation(
             let val = generate_expression_or_undefined(&argument.value, generator, None);
             argument_holders.push(generator.copy_if_needed_to_preserve_evaluation_order(&val));
         }
-        let callee_name =
-            expression_string_approximation(&data.arguments[0].value).map(|s| generator.intern_string(&s));
+        let arena_clone = generator.arena.clone();
+        let callee_name = expression_string_approximation(&data.arguments[0].value, &arena_clone)
+            .map(|s| generator.intern_string(&s));
         let arguments: Vec<Operand> = argument_holders.iter().map(|a| a.operand()).collect();
         generator.emit(Instruction::Call {
             dst: dst.operand(),
@@ -2947,7 +3212,7 @@ fn try_generate_builtin_abstract_operation(
         (utf16!("IteratorComplete"), AbstractOperationKind::IteratorComplete),
     ];
     for &(op_name, operation) in known_operations {
-        if *name == op_name {
+        if name == op_name {
             let callee = generator.add_constant_abstract_operation(operation);
             let undefined = generator.add_constant_undefined();
             let expression_string = generator.intern_string(name);
@@ -3019,15 +3284,20 @@ fn generate_call_expression(
     let dst = choose_dst(generator, preferred_dst);
 
     // Compute expression_string for error messages (e.g. "true is not a function (evaluated from 'a')").
+    let arena = generator.arena.clone();
     let expression_string: Option<StringTableIndex> =
-        expression_string_approximation(&data.callee).map(|s| generator.intern_string(&s));
+        expression_string_approximation(&data.callee, &arena).map(|s| generator.intern_string(&s));
 
     // Detect direct eval calls: bare identifier "eval" as callee.
-    let is_direct_eval =
-        !is_new && matches!(&data.callee.inner, ExpressionKind::Identifier(ident) if ident.name == utf16!("eval"));
+    let is_direct_eval = !is_new
+        && matches!(&data.callee.inner, ExpressionKind::Identifier(ident) if arena.name_slice(*ident) == utf16!("eval"));
 
     // Detect known builtins for member expression callees (e.g. Math.abs).
-    let builtin: Option<u8> = if !is_new { get_builtin(&data.callee) } else { None };
+    let builtin: Option<u8> = if !is_new {
+        get_builtin(&data.callee, &generator.arena)
+    } else {
+        None
+    };
 
     // For method calls (obj.method()), we need to use the object as `this`.
     let (callee, this_value) = if !is_new {
@@ -3053,7 +3323,7 @@ fn generate_call_expression(
                 if let Some(key) = computed_key {
                     emit_get_by_value_with_this(generator, &method, &super_base, &key, &this_value);
                 } else if let ExpressionKind::Identifier(ident) = &data.property.inner {
-                    emit_get_by_id_with_this(generator, &method, &super_base, &ident.name, &this_value);
+                    emit_get_by_id_with_this(generator, &method, &super_base, arena.name_slice(*ident), &this_value);
                 }
                 (method, Some(this_value))
             }
@@ -3065,7 +3335,7 @@ fn generate_call_expression(
                     let property = generate_expression_or_undefined(&data.property, generator, None);
                     emit_get_by_value(generator, &method, &obj, &property, None);
                 } else if let ExpressionKind::Identifier(ident) = &data.property.inner {
-                    emit_get_by_id(generator, &method, &obj, &ident.name, base_id);
+                    emit_get_by_id(generator, &method, &obj, arena.name_slice(*ident), base_id);
                 } else if let ExpressionKind::PrivateIdentifier(priv_ident) = &data.property.inner {
                     let id = generator.intern_identifier(&priv_ident.name);
                     generator.emit(Instruction::GetPrivateById {
@@ -3076,33 +3346,29 @@ fn generate_call_expression(
                 }
                 (method, Some(obj))
             }
-            ExpressionKind::Identifier(ident) if ident.is_local() => {
+            ExpressionKind::Identifier(ident) if arena.identifiers[*ident].is_local() => {
+                let id_data = &arena.identifiers[*ident];
                 // Local identifier: use the local directly, with ThrowIfTDZ
                 // if not yet initialized.
-                let local = generator.resolve_local(ident.local_index.get(), ident.local_type.get().unwrap());
-                let needs_tdz = if ident.local_type.get() == Some(LocalType::Argument) {
-                    !generator.is_argument_initialized(ident.local_index.get())
+                let local = generator.resolve_local(id_data.local_index, id_data.local_type.unwrap());
+                let needs_tdz = if id_data.local_type == Some(LocalType::Argument) {
+                    !generator.is_argument_initialized(id_data.local_index)
                 } else {
-                    generator.is_local_lexically_declared(ident.local_index.get())
-                        && !generator.is_local_initialized(ident.local_index.get())
+                    generator.is_local_lexically_declared(id_data.local_index)
+                        && !generator.is_local_initialized(id_data.local_index)
                 };
                 if needs_tdz {
                     generator.emit(Instruction::ThrowIfTDZ { src: local.operand() });
                 }
                 (local, None)
             }
-            ExpressionKind::Identifier(ident) if !ident.is_global.get() => {
+            ExpressionKind::Identifier(ident) if !arena.identifiers[*ident].is_global => {
                 // Non-local, non-global identifier: use GetCalleeAndThisFromEnvironment
                 // to properly handle with-statement bindings and eval.
                 let callee_reg = generator.allocate_register();
                 let this_reg = generator.allocate_register();
-                let id = generator.intern_identifier(&ident.name);
-                generator.emit(Instruction::GetCalleeAndThisFromEnvironment {
-                    callee: callee_reg.operand(),
-                    this_value: this_reg.operand(),
-                    identifier: id,
-                    cache: EnvironmentCoordinate::empty(),
-                });
+                let id = generator.intern_identifier_id(arena.identifiers[*ident].name);
+                emit_get_callee_and_this_from_environment(generator, callee_reg.operand(), this_reg.operand(), id);
                 (callee_reg, Some(this_reg))
             }
             ExpressionKind::OptionalChain(oc_data) => {
@@ -3298,9 +3564,9 @@ fn generate_update_expression(
     // so we can store back without re-evaluating.
     match &argument.inner {
         ExpressionKind::Identifier(ident) => {
-            let value = generate_identifier(ident, generator, None);
+            let value = generate_identifier(*ident, generator, None);
             let result = emit_update_op(generator, op, prefixed, &value);
-            emit_set_variable(generator, ident, &value);
+            emit_set_variable(generator, *ident, &value);
             Some(result)
         }
         ExpressionKind::Member(data) => {
@@ -3324,7 +3590,8 @@ fn generate_update_expression(
                 if let Some(ref key) = computed_key {
                     emit_get_by_value_with_this(generator, &value, &base, key, &this_value);
                 } else if let ExpressionKind::Identifier(ident) = &data.property.inner {
-                    emit_get_by_id_with_this(generator, &value, &base, &ident.name, &this_value);
+                    let arena = generator.arena.clone();
+                    emit_get_by_id_with_this(generator, &value, &base, arena.name_slice(*ident), &this_value);
                 }
                 let result = emit_update_op(generator, op, prefixed, &value);
                 emit_super_put(
@@ -3350,15 +3617,17 @@ fn generate_update_expression(
                     Some(result)
                 } else if let ExpressionKind::Identifier(property_ident) = &data.property.inner {
                     let value = generator.allocate_register();
-                    emit_get_by_id(generator, &value, &base, &property_ident.name, base_id);
-                    let key = generator.intern_property_key(&property_ident.name);
+                    let arena = generator.arena.clone();
+                    let property_name = arena.name_slice(*property_ident);
+                    emit_get_by_id(generator, &value, &base, property_name, base_id);
+                    let key = generator.intern_property_key(property_name);
                     let result = emit_update_op(generator, op, prefixed, &value);
                     let cache2 = generator.next_property_lookup_cache();
                     generator.emit(Instruction::PutById {
                         base: base.operand(),
                         property: key,
                         src: value.operand(),
-                        cache: cache2 as u64,
+                        cache: cache2,
                         base_identifier: None,
                         kind: 0,
                     });
@@ -3409,25 +3678,44 @@ fn generate_assignment_expression(
     op: AssignmentOp,
     lhs: &AssignmentLhs,
     rhs: &Expression,
+    lhs_is_parenthesized: bool,
     preferred_dst: Option<&ScopedOperand>,
 ) -> Option<ScopedOperand> {
     match lhs {
         AssignmentLhs::Expression(lhs_expression) => {
             // Simple assignment to identifier
-            if let ExpressionKind::Identifier(ident) = &lhs_expression.inner {
+            if let ExpressionKind::Identifier(id) = &lhs_expression.inner {
+                let id = *id;
+                let arena = generator.arena.clone();
+                let ident = &arena.identifiers[id];
                 if op == AssignmentOp::Assignment {
-                    generator.pending_lhs_name = Some(generator.intern_identifier(&ident.name));
+                    // https://tc39.es/ecma262/#sec-assignment-operators-runtime-semantics-evaluation
+                    // AssignmentExpression : LeftHandSideExpression `=` AssignmentExpression
+                    //
+                    // 1. If |LeftHandSideExpression| is neither an |ObjectLiteral| nor an |ArrayLiteral|, then
+                    //   a. Let _lRef_ be ? Evaluation of |LeftHandSideExpression|.
+                    //   b. If the AssignmentTargetType of |LeftHandSideExpression| is ~web-compat~, throw a
+                    //      *ReferenceError* exception.
+                    //   c. If IsAnonymousFunctionDefinition(|AssignmentExpression|) is *true* and IsIdentifierRef of
+                    //      |LeftHandSideExpression| is *true*, then
+                    //     i. Let _lhs_ be the StringValue of |LeftHandSideExpression|.
+                    //     ii. Let _rVal_ be ? NamedEvaluation of |AssignmentExpression| with argument _lhs_.
+                    //   d. Else,
+                    //     i. Let _rRef_ be ? Evaluation of |AssignmentExpression|.
+                    //     ii. Let _rVal_ be ? GetValue(_rRef_).
+                    let resolved_binding = emit_resolve_binding_for_identifier_assignment(generator, id);
+                    set_pending_lhs_name_for_identifier_assignment(generator, ident.name, lhs_is_parenthesized);
                     let rhs_val = generate_expression(rhs, generator, None)?;
                     generator.pending_lhs_name = None;
                     if ident.is_local() {
-                        emit_tdz_check_if_needed(generator, ident);
+                        emit_tdz_check_if_needed(generator, id);
                     }
-                    emit_set_variable(generator, ident, &rhs_val);
+                    emit_set_variable_or_resolved_binding(generator, id, &rhs_val, resolved_binding.as_ref());
                     return Some(rhs_val);
                 }
 
                 // Load LHS value first (needed for both compound and logical assignments).
-                let lhs_val = generate_identifier(ident, generator, None);
+                let lhs_val = generate_identifier(id, generator, None);
                 let lhs_val = generator.copy_if_needed_to_preserve_evaluation_order(&lhs_val);
 
                 let is_logical = matches!(
@@ -3457,7 +3745,11 @@ fn generate_assignment_expression(
                     }
                     // RHS block: evaluate RHS, assign, jump to end.
                     generator.switch_to_basic_block(rhs_block);
-                    generator.pending_lhs_name = Some(generator.intern_identifier(&ident.name));
+                    set_pending_lhs_name_for_identifier_assignment(
+                        generator,
+                        arena.identifiers[id].name,
+                        lhs_is_parenthesized,
+                    );
                     let rhs_val = generate_expression(rhs, generator, None)?;
                     generator.pending_lhs_name = None;
                     // Allocate dst after RHS evaluation.
@@ -3467,7 +3759,7 @@ fn generate_assignment_expression(
                         choose_dst(generator, preferred_dst)
                     };
                     generator.emit_mov(&dst, &rhs_val);
-                    emit_set_variable(generator, ident, &dst);
+                    emit_set_variable(generator, id, &dst);
                     generator.emit(Instruction::Jump { target: end_block });
                     // LHS block: keep original value.
                     generator.switch_to_basic_block(lhs_block);
@@ -3486,7 +3778,7 @@ fn generate_assignment_expression(
                     choose_dst(generator, preferred_dst)
                 };
                 emit_compound_assignment(generator, op, &dst, &lhs_val, &rhs_val);
-                emit_set_variable(generator, ident, &dst);
+                emit_set_variable(generator, id, &dst);
                 return Some(dst);
             }
             // Member expression LHS (e.g., obj.foo = x, obj[key] = x)
@@ -3534,7 +3826,8 @@ fn generate_assignment_expression(
                     if let Some(ref key) = computed_key {
                         emit_get_by_value_with_this(generator, &old_val, &base, key, &super_this);
                     } else if let ExpressionKind::Identifier(ident) = &member_data.property.inner {
-                        emit_get_by_id_with_this(generator, &old_val, &base, &ident.name, &super_this);
+                        let arena = generator.arena.clone();
+                        emit_get_by_id_with_this(generator, &old_val, &base, arena.name_slice(*ident), &super_this);
                     }
                     let is_logical = matches!(
                         op,
@@ -3649,7 +3942,9 @@ fn generate_assignment_expression(
                     return Some(dst);
                 } else if let ExpressionKind::Identifier(ident) = &member_data.property.inner {
                     let old_val = generator.allocate_register();
-                    emit_get_by_id(generator, &old_val, &base, &ident.name, base_id);
+                    let arena = generator.arena.clone();
+                    let property_name = arena.name_slice(*ident);
+                    emit_get_by_id(generator, &old_val, &base, property_name, base_id);
                     if is_logical {
                         let rhs_block = generator.make_block();
                         let lhs_block = generator.make_block();
@@ -3659,13 +3954,13 @@ fn generate_assignment_expression(
                         let rhs_val = generate_expression(rhs, generator, None)?;
                         let dst = choose_dst(generator, preferred_dst);
                         generator.emit_mov(&dst, &rhs_val);
-                        let key = generator.intern_property_key(&ident.name);
+                        let key = generator.intern_property_key(property_name);
                         let cache2 = generator.next_property_lookup_cache();
                         generator.emit(Instruction::PutById {
                             base: base.operand(),
                             property: key,
                             src: dst.operand(),
-                            cache: cache2 as u64,
+                            cache: cache2,
                             base_identifier: None,
                             kind: 0,
                         });
@@ -3679,13 +3974,13 @@ fn generate_assignment_expression(
                     let rhs_val = generate_expression(rhs, generator, None)?;
                     let dst = choose_dst(generator, preferred_dst);
                     emit_compound_assignment(generator, op, &dst, &old_val, &rhs_val);
-                    let key = generator.intern_property_key(&ident.name);
+                    let key = generator.intern_property_key(property_name);
                     let cache2 = generator.next_property_lookup_cache();
                     generator.emit(Instruction::PutById {
                         base: base.operand(),
                         property: key,
                         src: dst.operand(),
-                        cache: cache2 as u64,
+                        cache: cache2,
                         base_identifier: None,
                         kind: 0,
                     });
@@ -3787,7 +4082,8 @@ fn emit_super_get(
         emit_get_by_value_with_this(generator, dst, base, &property, this_value);
         Some(property)
     } else if let ExpressionKind::Identifier(ident) = &property.inner {
-        emit_get_by_id_with_this(generator, dst, base, &ident.name, this_value);
+        let arena = generator.arena.clone();
+        emit_get_by_id_with_this(generator, dst, base, arena.name_slice(*ident), this_value);
         None
     } else {
         None
@@ -3814,14 +4110,15 @@ fn emit_super_put(
         };
         emit_put_normal_by_value_with_this(generator, base, &property, this_value, value);
     } else if let ExpressionKind::Identifier(ident) = &property.inner {
-        let key = generator.intern_property_key(&ident.name);
+        let arena = generator.arena.clone();
+        let key = generator.intern_property_key_id(arena.identifiers[*ident].name);
         let cache = generator.next_property_lookup_cache();
         generator.emit(Instruction::PutByIdWithThis {
             base: base.operand(),
             this_value: this_value.operand(),
             property: key,
             src: value.operand(),
-            cache: cache as u64,
+            cache,
             kind: 0,
         });
     }
@@ -3843,7 +4140,7 @@ fn emit_get_by_id(
             dst: dst.operand(),
             base: base.operand(),
             base_identifier,
-            cache: cache as u64,
+            cache,
         });
     } else {
         let cache = generator.next_property_lookup_cache();
@@ -3852,7 +4149,7 @@ fn emit_get_by_id(
             base: base.operand(),
             property: key,
             base_identifier,
-            cache: cache as u64,
+            cache,
         });
     }
 }
@@ -3874,7 +4171,7 @@ fn emit_get_by_id_with_this(
             dst: dst.operand(),
             base: base.operand(),
             this_value: this_value.operand(),
-            cache: cache as u64,
+            cache,
         });
     } else {
         let cache = generator.next_property_lookup_cache();
@@ -3883,7 +4180,7 @@ fn emit_get_by_id_with_this(
             base: base.operand(),
             property: key,
             this_value: this_value.operand(),
-            cache: cache as u64,
+            cache,
         });
     }
 }
@@ -3939,7 +4236,7 @@ fn emit_get_by_value(
                 dst: dst.operand(),
                 base: base.operand(),
                 base_identifier,
-                cache: cache as u64,
+                cache,
             });
         } else {
             let cache = generator.next_property_lookup_cache();
@@ -3948,7 +4245,7 @@ fn emit_get_by_value(
                 base: base.operand(),
                 property: key,
                 base_identifier,
-                cache: cache as u64,
+                cache,
             });
         }
         return;
@@ -3977,7 +4274,7 @@ fn emit_get_by_value_with_this(
                 dst: dst.operand(),
                 base: base.operand(),
                 this_value: this_value.operand(),
-                cache: cache as u64,
+                cache,
             });
         } else {
             let cache = generator.next_property_lookup_cache();
@@ -3986,7 +4283,7 @@ fn emit_get_by_value_with_this(
                 base: base.operand(),
                 property: key,
                 this_value: this_value.operand(),
-                cache: cache as u64,
+                cache,
             });
         }
         return;
@@ -4013,7 +4310,7 @@ fn emit_put_normal_by_value(
             base: base.operand(),
             property: key,
             src: src.operand(),
-            cache: cache as u64,
+            cache,
             base_identifier,
             kind: 0,
         });
@@ -4043,7 +4340,7 @@ fn emit_put_normal_by_value_with_this(
             this_value: this_value.operand(),
             property: key,
             src: src.operand(),
-            cache: cache as u64,
+            cache,
             kind: 0,
         });
         return;
@@ -4079,7 +4376,7 @@ fn emit_put_by_value(
                     base: base.operand(),
                     property: key,
                     src: src.operand(),
-                    cache: cache as u64,
+                    cache,
                     base_identifier: None,
                     kind: 4,
                 });
@@ -4089,7 +4386,7 @@ fn emit_put_by_value(
                     base: base.operand(),
                     property: key,
                     src: src.operand(),
-                    cache: cache as u64,
+                    cache,
                     base_identifier: None,
                     kind: 1,
                 });
@@ -4099,7 +4396,7 @@ fn emit_put_by_value(
                     base: base.operand(),
                     property: key,
                     src: src.operand(),
-                    cache: cache as u64,
+                    cache,
                     base_identifier: None,
                     kind: 2,
                 });
@@ -4141,19 +4438,21 @@ fn emit_put_by_value(
 /// Emit a ThrowIfTDZ check for a local identifier if needed. This is used
 /// before assigning to a
 /// variable to ensure TDZ semantics for let/const bindings.
-fn emit_tdz_check_if_needed(generator: &mut Generator, ident: &Identifier) {
+fn emit_tdz_check_if_needed(generator: &mut Generator, id: crate::ast::IdentifierId) {
+    let arena = generator.arena.clone();
+    let ident = &arena.identifiers[id];
     if !ident.is_local() {
         return;
     }
-    let local_index = ident.local_index.get();
-    let needs_tdz_check = if ident.local_type.get() == Some(LocalType::Argument) {
+    let local_index = ident.local_index;
+    let needs_tdz_check = if ident.local_type == Some(LocalType::Argument) {
         !generator.is_argument_initialized(local_index)
     } else {
         generator.is_local_lexically_declared(local_index) && !generator.is_local_initialized(local_index)
     };
     if needs_tdz_check {
-        let local = generator.resolve_local(local_index, ident.local_type.get().unwrap());
-        if ident.local_type.get() == Some(LocalType::Argument) {
+        let local = generator.resolve_local(local_index, ident.local_type.unwrap());
+        if ident.local_type == Some(LocalType::Argument) {
             let empty = generator.add_constant_empty();
             generator.emit_mov(&local, &empty);
         }
@@ -4161,18 +4460,20 @@ fn emit_tdz_check_if_needed(generator: &mut Generator, ident: &Identifier) {
     }
 }
 
-fn emit_set_variable(generator: &mut Generator, ident: &Identifier, value: &ScopedOperand) {
+fn emit_set_variable(generator: &mut Generator, id: crate::ast::IdentifierId, value: &ScopedOperand) {
+    let arena = generator.arena.clone();
+    let ident = &arena.identifiers[id];
     if ident.is_local() {
-        if ident.declaration_kind.get() == Some(DeclarationKind::Const) {
+        if ident.declaration_kind == Some(DeclarationKind::Const) {
             // The caller is responsible for emitting ThrowIfTDZ before calling
             // emit_set_variable().
             generator.emit(Instruction::ThrowConstAssignment {});
             return;
         }
-        let local_index = ident.local_index.get();
-        let local = generator.resolve_local(local_index, ident.local_type.get().unwrap());
+        let local_index = ident.local_index;
+        let local = generator.resolve_local(local_index, ident.local_type.unwrap());
         // Skip self-move entirely.
-        let is_variable_self_move = ident.local_type.get() == Some(LocalType::Variable)
+        let is_variable_self_move = ident.local_type == Some(LocalType::Variable)
             && value.operand().is_local()
             && value.operand().index() == local_index;
         if is_variable_self_move {
@@ -4184,23 +4485,19 @@ fn emit_set_variable(generator: &mut Generator, ident: &Identifier, value: &Scop
             dst: local.operand(),
             src: value.operand(),
         });
-    } else if ident.is_global.get() {
-        let id = generator.intern_identifier(&ident.name);
+    } else if ident.is_global {
+        let id = generator.intern_identifier_id(ident.name);
         let cache = generator.next_global_variable_cache();
         generator.emit(Instruction::SetGlobal {
             identifier: id,
             src: value.operand(),
-            cache: cache as u64,
+            cache,
         });
     } else {
         // Non-local, non-global: use SetLexicalBinding which searches
         // the lexical environment chain (important for with-statement support).
-        let id = generator.intern_identifier(&ident.name);
-        generator.emit(Instruction::SetLexicalBinding {
-            identifier: id,
-            src: value.operand(),
-            cache: EnvironmentCoordinate::empty(),
-        });
+        let id = generator.intern_identifier_id(ident.name);
+        emit_set_lexical_binding(generator, id, value.operand());
     }
 }
 
@@ -4217,13 +4514,14 @@ fn emit_put_to_member(
         let property = generate_expression_or_undefined(property, generator, None);
         emit_put_normal_by_value(generator, base, &property, value, base_id);
     } else if let ExpressionKind::Identifier(ident) = &property.inner {
-        let key = generator.intern_property_key(&ident.name);
+        let arena = generator.arena.clone();
+        let key = generator.intern_property_key_id(arena.identifiers[*ident].name);
         let cache = generator.next_property_lookup_cache();
         generator.emit(Instruction::PutById {
             base: base.operand(),
             property: key,
             src: value.operand(),
-            cache: cache as u64,
+            cache,
             base_identifier: base_id,
             kind: 0,
         });
@@ -4241,11 +4539,13 @@ fn emit_put_to_member(
 fn emit_delete_reference(generator: &mut Generator, operand: &Expression) -> ScopedOperand {
     match &operand.inner {
         ExpressionKind::Identifier(ident) => {
-            if ident.is_local() {
+            let arena = generator.arena.clone();
+            let identifier = &arena.identifiers[*ident];
+            if identifier.is_local() {
                 return generator.add_constant_boolean(false);
             }
             let dst = generator.allocate_register();
-            let id = generator.intern_identifier(&ident.name);
+            let id = generator.intern_identifier_id(identifier.name);
             generator.emit(Instruction::DeleteVariable {
                 dst: dst.operand(),
                 identifier: id,
@@ -4293,7 +4593,8 @@ fn emit_delete_reference(generator: &mut Generator, operand: &Expression) -> Sco
                     property: key.operand(),
                 });
             } else if let ExpressionKind::Identifier(property_ident) = &data.property.inner {
-                let key = generator.intern_property_key(&property_ident.name);
+                let arena = generator.arena.clone();
+                let key = generator.intern_property_key_id(arena.identifiers[*property_ident].name);
                 generator.emit(Instruction::DeleteById {
                     dst: dst.operand(),
                     base: base.operand(),
@@ -4304,6 +4605,7 @@ fn emit_delete_reference(generator: &mut Generator, operand: &Expression) -> Sco
             }
             dst
         }
+        ExpressionKind::OptionalChain(data) => emit_delete_optional_chain_reference(generator, data),
         _ => {
             // delete on non-reference: evaluate for side effects, return true
             generate_expression(operand, generator, None);
@@ -4378,7 +4680,8 @@ fn emit_evaluate_member_reference(generator: &mut Generator, target: &Expression
                     }
                 }
             } else if let ExpressionKind::Identifier(ident) = &member_data.property.inner {
-                let key = generator.intern_property_key(&ident.name);
+                let arena = generator.arena.clone();
+                let key = generator.intern_property_key_id(arena.identifiers[*ident].name);
                 let cache = generator.next_property_lookup_cache();
                 EvaluatedReference::SuperMemberId {
                     base,
@@ -4413,7 +4716,8 @@ fn emit_evaluate_member_reference(generator: &mut Generator, target: &Expression
                     }
                 }
             } else if let ExpressionKind::Identifier(ident) = &member_data.property.inner {
-                let key = generator.intern_property_key(&ident.name);
+                let arena = generator.arena.clone();
+                let key = generator.intern_property_key_id(arena.identifiers[*ident].name);
                 let cache = generator.next_property_lookup_cache();
                 EvaluatedReference::MemberId {
                     base,
@@ -4453,7 +4757,7 @@ fn emit_store_to_evaluated_reference(generator: &mut Generator, reference: &Eval
                 base: base.operand(),
                 property: *property,
                 src: value.operand(),
-                cache: *cache as u64,
+                cache: *cache,
                 base_identifier: *base_identifier,
                 kind: 0,
             });
@@ -4483,7 +4787,7 @@ fn emit_store_to_evaluated_reference(generator: &mut Generator, reference: &Eval
                 this_value: this_value.operand(),
                 property: *property,
                 src: value.operand(),
-                cache: *cache as u64,
+                cache: *cache,
                 kind: 0,
             });
         }
@@ -4493,7 +4797,7 @@ fn emit_store_to_evaluated_reference(generator: &mut Generator, reference: &Eval
 fn emit_store_to_reference(generator: &mut Generator, target: &Expression, value: &ScopedOperand) {
     match &target.inner {
         ExpressionKind::Identifier(ident) => {
-            emit_set_variable(generator, ident, value);
+            emit_set_variable(generator, *ident, value);
         }
         ExpressionKind::Member(data) => {
             if matches!(data.object.inner, ExpressionKind::Super) {
@@ -4718,14 +5022,16 @@ fn generate_tagged_template_literal(
                 dst: super_base.operand(),
             });
             let method = generator.allocate_register();
+            let arena = generator.arena.clone();
             if let Some(key) = computed_key {
                 emit_get_by_value_with_this(generator, &method, &super_base, &key, &this_value);
             } else if let ExpressionKind::Identifier(ident) = &member_data.property.inner {
-                emit_get_by_id_with_this(generator, &method, &super_base, &ident.name, &this_value);
+                emit_get_by_id_with_this(generator, &method, &super_base, arena.name_slice(*ident), &this_value);
             }
             (method, Some(this_value))
         }
         ExpressionKind::Member(member_data) => {
+            let arena = generator.arena.clone();
             let obj = generate_expression_or_undefined(&member_data.object, generator, None);
             let method = generator.allocate_register();
             if member_data.computed {
@@ -4733,7 +5039,7 @@ fn generate_tagged_template_literal(
                 emit_get_by_value(generator, &method, &obj, &property, None);
             } else if let ExpressionKind::Identifier(ident) = &member_data.property.inner {
                 let base_id = intern_base_identifier(generator, &member_data.object);
-                emit_get_by_id(generator, &method, &obj, &ident.name, base_id);
+                emit_get_by_id(generator, &method, &obj, arena.name_slice(*ident), base_id);
             } else if let ExpressionKind::PrivateIdentifier(priv_ident) = &member_data.property.inner {
                 let id = generator.intern_identifier(&priv_ident.name);
                 generator.emit(Instruction::GetPrivateById {
@@ -4744,7 +5050,9 @@ fn generate_tagged_template_literal(
             }
             (method, Some(obj))
         }
-        ExpressionKind::Identifier(ident) if ident.is_local() || ident.is_global.get() => {
+        ExpressionKind::Identifier(ident)
+            if generator.arena.identifiers[*ident].is_local() || generator.arena.identifiers[*ident].is_global =>
+        {
             let tag_val = generate_expression_or_undefined(tag, generator, None);
             (tag_val, None)
         }
@@ -4753,13 +5061,9 @@ fn generate_tagged_template_literal(
             // to properly handle with-statement bindings.
             let callee_reg = generator.allocate_register();
             let this_reg = generator.allocate_register();
-            let id = generator.intern_identifier(&ident.name);
-            generator.emit(Instruction::GetCalleeAndThisFromEnvironment {
-                callee: callee_reg.operand(),
-                this_value: this_reg.operand(),
-                identifier: id,
-                cache: EnvironmentCoordinate::empty(),
-            });
+            let arena = generator.arena.clone();
+            let id = generator.intern_identifier_id(arena.identifiers[*ident].name);
+            emit_get_callee_and_this_from_environment(generator, callee_reg.operand(), this_reg.operand(), id);
             (callee_reg, Some(this_reg))
         }
         _ => {
@@ -4798,7 +5102,7 @@ fn generate_tagged_template_literal(
     generator.emit(Instruction::GetTemplateObject {
         dst: strings_array.operand(),
         strings_count: u32_from_usize(string_ops.len()),
-        cache: cache_index as u64,
+        cache: cache_index,
         strings: string_ops,
     });
 
@@ -4909,27 +5213,23 @@ fn generate_switch_statement(
             generator.current_completion_register = Some(c.clone());
         }
 
-        let case_scope = case.scope.borrow();
+        let arena = generator.arena.clone();
+        let case_scope = &arena.scopes[case.scope];
         for child in &case_scope.children {
             // For function declarations in switch cases: emit AnnexB hoisting
             // only if the scope collector approved it (name is in annexb_function_names).
             if did_create_env
-                && let StatementKind::FunctionDeclaration(ref fd) = child.inner
-                && let Some(ref name_ident) = fd.name
-                && generator.annexb_function_names.contains(name_ident.name.as_slice())
+                && let Some(fd) = child.inner.function_declaration_for_labelled_item()
+                && let Some(name_ident_id) = fd.name
+                && generator
+                    .annexb_function_names
+                    .contains(generator.arena.name_slice(name_ident_id))
             {
-                let id = generator.intern_identifier(&name_ident.name);
+                let arena = generator.arena.clone();
+                let id = generator.intern_identifier_id(arena.identifiers[name_ident_id].name);
                 let value = generator.allocate_register();
-                generator.emit(Instruction::GetBinding {
-                    dst: value.operand(),
-                    identifier: id,
-                    cache: EnvironmentCoordinate::empty(),
-                });
-                generator.emit(Instruction::SetVariableBinding {
-                    identifier: id,
-                    src: value.operand(),
-                    cache: EnvironmentCoordinate::empty(),
-                });
+                emit_get_binding(generator, value.operand(), id, false);
+                emit_set_variable_binding(generator, id, value.operand());
             }
             let result = generate_statement(child, generator, None);
             if generator.is_current_block_terminated() {
@@ -4959,7 +5259,7 @@ fn generate_switch_statement(
 
     if did_create_env {
         generator.end_boundary(BlockBoundaryType::LeaveLexicalEnvironment);
-        generator.lexical_environment_register_stack.pop();
+        generator.pop_tracked_lexical_environment();
         if !generator.is_current_block_terminated() {
             let parent = generator.current_lexical_environment();
             generator.emit(Instruction::SetLexicalEnvironment {
@@ -4975,24 +5275,30 @@ fn generate_switch_statement(
 /// share a single lexical environment.
 fn emit_switch_block_declaration_instantiation(generator: &mut Generator, data: &SwitchStatementData) -> bool {
     // Collect all statements across all cases.
-    let case_scopes: Vec<_> = data.cases.iter().map(|c| c.scope.borrow()).collect();
-    let all_children: Vec<&Statement> = case_scopes.iter().flat_map(|scope| scope.children.iter()).collect();
+    let arena = generator.arena.clone();
+    let all_children: Vec<&Statement> = data
+        .cases
+        .iter()
+        .flat_map(|c| arena.scopes[c.scope].children.iter())
+        .collect();
 
     // Check if we need a lexical environment.
     // Only needed if there are non-local lexical declarations.
     let needs_env = all_children.iter().any(|child| match &child.inner {
-        StatementKind::FunctionDeclaration(_) => true,
+        _ if child.inner.function_declaration_for_labelled_item().is_some() => true,
         StatementKind::VariableDeclaration(vd)
             if vd.kind == DeclarationKind::Let || vd.kind == DeclarationKind::Const =>
         {
             vd.declarations.iter().any(|declaration| {
                 let mut names = Vec::new();
-                collect_target_names(&declaration.target, &mut names);
+                collect_target_names(&declaration.target, &mut names, &generator.arena);
                 !names.is_empty()
             })
         }
         StatementKind::VariableDeclaration(_) => false,
-        StatementKind::ClassDeclaration(class_data) => class_data.name.as_ref().is_some_and(|n| !n.is_local()),
+        StatementKind::ClassDeclaration(class_data) => class_data
+            .name
+            .is_some_and(|n| !generator.arena.identifiers[n].is_local()),
         _ => false,
     });
 
@@ -5010,6 +5316,27 @@ fn emit_switch_block_declaration_instantiation(generator: &mut Generator, data: 
 // =============================================================================
 // Object expression
 // =============================================================================
+
+fn is_anonymous_function_definition(generator: &Generator, expression: &Expression) -> bool {
+    match &expression.inner {
+        ExpressionKind::Function(function_id) => generator.function_table.get(*function_id).name.is_none(),
+        ExpressionKind::Class(data) => data.name.is_none(),
+        _ => false,
+    }
+}
+
+fn emit_set_function_name(
+    generator: &mut Generator,
+    function: &ScopedOperand,
+    name: &ScopedOperand,
+    prefix: FunctionNamePrefix,
+) {
+    generator.emit(Instruction::SetFunctionName {
+        function: function.operand(),
+        name: name.operand(),
+        prefix: prefix as u32,
+    });
+}
 
 /// Generate bytecode for an object literal expression.
 ///
@@ -5051,7 +5378,7 @@ fn generate_object_expression(
     };
     generator.emit(Instruction::NewObject {
         dst: dst.operand(),
-        cache: cache_index as u64,
+        cache: cache_index,
     });
 
     if properties.is_empty() {
@@ -5089,12 +5416,31 @@ fn generate_object_expression(
             None
         };
 
+        let is_method_like = property.is_method
+            || property.property_type == ObjectPropertyType::Getter
+            || property.property_type == ObjectPropertyType::Setter;
+        let function_name_prefix = match property.property_type {
+            ObjectPropertyType::Getter => FunctionNamePrefix::Get,
+            ObjectPropertyType::Setter => FunctionNamePrefix::Set,
+            _ => FunctionNamePrefix::None,
+        };
+        // PropertyDefinitionEvaluation, https://tc39.es/ecma262/#sec-runtime-semantics-propertydefinitionevaluation
+        // If IsAnonymousFunctionDefinition(|AssignmentExpression|) is *true* and _isProtoSetter_ is *false*, then
+        //   Let _propValue_ be ? NamedEvaluation of |AssignmentExpression| with argument _propertyKey_.
+        let should_set_runtime_function_name = computed_key.is_some()
+            && property.property_type != ObjectPropertyType::ProtoSetter
+            && (is_method_like
+                || property
+                    .value
+                    .as_ref()
+                    .is_some_and(|value| is_anonymous_function_definition(generator, value)));
+
         // Set pending LHS name for function name inference on non-computed properties.
         // ProtoSetter (__proto__) skips NamedEvaluation per spec.
         if !effectively_computed && property.property_type != ObjectPropertyType::ProtoSetter {
             let base_name: Option<Utf16String> = match &property.key.inner {
                 ExpressionKind::StringLiteral(s) => Some((**s).clone()),
-                ExpressionKind::Identifier(ident) => Some(ident.name.to_utf16_string()),
+                ExpressionKind::Identifier(ident) => Some(generator.arena.name_of(*ident).clone()),
                 _ => None,
             };
             if let Some(name) = base_name {
@@ -5120,9 +5466,6 @@ fn generate_object_expression(
         }
         // Methods, getters, and setters need the object as their [[HomeObject]]
         // so that super property lookups work.
-        let is_method_like = property.is_method
-            || property.property_type == ObjectPropertyType::Getter
-            || property.property_type == ObjectPropertyType::Setter;
         if is_method_like {
             generator.home_objects.push(dst.clone());
         }
@@ -5135,6 +5478,16 @@ fn generate_object_expression(
             generator.home_objects.pop();
         }
         generator.pending_lhs_name = None;
+        if should_set_runtime_function_name {
+            emit_set_function_name(
+                generator,
+                &value,
+                computed_key
+                    .as_ref()
+                    .expect("runtime function names require a runtime property key"),
+                function_name_prefix,
+            );
+        }
 
         match property.property_type {
             ObjectPropertyType::Spread => {
@@ -5155,8 +5508,11 @@ fn generate_object_expression(
                     );
                 } else {
                     // Non-simple object: use PutOwnById instead of InitObjectLiteralProperty
+                    let arena = generator.arena.clone();
                     let property_key = match &property.key.inner {
-                        ExpressionKind::Identifier(ident) => generator.intern_property_key(&ident.name),
+                        ExpressionKind::Identifier(ident) => {
+                            generator.intern_property_key_id(arena.identifiers[*ident].name)
+                        }
                         ExpressionKind::StringLiteral(s) => generator.intern_property_key(s),
                         _ => {
                             emit_object_property_set_by_key(
@@ -5176,7 +5532,7 @@ fn generate_object_expression(
                         base: dst.operand(),
                         property: property_key,
                         src: value.operand(),
-                        cache: cache as u64,
+                        cache,
                         base_identifier: None,
                         kind: 4,
                     });
@@ -5203,7 +5559,7 @@ fn generate_object_expression(
                     base: dst.operand(),
                     property: key,
                     src: value.operand(),
-                    cache: cache as u64,
+                    cache,
                     base_identifier: None,
                     kind: 3,
                 });
@@ -5214,7 +5570,7 @@ fn generate_object_expression(
     if is_simple {
         generator.emit(Instruction::CacheObjectShape {
             object: dst.operand(),
-            cache: cache_index as u64,
+            cache: cache_index,
         });
     }
 
@@ -5244,7 +5600,8 @@ fn emit_object_property_set_by_key(
     }
     match &key.inner {
         ExpressionKind::Identifier(ident) => {
-            let property_key = generator.intern_property_key(&ident.name);
+            let arena = generator.arena.clone();
+            let property_key = generator.intern_property_key_id(arena.identifiers[*ident].name);
             generator.emit(Instruction::InitObjectLiteralProperty {
                 object: object.operand(),
                 property: property_key,
@@ -5304,7 +5661,7 @@ fn emit_object_accessor_by_key(
                 base: object.operand(),
                 property: property_key,
                 src: value.operand(),
-                cache: cache as u64,
+                cache,
                 base_identifier: None,
                 kind: 1,
             });
@@ -5313,7 +5670,7 @@ fn emit_object_accessor_by_key(
                 base: object.operand(),
                 property: property_key,
                 src: value.operand(),
-                cache: cache as u64,
+                cache,
                 base_identifier: None,
                 kind: 2,
             });
@@ -5347,7 +5704,11 @@ fn emit_object_accessor_by_key(
     }
 
     match &key.inner {
-        ExpressionKind::Identifier(ident) => emit_by_id(generator, &ident.name),
+        ExpressionKind::Identifier(ident) => {
+            let arena = generator.arena.clone();
+            let name = arena.name_slice(*ident);
+            emit_by_id(generator, name);
+        }
         ExpressionKind::StringLiteral(s) => emit_by_id(generator, s),
         _ => emit_by_value(generator, key),
     }
@@ -5396,7 +5757,8 @@ fn generate_optional_chain_inner(
                 generator.emit_mov(current_base, &obj);
             } else if let ExpressionKind::Identifier(ident) = &member_data.property.inner {
                 let base_id = intern_base_identifier(generator, &member_data.object);
-                emit_get_by_id(generator, &val, &obj, &ident.name, base_id);
+                let arena = generator.arena.clone();
+                emit_get_by_id(generator, &val, &obj, arena.name_slice(*ident), base_id);
                 generator.emit_mov(current_base, &obj);
             } else if let ExpressionKind::PrivateIdentifier(name) = &member_data.property.inner {
                 let id = generator.intern_identifier(&name.name);
@@ -5454,7 +5816,14 @@ fn generate_optional_chain_inner(
         match reference {
             OptionalChainReference::MemberReference { identifier, .. } => {
                 generator.emit_mov(current_base, current_value);
-                emit_get_by_id(generator, current_value, current_value, &identifier.name, None);
+                let arena = generator.arena.clone();
+                emit_get_by_id(
+                    generator,
+                    current_value,
+                    current_value,
+                    arena.name_slice(*identifier),
+                    None,
+                );
             }
             OptionalChainReference::ComputedReference { expression, .. } => {
                 generator.emit_mov(current_base, current_value);
@@ -5494,6 +5863,221 @@ fn generate_optional_chain_inner(
 
     generator.switch_to_basic_block(end_block);
     Some(())
+}
+
+fn generate_optional_chain_start(
+    generator: &mut Generator,
+    base: &Expression,
+    current_value: &ScopedOperand,
+    current_base: &ScopedOperand,
+) -> Option<()> {
+    let new_current_value = match &base.inner {
+        ExpressionKind::Member(member_data) => {
+            let is_super = matches!(member_data.object.inner, ExpressionKind::Super);
+            // For super property access, resolve this binding first (before
+            // ResolveSuperBase) per spec evaluation order.
+            let this_value = if is_super {
+                Some(emit_resolve_this_binding(generator))
+            } else {
+                None
+            };
+            let obj = generate_expression(&member_data.object, generator, None)?;
+            let val = generator.allocate_register();
+            if is_super {
+                let this_value = this_value.unwrap();
+                emit_super_get(
+                    generator,
+                    &val,
+                    &obj,
+                    &member_data.property,
+                    member_data.computed,
+                    &this_value,
+                );
+                generator.emit_mov(current_base, &this_value);
+            } else if member_data.computed {
+                let property = generate_expression(&member_data.property, generator, None)?;
+                emit_get_by_value(generator, &val, &obj, &property, None);
+                generator.emit_mov(current_base, &obj);
+            } else if let ExpressionKind::Identifier(ident) = &member_data.property.inner {
+                let base_id = intern_base_identifier(generator, &member_data.object);
+                let arena = generator.arena.clone();
+                emit_get_by_id(generator, &val, &obj, arena.name_slice(*ident), base_id);
+                generator.emit_mov(current_base, &obj);
+            } else if let ExpressionKind::PrivateIdentifier(name) = &member_data.property.inner {
+                let id = generator.intern_identifier(&name.name);
+                generator.emit(Instruction::GetPrivateById {
+                    dst: val.operand(),
+                    base: obj.operand(),
+                    property: id,
+                });
+                generator.emit_mov(current_base, &obj);
+            } else {
+                let property = generate_expression(&member_data.property, generator, None)?;
+                emit_get_by_value(generator, &val, &obj, &property, None);
+                generator.emit_mov(current_base, &obj);
+            }
+            val
+        }
+        ExpressionKind::OptionalChain(oc_data) => {
+            generate_optional_chain_inner(
+                generator,
+                &oc_data.base,
+                &oc_data.references,
+                current_value,
+                current_base,
+            )?;
+            current_value.clone()
+        }
+        _ => generate_expression(base, generator, None)?,
+    };
+
+    generator.emit_mov(current_value, &new_current_value);
+    Some(())
+}
+
+fn is_optional_chain_reference_optional(reference: &OptionalChainReference) -> bool {
+    match reference {
+        OptionalChainReference::Call { mode, .. }
+        | OptionalChainReference::ComputedReference { mode, .. }
+        | OptionalChainReference::MemberReference { mode, .. }
+        | OptionalChainReference::PrivateMemberReference { mode, .. } => *mode == OptionalChainMode::Optional,
+    }
+}
+
+fn generate_optional_chain_reference(
+    generator: &mut Generator,
+    reference: &OptionalChainReference,
+    current_value: &ScopedOperand,
+    current_base: &ScopedOperand,
+) -> Option<()> {
+    match reference {
+        OptionalChainReference::MemberReference { identifier, .. } => {
+            generator.emit_mov(current_base, current_value);
+            let arena = generator.arena.clone();
+            emit_get_by_id(
+                generator,
+                current_value,
+                current_value,
+                arena.name_slice(*identifier),
+                None,
+            );
+        }
+        OptionalChainReference::ComputedReference { expression, .. } => {
+            generator.emit_mov(current_base, current_value);
+            let property = generate_expression(expression, generator, None)?;
+            emit_get_by_value(generator, current_value, current_value, &property, None);
+        }
+        OptionalChainReference::Call { arguments, .. } => {
+            let arguments_array = generate_arguments_array(generator, arguments);
+            generator.emit(Instruction::CallWithArgumentArray {
+                dst: current_value.operand(),
+                callee: current_value.operand(),
+                this_value: current_base.operand(),
+                arguments: arguments_array.operand(),
+                expression_string: None,
+            });
+            let undef = generator.add_constant_undefined();
+            generator.emit_mov(current_base, &undef);
+        }
+        OptionalChainReference::PrivateMemberReference { private_identifier, .. } => {
+            generator.emit_mov(current_base, current_value);
+            let id = generator.intern_identifier(&private_identifier.name);
+            generator.emit(Instruction::GetPrivateById {
+                dst: current_value.operand(),
+                base: current_value.operand(),
+                property: id,
+            });
+        }
+    }
+
+    Some(())
+}
+
+fn emit_delete_optional_chain_reference(generator: &mut Generator, data: &OptionalChainData) -> ScopedOperand {
+    // https://tc39.es/ecma262/#sec-delete-operator-runtime-semantics-evaluation
+    // `delete` needs the final optional-chain property reference so it can perform [[Delete]]. If an optional hop
+    // short-circuits, the operand evaluates to a non-reference value and `delete` returns true.
+    let Some((last_reference, prefix_references)) = data.references.split_last() else {
+        generate_expression(&data.base, generator, None);
+        return generator.add_constant_boolean(true);
+    };
+
+    if !matches!(
+        last_reference,
+        OptionalChainReference::MemberReference { .. } | OptionalChainReference::ComputedReference { .. }
+    ) {
+        let current_base = generator.allocate_register();
+        let current_value = generator.allocate_register();
+        let undef = generator.add_constant_undefined();
+        generator.emit_mov(&current_base, &undef);
+        generate_optional_chain_inner(generator, &data.base, &data.references, &current_value, &current_base);
+        return generator.add_constant_boolean(true);
+    }
+
+    let dst = generator.allocate_register();
+    let current_base = generator.allocate_register();
+    let current_value = generator.allocate_register();
+    let undef = generator.add_constant_undefined();
+    generator.emit_mov(&current_base, &undef);
+
+    let short_circuit_block = generator.make_block();
+    let end_block = generator.make_block();
+
+    generate_optional_chain_start(generator, &data.base, &current_value, &current_base);
+
+    for reference in prefix_references {
+        if is_optional_chain_reference_optional(reference) {
+            let not_nullish_block = generator.make_block();
+            generator.emit(Instruction::JumpNullish {
+                condition: current_value.operand(),
+                true_target: short_circuit_block,
+                false_target: not_nullish_block,
+            });
+            generator.switch_to_basic_block(not_nullish_block);
+        }
+
+        generate_optional_chain_reference(generator, reference, &current_value, &current_base);
+    }
+
+    if is_optional_chain_reference_optional(last_reference) {
+        let not_nullish_block = generator.make_block();
+        generator.emit(Instruction::JumpNullish {
+            condition: current_value.operand(),
+            true_target: short_circuit_block,
+            false_target: not_nullish_block,
+        });
+        generator.switch_to_basic_block(not_nullish_block);
+    }
+
+    match last_reference {
+        OptionalChainReference::MemberReference { identifier, .. } => {
+            let arena = generator.arena.clone();
+            let key = generator.intern_property_key_id(arena.identifiers[*identifier].name);
+            generator.emit(Instruction::DeleteById {
+                dst: dst.operand(),
+                base: current_value.operand(),
+                property: key,
+            });
+        }
+        OptionalChainReference::ComputedReference { expression, .. } => {
+            let property = generate_expression_or_undefined(expression, generator, None);
+            generator.emit(Instruction::DeleteByValue {
+                dst: dst.operand(),
+                base: current_value.operand(),
+                property: property.operand(),
+            });
+        }
+        _ => unreachable!("non-property optional chain references were handled above"),
+    }
+    generator.emit(Instruction::Jump { target: end_block });
+
+    generator.switch_to_basic_block(short_circuit_block);
+    let true_value = generator.add_constant_boolean(true);
+    generator.emit_mov(&dst, &true_value);
+    generator.emit(Instruction::Jump { target: end_block });
+
+    generator.switch_to_basic_block(end_block);
+    dst
 }
 
 /// Convert arguments to an array for CallWithArgumentArray.
@@ -5571,15 +6155,18 @@ fn generate_class_expression(
         dst: class_env.operand(),
         parent: parent_env.operand(),
         capacity: 0,
+        is_catch_environment: false,
     });
-    generator.lexical_environment_register_stack.push(class_env.clone());
+    generator.push_static_lexical_environment(class_env.clone());
 
-    // Step 3.a: Create binding for the class name in the class environment.
+    // https://tc39.es/ecma262/#sec-runtime-semantics-classdefinitionevaluation
+    // If _classBinding_ is not *undefined*, then
+    //   Perform ! _classEnv_.CreateImmutableBinding(_classBinding_, *true*).
     // Only emit when the class has a name, or when there's no lhs_name
     // (skip this for anonymous classes with lhs_name).
     if data.name.is_some() || lhs_name.is_none() {
-        let name = if let Some(name_ident) = &data.name {
-            name_ident.name.to_utf16_string()
+        let name = if let Some(name_ident_id) = data.name {
+            generator.arena.name_of(name_ident_id).clone()
         } else {
             Utf16String::new()
         };
@@ -5589,13 +6176,13 @@ fn generate_class_expression(
             mode: EnvironmentMode::Lexical as u32,
             is_immutable: true,
             is_global: false,
-            is_strict: false,
+            is_strict: true,
         });
     }
 
     // Evaluate super class if present
     let super_class = if let Some(super_expression) = &data.super_class {
-        generate_expression(super_expression, generator, None)
+        generate_class_part_expression(super_expression, generator, None)
     } else {
         None
     };
@@ -5631,7 +6218,7 @@ fn generate_class_expression(
         match &element_node.inner {
             ClassElement::Method { key, .. } => {
                 if !is_private_key(key) {
-                    let key_val = generate_expression(key, generator, None);
+                    let key_val = generate_class_part_expression(key, generator, None);
                     element_keys.push(key_val);
                 } else {
                     element_keys.push(None);
@@ -5639,7 +6226,7 @@ fn generate_class_expression(
             }
             ClassElement::Field { key, .. } => {
                 if !is_private_key(key) {
-                    let key_val = generate_expression(key, generator, None);
+                    let key_val = generate_class_part_expression(key, generator, None);
                     element_keys.push(key_val);
                 } else {
                     element_keys.push(None);
@@ -5760,8 +6347,9 @@ fn generate_class_expression(
 
                     if !is_literal {
                         // Determine field name for anonymous function naming.
+                        let arena = generator.arena.clone();
                         let field_name = match &key.inner {
-                            ExpressionKind::Identifier(ident) => ident.name.to_utf16_string(),
+                            ExpressionKind::Identifier(ident) => arena.name_of(*ident).clone(),
                             ExpressionKind::StringLiteral(s) => (**s).clone(),
                             ExpressionKind::PrivateIdentifier(p) => p.name.clone(),
                             ExpressionKind::NumericLiteral(n) => super::ffi::js_number_to_utf16(*n),
@@ -5772,7 +6360,9 @@ fn generate_class_expression(
                             _ => Utf16String::new(),
                         };
 
-                        // Wrap the expression in a ClassFieldInitializer statement.
+                        // Use the ClassFieldInitializer statement directly as the
+                        // synthetic function's body. compile_function_payload tolerates
+                        // a non-Block body (body_scope = None for the wrapper).
                         let body_statement = Statement::new(
                             init_expression.range,
                             StatementKind::ClassFieldInitializer(Box::new(ClassFieldInitializerData {
@@ -5780,17 +6370,13 @@ fn generate_class_expression(
                                 field_name,
                             })),
                         );
-                        let wrapper_body = Statement::new(
-                            init_expression.range,
-                            StatementKind::Block(ScopeData::shared_with_children(vec![body_statement])),
-                        );
 
                         // Class bodies are always strict mode.
                         let function_data = Box::new(FunctionData {
                             name: None,
                             source_text_start: init_expression.range.start.offset,
                             source_text_end: init_expression.range.end.offset,
-                            body: Box::new(wrapper_body),
+                            body: Box::new(body_statement),
                             parameters: Vec::new(),
                             function_length: 0,
                             kind: FunctionKind::Normal,
@@ -5811,7 +6397,7 @@ fn generate_class_expression(
                         let key_is_private = is_private_key(key);
                         let key_name: Utf16String = match &key.inner {
                             ExpressionKind::PrivateIdentifier(ident) => ident.name.clone(),
-                            ExpressionKind::Identifier(ident) => ident.name.to_utf16_string(),
+                            ExpressionKind::Identifier(ident) => arena.name_of(*ident).clone(),
                             ExpressionKind::StringLiteral(s) => (**s).clone(),
                             ExpressionKind::NumericLiteral(n) => super::ffi::js_number_to_utf16(*n),
                             _ => Utf16String::new(),
@@ -5885,8 +6471,9 @@ fn generate_class_expression(
     let source_end = data.source_text_end as usize;
     let source_text_len = source_end - source_start;
 
+    let class_name = data.name.map(|n| generator.arena.name_of(n).clone());
     let blueprint_index = generator.register_class_blueprint(PendingClassBlueprint {
-        name: data.name.as_ref().map(|n| n.name.to_utf16_string()),
+        name: class_name,
         source_text_offset: source_start,
         source_text_length: source_text_len,
         constructor_sfd_index,
@@ -5902,7 +6489,7 @@ fn generate_class_expression(
     generator.emit(Instruction::SetLexicalEnvironment {
         environment: parent_env.operand(),
     });
-    generator.lexical_environment_register_stack.pop();
+    generator.pop_tracked_lexical_environment();
 
     // Allocate dst after element keys.
     let dst = choose_dst(generator, preferred_dst);
@@ -5927,7 +6514,8 @@ fn generate_class_expression(
 
 /// Synthesize a default constructor SharedFunctionInstanceData.
 fn emit_default_constructor(generator: &mut Generator, has_super: bool) -> u32 {
-    use crate::parser::{Parser, ProgramType};
+    use crate::parser::Parser;
+    use crate::parser::ProgramType;
 
     // Wrap in "function" keyword so it parses as a FunctionDeclaration.
     let source: Utf16String = if has_super {
@@ -5941,13 +6529,18 @@ fn emit_default_constructor(generator: &mut Generator, has_super: bool) -> u32 {
         parser.flags.allow_super_constructor_call = true;
     }
     let program = parser.parse_program(false);
-    parser.scope_collector.analyze(false);
+    parser.scope_collector.analyze(
+        false,
+        &mut parser.arena.identifiers,
+        &parser.arena.strings,
+        &mut parser.arena.scopes,
+    );
 
     assert!(!parser.has_errors(), "default constructor parse failed");
 
     // Extract FunctionData from the parsed program.
     let function_id = if let StatementKind::Program(ref data) = program.inner {
-        let scope = data.scope.borrow();
+        let scope = &parser.arena.scopes[data.scope];
         scope.children.iter().find_map(|child| {
             if let StatementKind::FunctionDeclaration(fd) = &child.inner {
                 Some(fd.function_id)
@@ -5967,10 +6560,14 @@ fn emit_default_constructor(generator: &mut Generator, has_super: bool) -> u32 {
     function_data.source_text_start = 0;
     function_data.source_text_end = 0;
 
-    let subtable = parser.function_table.extract_reachable(&function_data);
+    let subtable = parser
+        .function_table
+        .extract_reachable(&function_data, &parser.arena.scopes);
+    let arena = std::sync::Arc::new(std::mem::take(&mut parser.arena));
     generator.register_shared_function_data(PendingSharedFunctionData {
         function_data: Some(function_data),
         subtable: Some(subtable),
+        arena: Some(arena),
         name_override: None,
         class_field_initializer_name: None,
         should_eager_compile: false,
@@ -5995,14 +6592,14 @@ fn get_private_identifier_name(key: &Expression) -> Option<Utf16String> {
 
 /// Check if a for-in/for-of LHS is a `let`/`const` declaration with non-local identifiers,
 /// meaning we need a per-iteration lexical environment.
-fn for_in_of_needs_lexical_env(lhs: &ForInOfLhs) -> bool {
+fn for_in_of_needs_lexical_env(lhs: &ForInOfLhs, arena: &crate::ast::AstArena) -> bool {
     if let ForInOfLhs::Declaration(statement) = lhs
         && let StatementKind::VariableDeclaration(vd) = &statement.inner
         && (vd.kind == DeclarationKind::Let || vd.kind == DeclarationKind::Const)
     {
         let mut names = Vec::new();
         for declaration in &vd.declarations {
-            collect_target_names(&declaration.target, &mut names);
+            collect_target_names(&declaration.target, &mut names, arena);
         }
         return !names.is_empty();
     }
@@ -6010,36 +6607,47 @@ fn for_in_of_needs_lexical_env(lhs: &ForInOfLhs) -> bool {
 }
 
 /// Collect all non-local binding names from a variable declarator target.
-fn collect_target_names(target: &VariableDeclaratorTarget, names: &mut Vec<(Utf16String, bool)>) {
+fn collect_target_names(
+    target: &VariableDeclaratorTarget,
+    names: &mut Vec<(Utf16String, bool)>,
+    arena: &crate::ast::AstArena,
+) {
     match target {
-        VariableDeclaratorTarget::Identifier(ident) => {
+        VariableDeclaratorTarget::Identifier(id) => {
+            let ident = &arena.identifiers[*id];
             if !ident.is_local() {
-                names.push((ident.name.to_utf16_string(), false));
+                names.push((arena.strings[ident.name].clone(), false));
             }
         }
         VariableDeclaratorTarget::BindingPattern(pattern) => {
-            collect_pattern_binding_names(pattern, names);
+            collect_pattern_binding_names(pattern, names, arena);
         }
     }
 }
 
 /// Collect all non-local binding names from a binding pattern (recursive).
-fn collect_pattern_binding_names(pattern: &BindingPattern, names: &mut Vec<(Utf16String, bool)>) {
+fn collect_pattern_binding_names(
+    pattern: &BindingPattern,
+    names: &mut Vec<(Utf16String, bool)>,
+    arena: &crate::ast::AstArena,
+) {
     for entry in &pattern.entries {
         match &entry.alias {
-            Some(BindingEntryAlias::Identifier(ident)) => {
+            Some(BindingEntryAlias::Identifier(id)) => {
+                let ident = &arena.identifiers[*id];
                 if !ident.is_local() {
-                    names.push((ident.name.to_utf16_string(), false));
+                    names.push((arena.strings[ident.name].clone(), false));
                 }
             }
             Some(BindingEntryAlias::BindingPattern(sub)) => {
-                collect_pattern_binding_names(sub, names);
+                collect_pattern_binding_names(sub, names, arena);
             }
             None => {
-                if let Some(BindingEntryName::Identifier(ident)) = &entry.name
-                    && !ident.is_local()
-                {
-                    names.push((ident.name.to_utf16_string(), false));
+                if let Some(BindingEntryName::Identifier(id)) = &entry.name {
+                    let ident = &arena.identifiers[*id];
+                    if !ident.is_local() {
+                        names.push((arena.strings[ident.name].clone(), false));
+                    }
                 }
             }
             Some(BindingEntryAlias::MemberExpression(_)) => {}
@@ -6060,7 +6668,7 @@ fn create_for_in_of_lexical_env(generator: &mut Generator, lhs: &ForInOfLhs) -> 
     {
         is_constant = vd.kind == DeclarationKind::Const;
         for declaration in &vd.declarations {
-            collect_target_names(&declaration.target, &mut binding_names);
+            collect_target_names(&declaration.target, &mut binding_names, &generator.arena);
         }
     }
 
@@ -6094,7 +6702,7 @@ fn enter_for_in_of_head_tdz(generator: &mut Generator, lhs: &ForInOfLhs) -> bool
     {
         let mut names = Vec::new();
         for declaration in &vd.declarations {
-            collect_target_names(&declaration.target, &mut names);
+            collect_target_names(&declaration.target, &mut names, &generator.arena);
         }
         if !names.is_empty() {
             generator.push_new_lexical_environment(0);
@@ -6116,7 +6724,7 @@ fn enter_for_in_of_head_tdz(generator: &mut Generator, lhs: &ForInOfLhs) -> bool
 
 /// Tear down the TDZ environment after RHS evaluation.
 fn leave_for_in_of_head_tdz(generator: &mut Generator) {
-    generator.lexical_environment_register_stack.pop();
+    generator.pop_tracked_lexical_environment();
     if !generator.is_current_block_terminated() {
         let parent = generator.current_lexical_environment();
         generator.emit(Instruction::SetLexicalEnvironment {
@@ -6153,19 +6761,20 @@ fn generate_for_in_statement(
         && let StatementKind::VariableDeclaration(vd) = &statement.inner
         && vd.kind == DeclarationKind::Var
         && let Some(declaration) = vd.declarations.first()
-        && let (VariableDeclaratorTarget::Identifier(ident), Some(init)) = (&declaration.target, &declaration.init)
+        && let (VariableDeclaratorTarget::Identifier(ident_id), Some(init)) = (&declaration.target, &declaration.init)
     {
-        generator.pending_lhs_name = Some(generator.intern_identifier(&ident.name));
+        let arena = generator.arena.clone();
+        generator.pending_lhs_name = Some(generator.intern_identifier_id(arena.identifiers[*ident_id].name));
         let value = generate_expression_or_undefined(init, generator, None);
         generator.pending_lhs_name = None;
-        emit_set_variable(generator, ident, &value);
+        emit_set_variable(generator, *ident_id, &value);
     }
 
     // Create end_block and update_block first, then nullish_block and
     // continuation_block during head evaluation.
     let end_block = generator.make_block();
     let update_block = generator.make_block();
-    let needs_lexical_env = for_in_of_needs_lexical_env(lhs);
+    let needs_lexical_env = for_in_of_needs_lexical_env(lhs, &generator.arena);
 
     // B.3.5 Initializers in ForIn Statement Heads: evaluate initializer before RHS.
     // Create TDZ for lexical declarations before evaluating the RHS expression.
@@ -6202,7 +6811,7 @@ fn generate_for_in_statement(
         generator.emit(Instruction::GetObjectPropertyIterator {
             dst_iterator: iterator_object.operand(),
             object: object.operand(),
-            cache: cache as u64,
+            cache,
         });
 
         iterator_object
@@ -6283,14 +6892,11 @@ fn generate_labelled_statement(
     // begin_breakable_scope/begin_continuable_scope pick them up.
     // NB: The parser wraps for/for-in/for-of loops in a Block for scope
     // management, so we look through single-child Block wrappers.
-    let block_scope_borrow;
-    let effective_inner = if let StatementKind::Block(ref scope) = inner.inner {
-        block_scope_borrow = scope.borrow();
-        if block_scope_borrow.children.len() == 1 {
-            &block_scope_borrow.children[0]
-        } else {
-            inner
-        }
+    let block_arena;
+    let effective_inner = if let StatementKind::Block(scope) = inner.inner {
+        block_arena = generator.arena.clone();
+        let children = &block_arena.scopes[scope].children;
+        if children.len() == 1 { &children[0] } else { inner }
     } else {
         inner
     };
@@ -6343,7 +6949,7 @@ fn generate_for_of_statement_inner(
 
     // Create TDZ for lexical declarations before evaluating the RHS expression.
     let entered_tdz = enter_for_in_of_head_tdz(generator, lhs);
-    let needs_lexical_env = for_in_of_needs_lexical_env(lhs);
+    let needs_lexical_env = for_in_of_needs_lexical_env(lhs, &generator.arena);
     let old_handler = generator.current_unwind_handler;
 
     // Evaluate RHS into `object`, allocate iterator registers, and emit
@@ -6491,7 +7097,7 @@ fn generate_for_of_statement_inner(
     // Restore lexical env before continuing
     if needs_lexical_env {
         generator.end_boundary(BlockBoundaryType::LeaveLexicalEnvironment);
-        generator.lexical_environment_register_stack.pop();
+        generator.pop_tracked_lexical_environment();
     }
     generator.end_continuable_scope();
 
@@ -6780,7 +7386,7 @@ fn assign_to_for_in_of_lhs(generator: &mut Generator, lhs: &ForInOfLhs, value: &
                 };
                 match &declaration.target {
                     VariableDeclaratorTarget::Identifier(ident) => {
-                        emit_set_variable_with_mode(generator, ident, value, mode);
+                        emit_set_variable_with_mode(generator, *ident, value, mode);
                     }
                     VariableDeclaratorTarget::BindingPattern(pattern) => {
                         generate_binding_pattern_bytecode(generator, pattern, mode, value);
@@ -6802,6 +7408,9 @@ fn assign_to_for_in_of_lhs(generator: &mut Generator, lhs: &ForInOfLhs, value: &
 // =============================================================================
 
 /// Whether we are initializing a new binding or setting an existing one.
+// https://tc39.es/ecma262/#sec-runtime-semantics-bindinginitialization
+// https://tc39.es/ecma262/#sec-runtime-semantics-destructuringassignmentevaluation
+// Binding patterns initialize lexical declarations, while assignment patterns perform PutValue.
 #[derive(Clone, Copy)]
 enum BindingMode {
     /// `const` or `let` declarations: emit InitializeLexicalBinding.
@@ -6811,11 +7420,12 @@ enum BindingMode {
 }
 
 fn set_pending_lhs_name_for_entry(generator: &mut Generator, entry: &BindingEntry) {
+    let arena = generator.arena.clone();
     let name = match &entry.alias {
-        Some(BindingEntryAlias::Identifier(id)) => Some(&id.name),
+        Some(BindingEntryAlias::Identifier(id)) => Some(arena.identifiers[*id].name),
         None => {
             if let Some(BindingEntryName::Identifier(id)) = &entry.name {
-                Some(&id.name)
+                Some(arena.identifiers[*id].name)
             } else {
                 None
             }
@@ -6823,7 +7433,7 @@ fn set_pending_lhs_name_for_entry(generator: &mut Generator, entry: &BindingEntr
         _ => None,
     };
     if let Some(name) = name {
-        generator.pending_lhs_name = Some(generator.intern_identifier(name));
+        generator.pending_lhs_name = Some(generator.intern_identifier_id(name));
     }
 }
 
@@ -6845,37 +7455,40 @@ fn generate_binding_pattern_bytecode(
 
 fn emit_set_variable_with_mode(
     generator: &mut Generator,
-    ident: &Identifier,
+    id: crate::ast::IdentifierId,
     value: &ScopedOperand,
     mode: BindingMode,
 ) {
+    let arena = generator.arena.clone();
+    let ident = &arena.identifiers[id];
     if ident.is_local() {
-        let local = generator.resolve_local(ident.local_index.get(), ident.local_type.get().unwrap());
-        generator.emit_mov(&local, value);
-    } else {
-        let id = generator.intern_identifier(&ident.name);
         match mode {
             BindingMode::InitializeLexical => {
-                generator.emit(Instruction::InitializeLexicalBinding {
-                    identifier: id,
-                    src: value.operand(),
-                    cache: EnvironmentCoordinate::empty(),
-                });
+                let local = generator.resolve_local(ident.local_index, ident.local_type.unwrap());
+                generator.emit_mov(&local, value);
+                generator.mark_local_initialized(ident.local_index);
             }
             BindingMode::Set => {
-                if ident.is_global.get() {
+                emit_tdz_check_if_needed(generator, id);
+                emit_set_variable(generator, id, value);
+            }
+        }
+    } else {
+        let id = generator.intern_identifier_id(ident.name);
+        match mode {
+            BindingMode::InitializeLexical => {
+                emit_initialize_lexical_binding(generator, id, value.operand());
+            }
+            BindingMode::Set => {
+                if ident.is_global {
                     let cache = generator.next_global_variable_cache();
                     generator.emit(Instruction::SetGlobal {
                         identifier: id,
                         src: value.operand(),
-                        cache: cache as u64,
+                        cache,
                     });
                 } else {
-                    generator.emit(Instruction::SetLexicalBinding {
-                        identifier: id,
-                        src: value.operand(),
-                        cache: EnvironmentCoordinate::empty(),
-                    });
+                    emit_set_lexical_binding(generator, id, value.operand());
                 }
             }
         }
@@ -6892,11 +7505,11 @@ fn assign_binding_entry_alias(
         None => {
             // Name IS the binding target (e.g., `{ x }` or array element).
             if let Some(BindingEntryName::Identifier(ident)) = &entry.name {
-                emit_set_variable_with_mode(generator, ident, value, mode);
+                emit_set_variable_with_mode(generator, *ident, value, mode);
             }
         }
         Some(BindingEntryAlias::Identifier(ident)) => {
-            emit_set_variable_with_mode(generator, ident, value, mode);
+            emit_set_variable_with_mode(generator, *ident, value, mode);
         }
         Some(BindingEntryAlias::BindingPattern(sub_pattern)) => {
             generate_binding_pattern_bytecode(generator, sub_pattern, mode, value);
@@ -6905,6 +7518,14 @@ fn assign_binding_entry_alias(
             emit_store_to_reference(generator, expression, value);
         }
     }
+}
+
+fn make_block_with_unwind_handler(generator: &mut Generator, unwind_handler: Option<Label>) -> Label {
+    let saved_unwind_handler = generator.current_unwind_handler;
+    generator.current_unwind_handler = unwind_handler;
+    let block = generator.make_block();
+    generator.current_unwind_handler = saved_unwind_handler;
+    block
 }
 
 fn generate_array_binding_pattern(
@@ -6928,6 +7549,43 @@ fn generate_array_binding_pattern(
         hint: IteratorHint::Sync as u32,
     });
 
+    // 13.15.5.1 Runtime Semantics: DestructuringAssignmentEvaluation,
+    // https://tc39.es/ecma262/#sec-runtime-semantics-destructuringassignmentevaluation
+    //
+    // ArrayAssignmentPattern : `[` AssignmentElementList `]`
+    // 1. Let _iteratorRecord_ be ? GetIterator(_value_, ~sync~).
+    // 2. Let _result_ be Completion(IteratorDestructuringAssignmentEvaluation of |AssignmentElementList| with argument
+    //    _iteratorRecord_).
+    // 3. If _iteratorRecord_.[[Done]] is *false*, return ? IteratorClose(_iteratorRecord_, _result_).
+    // 4. Return _result_.
+    let old_handler = generator.current_unwind_handler;
+    let close_completion_type = generator.allocate_register();
+    let close_completion_value = generator.allocate_register();
+    let exception_preamble_block = generator.make_block();
+    let iterator_close_body_block = generator.make_block();
+    let after_pattern_block = generator.make_block();
+    let lexical_env_at_entry = generator.lexical_environment_register_stack.last().cloned();
+    let parent_index = generator.current_finally_context;
+    generator.push_finally_context(FinallyContext {
+        completion_type: close_completion_type.clone(),
+        completion_value: close_completion_value.clone(),
+        finally_body: iterator_close_body_block,
+        exception_preamble: exception_preamble_block,
+        parent_index,
+        registered_jumps: Vec::new(),
+        next_jump_index: FinallyContext::FIRST_JUMP_INDEX,
+        lexical_environment_at_entry: lexical_env_at_entry.clone(),
+        saved_unwind_handler: None,
+    });
+    generator.start_boundary(BlockBoundaryType::ReturnToFinally);
+
+    generator.current_unwind_handler = Some(exception_preamble_block);
+    let pattern_body_block = generator.make_block();
+    generator.emit(Instruction::Jump {
+        target: pattern_body_block,
+    });
+    generator.switch_to_basic_block(pattern_body_block);
+
     for (index, entry) in pattern.entries.iter().enumerate() {
         if entry.is_rest {
             // 13.15.5.3 AssignmentRestElement: ... DestructuringAssignmentTarget
@@ -6943,16 +7601,24 @@ fn generate_array_binding_pattern(
             // else branch.
             let mut value = generator.allocate_register();
             if index == 0 {
+                let iterator_to_array_block = make_block_with_unwind_handler(generator, old_handler);
+                let continuation = make_block_with_unwind_handler(generator, Some(exception_preamble_block));
+                generator.emit(Instruction::Jump {
+                    target: iterator_to_array_block,
+                });
+                generator.switch_to_basic_block(iterator_to_array_block);
                 generator.emit(Instruction::IteratorToArray {
                     dst: value.operand(),
                     iterator_object: iterator_object.operand(),
                     iterator_next_method: iterator_next.operand(),
                     iterator_done_property: iterator_done.operand(),
                 });
+                generator.emit(Instruction::Jump { target: continuation });
+                generator.switch_to_basic_block(continuation);
             } else {
-                let if_exhausted = generator.make_block();
-                let if_not_exhausted = generator.make_block();
-                let continuation = generator.make_block();
+                let if_exhausted = make_block_with_unwind_handler(generator, Some(exception_preamble_block));
+                let if_not_exhausted = make_block_with_unwind_handler(generator, old_handler);
+                let continuation = make_block_with_unwind_handler(generator, Some(exception_preamble_block));
 
                 generator.emit_jump_if(&is_exhausted, if_exhausted, if_not_exhausted);
 
@@ -6983,7 +7649,7 @@ fn generate_array_binding_pattern(
             } else {
                 assign_binding_entry_alias(generator, entry, &value, mode);
             }
-            return; // rest consumes the iterator
+            break; // rest consumes the iterator
         }
 
         // 13.15.5.5 AssignmentElement: DestructuringAssignmentTarget Initializer(opt)
@@ -6998,13 +7664,19 @@ fn generate_array_binding_pattern(
         // but don't bind anything.
         let is_elision = entry.name.is_none() && entry.alias.is_none();
 
-        let exhausted_block = generator.make_block();
+        let exhausted_block = make_block_with_unwind_handler(generator, Some(exception_preamble_block));
 
         if index != 0 {
-            let not_exhausted_block = generator.make_block();
+            let not_exhausted_block = make_block_with_unwind_handler(generator, Some(exception_preamble_block));
             generator.emit_jump_if(&is_exhausted, exhausted_block, not_exhausted_block);
             generator.switch_to_basic_block(not_exhausted_block);
         }
+
+        let iterator_next_block = make_block_with_unwind_handler(generator, old_handler);
+        generator.emit(Instruction::Jump {
+            target: iterator_next_block,
+        });
+        generator.switch_to_basic_block(iterator_next_block);
 
         let value = generator.allocate_register();
         generator.emit(Instruction::IteratorNextUnpack {
@@ -7016,11 +7688,11 @@ fn generate_array_binding_pattern(
         });
 
         // Check if iterator got exhausted by this step.
-        let no_bail_block = generator.make_block();
+        let no_bail_block = make_block_with_unwind_handler(generator, Some(exception_preamble_block));
         generator.emit_jump_if(&is_exhausted, exhausted_block, no_bail_block);
 
         generator.switch_to_basic_block(no_bail_block);
-        let create_binding_block = generator.make_block();
+        let create_binding_block = make_block_with_unwind_handler(generator, Some(exception_preamble_block));
         generator.emit(Instruction::Jump {
             target: create_binding_block,
         });
@@ -7064,10 +7736,23 @@ fn generate_array_binding_pattern(
         }
     }
 
-    // Close iterator if not exhausted.
-    let done_block = generator.make_block();
-    let not_done_block = generator.make_block();
-    generator.emit_jump_if(&is_exhausted, done_block, not_done_block);
+    generator.end_boundary(BlockBoundaryType::ReturnToFinally);
+    let finally_ctx_index = generator.current_finally_context.expect("no active finally context");
+    generator.current_finally_context = generator.finally_contexts[finally_ctx_index].parent_index;
+    generator.current_unwind_handler = old_handler;
+
+    let normal_close_check_block = make_block_with_unwind_handler(generator, old_handler);
+    if !generator.is_current_block_terminated() {
+        generator.emit(Instruction::Jump {
+            target: normal_close_check_block,
+        });
+    }
+
+    // Close iterator if it is not done.
+    generator.switch_to_basic_block(normal_close_check_block);
+    let done_block = make_block_with_unwind_handler(generator, old_handler);
+    let not_done_block = make_block_with_unwind_handler(generator, old_handler);
+    generator.emit_jump_if(&iterator_done, done_block, not_done_block);
     generator.switch_to_basic_block(not_done_block);
     let undef = generator.add_constant_undefined();
     generator.emit(Instruction::IteratorClose {
@@ -7079,6 +7764,122 @@ fn generate_array_binding_pattern(
     });
     generator.emit(Instruction::Jump { target: done_block });
     generator.switch_to_basic_block(done_block);
+    generator.emit(Instruction::Jump {
+        target: after_pattern_block,
+    });
+
+    generator.switch_to_basic_block(exception_preamble_block);
+    generator.emit(Instruction::Catch {
+        dst: close_completion_value.operand(),
+    });
+    if let Some(env) = &lexical_env_at_entry {
+        generator.emit(Instruction::SetLexicalEnvironment {
+            environment: env.operand(),
+        });
+    }
+    let throw_const = generator.add_constant_i32(FinallyContext::THROW);
+    generator.emit_mov(&close_completion_type, &throw_const);
+    generator.emit(Instruction::Jump {
+        target: iterator_close_body_block,
+    });
+
+    generator.switch_to_basic_block(iterator_close_body_block);
+    let close_iterator_block = make_block_with_unwind_handler(generator, old_handler);
+    let dispatch_completion_block = make_block_with_unwind_handler(generator, old_handler);
+    generator.emit_jump_if(&iterator_done, dispatch_completion_block, close_iterator_block);
+
+    generator.switch_to_basic_block(close_iterator_block);
+    let throw_close_block = make_block_with_unwind_handler(generator, old_handler);
+    let non_throw_close_block = make_block_with_unwind_handler(generator, old_handler);
+    let throw_check_const = generator.add_constant_i32(FinallyContext::THROW);
+    generator.emit(Instruction::JumpStrictlyEquals {
+        lhs: close_completion_type.operand(),
+        rhs: throw_check_const.operand(),
+        true_target: throw_close_block,
+        false_target: non_throw_close_block,
+    });
+
+    generator.switch_to_basic_block(non_throw_close_block);
+    let undef = generator.add_constant_undefined();
+    generator.emit(Instruction::IteratorClose {
+        iterator_object: iterator_object.operand(),
+        iterator_next: iterator_next.operand(),
+        iterator_done: iterator_done.operand(),
+        completion_type: CompletionType::Normal as u32,
+        completion_value: undef.operand(),
+    });
+    generator.emit(Instruction::Jump {
+        target: dispatch_completion_block,
+    });
+
+    generator.switch_to_basic_block(throw_close_block);
+    generator.emit(Instruction::IteratorClose {
+        iterator_object: iterator_object.operand(),
+        iterator_next: iterator_next.operand(),
+        iterator_done: iterator_done.operand(),
+        completion_type: CompletionType::Throw as u32,
+        completion_value: close_completion_value.operand(),
+    });
+    if !generator.is_current_block_terminated() {
+        generator.emit(Instruction::Throw {
+            src: close_completion_value.operand(),
+        });
+    }
+
+    generator.switch_to_basic_block(dispatch_completion_block);
+    let registered_jumps = std::mem::take(&mut generator.finally_contexts[finally_ctx_index].registered_jumps);
+    for jump in &registered_jumps {
+        let after_check = make_block_with_unwind_handler(generator, old_handler);
+        let jump_const = generator.add_constant_i32(jump.index);
+        generator.emit(Instruction::JumpStrictlyEquals {
+            lhs: close_completion_type.operand(),
+            rhs: jump_const.operand(),
+            true_target: jump.target,
+            false_target: after_check,
+        });
+        generator.switch_to_basic_block(after_check);
+    }
+
+    let return_block = make_block_with_unwind_handler(generator, old_handler);
+    let throw_block = make_block_with_unwind_handler(generator, old_handler);
+    let return_const = generator.add_constant_i32(FinallyContext::RETURN);
+    generator.emit(Instruction::JumpStrictlyEquals {
+        lhs: close_completion_type.operand(),
+        rhs: return_const.operand(),
+        true_target: return_block,
+        false_target: throw_block,
+    });
+
+    generator.switch_to_basic_block(return_block);
+    if let Some(outer_index) = generator.current_finally_context {
+        let outer_ct = generator.finally_contexts[outer_index].completion_type.clone();
+        let outer_cv = generator.finally_contexts[outer_index].completion_value.clone();
+        let outer_fb = generator.finally_contexts[outer_index].finally_body;
+        generator.emit_mov(&outer_ct, &close_completion_type);
+        generator.emit_mov(&outer_cv, &close_completion_value);
+        generator.emit(Instruction::Jump { target: outer_fb });
+    } else if generator.is_in_generator_function() {
+        generator.emit(Instruction::Yield {
+            continuation_label: None,
+            value: close_completion_value.operand(),
+        });
+    } else {
+        generator.emit(Instruction::Return {
+            value: close_completion_value.operand(),
+        });
+    }
+
+    generator.switch_to_basic_block(throw_block);
+    generator.emit(Instruction::Throw {
+        src: close_completion_value.operand(),
+    });
+
+    let dummy = generator.add_constant_undefined();
+    generator.finally_contexts[finally_ctx_index].completion_type = dummy.clone();
+    generator.finally_contexts[finally_ctx_index].completion_value = dummy;
+    generator.finally_contexts[finally_ctx_index].lexical_environment_at_entry = None;
+
+    generator.switch_to_basic_block(after_pattern_block);
 }
 
 fn generate_object_binding_pattern(
@@ -7094,6 +7895,14 @@ fn generate_object_binding_pattern(
 
     for entry in &pattern.entries {
         if entry.is_rest {
+            // AssignmentRestProperty : `...` DestructuringAssignmentTarget
+            // 1. Let _lRef_ be ? Evaluation of |DestructuringAssignmentTarget|.
+            let evaluated_ref = if let Some(BindingEntryAlias::MemberExpression(expression)) = &entry.alias {
+                Some(emit_evaluate_member_reference(generator, expression))
+            } else {
+                None
+            };
+
             // Rest element: copy object excluding already-destructured properties.
             let copy = generator.allocate_register();
             generator.emit(Instruction::CopyObjectExcludingProperties {
@@ -7102,33 +7911,55 @@ fn generate_object_binding_pattern(
                 excluded_names_count: u32_from_usize(excluded_names.len()),
                 excluded_names: excluded_names.iter().map(|o| o.operand()).collect(),
             });
-            assign_binding_entry_alias(generator, entry, &copy, mode);
+            if let Some(ref eref) = evaluated_ref {
+                emit_store_to_evaluated_reference(generator, eref, &copy);
+            } else {
+                assign_binding_entry_alias(generator, entry, &copy, mode);
+            }
             return;
         }
 
         let value = generator.allocate_register();
+        let evaluated_ref;
 
         match &entry.name {
             Some(BindingEntryName::Identifier(ident)) => {
-                emit_get_by_id(generator, &value, object, &ident.name, None);
+                let arena = generator.arena.clone();
+                let name = arena.name_slice(*ident);
+                // AssignmentElement : DestructuringAssignmentTarget Initializer?
+                // 1. If |DestructuringAssignmentTarget| is neither an |ObjectLiteral| nor an |ArrayLiteral|, then
+                //    a. Let _lRef_ be ? Evaluation of |DestructuringAssignmentTarget|.
+                // 2. Let _v_ be ? GetV(_value_, _propertyName_).
+                evaluated_ref = if let Some(BindingEntryAlias::MemberExpression(expression)) = &entry.alias {
+                    Some(emit_evaluate_member_reference(generator, expression))
+                } else {
+                    None
+                };
+                emit_get_by_id(generator, &value, object, name, None);
                 if has_rest {
-                    let name_val = generator.add_constant_string(ident.name.to_utf16_string());
+                    let name_val = generator.add_constant_string(arena.name_of(*ident).clone());
                     excluded_names.push(name_val);
                 }
             }
             Some(BindingEntryName::Expression(expression)) => {
                 let property_name = generate_expression_or_undefined(expression, generator, None);
+                let property_name = generator.copy_if_needed_to_preserve_evaluation_order(&property_name);
+                generator.emit(Instruction::ToPrimitiveWithStringHint {
+                    dst: property_name.operand(),
+                    value: property_name.operand(),
+                });
                 if has_rest {
-                    // Only copy to a new register if the property name is a local variable,
-                    // since locals can be reassigned. Registers are temporaries and won't change.
-                    if property_name.operand().is_local() {
-                        let excluded_name = generator.allocate_register();
-                        generator.emit_mov(&excluded_name, &property_name);
-                        excluded_names.push(excluded_name);
-                    } else {
-                        excluded_names.push(property_name.clone());
-                    }
+                    excluded_names.push(property_name.clone());
                 }
+                // AssignmentElement : DestructuringAssignmentTarget Initializer?
+                // 1. If |DestructuringAssignmentTarget| is neither an |ObjectLiteral| nor an |ArrayLiteral|, then
+                //    a. Let _lRef_ be ? Evaluation of |DestructuringAssignmentTarget|.
+                // 2. Let _v_ be ? GetV(_value_, _propertyName_).
+                evaluated_ref = if let Some(BindingEntryAlias::MemberExpression(expression)) = &entry.alias {
+                    Some(emit_evaluate_member_reference(generator, expression))
+                } else {
+                    None
+                };
                 emit_get_by_value(generator, &value, object, &property_name, None);
             }
             None => {
@@ -7157,7 +7988,11 @@ fn generate_object_binding_pattern(
             generator.switch_to_basic_block(if_not_undefined);
         }
 
-        assign_binding_entry_alias(generator, entry, &value, mode);
+        if let Some(ref eref) = evaluated_ref {
+            emit_store_to_evaluated_reference(generator, eref, &value);
+        } else {
+            assign_binding_entry_alias(generator, entry, &value, mode);
+        }
     }
 }
 
@@ -7255,17 +8090,19 @@ fn generate_try_statement(
         let mut created_catch_scope = false;
         if let Some(parameter) = &catch.parameter {
             match parameter {
-                CatchBinding::Identifier(ident) => {
+                CatchBinding::Identifier(ident_id) => {
+                    let arena = generator.arena.clone();
+                    let ident = &arena.identifiers[*ident_id];
                     if ident.is_local() {
-                        let local = generator.local(ident.local_index.get());
+                        let local = generator.local(ident.local_index);
                         generator.emit_mov(&local, &caught_value);
-                        generator.mark_local_initialized(ident.local_index.get());
+                        generator.mark_local_initialized(ident.local_index);
                     } else {
-                        generator.push_new_lexical_environment(0);
+                        generator.push_new_catch_lexical_environment(0);
                         generator.start_boundary(BlockBoundaryType::LeaveLexicalEnvironment);
                         created_catch_scope = true;
 
-                        let id = generator.intern_identifier(&ident.name);
+                        let id = generator.intern_identifier_id(ident.name);
                         generator.emit(Instruction::CreateVariable {
                             identifier: id,
                             mode: EnvironmentMode::Lexical as u32,
@@ -7273,19 +8110,15 @@ fn generate_try_statement(
                             is_global: false,
                             is_strict: false,
                         });
-                        generator.emit(Instruction::InitializeLexicalBinding {
-                            identifier: id,
-                            src: caught_value.operand(),
-                            cache: EnvironmentCoordinate::empty(),
-                        });
+                        emit_initialize_lexical_binding(generator, id, caught_value.operand());
                     }
                 }
                 CatchBinding::BindingPattern(pattern) => {
                     let mut names: Vec<(Utf16String, bool)> = Vec::new();
-                    collect_pattern_binding_names(pattern, &mut names);
+                    collect_pattern_binding_names(pattern, &mut names, &generator.arena);
 
                     if !names.is_empty() {
-                        generator.push_new_lexical_environment(0);
+                        generator.push_new_catch_lexical_environment(0);
                         generator.start_boundary(BlockBoundaryType::LeaveLexicalEnvironment);
                         created_catch_scope = true;
 
@@ -7573,10 +8406,12 @@ fn emit_new_function(generator: &mut Generator, data: Box<FunctionData>, name_ov
         generator.source_len
     );
 
-    let subtable = generator.function_table.extract_reachable(&data);
+    let arena_clone = generator.arena.clone();
+    let subtable = generator.function_table.extract_reachable(&data, &arena_clone.scopes);
     generator.register_shared_function_data(PendingSharedFunctionData {
         function_data: Some(data),
         subtable: Some(subtable),
+        arena: None,
         name_override: name_override.map(Utf16String::from),
         class_field_initializer_name: None,
         should_eager_compile: false,
@@ -7617,10 +8452,12 @@ pub fn emit_function_declaration_instantiation(
     let mut seen_names: HashSet<Utf16String> = HashSet::new();
     let mut has_duplicates = false;
 
+    let arena = generator.arena.clone();
     for parameter in &function_data.parameters {
         match &parameter.binding {
-            FunctionParameterBinding::Identifier(ident) => {
-                let name = ident.name.to_utf16_string();
+            FunctionParameterBinding::Identifier(ident_id) => {
+                let ident = &arena.identifiers[*ident_id];
+                let name = arena.strings[ident.name].clone();
                 let is_local = ident.is_local();
                 if !seen_names.insert(name.clone()) {
                     has_duplicates = true;
@@ -7629,7 +8466,13 @@ pub fn emit_function_declaration_instantiation(
                 }
             }
             FunctionParameterBinding::BindingPattern(pattern) => {
-                collect_binding_pattern_names(pattern, &mut parameter_names, &mut seen_names, &mut has_duplicates);
+                collect_binding_pattern_names(
+                    pattern,
+                    &mut parameter_names,
+                    &mut seen_names,
+                    &mut has_duplicates,
+                    &arena,
+                );
             }
         }
     }
@@ -7688,11 +8531,7 @@ pub fn emit_function_declaration_instantiation(
             });
             if has_duplicates {
                 let undef = generator.add_constant_undefined();
-                generator.emit(Instruction::InitializeLexicalBinding {
-                    identifier: id,
-                    src: undef.operand(),
-                    cache: EnvironmentCoordinate::empty(),
-                });
+                emit_initialize_lexical_binding(generator, id, undef.operand());
             }
         }
     }
@@ -7750,6 +8589,14 @@ pub fn emit_function_declaration_instantiation(
             });
 
             generator.switch_to_basic_block(if_undefined_block);
+            if let FunctionParameterBinding::Identifier(ident_id) = &parameter.binding {
+                // https://tc39.es/ecma262/#sec-runtime-semantics-iteratorbindinginitialization
+                // If |Initializer| is present and _v_ is *undefined*, then
+                //   If IsAnonymousFunctionDefinition(|Initializer|) is *true*, then
+                //     Set _v_ to ? NamedEvaluation of |Initializer| with argument _bindingId_.
+                let arena = generator.arena.clone();
+                generator.pending_lhs_name = Some(generator.intern_identifier_id(arena.identifiers[*ident_id].name));
+            }
             if let Some(value) = generate_expression(
                 parameter
                     .default_value
@@ -7760,6 +8607,7 @@ pub fn emit_function_declaration_instantiation(
             ) {
                 generator.emit_mov_raw(Operand::argument(parameter_index), value.operand());
             }
+            generator.pending_lhs_name = None;
             generator.emit(Instruction::Jump {
                 target: if_not_undefined_block,
             });
@@ -7768,10 +8616,12 @@ pub fn emit_function_declaration_instantiation(
         }
 
         match &parameter.binding {
-            FunctionParameterBinding::Identifier(ident) => {
+            FunctionParameterBinding::Identifier(ident_id) => {
+                let arena = generator.arena.clone();
+                let ident = &arena.identifiers[*ident_id];
                 if ident.is_local() {
-                    let local_index = ident.local_index.get();
-                    match ident.local_type.get() {
+                    let local_index = ident.local_index;
+                    match ident.local_type {
                         Some(LocalType::Variable) => generator.mark_local_initialized(local_index),
                         Some(LocalType::Argument) => {
                             generator.mark_argument_initialized(local_index);
@@ -7779,19 +8629,11 @@ pub fn emit_function_declaration_instantiation(
                         None => {}
                     }
                 } else {
-                    let id = generator.intern_identifier(&ident.name);
+                    let id = generator.intern_identifier_id(ident.name);
                     if has_duplicates {
-                        generator.emit(Instruction::SetLexicalBinding {
-                            identifier: id,
-                            src: Operand::argument(parameter_index),
-                            cache: EnvironmentCoordinate::empty(),
-                        });
+                        emit_set_lexical_binding(generator, id, Operand::argument(parameter_index));
                     } else {
-                        generator.emit(Instruction::InitializeLexicalBinding {
-                            identifier: id,
-                            src: Operand::argument(parameter_index),
-                            cache: EnvironmentCoordinate::empty(),
-                        });
+                        emit_initialize_lexical_binding(generator, id, Operand::argument(parameter_index));
                     }
                 }
             }
@@ -7834,11 +8676,7 @@ pub fn emit_function_declaration_instantiation(
                         is_global: false,
                         is_strict: false,
                     });
-                    generator.emit(Instruction::InitializeVariableBinding {
-                        identifier: id,
-                        src: undef.operand(),
-                        cache: EnvironmentCoordinate::empty(),
-                    });
+                    emit_initialize_variable_binding(generator, id, undef.operand());
                 }
             }
         } else {
@@ -7856,7 +8694,7 @@ pub fn emit_function_declaration_instantiation(
                 // parameter scope.
                 let var_env = generator.allocate_register();
                 generator.emit(Instruction::GetLexicalEnvironment { dst: var_env.operand() });
-                generator.lexical_environment_register_stack.push(var_env);
+                generator.push_static_variable_environment(var_env);
             }
 
             for var in &fsd.vars_to_initialize {
@@ -7876,11 +8714,7 @@ pub fn emit_function_declaration_instantiation(
                 } else {
                     let id = generator.intern_identifier(&var.name);
                     let value = generator.allocate_register();
-                    generator.emit(Instruction::GetBinding {
-                        dst: value.operand(),
-                        identifier: id,
-                        cache: EnvironmentCoordinate::empty(),
-                    });
+                    emit_get_binding(generator, value.operand(), id, false);
                     value
                 };
 
@@ -7896,11 +8730,7 @@ pub fn emit_function_declaration_instantiation(
                         is_global: false,
                         is_strict: false,
                     });
-                    generator.emit(Instruction::InitializeVariableBinding {
-                        identifier: id,
-                        src: initial_value.operand(),
-                        cache: EnvironmentCoordinate::empty(),
-                    });
+                    emit_initialize_variable_binding(generator, id, initial_value.operand());
                 }
             }
         }
@@ -7924,18 +8754,14 @@ pub fn emit_function_declaration_instantiation(
                 is_strict: false,
             });
             let undef = generator.add_constant_undefined();
-            generator.emit(Instruction::InitializeVariableBinding {
-                identifier: id,
-                src: undef.operand(),
-                cache: EnvironmentCoordinate::empty(),
-            });
+            emit_initialize_variable_binding(generator, id, undef.operand());
         }
     }
 
     // --- Step 7: Lexical environment for non-local declarations ---
     // Note: this counts only let/const/class declarations (not function declarations,
     // which are var-hoisted in function bodies).
-    let lex_bindings_count = count_non_local_lexical_bindings(body_scope);
+    let lex_bindings_count = count_non_local_lexical_bindings(body_scope, &generator.arena);
 
     if !strict && lex_bindings_count > 0 {
         generator.push_new_lexical_environment(lex_bindings_count);
@@ -7951,7 +8777,7 @@ pub fn emit_function_declaration_instantiation(
                 let is_constant = vd.kind == DeclarationKind::Const;
                 for declaration in &vd.declarations {
                     let mut names = Vec::new();
-                    collect_target_names(&declaration.target, &mut names);
+                    collect_target_names(&declaration.target, &mut names, &generator.arena);
                     for (name, _) in names {
                         let id = generator.intern_identifier(&name);
                         generator.emit(Instruction::CreateVariable {
@@ -7966,17 +8792,19 @@ pub fn emit_function_declaration_instantiation(
             }
             StatementKind::ClassDeclaration(class_data) => {
                 // Class declarations are lexically scoped (like const).
-                if let Some(ref name_ident) = class_data.name
-                    && !name_ident.is_local()
-                {
-                    let id = generator.intern_identifier(&name_ident.name);
-                    generator.emit(Instruction::CreateVariable {
-                        identifier: id,
-                        mode: EnvironmentMode::Lexical as u32,
-                        is_immutable: false,
-                        is_global: false,
-                        is_strict: false,
-                    });
+                if let Some(name_ident_id) = class_data.name {
+                    let arena = generator.arena.clone();
+                    let name_ident = &arena.identifiers[name_ident_id];
+                    if !name_ident.is_local() {
+                        let id = generator.intern_identifier_id(name_ident.name);
+                        generator.emit(Instruction::CreateVariable {
+                            identifier: id,
+                            mode: EnvironmentMode::Lexical as u32,
+                            is_immutable: false,
+                            is_global: false,
+                            is_strict: false,
+                        });
+                    }
                 }
             }
             _ => {}
@@ -7988,14 +8816,16 @@ pub fn emit_function_declaration_instantiation(
     if let Some(fsd) = function_scope_data {
         for function_to_init in &fsd.functions_to_initialize {
             let child = &body_scope.children[function_to_init.child_index];
-            if let StatementKind::FunctionDeclaration(ref fd) = child.inner {
+            if let Some(fd) = child.inner.function_declaration_for_labelled_item() {
                 let inner_function_data = generator.function_table.take(fd.function_id);
                 let sfd_index = emit_new_function(generator, inner_function_data, None);
 
                 // Check if the function name identifier is local.
-                if let Some(name_ident) = &fd.name {
+                if let Some(name_ident_id) = fd.name {
+                    let arena = generator.arena.clone();
+                    let name_ident = &arena.identifiers[name_ident_id];
                     if name_ident.is_local() {
-                        let local_index = name_ident.local_index.get();
+                        let local_index = name_ident.local_index;
                         let local = generator.local(local_index);
                         generator.emit(Instruction::NewFunction {
                             dst: local.operand(),
@@ -8012,12 +8842,8 @@ pub fn emit_function_declaration_instantiation(
                             home_object: None,
                             lhs_name: None,
                         });
-                        let id = generator.intern_identifier(&name_ident.name);
-                        generator.emit(Instruction::SetVariableBinding {
-                            identifier: id,
-                            src: function_reg.operand(),
-                            cache: EnvironmentCoordinate::empty(),
-                        });
+                        let id = generator.intern_identifier_id(name_ident.name);
+                        emit_set_variable_binding(generator, id, function_reg.operand());
                     }
                 }
             }
@@ -8032,10 +8858,10 @@ fn is_for_loop(statement: &Statement) -> bool {
 
 /// Check if a block needs block declaration instantiation.
 /// True when the block has function declarations or non-local let/const/class.
-fn needs_block_declaration_instantiation(scope: &ScopeData) -> bool {
+fn needs_block_declaration_instantiation(scope: &ScopeData, arena: &crate::ast::AstArena) -> bool {
     for child in &scope.children {
         match &child.inner {
-            StatementKind::FunctionDeclaration(_) => {
+            _ if child.inner.function_declaration_for_labelled_item().is_some() => {
                 return true;
             }
             StatementKind::VariableDeclaration(vd)
@@ -8043,15 +8869,15 @@ fn needs_block_declaration_instantiation(scope: &ScopeData) -> bool {
             {
                 for declaration in &vd.declarations {
                     let mut names = Vec::new();
-                    collect_target_names(&declaration.target, &mut names);
+                    collect_target_names(&declaration.target, &mut names, arena);
                     if !names.is_empty() {
                         return true;
                     }
                 }
             }
             StatementKind::ClassDeclaration(class_data) => {
-                if let Some(ref name_ident) = class_data.name
-                    && !name_ident.is_local()
+                if let Some(name_ident) = class_data.name
+                    && !arena.identifiers[name_ident].is_local()
                 {
                     return true;
                 }
@@ -8059,7 +8885,7 @@ fn needs_block_declaration_instantiation(scope: &ScopeData) -> bool {
             StatementKind::UsingDeclaration(declarations) => {
                 for declaration in declarations.iter() {
                     let mut names = Vec::new();
-                    collect_target_names(&declaration.target, &mut names);
+                    collect_target_names(&declaration.target, &mut names, arena);
                     if !names.is_empty() {
                         return true;
                     }
@@ -8072,7 +8898,7 @@ fn needs_block_declaration_instantiation(scope: &ScopeData) -> bool {
 }
 
 /// Count non-local lexical bindings in a function body scope.
-fn count_non_local_lexical_bindings(scope: &ScopeData) -> u32 {
+fn count_non_local_lexical_bindings(scope: &ScopeData, arena: &crate::ast::AstArena) -> u32 {
     let mut count = 0u32;
     for child in &scope.children {
         match &child.inner {
@@ -8081,11 +8907,13 @@ fn count_non_local_lexical_bindings(scope: &ScopeData) -> u32 {
             {
                 for declaration in &vd.declarations {
                     let mut names = Vec::new();
-                    collect_target_names(&declaration.target, &mut names);
+                    collect_target_names(&declaration.target, &mut names, arena);
                     count += u32_from_usize(names.len());
                 }
             }
-            StatementKind::ClassDeclaration(class_data) if class_data.name.as_ref().is_some_and(|n| !n.is_local()) => {
+            StatementKind::ClassDeclaration(class_data)
+                if class_data.name.is_some_and(|n| !arena.identifiers[n].is_local()) =>
+            {
                 count += 1;
             }
             _ => {}
@@ -8105,12 +8933,14 @@ fn collect_binding_pattern_names(
     parameter_names: &mut Vec<FdiParameterName>,
     seen_names: &mut HashSet<Utf16String>,
     has_duplicates: &mut bool,
+    arena: &crate::ast::AstArena,
 ) {
     for entry in &pattern.entries {
         // The bound name can be in the alias (for object patterns) or name (for array patterns).
         match &entry.alias {
-            Some(BindingEntryAlias::Identifier(ident)) => {
-                let name = ident.name.to_utf16_string();
+            Some(BindingEntryAlias::Identifier(ident_id)) => {
+                let ident = &arena.identifiers[*ident_id];
+                let name = arena.strings[ident.name].clone();
                 let is_local = ident.is_local();
                 if !seen_names.insert(name.clone()) {
                     *has_duplicates = true;
@@ -8119,12 +8949,13 @@ fn collect_binding_pattern_names(
                 }
             }
             Some(BindingEntryAlias::BindingPattern(sub_pattern)) => {
-                collect_binding_pattern_names(sub_pattern, parameter_names, seen_names, has_duplicates);
+                collect_binding_pattern_names(sub_pattern, parameter_names, seen_names, has_duplicates, arena);
             }
             None => {
                 // No alias — the name itself is the binding.
-                if let Some(BindingEntryName::Identifier(ident)) = &entry.name {
-                    let name = ident.name.to_utf16_string();
+                if let Some(BindingEntryName::Identifier(ident_id)) = &entry.name {
+                    let ident = &arena.identifiers[*ident_id];
+                    let name = arena.strings[ident.name].clone();
                     let is_local = ident.is_local();
                     if !seen_names.insert(name.clone()) {
                         *has_duplicates = true;
@@ -8172,7 +9003,7 @@ const BUILTIN_STRING_PROTOTYPE_CHAR_AT: u8 = 23;
 
 /// Detect known builtin methods from a callee expression (e.g. Math.abs).
 /// Returns the Builtin enum value as u8, matching Builtins.h ordering.
-fn get_builtin(callee: &Expression) -> Option<u8> {
+fn get_builtin(callee: &Expression, arena: &crate::ast::AstArena) -> Option<u8> {
     let ExpressionKind::Member(member_data) = &callee.inner else {
         return None;
     };
@@ -8182,15 +9013,17 @@ fn get_builtin(callee: &Expression) -> Option<u8> {
     let ExpressionKind::Identifier(property_ident) = &member_data.property.inner else {
         return None;
     };
-    if property_ident.name == utf16!("charAt") {
+    let property_name = arena.name_slice(*property_ident);
+    if property_name == utf16!("charAt") {
         return Some(BUILTIN_STRING_PROTOTYPE_CHAR_AT);
     }
-    if property_ident.name == utf16!("charCodeAt") {
+    if property_name == utf16!("charCodeAt") {
         return Some(BUILTIN_STRING_PROTOTYPE_CHAR_CODE_AT);
     }
     let ExpressionKind::Identifier(base_ident) = &member_data.object.inner else {
         return None;
     };
+    let base_name = arena.name_slice(*base_ident);
     // Must match JS_ENUMERATE_BUILTINS order in Builtins.h.
     static BUILTINS: &[(&[u16], &[u16], u8)] = &[
         (utf16!("Math"), utf16!("abs"), BUILTIN_MATH_ABS),
@@ -8245,7 +9078,7 @@ fn get_builtin(callee: &Expression) -> Option<u8> {
         (utf16!("String"), utf16!("fromCharCode"), BUILTIN_STRING_FROM_CHAR_CODE),
     ];
     for &(base, property, id) in BUILTINS {
-        if base_ident.name == base && property_ident.name == property {
+        if base_name == base && property_name == property {
             return Some(id);
         }
     }
@@ -9078,14 +9911,15 @@ fn nanboxed_empty() -> u64 {
 /// Intern the base expression as an identifier for error messages like
 /// "Cannot access property X on null object Y".
 fn intern_base_identifier(generator: &mut Generator, base: &Expression) -> Option<IdentifierTableIndex> {
-    expression_identifier(base).map(|s| generator.intern_identifier(&s))
+    let arena = generator.arena.clone();
+    expression_identifier(base, &arena).map(|s| generator.intern_identifier(&s))
 }
 
 /// Try to produce a human-readable name for an expression (for error messages).
 /// Returns None for expressions that have no meaningful name.
-fn expression_identifier(expression: &Expression) -> Option<Utf16String> {
+fn expression_identifier(expression: &Expression, arena: &crate::ast::AstArena) -> Option<Utf16String> {
     match &expression.inner {
-        ExpressionKind::Identifier(ident) => Some(ident.name.to_utf16_string()),
+        ExpressionKind::Identifier(ident) => Some(arena.name_of(*ident).clone()),
         ExpressionKind::StringLiteral(s) => {
             let mut result = Utf16String(utf16!("'").to_vec());
             result.0.extend_from_slice(s);
@@ -9096,10 +9930,10 @@ fn expression_identifier(expression: &Expression) -> Option<Utf16String> {
         ExpressionKind::This => Some(Utf16String(utf16!("this").to_vec())),
         ExpressionKind::Member(data) => {
             let mut s = Utf16String::new();
-            if let Some(obj_id) = expression_identifier(&data.object) {
+            if let Some(obj_id) = expression_identifier(&data.object, arena) {
                 s.0.extend_from_slice(&obj_id);
             }
-            if let Some(property_id) = expression_identifier(&data.property) {
+            if let Some(property_id) = expression_identifier(&data.property, arena) {
                 if data.computed {
                     s.0.extend_from_slice(utf16!("["));
                     s.0.extend_from_slice(&property_id);
@@ -9118,20 +9952,20 @@ fn expression_identifier(expression: &Expression) -> Option<Utf16String> {
 /// Produce a human-readable string for call expression error messages.
 /// Unlike expression_identifier, this always produces output for known types
 /// (using "<object>" for unrecognized sub-expressions).
-fn expression_string_approximation(expression: &Expression) -> Option<Utf16String> {
+fn expression_string_approximation(expression: &Expression, arena: &crate::ast::AstArena) -> Option<Utf16String> {
     match &expression.inner {
-        ExpressionKind::Identifier(ident) => Some(ident.name.to_utf16_string()),
-        ExpressionKind::Member(_) => Some(member_to_string_approximation(expression)),
+        ExpressionKind::Identifier(ident) => Some(arena.name_of(*ident).clone()),
+        ExpressionKind::Member(_) => Some(member_to_string_approximation(expression, arena)),
         _ => None,
     }
 }
 
-fn member_to_string_approximation(expression: &Expression) -> Utf16String {
+fn member_to_string_approximation(expression: &Expression, arena: &crate::ast::AstArena) -> Utf16String {
     match &expression.inner {
-        ExpressionKind::Identifier(ident) => ident.name.to_utf16_string(),
+        ExpressionKind::Identifier(ident) => arena.name_of(*ident).clone(),
         ExpressionKind::Member(data) => {
-            let mut s = member_to_string_approximation(&data.object);
-            let property_str = member_to_string_approximation(&data.property);
+            let mut s = member_to_string_approximation(&data.object, arena);
+            let property_str = member_to_string_approximation(&data.property, arena);
             if data.computed {
                 s.0.extend_from_slice(utf16!("["));
                 s.0.extend_from_slice(&property_str);

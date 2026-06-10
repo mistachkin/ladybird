@@ -11,6 +11,8 @@
 
 #include <AK/AtomicRefCounted.h>
 #include <AK/FlyString.h>
+#include <AK/HashMap.h>
+#include <AK/OwnPtr.h>
 #include <AK/RefPtr.h>
 #include <AK/Utf16String.h>
 #include <LibGfx/Font/Font.h>
@@ -23,8 +25,17 @@ struct hb_buffer_t;
 
 namespace Gfx {
 
+struct ShapedGlyphs;
+
+struct ShapingCacheKey {
+    Utf16String text;
+    u8 text_type { 0 };
+    u32 letter_spacing_bit_pattern { 0 };
+
+    bool operator==(ShapingCacheKey const&) const = default;
+};
+
 struct FontPixelMetrics {
-    float size { 0 };
     float x_height { 0 };
     float advance_of_ascii_zero { 0 };
 
@@ -33,11 +44,6 @@ struct FontPixelMetrics {
 
     // Number of pixels the font descends below the baseline.
     float descent { 0 };
-
-    // Line gap specified by font.
-    float line_gap { 0 };
-
-    float line_spacing() const { return ascent + descent + line_gap; }
 };
 
 // https://learn.microsoft.com/en-us/typography/opentype/spec/os2#uswidthclass
@@ -57,10 +63,10 @@ constexpr float text_shaping_resolution = 64;
 
 class Font : public AtomicRefCounted<Font> {
 public:
-    Font(NonnullRefPtr<Typeface const>, float point_width, float point_height, unsigned dpi_x, unsigned dpi_y, FontVariationSettings const variations, ShapeFeatures const& features);
-    ScaledFontMetrics metrics() const;
+    Font(NonnullRefPtr<Typeface const>, float point_width, float point_height, FontVariationSettings const variations, ShapeFeatures const& features);
     ~Font();
 
+    u64 id() const { return m_id; }
     float point_size() const;
     float pixel_size() const;
     FontPixelMetrics const& pixel_metrics() const { return m_pixel_metrics; }
@@ -69,13 +75,10 @@ public:
     bool contains_glyph(u32 code_point) const { return m_typeface->glyph_id_for_code_point(code_point) > 0; }
     float glyph_width(u32 code_point) const;
     u32 glyph_id_for_code_point(u32 code_point) const { return m_typeface->glyph_id_for_code_point(code_point); }
-    float preferred_line_height() const { return metrics().height() + metrics().line_gap; }
     int x_height() const { return m_point_height; } // FIXME: Read from font
-    u8 baseline() const { return m_point_height; }  // FIXME: Read from font
     float width(Utf16View const&) const;
     FlyString const& family() const { return m_typeface->family(); }
 
-    NonnullRefPtr<Font> scaled_with_size(float point_size) const;
     NonnullRefPtr<Font> with_size(float point_size) const;
 
     Typeface const& typeface() const { return m_typeface; }
@@ -84,11 +87,12 @@ public:
 
     Font const& bold_variant() const;
     hb_font_t* harfbuzz_font() const;
+    FontVariationSettings const& variation_settings() const { return m_font_variation_settings; }
     ShapeFeatures const& features() const { return m_shape_features; }
 
     struct ShapingCache {
-        HashMap<Utf16String, hb_buffer_t*> map;
-        hb_buffer_t* single_ascii_character_map[128] { nullptr };
+        HashMap<ShapingCacheKey, OwnPtr<ShapedGlyphs>> map;
+        OwnPtr<ShapedGlyphs> single_ascii_character_map[128];
 
         ~ShapingCache();
         void clear();
@@ -98,6 +102,8 @@ public:
     bool is_emoji_font() const;
 
 private:
+    u64 m_id { 0 };
+
     mutable RefPtr<Font const> m_bold_variant;
     mutable hb_font_t* m_harfbuzz_font { nullptr };
 
@@ -106,8 +112,6 @@ private:
     mutable TriState m_is_emoji_font { TriState::Unknown };
 
     NonnullRefPtr<Typeface const> m_typeface;
-    float m_x_scale { 0.0f };
-    float m_y_scale { 0.0f };
     float m_point_width { 0.0f };
     float m_point_height { 0.0f };
     FontVariationSettings const m_font_variation_settings;
@@ -115,6 +119,18 @@ private:
     FontPixelMetrics m_pixel_metrics;
 
     float m_pixel_size { 0.0f };
+};
+
+}
+
+namespace AK {
+
+template<>
+struct Traits<Gfx::ShapingCacheKey> : public DefaultTraits<Gfx::ShapingCacheKey> {
+    static unsigned hash(Gfx::ShapingCacheKey const& key)
+    {
+        return pair_int_hash(key.text.hash(), pair_int_hash(key.text_type, key.letter_spacing_bit_pattern));
+    }
 };
 
 }

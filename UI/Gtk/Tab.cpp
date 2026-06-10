@@ -8,8 +8,10 @@
 #include <LibGfx/Cursor.h>
 #include <LibURL/URL.h>
 #include <LibWeb/HTML/SelectItem.h>
+#include <LibWebView/Application.h>
 #include <LibWebView/Menu.h>
 #include <LibWebView/URL.h>
+#include <LibWebView/WebContentClient.h>
 #include <UI/Gtk/BrowserWindow.h>
 #include <UI/Gtk/Dialogs.h>
 #include <UI/Gtk/Events.h>
@@ -89,16 +91,20 @@ Tab::Tab(BrowserWindow& window, RefPtr<WebView::WebContentClient> parent_client,
 
 Tab::~Tab() = default;
 
+void Tab::set_tab_page(AdwTabPage* page)
+{
+    m_tab_page = page;
+    update_tab_title();
+}
+
 void Tab::setup_callbacks()
 {
     auto* root = GTK_WIDGET(m_web_view);
 
     m_view->on_title_change = [this](auto const& title) {
-        if (m_tab_page) {
-            auto utf8 = title.to_utf8();
-            auto byte_str = ByteString(utf8.bytes_as_string_view());
-            adw_tab_page_set_title(m_tab_page, byte_str.characters());
-        }
+        auto utf8 = title.to_utf8();
+        m_title = ByteString(utf8.bytes_as_string_view());
+        update_tab_title();
     };
 
     m_view->on_url_change = [this](auto const& url) {
@@ -113,13 +119,22 @@ void Tab::setup_callbacks()
     };
 
     m_view->on_load_start = [this](auto const&, bool) {
+        m_is_loading = true;
+        m_favicon.clear();
         if (m_tab_page)
             adw_tab_page_set_loading(m_tab_page, TRUE);
+        if (m_window.current_tab() == this) {
+            m_window.update_location_favicon(nullptr);
+            m_window.update_location_loading(true);
+        }
     };
 
     m_view->on_load_finish = [this](auto const&) {
+        m_is_loading = false;
         if (m_tab_page)
             adw_tab_page_set_loading(m_tab_page, FALSE);
+        if (m_window.current_tab() == this)
+            m_window.update_location_loading(false);
     };
 
     m_view->on_cursor_change = [root](auto const& cursor) {
@@ -236,11 +251,13 @@ void Tab::setup_callbacks()
     };
 
     m_view->on_favicon_change = [this](auto const& bitmap) {
-        if (!m_tab_page)
-            return;
         g_autoptr(GBytes) bytes = g_bytes_new(bitmap.scanline_u8(0), bitmap.size_in_bytes());
         GObjectPtr texture { gdk_memory_texture_new(bitmap.width(), bitmap.height(), GDK_MEMORY_B8G8R8A8_PREMULTIPLIED, bytes, bitmap.pitch()) };
-        adw_tab_page_set_icon(m_tab_page, G_ICON(texture.ptr()));
+        m_favicon = GObjectPtr<GdkPaintable>(GDK_PAINTABLE(g_object_ref(texture.ptr())));
+        if (m_tab_page)
+            adw_tab_page_set_icon(m_tab_page, G_ICON(texture.ptr()));
+        if (m_window.current_tab() == this)
+            m_window.update_location_favicon(m_favicon.ptr());
     };
 
     m_view->on_audio_play_state_changed = [this](auto play_state) {
@@ -260,6 +277,30 @@ void Tab::setup_callbacks()
     create_context_menu(*root, *m_view, m_view->link_context_menu());
     create_context_menu(*root, *m_view, m_view->image_context_menu());
     create_context_menu(*root, *m_view, m_view->media_context_menu());
+}
+
+ByteString Tab::tab_title() const
+{
+    if (!WebView::Application::settings().config_variable_as_bool(WebView::ConfigVariableID::ShowWebContentProcessIDInTabTitle))
+        return m_title;
+
+    return ByteString::formatted("{} [{}]", m_title, m_view->client().pid());
+}
+
+void Tab::update_tab_title()
+{
+    if (!m_tab_page)
+        return;
+
+    auto title = tab_title();
+    adw_tab_page_set_title(m_tab_page, title.characters());
+    adw_tab_page_set_tooltip(m_tab_page, title.characters());
+}
+
+void Tab::config_variable_changed(WebView::ConfigVariableID variable)
+{
+    if (variable == WebView::ConfigVariableID::ShowWebContentProcessIDInTabTitle)
+        update_tab_title();
 }
 
 void Tab::navigate(URL::URL const& url)

@@ -27,12 +27,12 @@ public:
 
     GC::Ptr<DOM::ShadowRoot> shadow_root() const;
 
-    using ElementInternalsFormValue = Variant<GC::Root<FileAPI::File>, String, GC::Root<XHR::FormData>, Empty>;
+    using ElementInternalsFormValue = Variant<GC::Ref<FileAPI::File>, String, GC::Ref<XHR::FormData>, Empty>;
     WebIDL::ExceptionOr<void> set_form_value(ElementInternalsFormValue value, Optional<ElementInternalsFormValue> state);
 
     WebIDL::ExceptionOr<GC::Ptr<HTMLFormElement>> form() const;
 
-    WebIDL::ExceptionOr<void> set_validity(ValidityStateFlags const& flags, Optional<String> message, GC::Ptr<HTMLElement> anchor);
+    WebIDL::ExceptionOr<void> set_validity(Bindings::ValidityStateFlags const& flags, Optional<String> message, GC::Ptr<HTMLElement> anchor);
     WebIDL::ExceptionOr<bool> will_validate() const;
     WebIDL::ExceptionOr<GC::Ref<ValidityState const>> validity() const;
     WebIDL::ExceptionOr<String> validation_message() const;

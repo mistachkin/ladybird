@@ -4,104 +4,164 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <AK/Function.h>
-#include <AK/TemporaryChange.h>
+#include <AK/HashTable.h>
+#include <AK/StdLibExtras.h>
+#include <AK/Vector.h>
+#include <LibWeb/CSS/Invalidation/AncestorTraversal.h>
+#include <LibWeb/CSS/Invalidation/InvalidationSetMatcher.h>
 #include <LibWeb/CSS/Invalidation/PseudoClassInvalidator.h>
-#include <LibWeb/CSS/SelectorEngine.h>
-#include <LibWeb/CSS/StyleComputer.h>
+#include <LibWeb/CSS/InvalidationSet.h>
 #include <LibWeb/CSS/StyleScope.h>
+#include <LibWeb/DOM/AbstractElement.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Element.h>
-#include <LibWeb/DOM/ShadowRoot.h>
+#include <LibWeb/DOM/StyleInvalidationReason.h>
 
 namespace Web::CSS::Invalidation {
 
-template<typename StateSlot, typename NewState>
-static void invalidate_style_after_pseudo_class_state_change_impl(CSS::PseudoClass pseudo_class, DOM::Document& document, StateSlot& state_slot, DOM::Node& invalidation_root, NewState new_state)
+static bool pseudo_class_propagates_to_ancestors(CSS::PseudoClass pseudo_class)
 {
-    auto& root = invalidation_root.root();
-    auto shadow_root = is<DOM::ShadowRoot>(root) ? static_cast<DOM::ShadowRoot const*>(&root) : nullptr;
-    auto& style_scope = shadow_root ? shadow_root->style_scope() : document.style_scope();
+    return first_is_one_of(pseudo_class, CSS::PseudoClass::Hover, CSS::PseudoClass::FocusWithin);
+}
 
-    auto const& rules = style_scope.get_pseudo_class_rule_cache(pseudo_class);
+static AncestorTraversal ancestor_traversal_for_pseudo_class(CSS::PseudoClass pseudo_class)
+{
+    switch (pseudo_class) {
+    case CSS::PseudoClass::FocusWithin:
+        return AncestorTraversal::FlatTree;
+    default:
+        return AncestorTraversal::ShadowIncluding;
+    }
+}
 
-    auto& style_computer = document.style_computer();
-    auto does_rule_match_on_element = [&](DOM::Element const& element, CSS::MatchingRule const& rule) {
-        auto const& selector = rule.selector;
-        if (selector.can_use_ancestor_filter() && style_computer.should_reject_with_ancestor_filter(selector))
-            return false;
-
-        SelectorEngine::MatchContext context;
-        auto const& target_pseudo = selector.target_pseudo_element();
-        if (!target_pseudo.has_value())
-            return SelectorEngine::matches(selector, element, {}, context);
-        switch (target_pseudo->type()) {
-        case CSS::PseudoElement::Before:
-            return SelectorEngine::matches(selector, { element, CSS::PseudoElement::Before }, {}, context);
-        case CSS::PseudoElement::After:
-            return SelectorEngine::matches(selector, { element, CSS::PseudoElement::After }, {}, context);
-        default:
-            return false;
-        }
-    };
-
-    auto matches_different_set_of_rules_after_state_change = [&](DOM::Element& element) {
-        bool result = false;
-        rules.for_each_matching_rules({ element }, [&](auto& rules) {
-            for (auto& rule : rules) {
-                bool before = does_rule_match_on_element(element, rule);
-                TemporaryChange change { state_slot, new_state };
-                bool after = does_rule_match_on_element(element, rule);
-                if (before != after) {
-                    result = true;
-                    return IterationDecision::Break;
-                }
+static bool pseudo_class_subject_may_match_element(DOM::Element& element, CSS::Selector const& selector, CSS::PseudoClass pseudo_class)
+{
+    auto const& compound_selectors = selector.compound_selectors();
+    for (size_t i = compound_selectors.size(); i > 0; --i) {
+        auto const& compound_selector = compound_selectors[i - 1];
+        bool contains_pseudo_class = false;
+        for (auto const& simple_selector : compound_selector.simple_selectors) {
+            if (simple_selector.type == CSS::Selector::SimpleSelector::Type::PseudoClass
+                && simple_selector.pseudo_class().type == pseudo_class) {
+                contains_pseudo_class = true;
+                break;
             }
-            return IterationDecision::Continue;
-        });
-        return result;
-    };
-
-    Function<void(DOM::Node&)> invalidate_affected_elements_recursively = [&](DOM::Node& node) -> void {
-        if (node.is_element()) {
-            auto& element = static_cast<DOM::Element&>(node);
-            style_computer.push_ancestor(element);
-            if (element.affected_by_pseudo_class(pseudo_class) && matches_different_set_of_rules_after_state_change(element))
-                element.set_needs_style_update(true);
         }
+        if (!contains_pseudo_class)
+            continue;
 
-        node.for_each_child([&](auto& child) {
-            invalidate_affected_elements_recursively(child);
-            return IterationDecision::Continue;
+        if (!compound_may_match_element(element, compound_selector, pseudo_class))
+            return false;
+
+        if (compound_selector.simple_selectors.size() > 1 || i == 1)
+            return true;
+
+        if (compound_selector.combinator != CSS::Selector::Combinator::None)
+            return true;
+
+        // Some selectors are represented with the pseudo-class in its own
+        // compound. In that case, the preceding compound carries the subject
+        // constraints, such as the `a` in `a:hover`.
+        return compound_may_match_element(element, compound_selectors[i - 2], pseudo_class);
+    }
+    return true;
+}
+
+static bool element_may_match_rule_containing_pseudo_class_in_style_scope(DOM::Element& element, CSS::StyleScope& style_scope, CSS::PseudoClass pseudo_class)
+{
+    bool may_match = false;
+    auto abstract_element = DOM::AbstractElement { element };
+    style_scope.get_pseudo_class_rule_cache(pseudo_class).for_each_matching_rules(abstract_element, [&](auto const& matching_rules) {
+        for (auto const& matching_rule : matching_rules) {
+            if (pseudo_class_subject_may_match_element(element, matching_rule.selector, pseudo_class)) {
+                may_match = true;
+                return IterationDecision::Break;
+            }
+        }
+        return IterationDecision::Continue;
+    });
+    return may_match;
+}
+
+static bool element_may_match_rule_containing_pseudo_class(DOM::Element& element, CSS::PseudoClass pseudo_class)
+{
+    bool may_match = false;
+    element.for_each_style_scope_which_may_observe_the_node([&](CSS::StyleScope& scope) {
+        if (element_may_match_rule_containing_pseudo_class_in_style_scope(element, scope, pseudo_class))
+            may_match = true;
+    });
+    return may_match;
+}
+
+void invalidate_style_after_pseudo_class_state_change(CSS::PseudoClass pseudo_class, GC::Ptr<DOM::Node> old_state, GC::Ptr<DOM::Node> new_state)
+{
+    if (!old_state && !new_state)
+        return;
+
+    bool const propagates = pseudo_class_propagates_to_ancestors(pseudo_class);
+    auto traversal = ancestor_traversal_for_pseudo_class(pseudo_class);
+
+    Vector<CSS::InvalidationSet::Property, 1> properties { { CSS::InvalidationSet::Property::Type::PseudoClass, pseudo_class } };
+    auto reason = DOM::StyleInvalidationReason::PseudoClassStateChange;
+
+    auto invalidate = [&](DOM::Element& element) {
+        DOM::StyleInvalidationOptions options {
+            .invalidate_self = element_may_match_rule_containing_pseudo_class(element, pseudo_class),
+        };
+        options.invalidate_self_from_property_plan = options.invalidate_self;
+        element.invalidate_style(reason, properties, options);
+
+        // The interaction-state pseudo classes (Hover/Focus/etc.) aren't tracked in
+        // pseudo_classes_used_in_has_selectors, so invalidate_node_style_for_properties
+        // doesn't schedule :has() ancestor invalidation for them. Schedule it directly so
+        // rules like .a:has(:focus) ... re-evaluate when the state flips.
+        element.for_each_style_scope_which_may_observe_the_node([&](CSS::StyleScope& scope) {
+            if (!scope.may_have_has_selectors())
+                return;
+            scope.record_pending_has_invalidation_mutation_features(element, properties);
+            scope.schedule_ancestors_style_invalidation_due_to_presence_of_has(element);
         });
-
-        if (node.is_element())
-            style_computer.pop_ancestor(static_cast<DOM::Element&>(node));
     };
 
-    // Seed the ancestor filter with ancestors above the starting node,
-    // so that ancestor-dependent selectors can still be correctly rejected.
-    for (auto* ancestor = invalidation_root.parent(); ancestor; ancestor = ancestor->parent()) {
-        if (ancestor->is_element())
-            style_computer.push_ancestor(static_cast<DOM::Element&>(*ancestor));
-    }
+    auto build_chain = [&](GC::Ptr<DOM::Node> start) {
+        HashTable<DOM::Element const*> chain;
+        if (!start)
+            return chain;
+        if (propagates) {
+            for_each_inclusive_ancestor_element(*start, traversal, [&](DOM::Element& element) {
+                chain.set(&element);
+                return TraversalDecision::Continue;
+            });
+        } else if (auto* element = as_if<DOM::Element>(*start)) {
+            chain.set(element);
+        }
+        return chain;
+    };
 
-    invalidate_affected_elements_recursively(invalidation_root);
+    auto old_chain = build_chain(old_state);
+    auto new_chain = build_chain(new_state);
 
-    for (auto* ancestor = invalidation_root.parent(); ancestor; ancestor = ancestor->parent()) {
-        if (ancestor->is_element())
-            style_computer.pop_ancestor(static_cast<DOM::Element&>(*ancestor));
-    }
-}
+    // Walk start's ancestor chain (inclusive) and invalidate each element whose pseudo-class
+    // state changes. Elements in both chains have unchanged state and are skipped; once we
+    // reach one, all further ancestors are also in both chains so we stop.
+    auto walk_and_invalidate = [&](GC::Ptr<DOM::Node> start, HashTable<DOM::Element const*> const& other_chain) {
+        if (!start)
+            return;
+        if (propagates) {
+            for_each_inclusive_ancestor_element(*start, traversal, [&](DOM::Element& element) {
+                if (other_chain.contains(&element))
+                    return TraversalDecision::Break;
+                invalidate(element);
+                return TraversalDecision::Continue;
+            });
+        } else if (auto* element = as_if<DOM::Element>(*start)) {
+            if (!other_chain.contains(element))
+                invalidate(*element);
+        }
+    };
 
-void invalidate_style_after_pseudo_class_state_change(CSS::PseudoClass pseudo_class, DOM::Document& document, GC::Ptr<DOM::Node>& state_slot, DOM::Node& invalidation_root, GC::Ptr<DOM::Node> new_state)
-{
-    invalidate_style_after_pseudo_class_state_change_impl(pseudo_class, document, state_slot, invalidation_root, new_state);
-}
-
-void invalidate_style_after_pseudo_class_state_change(CSS::PseudoClass pseudo_class, DOM::Document& document, GC::Ptr<DOM::Element>& state_slot, DOM::Node& invalidation_root, GC::Ptr<DOM::Element> new_state)
-{
-    invalidate_style_after_pseudo_class_state_change_impl(pseudo_class, document, state_slot, invalidation_root, new_state);
+    walk_and_invalidate(old_state, new_chain);
+    walk_and_invalidate(new_state, old_chain);
 }
 
 }

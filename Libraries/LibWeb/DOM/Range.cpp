@@ -8,6 +8,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/NeverDestroyed.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/Bindings/Range.h>
 #include <LibWeb/DOM/Comment.h>
@@ -26,7 +27,11 @@
 #include <LibWeb/HTML/HTMLHtmlElement.h>
 #include <LibWeb/HTML/HTMLScriptElement.h>
 #include <LibWeb/HTML/Window.h>
+#include <LibWeb/Layout/TextNode.h>
+#include <LibWeb/Layout/TextOffsetMapping.h>
 #include <LibWeb/Namespace.h>
+#include <LibWeb/Painting/PaintableFragment.h>
+#include <LibWeb/Painting/PaintableWithLines.h>
 #include <LibWeb/Painting/ViewportPaintable.h>
 #include <LibWeb/TrustedTypes/RequireTrustedTypesForDirective.h>
 #include <LibWeb/TrustedTypes/TrustedTypePolicy.h>
@@ -37,8 +42,8 @@ GC_DEFINE_ALLOCATOR(Range);
 
 HashTable<Range*>& Range::live_ranges()
 {
-    static HashTable<Range*> ranges;
-    return ranges;
+    static NeverDestroyed<HashTable<Range*>> ranges;
+    return *ranges;
 }
 
 GC::Ref<Range> Range::create(HTML::Window& window)
@@ -106,17 +111,21 @@ void Range::set_associated_selection(Badge<Selection::Selection>, GC::Ptr<Select
 
 void Range::update_associated_selection()
 {
+    auto& document = m_start_container->document();
+
+    // NB: Called during selection update after range change.
+    if (auto viewport = document.unsafe_paintable()) {
+        if (m_associated_selection)
+            viewport->recompute_selection_states(*this);
+        else
+            viewport->reset_selection_states();
+        viewport->set_needs_repaint();
+    }
+
     if (!m_associated_selection)
         return;
 
-    auto& document = m_start_container->document();
     document.reset_cursor_blink_cycle();
-
-    // NB: Called during selection update after range change.
-    if (auto* viewport = document.unsafe_paintable()) {
-        viewport->recompute_selection_states(*this);
-        viewport->set_needs_repaint();
-    }
 
     // https://w3c.github.io/selection-api/#selectionchange-event
     // When the selection is dissociated with its range, associated with a new range, or the associated range's boundary
@@ -1107,7 +1116,7 @@ WebIDL::ExceptionOr<void> Range::delete_contents()
 
     // 4. Let nodesToRemove be a list of all the nodes that are contained in this, in tree order, omitting any node
     //    whose parent is also contained in this.
-    GC::RootVector<Node*> nodes_to_remove(heap());
+    GC::RootVector<Node*> nodes_to_remove;
     for (GC::Ptr<Node> node = start_container(); node != end_container()->next_sibling(); node = node->next_in_pre_order()) {
         if (contains_node(*node) && (!node->parent_node() || !contains_node(*node->parent_node())))
             nodes_to_remove.append(node);
@@ -1171,16 +1180,34 @@ GC::Ref<Geometry::DOMRectList> Range::get_client_rects()
     Vector<GC::Root<Geometry::DOMRect>> rects;
     // FIXME: take Range collapsed into consideration
     // 2. Iterate the node included in Range
-    auto start_node = start_container();
-    if (!is<DOM::Text>(*start_node))
-        start_node = *start_node->child_at_index(m_start_offset);
+    GC::Ptr<Node> start_node = start_container();
+    if (!is<DOM::Text>(*start_node)) {
+        auto next_after_subtree = [](Node& node) -> GC::Ptr<Node> {
+            for (auto* current = &node; current; current = current->parent_node()) {
+                if (auto* next = current->next_sibling())
+                    return next;
+            }
+            return nullptr;
+        };
 
-    auto end_node = end_container();
+        auto* start_child = start_node->child_at_index(m_start_offset);
+        if (start_child) {
+            start_node = *start_child;
+        } else if (start_node->last_child()) {
+            start_node = next_after_subtree(*start_node);
+        } else {
+            start_node = start_node->next_in_pre_order();
+        }
+    }
+
+    GC::Ptr<Node> end_node = end_container();
     if (!is<DOM::Text>(*end_node)) {
         // end offset shouldn't be 0
         if (m_end_offset == 0)
             return Geometry::DOMRectList::create(realm(), {});
-        end_node = *end_node->child_at_index(m_end_offset - 1);
+        end_node = end_node->child_at_index(m_end_offset - 1);
+        if (!end_node)
+            return Geometry::DOMRectList::create(realm(), {});
     }
     for (GC::Ptr<Node> node = start_node; node && node != end_node->next_in_pre_order(); node = node->next_in_pre_order()) {
         auto selection_state = Painting::Paintable::SelectionState::Full;
@@ -1199,7 +1226,7 @@ GC::Ref<Geometry::DOMRectList> Range::get_client_rects()
         if (node_type == NodeType::ELEMENT_NODE) {
             // 1. For each element selected by the range, whose parent is not selected by the range, include the border
             // areas returned by invoking getClientRects() on the element.
-            if (contains_node(*node) && !contains_node(*node->parent())) {
+            if (contains_node(*node) && (!node->parent() || !contains_node(*node->parent()))) {
                 auto const& element = static_cast<DOM::Element const&>(*node);
                 auto const element_rects = element.get_client_rects();
                 for (auto& rect : element_rects) {
@@ -1210,18 +1237,36 @@ GC::Ref<Geometry::DOMRectList> Range::get_client_rects()
             // 2. For each Text node selected or partially selected by the range (including when the boundary-points
             // are identical), include scaled DOMRect object (for the part that is selected, not the whole line box).
             auto const& text = static_cast<DOM::Text const&>(*node);
-            auto const* paintable = text.paintable();
-            if (paintable && selection_state != Painting::Paintable::SelectionState::None) {
-                if (auto const* paintable_lines = as_if<Painting::PaintableWithLines>(paintable->containing_block())) {
-                    auto fragments = paintable_lines->fragments();
-                    for (auto frag = fragments.begin(); frag != fragments.end(); frag++) {
-                        auto rect = frag->range_rect(selection_state, start_offset(), end_offset());
-                        rects.append(Geometry::DOMRect::create(realm(), rect.to_type<float>()));
-                    }
-                } else {
-                    dbgln("FIXME: Failed to get client rects for node {}", node->debug_description());
-                }
+            if (selection_state == Painting::Paintable::SelectionState::None)
+                continue;
+
+            Layout::TextOffsetMapping mapping { text };
+            if (!mapping.primary()) {
+                dbgln("FIXME: Failed to get client rects for node {}", node->debug_description());
+                continue;
             }
+            size_t filter_dom_start = 0;
+            size_t filter_dom_end = NumericLimits<size_t>::max();
+            switch (selection_state) {
+            case Painting::Paintable::SelectionState::Full:
+                break;
+            case Painting::Paintable::SelectionState::StartAndEnd:
+                filter_dom_start = start_offset();
+                filter_dom_end = end_offset();
+                break;
+            case Painting::Paintable::SelectionState::Start:
+                filter_dom_start = start_offset();
+                break;
+            case Painting::Paintable::SelectionState::End:
+                filter_dom_end = end_offset();
+                break;
+            case Painting::Paintable::SelectionState::None:
+                VERIFY_NOT_REACHED();
+            }
+            mapping.for_each_paintable_fragment_in_dom_range(filter_dom_start, filter_dom_end, [&](Painting::PaintableFragment const& fragment) {
+                auto rect = fragment.range_rect(selection_state, start_offset(), end_offset());
+                rects.append(Geometry::DOMRect::create(realm(), rect.to_type<float>()));
+            });
         }
     }
     return Geometry::DOMRectList::create(realm(), move(rects));

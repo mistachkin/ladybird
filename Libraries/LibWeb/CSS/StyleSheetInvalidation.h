@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <AK/FlyString.h>
 #include <AK/RefPtr.h>
 #include <AK/Vector.h>
 #include <LibGC/Ptr.h>
@@ -23,6 +24,7 @@ struct StyleSheetInvalidationSet {
     InvalidationSet invalidation_set;
     bool may_match_shadow_host { false };
     bool may_match_light_dom_under_shadow_host { false };
+    bool may_match_light_dom_outside_shadow_host { false };
 
     struct PseudoElementInvalidationRule {
         InvalidationSet anchor_set;
@@ -42,7 +44,16 @@ struct StyleSheetInvalidationSet {
 struct ShadowRootStylesheetEffects {
     bool may_match_shadow_host { false };
     bool may_match_light_dom_under_shadow_host { false };
+    bool may_match_light_dom_outside_shadow_host { false };
     bool may_affect_assigned_nodes_via_slots { false };
+
+    bool all_set() const
+    {
+        return may_match_shadow_host
+            && may_match_light_dom_under_shadow_host
+            && may_match_light_dom_outside_shadow_host
+            && may_affect_assigned_nodes_via_slots;
+    }
 };
 
 enum class ShouldInvalidateRuleCache {
@@ -54,16 +65,36 @@ enum class ShouldInvalidateRuleCache {
 // invalidation flag inside `result` when a selector is not amenable to targeted invalidation.
 void extend_style_sheet_invalidation_set_with_style_rule(StyleSheetInvalidationSet& result, CSSStyleRule const& style_rule);
 
+// Extend `result` with the invalidation effects of `rule` when the rule becomes effective or ineffective. Style
+// rules and nested declaration rules contribute their selector-derived invalidation sets. Rule kinds that affect
+// cascade or computed-value resolution globally fall back to whole-subtree invalidation.
+void extend_style_sheet_invalidation_set_with_rule(StyleSheetInvalidationSet& result, CSSRule const& rule);
+
 // Shadow-root rules can escape the shadow tree either through ::slotted(...) or through :host with a combinator to
 // another compound, such as :host > * or :host + .foo. Those selectors must fan out invalidation to the host side
 // instead of treating the change as shadow-local.
 bool selector_may_match_light_dom_under_shadow_host(Selector const&);
 WEB_API bool selector_may_match_light_dom_under_shadow_host(StringView selector_text);
 
+// Shadow-root :host rules with sibling combinators can target host siblings or other nodes outside the host subtree.
+// These need broader host-root invalidation than host-subtree selectors like :host > * or :host *.
+bool selector_may_match_light_dom_outside_shadow_host(Selector const&);
+WEB_API bool selector_may_match_light_dom_outside_shadow_host(StringView selector_text);
+
 // Apply a built invalidation set to `root` (a Document or a ShadowRoot). When `force_broad_invalidation` is true,
 // schedule a tree-wide restyle regardless of the targeted set; this is used when the sheet contains rule kinds (such
 // as @property or @keyframes) whose effects are not captured by selector invalidation alone.
 void invalidate_root_for_style_sheet_change(DOM::Node& root, StyleSheetInvalidationSet const&, DOM::StyleInvalidationReason, bool force_broad_invalidation = false);
+
+// When a broad shadow-root stylesheet invalidation can change the cascade for rules outside the immediate changed
+// rule set, merge in the current shadow-scope selector reach so the broad invalidation fans out to :host and
+// ::slotted(...) targets as needed.
+void add_shadow_root_stylesheet_effects_for_broad_invalidation(DOM::Node& root, StyleSheetInvalidationSet&, bool requires_broad_invalidation);
+
+// Targeted invalidation used after a stylesheet is added to or removed from a Document or ShadowRoot, either via a
+// <style> element or via adoptedStyleSheets. The caller is responsible for updating the sheet's
+// owning_documents_or_shadow_roots and any list-membership before invoking this.
+void invalidate_style_for_stylesheet_change(DOM::Node& document_or_shadow_root, CSSStyleSheet const& sheet, DOM::StyleInvalidationReason);
 
 // Summarize how any currently-active stylesheet in `shadow_root` can escape the shadow subtree. Used by mutation
 // paths that need host-side fallout derived from the whole shadow scope rather than a single sheet.
@@ -88,5 +119,16 @@ void invalidate_owners_for_inserted_style_rule(CSSStyleSheet const& style_sheet,
 // Apply a targeted invalidation to all documents and shadow roots that own `style_sheet` in response to inserting
 // `keyframes_rule` into it. Only elements already referencing the inserted animation-name are dirtied.
 void invalidate_owners_for_inserted_keyframes_rule(CSSStyleSheet const& style_sheet, CSSKeyframesRule const& keyframes_rule);
+
+// For every @keyframes rule contained in `sheet`, dirty only the elements (and pseudo-elements) under `root` that
+// already reference the keyframes name. When `root` is a shadow root, the walk also fans out to the shadow host (and
+// host-side light DOM) if any active rule in the same scope can match those nodes via :host or ::slotted(...). Used
+// by the sheet add/remove paths so a sheet that contains @keyframes does not have to fall back to a whole-subtree
+// invalidation.
+void invalidate_root_for_keyframes_rules_in_sheet(DOM::Node& root, CSSStyleSheet const& sheet);
+
+// Dirty only the elements (and pseudo-elements) under `root` that already reference `animation_name`. When `root` is
+// a shadow root, the walk also fans out to the shadow host side if active rules in the same scope can match there.
+void invalidate_root_for_keyframes_rule(DOM::Node& root, FlyString const& animation_name);
 
 }

@@ -35,11 +35,11 @@ GC_DEFINE_ALLOCATOR(OffscreenCanvasRenderingContext2D);
 
 JS::ThrowCompletionOr<GC::Ref<OffscreenCanvasRenderingContext2D>> OffscreenCanvasRenderingContext2D::create(JS::Realm& realm, OffscreenCanvas& offscreen_canvas, JS::Value options)
 {
-    auto context_attributes = TRY(CanvasRenderingContext2DSettings::from_js_value(realm.vm(), options));
+    auto context_attributes = TRY(Bindings::convert_to_idl_value_for_canvas_rendering_context2d_settings(realm.vm(), options));
     return realm.create<OffscreenCanvasRenderingContext2D>(realm, offscreen_canvas, context_attributes);
 }
 
-OffscreenCanvasRenderingContext2D::OffscreenCanvasRenderingContext2D(JS::Realm& realm, OffscreenCanvas& offscreen_canvas, CanvasRenderingContext2DSettings context_attributes)
+OffscreenCanvasRenderingContext2D::OffscreenCanvasRenderingContext2D(JS::Realm& realm, OffscreenCanvas& offscreen_canvas, Bindings::CanvasRenderingContext2DSettings context_attributes)
     : PlatformObject(realm)
     , CanvasPath(static_cast<Bindings::PlatformObject&>(*this), *this)
     , m_canvas(offscreen_canvas)
@@ -73,17 +73,6 @@ void OffscreenCanvasRenderingContext2D::set_size(Gfx::IntSize const& size)
 GC::Ref<OffscreenCanvas> OffscreenCanvasRenderingContext2D::canvas()
 {
     return m_canvas;
-}
-
-OffscreenCanvas& OffscreenCanvasRenderingContext2D::canvas_element()
-{
-    return *m_canvas;
-}
-
-OffscreenCanvas const& OffscreenCanvasRenderingContext2D::canvas_element() const
-{
-
-    return *m_canvas;
 }
 
 void OffscreenCanvasRenderingContext2D::fill_rect(float, float, float, float)
@@ -143,7 +132,7 @@ void OffscreenCanvasRenderingContext2D::fill(Path2D&, StringView)
 }
 
 // https://html.spec.whatwg.org/multipage/canvas.html#dom-context-2d-createimagedata
-WebIDL::ExceptionOr<GC::Ref<ImageData>> OffscreenCanvasRenderingContext2D::create_image_data(int, int, Optional<ImageDataSettings> const&) const
+WebIDL::ExceptionOr<GC::Ref<ImageData>> OffscreenCanvasRenderingContext2D::create_image_data(int, int, Optional<Bindings::ImageDataSettings> const&) const
 {
     return WebIDL::NotSupportedError::create(realm(), "(STUBBED) OffscreenCanvasRenderingContext2D::create_image_data(int, int)"_utf16);
 }
@@ -153,7 +142,7 @@ WebIDL::ExceptionOr<GC::Ref<ImageData>> OffscreenCanvasRenderingContext2D::creat
     return WebIDL::NotSupportedError::create(realm(), "(STUBBED) OffscreenCanvasRenderingContext2D::create_image_data(ImageData&)"_utf16);
 }
 
-WebIDL::ExceptionOr<GC::Ptr<ImageData>> OffscreenCanvasRenderingContext2D::get_image_data(int, int, int, int, Optional<ImageDataSettings> const&) const
+WebIDL::ExceptionOr<GC::Ptr<ImageData>> OffscreenCanvasRenderingContext2D::get_image_data(int, int, int, int, Optional<Bindings::ImageDataSettings> const&) const
 {
     return WebIDL::NotSupportedError::create(realm(), "(STUBBED) OffscreenCanvasRenderingContext2D::get_image_data()"_utf16);
 }
@@ -295,16 +284,14 @@ void OffscreenCanvasRenderingContext2D::set_shadow_color(String color)
     // 1. Let context be this's canvas attribute's value, if that is an element; otherwise null.
 
     // 2. Let parsedValue be the result of parsing the given value with context if non-null.
-    auto style_value = parse_css_value(CSS::Parser::ParsingParams { CSS::Parser::SpecialContext::CanvasContextGenericValue }, color, CSS::PropertyID::Color);
-    if (style_value && style_value->has_color()) {
-        auto parsedValue = style_value->to_color({}).value_or(Color::Black);
+    auto parsed_value = parse_a_css_color_value(color);
 
-        // 4. Set this's shadow color to parsedValue.
-        drawing_state().shadow_color = parsedValue;
-    } else {
-        // 3. If parsedValue is failure, then return.
+    // 3. If parsedValue is failure, then return.
+    if (!parsed_value.has_value())
         return;
-    }
+
+    // 4. Set this's shadow color to parsedValue.
+    drawing_state().shadow_color = parsed_value.value();
 }
 
 float OffscreenCanvasRenderingContext2D::global_alpha() const

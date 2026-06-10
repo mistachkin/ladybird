@@ -7,12 +7,13 @@
 #pragma once
 
 #include <AK/Optional.h>
+#include <LibWeb/Bindings/HTMLElement.h>
 #include <LibWeb/DOM/Element.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/HTML/EventNames.h>
 #include <LibWeb/HTML/FormAssociatedElement.h>
 #include <LibWeb/HTML/GlobalEventHandlers.h>
-#include <LibWeb/HTML/HTMLOrSVGElement.h>
+#include <LibWeb/HTML/HTMLOrSVGOrMathMLElement.h>
 #include <LibWeb/HTML/ToggleTaskTracker.h>
 #include <LibWeb/HTML/TokenizedFeatures.h>
 
@@ -32,15 +33,7 @@ enum class ContentEditableState : u8 {
     Inherit,
 };
 
-struct ShowPopoverOptions {
-    GC::Ptr<HTMLElement> source;
-};
-
-struct TogglePopoverOptions : public ShowPopoverOptions {
-    Optional<bool> force {};
-};
-
-using TogglePopoverOptionsOrForceBoolean = Variant<TogglePopoverOptions, bool>;
+using TogglePopoverOptionsOrForceBoolean = Variant<Bindings::TogglePopoverOptions, bool>;
 
 enum class ThrowExceptions {
     Yes,
@@ -75,7 +68,7 @@ enum class IsPopover {
 class WEB_API HTMLElement
     : public DOM::Element
     , public HTML::GlobalEventHandlers
-    , public HTML::HTMLOrSVGElement<HTMLElement>
+    , public HTML::HTMLOrSVGOrMathMLElement<HTMLElement>
     , public FormAssociatedElement {
     WEB_PLATFORM_OBJECT(HTMLElement, DOM::Element);
     GC_DECLARE_ALLOCATOR(HTMLElement);
@@ -168,7 +161,7 @@ public:
     };
     PopoverVisibilityState popover_visibility_state() const { return m_popover_visibility_state; }
 
-    WebIDL::ExceptionOr<void> show_popover_for_bindings(ShowPopoverOptions const& = {});
+    WebIDL::ExceptionOr<void> show_popover_for_bindings(Bindings::ShowPopoverOptions const& = {});
     WebIDL::ExceptionOr<void> hide_popover_for_bindings();
     WebIDL::ExceptionOr<bool> toggle_popover(TogglePopoverOptionsOrForceBoolean const&);
 

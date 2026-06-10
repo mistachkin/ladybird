@@ -14,20 +14,18 @@
 
 namespace Web::Layout {
 
-GC_DEFINE_ALLOCATOR(InlineNode);
-
-InlineNode::InlineNode(DOM::Document& document, DOM::Element* element, GC::Ref<CSS::ComputedProperties> style)
-    : Layout::NodeWithStyleAndBoxModelMetrics(document, element, move(style))
+InlineNode::InlineNode(DOM::Document& document, DOM::Element* element, CSS::ComputedProperties const& style)
+    : Layout::NodeWithStyleAndBoxModelMetrics(document, element, style)
 {
 }
 
 InlineNode::~InlineNode() = default;
 
-GC::Ptr<Painting::PaintableWithLines> InlineNode::create_paintable_for_line_with_index(size_t line_index) const
+NonnullRefPtr<Painting::PaintableWithLines> InlineNode::create_paintable_for_line_with_index(size_t line_index) const
 {
     for (auto const& paintable : paintables()) {
-        if (is<Painting::PaintableWithLines>(paintable)) {
-            auto const& paintable_with_lines = static_cast<Painting::PaintableWithLines const&>(paintable);
+        if (is<Painting::PaintableWithLines>(*paintable)) {
+            auto const& paintable_with_lines = static_cast<Painting::PaintableWithLines const&>(*paintable);
             if (paintable_with_lines.line_index() == line_index) {
                 return const_cast<Painting::PaintableWithLines&>(paintable_with_lines);
             }

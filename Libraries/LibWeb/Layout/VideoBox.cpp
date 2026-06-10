@@ -11,9 +11,7 @@
 
 namespace Web::Layout {
 
-GC_DEFINE_ALLOCATOR(VideoBox);
-
-VideoBox::VideoBox(DOM::Document& document, DOM::Element& element, GC::Ref<CSS::ComputedProperties> style)
+VideoBox::VideoBox(DOM::Document& document, DOM::Element& element, CSS::ComputedProperties const& style)
     : ReplacedBox(document, element, style)
 {
 }
@@ -44,7 +42,7 @@ CSS::SizeWithAspectRatio VideoBox::natural_size() const
     return { natural_size->width(), natural_size->height(), natural_size->width() / natural_size->height() };
 }
 
-GC::Ptr<Painting::Paintable> VideoBox::create_paintable() const
+RefPtr<Painting::Paintable> VideoBox::create_paintable() const
 {
     return Painting::VideoPaintable::create(*this);
 }

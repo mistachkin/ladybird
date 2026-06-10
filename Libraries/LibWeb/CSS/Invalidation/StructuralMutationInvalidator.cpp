@@ -56,15 +56,54 @@ void invalidate_structurally_affected_siblings(DOM::Node& node, DOM::StyleInvali
     auto is_insertion_or_removal = reason == DOM::StyleInvalidationReason::NodeInsertBefore
         || reason == DOM::StyleInvalidationReason::NodeRemove;
 
+    // OPTIMIZATION: For :first-child / :last-child / :only-child, the match result only flips for
+    //               at most one element per insertion/removal, so we can target it precisely instead
+    //               of invalidating every previous/next sibling that ever observed those pseudo-classes.
+    // NB: :first-child / :last-child match on element siblings (skipping text/comment nodes), so we
+    //     find the adjacent *element* sibling here rather than the adjacent node.
+    GC::Ptr<DOM::Element> last_child_transition_target;
+    GC::Ptr<DOM::Element> first_child_transition_target;
     if (is_insertion_or_removal) {
-        // OPTIMIZATION: Only walk previous siblings if the parent has been observed to contain a child that matches a
-        //               pseudo-class whose match result can depend on siblings after that element. Otherwise, no
-        //               previous sibling can possibly need invalidation due to this insertion or removal.
-        if (auto* parent_node = as_if<DOM::ParentNode>(node.parent()); parent_node && parent_node->has_child_affected_by_backward_structural_changes()) {
+        // For NodeInsertBefore this runs after the insertion; for NodeRemove it runs before the
+        // removal. In both cases the node is currently in the tree, so the element siblings reflect
+        // the state in which "this node is at the trailing/leading element position" → the adjacent
+        // element is the one whose :last-child / :first-child match transitions.
+        GC::Ptr<DOM::Element> previous_element;
+        for (auto* sibling = node.previous_sibling(); sibling; sibling = sibling->previous_sibling()) {
+            if (auto* element = as_if<DOM::Element>(sibling)) {
+                previous_element = element;
+                break;
+            }
+        }
+        GC::Ptr<DOM::Element> next_element;
+        for (auto* sibling = node.next_sibling(); sibling; sibling = sibling->next_sibling()) {
+            if (auto* element = as_if<DOM::Element>(sibling)) {
+                next_element = element;
+                break;
+            }
+        }
+        if (!next_element && previous_element)
+            last_child_transition_target = previous_element;
+        if (!previous_element && next_element)
+            first_child_transition_target = next_element;
+    }
+
+    if (is_insertion_or_removal) {
+        // OPTIMIZATION: :last-child / :only-child can only flip for the element transitioning into or out of the
+        //               trailing position, so handle that directly. Only walk all previous siblings if the parent has
+        //               children affected by selectors whose from-end index can change, such as :nth-last-child.
+        if (auto* parent_node = as_if<DOM::ParentNode>(node.parent()); parent_node && parent_node->has_child_affected_by_last_child_pseudo_class()) {
+            if (last_child_transition_target && last_child_transition_target->affected_by_last_child_pseudo_class())
+                mark_sibling_for_style_update(*last_child_transition_target);
+        }
+        if (auto* parent_node = as_if<DOM::ParentNode>(node.parent()); parent_node && parent_node->has_child_affected_by_backward_positional_pseudo_class()) {
             auto& counters = node.document().style_invalidation_counters();
             for (auto* sibling = node.previous_sibling(); sibling; sibling = sibling->previous_sibling()) {
                 ++counters.previous_sibling_invalidation_walk_visits;
-                if (auto* element = as_if<DOM::Element>(sibling); element && element->affected_by_backward_structural_changes())
+                auto* element = as_if<DOM::Element>(sibling);
+                if (!element)
+                    continue;
+                if (element->affected_by_backward_positional_pseudo_class())
                     mark_sibling_for_style_update(*element);
             }
         }
@@ -78,11 +117,22 @@ void invalidate_structurally_affected_siblings(DOM::Node& node, DOM::StyleInvali
 
         bool needs_to_invalidate = false;
         if (is_insertion_or_removal) {
-            if (element->affected_by_indirect_sibling_combinator() || element->affected_by_first_child_pseudo_class() || element->affected_by_forward_positional_pseudo_class())
+            if (element->affected_by_indirect_sibling_combinator()) {
                 needs_to_invalidate = true;
-            else if (element->affected_by_direct_sibling_combinator() && current_sibling_distance <= element->sibling_invalidation_distance())
+            } else if (element->affected_by_forward_positional_pseudo_class()) {
+                // :nth-child / :nth-of-type / :first-of-type / :only-of-type need every next sibling
+                // re-evaluated since their leading indices shift.
                 needs_to_invalidate = true;
-        } else if (element->affected_by_indirect_sibling_combinator() || element->affected_by_forward_positional_pseudo_class()) {
+            } else if (element->affected_by_first_child_pseudo_class() && element == first_child_transition_target) {
+                // :first-child / :only-child only flip for the element transitioning into/out of the
+                // leading position.
+                needs_to_invalidate = true;
+            } else if (element->affected_by_direct_sibling_combinator() && current_sibling_distance <= element->sibling_invalidation_distance()) {
+                needs_to_invalidate = true;
+            }
+        } else if (element->affected_by_indirect_sibling_combinator()) {
+            needs_to_invalidate = true;
+        } else if (element->affected_by_forward_positional_pseudo_class()) {
             needs_to_invalidate = true;
         } else if (element->affected_by_direct_sibling_combinator() && current_sibling_distance <= element->sibling_invalidation_distance()) {
             needs_to_invalidate = true;

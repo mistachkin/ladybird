@@ -36,20 +36,20 @@ WebIDL::ExceptionOr<XHR::FormDataEntry> create_entry(JS::Realm& realm, String co
             // 1. If value is not a File object, then set value to a new File object, representing the same bytes, whose
             //    name attribute value is "blob".
             if (!is<FileAPI::File>(*blob)) {
-                FileAPI::FilePropertyBag options {};
+                Bindings::FilePropertyBag options {};
                 options.type = blob->type();
 
-                blob = TRY(FileAPI::File::create(realm, { GC::make_root(*blob) }, "blob"_string, move(options)));
+                blob = TRY(FileAPI::File::create(realm, { { blob } }, "blob"_string, move(options)));
             }
 
             // 2. If filename is given, then set value to a new File object, representing the same bytes, whose name
             //    attribute is filename.
             if (filename.has_value()) {
-                FileAPI::FilePropertyBag options {};
+                Bindings::FilePropertyBag options {};
                 options.type = blob->type();
                 options.last_modified = as<FileAPI::File>(*blob).last_modified();
 
-                blob = TRY(FileAPI::File::create(realm, { GC::make_root(*blob) }, *filename, move(options)));
+                blob = TRY(FileAPI::File::create(realm, { { blob } }, *filename, move(options)));
             }
 
             return GC::Ref { as<FileAPI::File>(*blob) };
@@ -117,7 +117,7 @@ WebIDL::ExceptionOr<Optional<GC::ConservativeVector<XHR::FormDataEntry>>> constr
     auto controls = form.get_submittable_elements();
 
     // 4. Let entry list be a new empty entry list.
-    GC::ConservativeVector<XHR::FormDataEntry> entry_list { realm.heap() };
+    GC::ConservativeVector<XHR::FormDataEntry> entry_list;
 
     // 5. For each element field in controls, in tree order:
     for (auto const& control : controls) {
@@ -207,7 +207,7 @@ WebIDL::ExceptionOr<Optional<GC::ConservativeVector<XHR::FormDataEntry>>> constr
         else if (auto* file_element = as_if<HTMLInputElement>(*control); file_element && file_element->type_state() == HTMLInputElement::TypeAttributeState::FileUpload) {
             // 1. If there are no selected files, then create an entry with name and a new File object with an empty name, application/octet-stream as type, and an empty body, and append it to entry list.
             if (file_element->files()->length() == 0) {
-                FileAPI::FilePropertyBag options {};
+                Bindings::FilePropertyBag options {};
                 options.type = "application/octet-stream"_string;
                 auto file = TRY(FileAPI::File::create(realm, {}, String {}, options));
                 entry_list.append(TRY(create_entry(realm, name.to_string(), GC::Ref<FileAPI::Blob> { file })));
@@ -249,8 +249,7 @@ WebIDL::ExceptionOr<Optional<GC::ConservativeVector<XHR::FormDataEntry>>> constr
     auto form_data = TRY(XHR::FormData::construct_impl(realm, move(entry_list)));
 
     // 7. Fire an event named formdata at form using FormDataEvent, with the formData attribute initialized to form data and the bubbles attribute initialized to true.
-    FormDataEventInit init {};
-    init.form_data = form_data;
+    Bindings::FormDataEventInit init { Bindings::EventInit {}, form_data };
     auto form_data_event = TRY(FormDataEvent::construct_impl(realm, HTML::EventNames::formdata, init));
     form_data_event->set_bubbles(true);
     form.dispatch_event(form_data_event);
@@ -317,7 +316,7 @@ ErrorOr<SerializedFormData> serialize_to_multipart_form_data(GC::ConservativeVec
         auto escaped_name = TRY(escape_line_feed_carriage_return_double_quote(normalized_name));
 
         TRY(entry.value.visit(
-            [&](GC::Root<FileAPI::File> const& file) -> ErrorOr<void> {
+            [&](GC::Ref<FileAPI::File> file) -> ErrorOr<void> {
                 // For filenames replace any 0x0A (LF) bytes with the byte sequence `%0A`, 0x0D (CR) with `%0D` and 0x22 (") with `%22`
                 auto escaped_filename = TRY(escape_line_feed_carriage_return_double_quote(file->name()));
                 // Add a `Content-Disposition` header with a `name` set to entry's name and `filename` set to entry's filename.

@@ -37,16 +37,19 @@ public:
     virtual Web::CSS::PreferredMotion preferred_motion() const override;
     virtual size_t screen_count() const override { return 1; }
     virtual HTTP::Cookie::VersionedCookie page_did_request_cookie(URL::URL const&, HTTP::Cookie::Source) override;
+    virtual void page_did_store_hsts_policy(String const&, HTTP::HSTS::ParsedHSTSPolicy const&) override;
+    virtual bool page_did_is_known_hsts_host(String const&) override;
     virtual void page_did_report_worker_exception(String const& message, String const& filename, u32 lineno, u32 colno) override;
     virtual void page_did_post_broadcast_channel_message(Web::HTML::BroadcastChannelMessage const& message) override;
     virtual void request_file(Web::FileRequest) override;
-    virtual WorkerAgentResponse request_worker_agent(Web::Bindings::AgentType) override;
+    virtual Web::HTML::WorkerAgentId start_worker_agent(Web::HTML::WorkerAgentStartRequest&&) override;
+    virtual void close_worker_agent(Web::HTML::WorkerAgentId, Web::HTML::WorkerAgentOwnerToken) override;
     virtual Web::DisplayListPlayerType display_list_player_type() const override { VERIFY_NOT_REACHED(); }
     virtual bool is_headless() const override { VERIFY_NOT_REACHED(); }
     virtual Queue<Web::QueuedInputEvent>& input_event_queue() override { VERIFY_NOT_REACHED(); }
     virtual void report_finished_handling_input_event([[maybe_unused]] u64 page_id, [[maybe_unused]] Web::EventResult event_was_handled) override { VERIFY_NOT_REACHED(); }
     virtual void request_frame() override { VERIFY_NOT_REACHED(); }
-    void did_finish_loading_worker_script();
+    void did_finish_loading_worker_script(bool worker_is_secure_context);
     void did_fail_loading_worker_script();
 
 private:

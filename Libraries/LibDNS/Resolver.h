@@ -11,6 +11,7 @@
 #include <AK/HashTable.h>
 #include <AK/MaybeOwned.h>
 #include <AK/MemoryStream.h>
+#include <AK/NeverDestroyed.h>
 #include <AK/QuickSort.h>
 #include <AK/Random.h>
 #include <AK/StringView.h>
@@ -24,7 +25,7 @@
 #include <LibCrypto/Curves/EdwardsCurve.h>
 #include <LibCrypto/PK/RSA.h>
 #include <LibDNS/Message.h>
-#include <LibThreading/RWLockProtected.h>
+#include <LibSync/RWLockProtected.h>
 #include <LibThreading/ThreadPool.h>
 
 #define TRY_OR_REJECT_PROMISE(promise, expr)          \
@@ -41,22 +42,28 @@ namespace DNS {
 
 // FIXME: Load these keys from a file (likely something trusted by the system, e.g. "whatever systemd does").
 // https://data.iana.org/root-anchors/root-anchors.xml
-static Vector<Messages::Records::DNSKEY> s_root_zone_dnskeys = {
-    {
-        .flags = 257,
-        .protocol = 3,
-        .algorithm = Messages::DNSSEC::Algorithm::RSASHA256,
-        .public_key = decode_base64("AwEAAaz/tAm8yTn4Mfeh5eyI96WSVexTBAvkMgJzkKTOiW1vkIbzxeF3+/4RgWOq7HrxRixHlFlExOLAJr5emLvN7SWXgnLh4+B5xQlNVz8Og8kvArMtNROxVQuCaSnIDdD5LKyWbRd2n9WGe2R8PzgCmr3EgVLrjyBxWezF0jLHwVN8efS3rCj/EWgvIWgb9tarpVUDK/b58Da+sqqls3eNbuv7pr+eoZG+SrDK6nWeL3c6H5Apxz7LjVc1uTIdsIXxuOLYA4/ilBmSVIzuDWfdRUfhHdY6+cn8HFRm+2hM8AnXGXws9555KrUB5qihylGa8subX2Nn6UwNR1AkUTV74bU="sv).release_value(),
-        .calculated_key_tag = 20326,
-    },
-    {
-        .flags = 256,
-        .protocol = 3,
-        .algorithm = Messages::DNSSEC::Algorithm::RSASHA256,
-        .public_key = decode_base64("AwEAAa96jeuknZlaeSrvyAJj6ZHv28hhOKkx3rLGXVaC6rXTsDc449/cidltpkyGwCJNnOAlFNKF2jBosZBU5eeHspaQWOmOElZsjICMQMC3aeHbGiShvZsx4wMYSjH8e7Vrhbu6irwCzVBApESjbUdpWWmEnhathWu1jo+siFUiRAAxm9qyJNg/wOZqqzL/dL/q8PkcRU5oUKEpUge71M3ej2/7CPqpdVwuMoTvoB+ZOT4YeGyxMvHmbrxlFzGOHOijtzN+u1TQNatX2XBuzZNQ1K+s2CXkPIZo7s6JgZyvaBevYtxPvYLw4z9mR7K2vaF18UYH9Z9GNUUeayffKC73PYc="sv).release_value(),
-        .calculated_key_tag = 38696,
-    },
-};
+static Vector<Messages::Records::DNSKEY> const& root_zone_dnskeys()
+{
+    static NeverDestroyed<Vector<Messages::Records::DNSKEY>> root_zone_dnskeys {
+        Vector<Messages::Records::DNSKEY> {
+            {
+                .flags = 257,
+                .protocol = 3,
+                .algorithm = Messages::DNSSEC::Algorithm::RSASHA256,
+                .public_key = decode_base64("AwEAAaz/tAm8yTn4Mfeh5eyI96WSVexTBAvkMgJzkKTOiW1vkIbzxeF3+/4RgWOq7HrxRixHlFlExOLAJr5emLvN7SWXgnLh4+B5xQlNVz8Og8kvArMtNROxVQuCaSnIDdD5LKyWbRd2n9WGe2R8PzgCmr3EgVLrjyBxWezF0jLHwVN8efS3rCj/EWgvIWgb9tarpVUDK/b58Da+sqqls3eNbuv7pr+eoZG+SrDK6nWeL3c6H5Apxz7LjVc1uTIdsIXxuOLYA4/ilBmSVIzuDWfdRUfhHdY6+cn8HFRm+2hM8AnXGXws9555KrUB5qihylGa8subX2Nn6UwNR1AkUTV74bU="sv).release_value(),
+                .calculated_key_tag = 20326,
+            },
+            {
+                .flags = 256,
+                .protocol = 3,
+                .algorithm = Messages::DNSSEC::Algorithm::RSASHA256,
+                .public_key = decode_base64("AwEAAa96jeuknZlaeSrvyAJj6ZHv28hhOKkx3rLGXVaC6rXTsDc449/cidltpkyGwCJNnOAlFNKF2jBosZBU5eeHspaQWOmOElZsjICMQMC3aeHbGiShvZsx4wMYSjH8e7Vrhbu6irwCzVBApESjbUdpWWmEnhathWu1jo+siFUiRAAxm9qyJNg/wOZqqzL/dL/q8PkcRU5oUKEpUge71M3ej2/7CPqpdVwuMoTvoB+ZOT4YeGyxMvHmbrxlFzGOHOijtzN+u1TQNatX2XBuzZNQ1K+s2CXkPIZo7s6JgZyvaBevYtxPvYLw4z9mR7K2vaF18UYH9Z9GNUUeayffKC73PYc="sv).release_value(),
+                .calculated_key_tag = 38696,
+            },
+        }
+    };
+    return *root_zone_dnskeys;
+}
 
 class Resolver;
 
@@ -238,21 +245,6 @@ public:
         : m_pending_lookups(make<RedBlackTree<u16, PendingLookup>>())
         , m_create_socket(move(create_socket))
     {
-        m_cache.with_write_locked([&](auto& cache) {
-            auto add_v4v6_entry = [&cache](StringView name_string, IPv4Address v4, IPv6Address v6) {
-                auto name = Messages::DomainName::from_string(name_string);
-                auto ptr = make_ref_counted<LookupResult>(name);
-                ptr->will_add_record_of_type(Messages::ResourceType::A);
-                ptr->will_add_record_of_type(Messages::ResourceType::AAAA);
-                cache.set(name_string, ptr);
-
-                ptr->add_record({ .name = {}, .type = Messages::ResourceType::A, .class_ = Messages::Class::IN, .ttl = 0, .record = Messages::Records::A { v4 }, .raw = {} });
-                ptr->add_record({ .name = {}, .type = Messages::ResourceType::AAAA, .class_ = Messages::Class::IN, .ttl = 0, .record = Messages::Records::AAAA { v6 }, .raw = {} });
-                ptr->finished_request();
-            };
-
-            add_v4v6_entry("localhost"sv, { 127, 0, 0, 1 }, IPv6Address::loopback());
-        });
     }
 
     NonnullRefPtr<Core::Promise<Empty>> when_socket_ready()
@@ -405,6 +397,22 @@ public:
             }
         }
 
+        // https://www.rfc-editor.org/rfc/rfc6761#section-6.3
+        // "localhost" and names within ".localhost" resolve to loopback for address queries and are never sent
+        // upstream; we answer in-process since the host resolver and upstream server are not guaranteed to.
+        if (name == "localhost"sv || name.ends_with(".localhost"sv)) {
+            dbgln_if(DNS_DEBUG, "DNS: Resolving {} as loopback", name);
+            auto result = make_ref_counted<LookupResult>(Messages::DomainName::from_string(name));
+            if (desired_types.contains_slow(Messages::ResourceType::A))
+                result->add_record({ .name = {}, .type = Messages::ResourceType::A, .class_ = Messages::Class::IN, .ttl = 0, .record = Messages::Records::A { IPv4Address { 127, 0, 0, 1 } }, .raw = {} });
+            if (desired_types.contains_slow(Messages::ResourceType::AAAA))
+                result->add_record({ .name = {}, .type = Messages::ResourceType::AAAA, .class_ = Messages::Class::IN, .ttl = 0, .record = Messages::Records::AAAA { IPv6Address::loopback() }, .raw = {} });
+            result->finished_request();
+            promise->resolve(move(result));
+            lookup_path = "localhost-loopback"sv;
+            return promise;
+        }
+
         if (auto result = lookup_in_cache(name, class_, desired_types)) {
             dbgln_if(DNS_DEBUG, "DNS: Resolving {} from cache...", name);
             if (!options.validate_dnssec_locally || result->is_dnssec_validated()) {
@@ -471,12 +479,12 @@ public:
 
             lookup_path = "system-resolver-bg"sv;
 
-            auto main_thread_event_loop_reference = Core::EventLoop::current_weak();
+            auto& main_thread_event_loop = Core::EventLoop::current();
 
             auto submit_worker = [&, this](Core::Socket::AddressFamily family) {
                 Threading::ThreadPool::the().submit(
                     [this, name, state = our_state, family,
-                        main_thread_event_loop_reference]() mutable {
+                        &main_thread_event_loop]() mutable {
                         auto worker_started_at = MonotonicTime::now();
                         auto record_or_error = Core::Socket::resolve_host(name, Core::Socket::SocketType::Stream, family);
                         auto worker_finished_at = MonotonicTime::now();
@@ -485,11 +493,7 @@ public:
                             .work_ms = (worker_finished_at - worker_started_at).to_milliseconds(),
                         };
 
-                        auto main_thread_event_loop = main_thread_event_loop_reference->take();
-                        if (!main_thread_event_loop)
-                            return;
-
-                        main_thread_event_loop->deferred_invoke(
+                        main_thread_event_loop.deferred_invoke(
                             [this, name, state, family,
                                 record_or_error = move(record_or_error),
                                 timing]() mutable {
@@ -665,7 +669,10 @@ public:
         });
 
         ByteBuffer query_bytes;
-        MUST(query.to_raw(query_bytes));
+        if (auto result = query.to_raw(query_bytes); result.is_error()) {
+            promise->reject(result.release_error());
+            return promise;
+        }
 
         if (m_mode == ConnectionMode::TCP) {
             auto original_query_bytes = query_bytes;
@@ -1130,7 +1137,7 @@ private:
             };
 
             if (is_root_zone) {
-                resolve_using_keys(s_root_zone_dnskeys);
+                resolve_using_keys(root_zone_dnskeys());
                 return;
             }
 
@@ -1412,10 +1419,10 @@ private:
         });
     }
 
-    Threading::RWLockProtected<HashMap<ByteString, NonnullRefPtr<LookupResult>>> m_cache;
-    Threading::RWLockProtected<HashMap<ByteString, NonnullRefPtr<PendingSystemResolution>>> m_pending_system_resolutions;
-    Threading::RWLockProtected<NonnullOwnPtr<RedBlackTree<u16, PendingLookup>>> m_pending_lookups;
-    Threading::RWLockProtected<Optional<MaybeOwned<Core::Socket>>> m_socket;
+    Sync::RWLockProtected<HashMap<ByteString, NonnullRefPtr<LookupResult>>> m_cache;
+    Sync::RWLockProtected<HashMap<ByteString, NonnullRefPtr<PendingSystemResolution>>> m_pending_system_resolutions;
+    Sync::RWLockProtected<NonnullOwnPtr<RedBlackTree<u16, PendingLookup>>> m_pending_lookups;
+    Sync::RWLockProtected<Optional<MaybeOwned<Core::Socket>>> m_socket;
     Function<ErrorOr<SocketResult>()> m_create_socket;
     bool m_attempting_restart { false };
     ConnectionMode m_mode { ConnectionMode::UDP };

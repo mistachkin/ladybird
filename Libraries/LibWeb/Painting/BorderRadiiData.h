@@ -7,28 +7,17 @@
 
 #pragma once
 
-#include <LibGfx/Point.h>
-#include <LibGfx/Rect.h>
+#include <LibGfx/CornerRadii.h>
 #include <LibWeb/CSS/ComputedValues.h>
 #include <LibWeb/Export.h>
 
 namespace Web::Painting {
 
-struct CornerRadius {
-    int horizontal_radius { 0 };
-    int vertical_radius { 0 };
-
-    inline operator bool() const
-    {
-        return horizontal_radius > 0 && vertical_radius > 0;
-    }
-};
-
 struct WEB_API BorderRadiusData {
     CSSPixels horizontal_radius { 0 };
     CSSPixels vertical_radius { 0 };
 
-    CornerRadius as_corner(DevicePixelConverter const& device_pixel_converter) const;
+    Gfx::CornerRadius as_corner(DevicePixelConverter const& device_pixel_converter) const;
 
     inline operator bool() const
     {
@@ -41,68 +30,6 @@ struct WEB_API BorderRadiusData {
             horizontal_radius = max(CSSPixels(0), horizontal_radius - horizontal);
         if (vertical_radius != 0)
             vertical_radius = max(CSSPixels(0), vertical_radius - vertical);
-    }
-};
-
-struct CornerRadii {
-    CornerRadius top_left;
-    CornerRadius top_right;
-    CornerRadius bottom_right;
-    CornerRadius bottom_left;
-
-    inline bool has_any_radius() const
-    {
-        return top_left || top_right || bottom_right || bottom_left;
-    }
-
-    void adjust_corners_for_spread_distance(int spread_distance);
-
-    bool contains(Gfx::IntPoint point, Gfx::IntRect const& rect) const
-    {
-        if (!rect.contains(point))
-            return false;
-
-        if (!has_any_radius())
-            return true;
-
-        auto const px = point.x();
-        auto const py = point.y();
-
-        auto outside_ellipse = [&](CornerRadius const& r, int cx, int cy) {
-            auto dx = static_cast<float>(px - cx) / r.horizontal_radius;
-            auto dy = static_cast<float>(py - cy) / r.vertical_radius;
-            return dx * dx + dy * dy > 1.f;
-        };
-
-        if (top_left) {
-            auto cx = rect.left() + top_left.horizontal_radius;
-            auto cy = rect.top() + top_left.vertical_radius;
-            if (px < cx && py < cy && outside_ellipse(top_left, cx, cy))
-                return false;
-        }
-
-        if (top_right) {
-            auto cx = rect.right() - top_right.horizontal_radius;
-            auto cy = rect.top() + top_right.vertical_radius;
-            if (px > cx && py < cy && outside_ellipse(top_right, cx, cy))
-                return false;
-        }
-
-        if (bottom_right) {
-            auto cx = rect.right() - bottom_right.horizontal_radius;
-            auto cy = rect.bottom() - bottom_right.vertical_radius;
-            if (px > cx && py > cy && outside_ellipse(bottom_right, cx, cy))
-                return false;
-        }
-
-        if (bottom_left) {
-            auto cx = rect.left() + bottom_left.horizontal_radius;
-            auto cy = rect.bottom() - bottom_left.vertical_radius;
-            if (px < cx && py > cy && outside_ellipse(bottom_left, cx, cy))
-                return false;
-        }
-
-        return true;
     }
 };
 
@@ -125,11 +52,41 @@ struct BorderRadiiData {
         if (!has_any_radius())
             return true;
 
-        auto to_corner = [](BorderRadiusData const& r) -> CornerRadius {
-            return { static_cast<int>(r.horizontal_radius.to_float()), static_cast<int>(r.vertical_radius.to_float()) };
+        auto outside_ellipse = [&](BorderRadiusData const& radius, CSSPixels center_x, CSSPixels center_y) {
+            auto dx = (point.x() - center_x).to_double() / radius.horizontal_radius.to_double();
+            auto dy = (point.y() - center_y).to_double() / radius.vertical_radius.to_double();
+            return dx * dx + dy * dy > 1.0;
         };
-        CornerRadii corners { to_corner(top_left), to_corner(top_right), to_corner(bottom_right), to_corner(bottom_left) };
-        return corners.contains(point.to_type<int>(), rect.to_type<int>());
+
+        if (top_left) {
+            auto center_x = rect.left() + top_left.horizontal_radius;
+            auto center_y = rect.top() + top_left.vertical_radius;
+            if (point.x() < center_x && point.y() < center_y && outside_ellipse(top_left, center_x, center_y))
+                return false;
+        }
+
+        if (top_right) {
+            auto center_x = rect.right() - top_right.horizontal_radius;
+            auto center_y = rect.top() + top_right.vertical_radius;
+            if (point.x() > center_x && point.y() < center_y && outside_ellipse(top_right, center_x, center_y))
+                return false;
+        }
+
+        if (bottom_right) {
+            auto center_x = rect.right() - bottom_right.horizontal_radius;
+            auto center_y = rect.bottom() - bottom_right.vertical_radius;
+            if (point.x() > center_x && point.y() > center_y && outside_ellipse(bottom_right, center_x, center_y))
+                return false;
+        }
+
+        if (bottom_left) {
+            auto center_x = rect.left() + bottom_left.horizontal_radius;
+            auto center_y = rect.bottom() - bottom_left.vertical_radius;
+            if (point.x() < center_x && point.y() > center_y && outside_ellipse(bottom_left, center_x, center_y))
+                return false;
+        }
+
+        return true;
     }
 
     inline void shrink(CSSPixels top, CSSPixels right, CSSPixels bottom, CSSPixels left)
@@ -145,11 +102,11 @@ struct BorderRadiiData {
         shrink(-top, -right, -bottom, -left);
     }
 
-    inline CornerRadii as_corners(DevicePixelConverter const& device_pixel_converter) const
+    inline Gfx::CornerRadii as_corners(DevicePixelConverter const& device_pixel_converter) const
     {
         if (!has_any_radius())
             return {};
-        return CornerRadii {
+        return Gfx::CornerRadii {
             top_left.as_corner(device_pixel_converter),
             top_right.as_corner(device_pixel_converter),
             bottom_right.as_corner(device_pixel_converter),

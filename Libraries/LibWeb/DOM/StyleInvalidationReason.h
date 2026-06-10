@@ -25,6 +25,7 @@ namespace Web::DOM {
     X(ElementAttributeChange)                       \
     X(ElementSetShadowRoot)                         \
     X(ElementSetActive)                             \
+    X(FormControlValidityChange)                    \
     X(Fullscreen)                                   \
     X(HTMLDialogElementSetIsModal)                  \
     X(HTMLDetailsOrDialogOpenAttributeChange)       \
@@ -45,6 +46,7 @@ namespace Web::DOM {
     X(NodeRemove)                                   \
     X(NodeSetTextContent)                           \
     X(Other)                                        \
+    X(PseudoClassStateChange)                       \
     X(SetSelectorText)                              \
     X(SettingsChange)                               \
     X(StyleSheetDisabledStateChange)                \
@@ -62,6 +64,7 @@ enum class StyleInvalidationReason {
 
 struct StyleInvalidationOptions {
     bool invalidate_self { false };
+    bool invalidate_self_from_property_plan { true };
 };
 
 }

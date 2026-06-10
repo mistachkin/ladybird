@@ -40,11 +40,11 @@ void SVGGradientElement::attribute_changed(FlyString const& name, Optional<Strin
 
 GradientUnits SVGGradientElement::gradient_units() const
 {
-    HashTable<SVGGradientElement const*> seen_gradients;
+    GC::RootHashTable<SVGGradientElement const*> seen_gradients;
     return gradient_units_impl(seen_gradients);
 }
 
-GradientUnits SVGGradientElement::gradient_units_impl(HashTable<SVGGradientElement const*>& seen_gradients) const
+GradientUnits SVGGradientElement::gradient_units_impl(GC::RootHashTable<SVGGradientElement const*>& seen_gradients) const
 {
     if (m_gradient_units.has_value())
         return *m_gradient_units;
@@ -55,11 +55,11 @@ GradientUnits SVGGradientElement::gradient_units_impl(HashTable<SVGGradientEleme
 
 SpreadMethod SVGGradientElement::spread_method() const
 {
-    HashTable<SVGGradientElement const*> seen_gradients;
+    GC::RootHashTable<SVGGradientElement const*> seen_gradients;
     return spread_method_impl(seen_gradients);
 }
 
-SpreadMethod SVGGradientElement::spread_method_impl(HashTable<SVGGradientElement const*>& seen_gradients) const
+SpreadMethod SVGGradientElement::spread_method_impl(GC::RootHashTable<SVGGradientElement const*>& seen_gradients) const
 {
     if (m_spread_method.has_value())
         return *m_spread_method;
@@ -83,11 +83,11 @@ Gfx::InterpolationColorSpace SVGGradientElement::color_space() const
 
 Optional<Gfx::AffineTransform> SVGGradientElement::gradient_transform() const
 {
-    HashTable<SVGGradientElement const*> seen_gradients;
+    GC::RootHashTable<SVGGradientElement const*> seen_gradients;
     return gradient_transform_impl(seen_gradients);
 }
 
-Optional<Gfx::AffineTransform> SVGGradientElement::gradient_transform_impl(HashTable<SVGGradientElement const*>& seen_gradients) const
+Optional<Gfx::AffineTransform> SVGGradientElement::gradient_transform_impl(GC::RootHashTable<SVGGradientElement const*>& seen_gradients) const
 {
     if (m_gradient_transform.has_value())
         return m_gradient_transform;
@@ -109,7 +109,7 @@ Gfx::AffineTransform SVGGradientElement::gradient_paint_transform(SVGPaintContex
     return gradient_paint_transform;
 }
 
-void SVGGradientElement::add_color_stops(Painting::SVGGradientPaintStyle& paint_style) const
+void SVGGradientElement::add_color_stops(Painting::GradientPaintStyle& paint_style) const
 {
     auto largest_offset = 0.0f;
     for_each_color_stop([&](auto& stop) {
@@ -129,10 +129,9 @@ void SVGGradientElement::add_color_stops(Painting::SVGGradientPaintStyle& paint_
     });
 }
 
-GC::Ptr<SVGGradientElement const> SVGGradientElement::linked_gradient(HashTable<SVGGradientElement const*>& seen_gradients) const
+GC::Ptr<SVGGradientElement const> SVGGradientElement::linked_gradient(GC::RootHashTable<SVGGradientElement const*>& seen_gradients) const
 {
     // FIXME: This entire function is an ad-hoc hack!
-    // It can only resolve #<ids> in the same document.
 
     auto link = has_attribute(AttributeNames::href) ? get_attribute(AttributeNames::href) : get_attribute("xlink:href"_fly_string);
     if (auto href = link; href.has_value() && !link->is_empty()) {
@@ -142,7 +141,11 @@ GC::Ptr<SVGGradientElement const> SVGGradientElement::linked_gradient(HashTable<
         auto id = url->fragment();
         if (!id.has_value() || id->is_empty())
             return {};
-        auto element = document().get_element_by_id(id.value());
+        GC::Ptr<DOM::Element> element;
+        if (auto containing_shadow = containing_shadow_root())
+            element = containing_shadow->get_element_by_id(id.value());
+        if (!element)
+            element = document().get_element_by_id(id.value());
         if (!element)
             return {};
         if (element == this)

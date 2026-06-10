@@ -10,8 +10,11 @@
 #include <LibWeb/Animations/AnimationEffect.h>
 #include <LibWeb/Animations/AnimationTimeline.h>
 #include <LibWeb/Bindings/AnimationEffect.h>
+#include <LibWeb/Bindings/CSSStyleSheet.h>
 #include <LibWeb/Bindings/Intrinsics.h>
+#include <LibWeb/CSS/CSSNumericValue.h>
 #include <LibWeb/CSS/ComputedProperties.h>
+#include <LibWeb/CSS/Invalidation/SlotInvalidator.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/PropertyID.h>
 #include <LibWeb/CSS/StyleComputer.h>
@@ -20,6 +23,7 @@
 #include <LibWeb/CSS/StyleValues/StyleValueList.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Element.h>
+#include <LibWeb/DOM/ShadowRoot.h>
 #include <LibWeb/Layout/Node.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
 
@@ -59,43 +63,43 @@ Bindings::PlaybackDirection css_animation_direction_to_bindings_playback_directi
     }
 }
 
-OptionalEffectTiming EffectTiming::to_optional_effect_timing() const
+Bindings::OptionalEffectTiming to_optional_effect_timing(Bindings::EffectTiming const& effect_timing)
 {
     return {
-        .delay = delay,
-        .end_delay = end_delay,
-        .fill = fill,
-        .iteration_start = iteration_start,
-        .iterations = iterations,
-        .duration = duration.visit(
+        .delay = effect_timing.delay,
+        .direction = effect_timing.direction,
+        .duration = effect_timing.duration.visit(
             [](double const& value) -> Variant<double, String> { return value; },
             [](String const& value) -> Variant<double, String> { return value; },
             // NB: We check that this isn't the case in the caller
-            [](GC::Root<CSS::CSSNumericValue> const&) -> Variant<double, String> { VERIFY_NOT_REACHED(); }),
-        .direction = direction,
-        .easing = easing,
+            [](GC::Ref<CSS::CSSNumericValue>) -> Variant<double, String> { VERIFY_NOT_REACHED(); }),
+        .easing = effect_timing.easing,
+        .end_delay = effect_timing.end_delay,
+        .fill = effect_timing.fill,
+        .iteration_start = effect_timing.iteration_start,
+        .iterations = effect_timing.iterations,
     };
 }
 
 // https://www.w3.org/TR/web-animations-1/#dom-animationeffect-gettiming
-EffectTiming AnimationEffect::get_timing() const
+Bindings::EffectTiming AnimationEffect::get_timing() const
 {
     // 1. Returns the specified timing properties for this animation effect.
     return {
         .delay = m_specified_start_delay,
+        .direction = m_playback_direction,
+        .duration = m_specified_iteration_duration,
+        .easing = m_timing_function.to_string(),
         .end_delay = m_specified_end_delay,
         .fill = m_fill_mode,
         .iteration_start = m_iteration_start,
         .iterations = m_iteration_count,
-        .duration = m_specified_iteration_duration,
-        .direction = m_playback_direction,
-        .easing = m_timing_function.to_string(),
     };
 }
 
 // https://www.w3.org/TR/web-animations-1/#dom-animationeffect-getcomputedtiming
 // https://drafts.csswg.org/web-animations-2/#dom-animationeffect-getcomputedtiming
-ComputedEffectTiming AnimationEffect::get_computed_timing() const
+Bindings::ComputedEffectTiming AnimationEffect::get_computed_timing() const
 {
     // 1. Returns the calculated timing properties for this animation effect.
 
@@ -118,24 +122,21 @@ ComputedEffectTiming AnimationEffect::get_computed_timing() const
     //       In this level of the specification, that simply means that an auto value is replaced by the none FillMode.
     auto fill = m_fill_mode == Bindings::FillMode::Auto ? Bindings::FillMode::None : m_fill_mode;
 
-    return {
-        {
-            .delay = m_specified_start_delay,
-            .end_delay = m_specified_end_delay,
-            .fill = fill,
-            .iteration_start = m_iteration_start,
-            .iterations = m_iteration_count,
-            .duration = duration,
-            .direction = m_playback_direction,
-            .easing = m_timing_function.to_string(),
-        },
-
-        end_time().as_css_numberish(realm()),
-        active_duration().as_css_numberish(realm()),
-        NullableCSSNumberish::from_optional_css_numberish_time(realm(), local_time()),
-        transformed_progress(),
-        current_iteration(),
-    };
+    Bindings::ComputedEffectTiming computed_timing {};
+    computed_timing.delay = m_specified_start_delay;
+    computed_timing.end_delay = m_specified_end_delay;
+    computed_timing.fill = fill;
+    computed_timing.iteration_start = m_iteration_start;
+    computed_timing.iterations = m_iteration_count;
+    computed_timing.duration = duration;
+    computed_timing.direction = m_playback_direction;
+    computed_timing.easing = m_timing_function.to_string();
+    computed_timing.active_duration = active_duration().as_css_numberish(realm());
+    computed_timing.current_iteration = current_iteration();
+    computed_timing.end_time = end_time().as_css_numberish(realm());
+    computed_timing.local_time = NullableCSSNumberish::from_optional_css_numberish_time(realm(), local_time());
+    computed_timing.progress = transformed_progress();
+    return computed_timing;
 }
 
 // https://drafts.csswg.org/web-animations-2/#intrinsic-iteration-duration
@@ -269,7 +270,7 @@ void AnimationEffect::normalize_specified_timing()
 // https://www.w3.org/TR/web-animations-1/#dom-animationeffect-updatetiming
 // https://www.w3.org/TR/web-animations-1/#update-the-timing-properties-of-an-animation-effect
 // https://drafts.csswg.org/web-animations-2/#updating-animationeffect-timing
-WebIDL::ExceptionOr<void> AnimationEffect::update_timing(OptionalEffectTiming timing)
+WebIDL::ExceptionOr<void> AnimationEffect::update_timing(Bindings::OptionalEffectTiming const& timing)
 {
     // 1. If the iterationStart member of input exists and is less than zero, throw a TypeError and abort this
     //    procedure.
@@ -802,7 +803,10 @@ static CSS::RequiredInvalidationAfterStyleChange compute_required_invalidation_f
         auto const* new_value = new_properties.get(property_id).value_or({});
         if (!old_value && !new_value)
             continue;
-        invalidation |= compute_property_invalidation(property_id, old_value, new_value);
+        auto property_invalidation = compute_property_invalidation(property_id, old_value, new_value);
+        if (!property_invalidation.is_none() && CSS::is_inherited_property(property_id))
+            property_invalidation.inherited_style_changed = true;
+        invalidation |= property_invalidation;
     }
     return invalidation;
 }
@@ -810,23 +814,41 @@ static CSS::RequiredInvalidationAfterStyleChange compute_required_invalidation_f
 AnimationUpdateContext::~AnimationUpdateContext()
 {
     for (auto& it : elements) {
-        auto style = it.value->target_style;
+        auto style = it.value.target_style;
         if (!style)
             continue;
         auto& element = it.key;
         GC::Ref<DOM::Element> target = element.element();
-        auto invalidation = compute_required_invalidation_for_animated_properties(it.value->animated_properties_before_update, style->animated_property_values());
+        auto invalidation = compute_required_invalidation_for_animated_properties(it.value.animated_properties_before_update, style->animated_property_values());
 
         if (invalidation.is_none())
             continue;
 
         // Traversal of the subtree is necessary to update the animated properties inherited from the target element.
-        target->for_each_in_subtree_of_type<DOM::Element>([&](auto& element) {
-            if (!element.cascaded_properties({}))
+        bool invalidated_assigned_slottables_for_descendant_slots = false;
+        if (!element.pseudo_element().has_value()) {
+            CSS::Invalidation::invalidate_assigned_slottables_after_slot_style_change(target);
+            if (invalidation.inherited_style_changed || invalidation.rebuild_layout_tree) {
+                CSS::Invalidation::invalidate_assigned_slottables_for_descendant_slots_after_inherited_style_change(target);
+                invalidated_assigned_slottables_for_descendant_slots = true;
+            }
+        }
+
+        target->for_each_shadow_including_descendant([&](auto& node) {
+            if (!is<DOM::Element>(node))
+                return TraversalDecision::Continue;
+            auto& element = static_cast<DOM::Element&>(node);
+            if (!element.computed_properties())
                 return TraversalDecision::SkipChildrenAndContinue;
             auto element_invalidation = element.recompute_inherited_style();
             if (element_invalidation.is_none())
                 return TraversalDecision::SkipChildrenAndContinue;
+            CSS::Invalidation::invalidate_assigned_slottables_after_slot_style_change(element);
+            if (!invalidated_assigned_slottables_for_descendant_slots
+                && (element_invalidation.inherited_style_changed || element_invalidation.rebuild_layout_tree)) {
+                CSS::Invalidation::invalidate_assigned_slottables_for_descendant_slots_after_inherited_style_change(target);
+                invalidated_assigned_slottables_for_descendant_slots = true;
+            }
             invalidation |= element_invalidation;
             return TraversalDecision::Continue;
         });
@@ -836,7 +858,7 @@ AnimationUpdateContext::~AnimationUpdateContext()
             if (target->unsafe_layout_node())
                 target->unsafe_layout_node()->apply_style(*style);
         } else {
-            if (auto pseudo_element_node = target->get_pseudo_element_node(element.pseudo_element().value()))
+            if (auto pseudo_element_node = target->pseudo_element_unsafe_layout_node(element.pseudo_element().value()))
                 pseudo_element_node->apply_style(*style);
         }
 

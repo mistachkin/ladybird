@@ -11,6 +11,7 @@
 #include <AK/Assertions.h>
 #include <AK/MemoryStream.h>
 #include <AK/Vector.h>
+#include <LibCrypto/Forward.h>
 #include <LibIPC/Decoder.h>
 #include <LibIPC/Encoder.h>
 #include <LibIPC/Message.h>
@@ -33,6 +34,8 @@ public:
         VERIFY(!m_buffer_has_been_taken);
         MUST(m_encoder.encode(value));
     }
+
+    void encode_unsigned_big_integer(::Crypto::UnsignedBigInteger const&);
 
     void append(SerializationRecord&&);
     void extend(Vector<TransferDataEncoder>);
@@ -59,6 +62,7 @@ public:
     }
 
     WebIDL::ExceptionOr<ByteBuffer> decode_buffer(JS::Realm&);
+    WebIDL::ExceptionOr<::Crypto::UnsignedBigInteger> decode_unsigned_big_integer(JS::Realm&);
 
 private:
     IPC::MessageBuffer m_buffer;
@@ -86,7 +90,7 @@ WebIDL::ExceptionOr<SerializationRecord> structured_serialize_internal(JS::VM&, 
 WebIDL::ExceptionOr<JS::Value> structured_deserialize(JS::VM&, SerializationRecord const&, JS::Realm&, Optional<DeserializationMemory> = {});
 WebIDL::ExceptionOr<JS::Value> structured_deserialize_internal(JS::VM&, TransferDataDecoder&, JS::Realm&, DeserializationMemory&);
 
-WEB_API WebIDL::ExceptionOr<SerializedTransferRecord> structured_serialize_with_transfer(JS::VM&, JS::Value, Vector<GC::Root<JS::Object>> const& transfer_list);
+WEB_API WebIDL::ExceptionOr<SerializedTransferRecord> structured_serialize_with_transfer(JS::VM&, JS::Value, ReadonlySpan<GC::Ref<JS::Object>> transfer_list);
 WebIDL::ExceptionOr<DeserializedTransferRecord> structured_deserialize_with_transfer(SerializedTransferRecord&, JS::Realm&);
 WEB_API WebIDL::ExceptionOr<JS::Value> structured_deserialize_with_transfer_internal(TransferDataDecoder&, JS::Realm&);
 

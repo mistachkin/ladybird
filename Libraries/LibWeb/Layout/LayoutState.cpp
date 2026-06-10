@@ -9,7 +9,6 @@
 #include <AK/Debug.h>
 #include <AK/HashMap.h>
 #include <AK/Tuple.h>
-#include <LibGC/RootHashMap.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/ShadowRoot.h>
 #include <LibWeb/Layout/AvailableSpace.h>
@@ -17,7 +16,10 @@
 #include <LibWeb/Layout/LayoutState.h>
 #include <LibWeb/Layout/Viewport.h>
 #include <LibWeb/Painting/PaintableWithLines.h>
+#include <LibWeb/Painting/SVGForeignObjectPaintable.h>
+#include <LibWeb/Painting/SVGGraphicsPaintable.h>
 #include <LibWeb/Painting/SVGPathPaintable.h>
+#include <LibWeb/Painting/SVGSVGPaintable.h>
 #include <LibWeb/Painting/TextPaintable.h>
 
 namespace Web::Layout {
@@ -29,6 +31,31 @@ LayoutState::LayoutState(NodeWithStyle const& subtree_root)
 
 LayoutState::~LayoutState()
 {
+}
+
+static Painting::LineBoxData line_box_data_for(LineBox const& line_box, size_t line_index)
+{
+    CSSPixelRect rect;
+    bool saw_fragment = false;
+    for (auto const& fragment : line_box.fragments()) {
+        auto fragment_rect = CSSPixelRect { fragment.offset(), fragment.size() };
+        if (saw_fragment)
+            rect.unite(fragment_rect);
+        else
+            rect = fragment_rect;
+        saw_fragment = true;
+    }
+
+    if (!saw_fragment)
+        return { line_index, {} };
+
+    auto writing_mode = line_box.fragments().first().writing_mode();
+    if (writing_mode == CSS::WritingMode::HorizontalTb) {
+        rect.set_y(line_box.bottom() - line_box.height());
+        rect.set_height(line_box.height());
+    }
+
+    return { line_index, rect };
 }
 
 void LayoutState::ensure_capacity(u32 node_count)
@@ -185,13 +212,44 @@ static CSSPixelRect measure_scrollable_overflow(Box const& box, ContainedBoxesMa
 
     // - The scroll container’s own padding box.
     auto const paintable_absolute_padding_box = paintable_box.absolute_padding_box_rect();
+    auto const paintable_absolute_content_box = paintable_box.absolute_rect();
     auto scrollable_overflow_rect = paintable_absolute_padding_box;
     auto overflow_directions = physical_overflow_directions(box);
+    auto content_overflows_content_box_in_x_axis = false;
+    auto content_overflows_content_box_in_y_axis = false;
+    auto content_overflows_content_box_on_right = false;
+    auto content_overflows_content_box_on_bottom = false;
+
+    auto update_content_overflow_x_axis = [&](CSSPixelRect const& rect) {
+        if (rect.left() < paintable_absolute_content_box.left()
+            || rect.right() > paintable_absolute_content_box.right()) {
+            content_overflows_content_box_in_x_axis = true;
+        }
+        if (rect.right() > paintable_absolute_content_box.right())
+            content_overflows_content_box_on_right = true;
+    };
+
+    auto update_content_overflow_y_axis = [&](CSSPixelRect const& rect) {
+        if (rect.top() < paintable_absolute_content_box.top()
+            || rect.bottom() > paintable_absolute_content_box.bottom()) {
+            content_overflows_content_box_in_y_axis = true;
+        }
+        if (rect.bottom() > paintable_absolute_content_box.bottom())
+            content_overflows_content_box_on_bottom = true;
+    };
+
+    auto update_content_overflow_axes = [&](CSSPixelRect const& rect) {
+        update_content_overflow_x_axis(rect);
+        update_content_overflow_y_axis(rect);
+    };
 
     // - All line boxes directly contained by the scroll container.
-    if (auto const* paintable_with_lines = as_if<Painting::PaintableWithLines>(box.first_paintable())) {
-        for (auto const& fragment : paintable_with_lines->fragments())
-            scrollable_overflow_rect.unite(fragment.absolute_rect());
+    if (auto first_paintable = box.first_paintable(); auto const* paintable_with_lines = as_if<Painting::PaintableWithLines>(first_paintable.ptr())) {
+        for (auto const& fragment : paintable_with_lines->fragments()) {
+            auto fragment_rect = fragment.absolute_rect();
+            scrollable_overflow_rect.unite(fragment_rect);
+            update_content_overflow_axes(fragment_rect);
+        }
     }
 
     auto content_overflow_rect = scrollable_overflow_rect;
@@ -226,6 +284,7 @@ static CSSPixelRect measure_scrollable_overflow(Box const& box, ContainedBoxesMa
             if (!child_border_box.is_empty()) {
                 scrollable_overflow_rect.unite(child_border_box);
                 content_overflow_rect.unite(child_border_box);
+                update_content_overflow_axes(child_border_box);
             }
 
             // - The scrollable overflow areas of all of the above boxes (including zero-area boxes and accounting for
@@ -239,10 +298,14 @@ static CSSPixelRect measure_scrollable_overflow(Box const& box, ContainedBoxesMa
             if (child.computed_values().overflow_x() == CSS::Overflow::Visible || child.computed_values().overflow_y() == CSS::Overflow::Visible) {
                 auto child_scrollable_overflow = measure_scrollable_overflow(child, contained_boxes_map);
                 if (!child_scrollable_overflow.is_empty()) {
-                    if (child.computed_values().overflow_x() == CSS::Overflow::Visible)
+                    if (child.computed_values().overflow_x() == CSS::Overflow::Visible) {
                         scrollable_overflow_rect.unite_horizontally(child_scrollable_overflow);
-                    if (child.computed_values().overflow_y() == CSS::Overflow::Visible)
+                        update_content_overflow_x_axis(child_scrollable_overflow);
+                    }
+                    if (child.computed_values().overflow_y() == CSS::Overflow::Visible) {
                         scrollable_overflow_rect.unite_vertically(child_scrollable_overflow);
+                        update_content_overflow_y_axis(child_scrollable_overflow);
+                    }
                 }
             }
         }
@@ -252,22 +315,32 @@ static CSSPixelRect measure_scrollable_overflow(Box const& box, ContainedBoxesMa
 
     // - Additional padding added to the scrollable overflow rectangle as necessary to enable scroll positions that
     //   satisfy the requirements of both place-content: start and place-content: end alignment.
-    auto has_scrollable_overflow = !paintable_absolute_padding_box.contains(scrollable_overflow_rect) && box.is_scroll_container();
+    auto has_scrollable_overflow_in_x_axis = box.is_scroll_container()
+        && (scrollable_overflow_rect.left() < paintable_absolute_padding_box.left()
+            || scrollable_overflow_rect.right() > paintable_absolute_padding_box.right());
+    auto has_scrollable_overflow_in_y_axis = box.is_scroll_container()
+        && (scrollable_overflow_rect.top() < paintable_absolute_padding_box.top()
+            || scrollable_overflow_rect.bottom() > paintable_absolute_padding_box.bottom());
+    auto has_scrollable_overflow = has_scrollable_overflow_in_x_axis || has_scrollable_overflow_in_y_axis;
     if (has_scrollable_overflow) {
         auto left = scrollable_overflow_rect.x();
         auto top = scrollable_overflow_rect.y();
         auto right = scrollable_overflow_rect.right();
         auto bottom = scrollable_overflow_rect.bottom();
 
-        if (overflow_directions.x_positive)
-            right = max(right, content_overflow_rect.right() + paintable_box.box_model().padding.right);
-        else
-            left = min(left, content_overflow_rect.x() - paintable_box.box_model().padding.left);
+        if (content_overflows_content_box_in_x_axis) {
+            if (overflow_directions.x_positive && content_overflows_content_box_on_right)
+                right = max(right, content_overflow_rect.right() + paintable_box.box_model().padding.right);
+            else if (!overflow_directions.x_positive)
+                left = min(left, content_overflow_rect.x() - paintable_box.box_model().padding.left);
+        }
 
-        if (overflow_directions.y_positive)
-            bottom = max(bottom, content_overflow_rect.bottom() + paintable_box.box_model().padding.bottom);
-        else
-            top = min(top, content_overflow_rect.y() - paintable_box.box_model().padding.top);
+        if (content_overflows_content_box_in_y_axis) {
+            if (overflow_directions.y_positive && content_overflows_content_box_on_bottom)
+                bottom = max(bottom, content_overflow_rect.bottom() + paintable_box.box_model().padding.bottom);
+            else if (!overflow_directions.y_positive)
+                top = min(top, content_overflow_rect.y() - paintable_box.box_model().padding.top);
+        }
 
         scrollable_overflow_rect = {
             left,
@@ -315,11 +388,11 @@ void LayoutState::resolve_relative_positions()
         auto& node = const_cast<NodeWithStyle&>(used_values.node());
 
         for (auto& paintable : node.paintables()) {
-            if (!(is<Painting::PaintableWithLines>(paintable) && is<Layout::InlineNode>(paintable.layout_node())))
+            auto* inline_paintable = as_if<Painting::PaintableWithLines>(paintable.ptr());
+            if (!inline_paintable || !is<Layout::InlineNode>(inline_paintable->layout_node()))
                 continue;
 
-            auto const& inline_paintable = static_cast<Painting::PaintableWithLines&>(paintable);
-            for (auto& fragment : inline_paintable.fragments()) {
+            for (auto& fragment : inline_paintable->fragments()) {
                 auto const& fragment_node = fragment.layout_node();
                 if (!is<Layout::NodeWithStyleAndBoxModelMetrics>(*fragment_node.parent()))
                     continue;
@@ -332,7 +405,8 @@ void LayoutState::resolve_relative_positions()
                         break;
                     if (ancestor->computed_values().position() == CSS::Positioning::Relative) {
                         VERIFY(ancestor->first_paintable());
-                        auto const& ancestor_node = as<Painting::PaintableBox>(*ancestor->first_paintable());
+                        auto ancestor_paintable = ancestor->first_paintable();
+                        auto const& ancestor_node = as<Painting::PaintableBox>(*ancestor_paintable);
                         auto const& inset = ancestor_node.box_model().inset;
                         offset.translate_by(inset.left, inset.top);
                     }
@@ -343,37 +417,37 @@ void LayoutState::resolve_relative_positions()
     });
 }
 
-static void build_paint_tree(Node& node, Painting::Paintable* parent_paintable = nullptr)
+static void build_paint_tree(Node& node, RefPtr<Painting::Paintable> parent_paintable = nullptr)
 {
     for (auto& paintable : node.paintables()) {
-        if (parent_paintable && !paintable.forms_unconnected_subtree()) {
-            VERIFY(!paintable.parent());
+        if (parent_paintable && !paintable->forms_unconnected_subtree()) {
+            VERIFY(!paintable->parent());
             parent_paintable->append_child(paintable);
         }
-        paintable.set_dom_node(node.dom_node());
+        paintable->set_dom_node(node.dom_node());
         if (node.dom_node())
             node.dom_node()->set_paintable(paintable);
     }
-    for (auto* child = node.first_child(); child; child = child->next_sibling()) {
+    for (auto child = node.first_child(); child; child = child->next_sibling()) {
         build_paint_tree(*child, node.first_paintable());
     }
 }
 
 void LayoutState::commit(Box& root)
 {
-    Painting::Paintable* parent_paintable = nullptr;
+    RefPtr<Painting::Paintable> parent_paintable;
     if (!root.is_viewport()) {
-        if (auto* existing = as_if<Painting::PaintableBox>(root.first_paintable())) {
-            parent_paintable = existing->parent();
+        if (auto existing = root.first_paintable(); auto* existing_box = as_if<Painting::PaintableBox>(existing.ptr())) {
+            parent_paintable = existing_box->parent();
             if (parent_paintable)
-                parent_paintable->remove_child(*existing);
+                parent_paintable->remove_child(*existing_box);
         }
     }
 
     // Cache existing paintables before clearing.
-    GC::RootHashMap<Node const*, GC::Ref<Painting::PaintableBox>> paintable_cache(root.document().heap());
+    HashMap<Node const*, NonnullRefPtr<Painting::PaintableBox>> paintable_cache;
     root.for_each_in_inclusive_subtree([&](Node& node) {
-        if (auto* paintable_box = as_if<Painting::PaintableBox>(node.first_paintable())) {
+        if (auto paintable = node.first_paintable(); auto* paintable_box = as_if<Painting::PaintableBox>(paintable.ptr())) {
             // InlineNodes are excluded because they can span multiple lines, with a separate
             // InlinePaintable created for each line via create_paintable_for_line_with_index().
             // This 1:N relationship between layout node and paintables, combined with the
@@ -410,7 +484,7 @@ void LayoutState::commit(Box& root)
     });
 
     HashTable<Layout::TextNode*> text_nodes;
-    HashTable<Painting::PaintableWithLines*> inline_node_paintables;
+    HashTable<WeakPtr<Painting::PaintableWithLines>> inline_node_paintables;
 
     auto transfer_box_model_metrics = [](Painting::BoxModelMetrics& box_model, UsedValues const& used_values) {
         box_model.inset = { used_values.inset_top, used_values.inset_right, used_values.inset_bottom, used_values.inset_left };
@@ -419,18 +493,19 @@ void LayoutState::commit(Box& root)
         box_model.margin = { used_values.margin_top, used_values.margin_right, used_values.margin_bottom, used_values.margin_left };
     };
 
-    auto try_to_relocate_fragment_in_inline_node = [&](auto& fragment, size_t line_index) -> bool {
+    auto try_to_relocate_fragment_in_inline_node = [&](auto& fragment, Painting::LineBoxData line_box_data, Painting::PaintableBox::FragmentationState fragmentation_state) -> bool {
         for (auto const* parent = fragment.layout_node().parent(); parent; parent = parent->parent()) {
             if (parent->is_atomic_inline())
                 break;
             if (is<InlineNode>(*parent)) {
                 auto& inline_node = const_cast<InlineNode&>(static_cast<InlineNode const&>(*parent));
-                auto line_paintable = inline_node.create_paintable_for_line_with_index(line_index);
-                line_paintable->add_fragment(fragment);
+                auto line_paintable = inline_node.create_paintable_for_line_with_index(line_box_data.index);
+                line_paintable->add_fragment(fragment, line_box_data);
+                line_paintable->set_fragmentation_state(fragmentation_state);
                 if (auto const* used_values = try_get(inline_node))
                     transfer_box_model_metrics(line_paintable->box_model(), *used_values);
                 if (!inline_node_paintables.contains(line_paintable.ptr())) {
-                    inline_node_paintables.set(line_paintable.ptr());
+                    inline_node_paintables.set(line_paintable);
                     inline_node.add_paintable(line_paintable);
                 }
                 return true;
@@ -445,7 +520,7 @@ void LayoutState::commit(Box& root)
         if (m_subtree_root && !m_subtree_root->is_inclusive_ancestor_of(node))
             return;
 
-        GC::Ptr<Painting::Paintable> paintable;
+        RefPtr<Painting::Paintable> paintable;
 
         // Try to reuse cached paintable for Box nodes
         if (auto cached = paintable_cache.get(&node); cached.has_value()) {
@@ -474,14 +549,36 @@ void LayoutState::commit(Box& root)
             if (auto* paintable_with_lines = as_if<Painting::PaintableWithLines>(*paintable_box)) {
                 for (size_t line_index = 0; line_index < used_values.line_boxes.size(); ++line_index) {
                     auto& line_box = used_values.line_boxes[line_index];
+                    auto line_box_data = line_box_data_for(line_box, line_index);
+                    auto first_fragment_continues_last_line_box = false;
+                    if (line_index > 0 && used_values.line_boxes[line_index - 1].fragments().size() > 0 && used_values.line_boxes[line_index].fragments().size() > 0) {
+                        first_fragment_continues_last_line_box = &used_values.line_boxes[line_index - 1].fragments().last().layout_node() == &used_values.line_boxes[line_index].fragments().first().layout_node();
+                    }
+                    auto last_fragment_is_continued_in_next_line_box = false;
+                    if (line_index < used_values.line_boxes.size() - 1 && used_values.line_boxes[line_index].fragments().size() > 0 && used_values.line_boxes[line_index + 1].fragments().size() > 0) {
+                        last_fragment_is_continued_in_next_line_box = &used_values.line_boxes[line_index].fragments().last().layout_node() == &used_values.line_boxes[line_index + 1].fragments().first().layout_node();
+                    }
                     for (auto const& fragment : line_box.fragments()) {
                         if (fragment.is_fully_truncated())
                             continue;
                         if (auto const* text_node = as_if<TextNode>(fragment.layout_node()))
                             text_nodes.set(const_cast<TextNode*>(text_node));
-                        auto did_relocate_fragment = try_to_relocate_fragment_in_inline_node(fragment, line_index);
+
+                        auto fragmentation_state = Painting::PaintableBox::FragmentationState::Unfragmented;
+                        auto is_first_fragment = &line_box.fragments().first() == &fragment;
+                        auto is_last_fragment = &line_box.fragments().last() == &fragment;
+                        if (is_first_fragment && is_last_fragment && first_fragment_continues_last_line_box && last_fragment_is_continued_in_next_line_box) {
+                            fragmentation_state = Painting::PaintableBox::FragmentationState::HorizontalMiddle;
+                        } else if (is_first_fragment && first_fragment_continues_last_line_box) {
+                            fragmentation_state = Painting::PaintableBox::FragmentationState::HorizontalEnd;
+                        } else if (is_last_fragment && last_fragment_is_continued_in_next_line_box) {
+                            fragmentation_state = Painting::PaintableBox::FragmentationState::HorizontalStart;
+                        }
+
+                        auto did_relocate_fragment = try_to_relocate_fragment_in_inline_node(fragment, line_box_data, fragmentation_state);
+                        first_fragment_continues_last_line_box = false;
                         if (!did_relocate_fragment)
-                            paintable_with_lines->add_fragment(fragment);
+                            paintable_with_lines->add_fragment(fragment, line_box_data);
                     }
                 }
             }
@@ -489,6 +586,14 @@ void LayoutState::commit(Box& root)
             if (auto* svg_graphics_paintable = as_if<Painting::SVGGraphicsPaintable>(paintable.ptr());
                 svg_graphics_paintable && used_values.computed_svg_transforms().has_value()) {
                 svg_graphics_paintable->set_computed_transforms(*used_values.computed_svg_transforms());
+            }
+            if (auto* svg_foreign_object_paintable = as_if<Painting::SVGForeignObjectPaintable>(paintable.ptr());
+                svg_foreign_object_paintable && used_values.computed_svg_transforms().has_value()) {
+                svg_foreign_object_paintable->set_computed_transforms(*used_values.computed_svg_transforms());
+            }
+            if (auto* svg_svg_paintable = as_if<Painting::SVGSVGPaintable>(paintable.ptr());
+                svg_svg_paintable && used_values.computed_svg_transforms().has_value()) {
+                svg_svg_paintable->set_computed_transforms(*used_values.computed_svg_transforms());
             }
 
             if (auto* svg_path_paintable = as_if<Painting::SVGPathPaintable>(paintable.ptr())) {
@@ -499,6 +604,11 @@ void LayoutState::commit(Box& root)
             if (node.display().is_grid_inside()) {
                 paintable_box->set_used_values_for_grid_template_columns(used_values.grid_template_columns());
                 paintable_box->set_used_values_for_grid_template_rows(used_values.grid_template_rows());
+                paintable_box->set_grid_layout_data(used_values.take_grid_layout_data());
+            }
+
+            if (node.display().is_flex_inside()) {
+                paintable_box->set_flex_layout_data(used_values.take_flex_layout_data());
             }
         }
     });
@@ -515,6 +625,24 @@ void LayoutState::commit(Box& root)
             transfer_box_model_metrics(line_paintable->box_model(), *used_values);
     }
 
+    // Ensure anonymous InlineNode ancestors of painted InlineNodes also get paintables. This handles cases like
+    // ::first-letter inside ::before, where the first-letter wrapper has a paintable but the ::before InlineNode above
+    // it does not.
+    for (auto const& paintable : inline_node_paintables.values()) {
+        for (auto const* ancestor = paintable->layout_node().parent(); ancestor; ancestor = ancestor->parent()) {
+            if (!is<InlineNode>(*ancestor) || ancestor->dom_node())
+                break;
+            auto& inline_ancestor = const_cast<InlineNode&>(static_cast<InlineNode const&>(*ancestor));
+            if (inline_ancestor.first_paintable())
+                break;
+            auto line_paintable = inline_ancestor.create_paintable_for_line_with_index(paintable->line_index());
+            inline_ancestor.add_paintable(line_paintable);
+            inline_node_paintables.set(line_paintable.ptr());
+            if (auto const* used_values = try_get(inline_ancestor))
+                transfer_box_model_metrics(line_paintable->box_model(), *used_values);
+        }
+    }
+
     // Resolve relative positions for regular boxes (not line box fragments):
     // NOTE: This needs to occur before fragments are transferred into the corresponding inline paintables, because
     //       after this transfer, the containing_line_box_fragment will no longer be valid.
@@ -524,7 +652,8 @@ void LayoutState::commit(Box& root)
         if (!node.is_box())
             return;
 
-        auto& paintable = as<Painting::PaintableBox>(*node.first_paintable());
+        auto paintable_ref = node.first_paintable();
+        auto& paintable = as<Painting::PaintableBox>(*paintable_ref);
         CSSPixelPoint offset;
 
         if (used_values.containing_line_box_fragment.has_value()) {
@@ -534,10 +663,19 @@ void LayoutState::commit(Box& root)
             auto const& containing_line_box_fragment = used_values.containing_line_box_fragment.value();
             auto const& containing_block = *node.containing_block();
             auto const& containing_block_used_values = get(containing_block);
-            auto const& fragment = containing_block_used_values.line_boxes[containing_line_box_fragment.line_box_index].fragments()[containing_line_box_fragment.fragment_index];
 
             // The fragment has the final offset for the atomic inline, so we just need to copy it from there.
-            offset = fragment.offset();
+            // However, line box post-processing may remove fragments after we record this coordinate.
+            if (containing_line_box_fragment.line_box_index < containing_block_used_values.line_boxes.size()) {
+                auto const& line_box = containing_block_used_values.line_boxes[containing_line_box_fragment.line_box_index];
+                paintable.set_containing_line_box_data(line_box_data_for(line_box, containing_line_box_fragment.line_box_index));
+                if (containing_line_box_fragment.fragment_index < line_box.fragments().size())
+                    offset = line_box.fragments()[containing_line_box_fragment.fragment_index].offset();
+                else
+                    offset = used_values.offset;
+            } else {
+                offset = used_values.offset;
+            }
         } else {
             // Not an atomic inline, much simpler case.
             offset = used_values.offset;
@@ -559,7 +697,10 @@ void LayoutState::commit(Box& root)
     resolve_relative_positions();
 
     // Measure size of paintables created for inline nodes.
-    for (auto* paintable_with_lines : inline_node_paintables) {
+    for (auto const& weak_paintable_with_lines : inline_node_paintables) {
+        auto paintable_with_lines = weak_paintable_with_lines.strong_ref();
+        if (!paintable_with_lines)
+            continue;
         if (!is<InlineNode>(paintable_with_lines->layout_node()))
             continue;
 
@@ -570,7 +711,7 @@ void LayoutState::commit(Box& root)
             if (paintable.line_index() != line_index)
                 return TraversalDecision::Continue;
             if (is<BlockContainer>(paintable.layout_node()))
-                return TraversalDecision::Continue;
+                return TraversalDecision::SkipChildrenAndContinue;
 
             auto const* used_values = try_get(paintable.layout_node_with_style_and_box_metrics());
             if (&paintable != paintable_with_lines && used_values)
@@ -614,8 +755,8 @@ void LayoutState::commit(Box& root)
         auto const* box = as_if<Box>(used_values.node());
         if (!box || !box->paintable_box())
             return;
-        if (auto containing_block = box->containing_block())
-            contained_boxes_map.ensure(containing_block.ptr()).append(box);
+        if (auto const* containing_block = box->containing_block())
+            contained_boxes_map.ensure(containing_block).append(box);
     });
 
     // Measure overflow in scroll containers.
@@ -636,7 +777,7 @@ void LayoutState::commit(Box& root)
     m_used_values_store.for_each([&](UsedValues& used_values) {
         auto& node = used_values.node();
         for (auto& paintable : node.paintables()) {
-            auto* paintable_box = as_if<Painting::PaintableBox>(paintable);
+            auto* paintable_box = as_if<Painting::PaintableBox>(paintable.ptr());
             if (!paintable_box)
                 continue;
 
@@ -648,7 +789,7 @@ void LayoutState::commit(Box& root)
                 auto sticky_insets = make<Painting::StickyInsets>();
                 auto const& inset = node.computed_values().inset();
 
-                auto const* nearest_scrollable_ancestor = paintable_box->nearest_scrollable_ancestor();
+                auto nearest_scrollable_ancestor = paintable_box->nearest_scrollable_ancestor();
                 CSSPixelSize scrollport_size;
                 if (nearest_scrollable_ancestor)
                     scrollport_size = nearest_scrollable_ancestor->absolute_rect().size();
@@ -785,33 +926,19 @@ void LayoutState::UsedValues::set_node(NodeWithStyle const& node, UsedValues con
             return false;
         }
 
-        if (size.is_calculated()) {
-            CSS::CalculationResolutionContext context {
-                .length_resolution_context = CSS::Length::ResolutionContext::for_layout_node(node),
-            };
-            if (size.calculated().contains_percentage()) {
+        if (size.is_length_percentage()) {
+            if (size.contains_percentage()) {
                 if (!containing_block_has_definite_size)
                     return false;
                 auto containing_block_size_as_length = width ? containing_block_used_values->content_width() : containing_block_used_values->content_height();
-                context.percentage_basis = CSS::Length::make_px(containing_block_size_as_length);
+                resolved_definite_size = clamp_to_max_dimension_value(adjust_for_box_sizing(size.to_px(node, containing_block_size_as_length), size, width));
+                return true;
             }
-            resolved_definite_size = clamp_to_max_dimension_value(adjust_for_box_sizing(size.calculated().resolve_length(context)->to_px(node), size, width));
+
+            resolved_definite_size = clamp_to_max_dimension_value(adjust_for_box_sizing(size.to_px(node, CSSPixels { 0 }), size, width));
             return true;
         }
 
-        if (size.is_length()) {
-            VERIFY(!size.is_auto()); // This should have been covered by the Size::is_auto() branch above.
-            resolved_definite_size = clamp_to_max_dimension_value(adjust_for_box_sizing(size.length().to_px(node), size, width));
-            return true;
-        }
-        if (size.is_percentage()) {
-            if (containing_block_has_definite_size) {
-                auto containing_block_size = width ? containing_block_used_values->content_width() : containing_block_used_values->content_height();
-                resolved_definite_size = clamp_to_max_dimension_value(adjust_for_box_sizing(containing_block_size.scaled(size.percentage().as_fraction()), size, width));
-                return true;
-            }
-            return false;
-        }
         return false;
     };
 

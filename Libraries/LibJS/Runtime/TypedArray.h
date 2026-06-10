@@ -45,7 +45,7 @@ public:
     ContentType content_type() const { return m_content_type; }
     ArrayBuffer* viewed_array_buffer() const { return m_viewed_array_buffer; }
 
-    // Cached raw pointer: viewed_array_buffer->buffer().data() + byte_offset.
+    // Cached raw pointer: viewed_array_buffer->data() + byte_offset.
     // nullptr means "not cached, use slow path". This is only safe for
     // fixed-length ArrayBuffers that own stable backing storage.
     u8* cached_data_ptr() const { return m_data; }
@@ -107,7 +107,7 @@ protected:
         }
 
         m_viewed_array_buffer->register_cached_typed_array_view(*this);
-        m_data = m_viewed_array_buffer->buffer().data() + m_byte_offset;
+        m_data = m_viewed_array_buffer->data() + m_byte_offset;
     }
 
     u32 m_element_size { 0 };
@@ -462,7 +462,7 @@ public:
         auto typed_array_record = make_typed_array_with_buffer_witness_record(*this, ArrayBuffer::Order::SeqCst);
 
         // 2. Let keys be a new empty List.
-        auto keys = GC::RootVector<Value> { heap() };
+        GC::RootVector<Value> keys;
 
         // 3. If IsTypedArrayOutOfBounds(taRecord) is false, then
         if (!is_typed_array_out_of_bounds(typed_array_record)) {
@@ -477,20 +477,20 @@ public:
         }
 
         // 4. For each own property key P of O such that P is a String and P is not an integer index, in ascending chronological order of property creation, do
-        for (auto& it : shape().property_table()) {
-            if (it.key.is_string()) {
+        shape().for_each_property_in_insertion_order([&](auto const& property_key, auto const&) {
+            if (property_key.is_string()) {
                 // a. Append P to keys.
-                keys.append(it.key.to_value(vm));
+                keys.append(property_key.to_value(vm));
             }
-        }
+        });
 
         // 5. For each own property key P of O such that P is a Symbol, in ascending chronological order of property creation, do
-        for (auto& it : shape().property_table()) {
-            if (it.key.is_symbol()) {
+        shape().for_each_property_in_insertion_order([&](auto const& property_key, auto const&) {
+            if (property_key.is_symbol()) {
                 // a. Append P to keys.
-                keys.append(it.key.to_value(vm));
+                keys.append(property_key.to_value(vm));
             }
-        }
+        });
 
         // 6. Return keys.
         return { move(keys) };
@@ -506,7 +506,7 @@ public:
         }
 
         auto length = typed_array_length(typed_array_record);
-        return { reinterpret_cast<UnderlyingBufferDataType const*>(m_viewed_array_buffer->buffer().data() + m_byte_offset), length };
+        return { reinterpret_cast<UnderlyingBufferDataType const*>(m_viewed_array_buffer->data() + m_byte_offset), length };
     }
 
     Span<UnderlyingBufferDataType> data()
@@ -519,7 +519,7 @@ public:
         }
 
         auto length = typed_array_length(typed_array_record);
-        return { reinterpret_cast<UnderlyingBufferDataType*>(m_viewed_array_buffer->buffer().data() + m_byte_offset), length };
+        return { reinterpret_cast<UnderlyingBufferDataType*>(m_viewed_array_buffer->data() + m_byte_offset), length };
     }
 
     bool is_unclamped_integer_element_type() const override

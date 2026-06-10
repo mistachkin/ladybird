@@ -8,6 +8,7 @@
 #include <AK/TypeCasts.h>
 #include <LibWeb/Bindings/CloseWatcher.h>
 #include <LibWeb/Bindings/Intrinsics.h>
+#include <LibWeb/DOM/AbortSignal.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/EventDispatcher.h>
 #include <LibWeb/DOM/IDLEventListener.h>
@@ -48,7 +49,7 @@ GC::Ref<CloseWatcher> CloseWatcher::establish(HTML::Window& window, GetEnabledSt
 }
 
 // https://html.spec.whatwg.org/multipage/interaction.html#dom-closewatcher
-WebIDL::ExceptionOr<GC::Ref<CloseWatcher>> CloseWatcher::construct_impl(JS::Realm& realm, CloseWatcherOptions const& options)
+WebIDL::ExceptionOr<GC::Ref<CloseWatcher>> CloseWatcher::construct_impl(JS::Realm& realm, Bindings::CloseWatcherOptions const& options)
 {
     auto& window = as<HTML::Window>(realm.global_object());
 

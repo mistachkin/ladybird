@@ -12,11 +12,9 @@
 
 namespace Web::Painting {
 
-GC_DEFINE_ALLOCATOR(MarkerPaintable);
-
-GC::Ref<MarkerPaintable> MarkerPaintable::create(Layout::ListItemMarkerBox const& layout_box)
+NonnullRefPtr<MarkerPaintable> MarkerPaintable::create(Layout::ListItemMarkerBox const& layout_box)
 {
-    return layout_box.heap().allocate<MarkerPaintable>(layout_box);
+    return adopt_ref(*new MarkerPaintable(layout_box));
 }
 
 MarkerPaintable::MarkerPaintable(Layout::ListItemMarkerBox const& layout_box)
@@ -46,7 +44,7 @@ void MarkerPaintable::paint(DisplayListRecordingContext& context, PaintPhase pha
 
     if (auto const* list_style_image = layout_box().list_style_image()) {
         list_style_image->resolve_for_size(layout_box(), marker_rect.size());
-        list_style_image->paint(context, device_rect, computed_values().image_rendering());
+        list_style_image->paint(context, layout_box().document(), device_rect, computed_values().image_rendering());
         return;
     }
 

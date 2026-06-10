@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <AK/Function.h>
+#include <LibGfx/DecodedImageFrameSkiaImageCache.h>
 #include <LibWeb/Painting/DisplayList.h>
 #include <LibWeb/Painting/DisplayListCommand.h>
 #include <LibWeb/Painting/DisplayListRecorder.h>
@@ -15,18 +17,23 @@ class SkPaint;
 
 namespace Web::Painting {
 
-class DisplayListPlayerSkia final : public DisplayListPlayer {
+class WEB_API DisplayListPlayerSkia final : public DisplayListPlayer {
 public:
     DisplayListPlayerSkia();
+    explicit DisplayListPlayerSkia(RefPtr<Gfx::SkiaBackendContext>);
     ~DisplayListPlayerSkia();
 
+    void flush(Gfx::PaintingSurface&) override;
+    void flush_async(Gfx::PaintingSurface&, Function<void()>&&);
+    void paint_scrollbar(Gfx::PaintingSurface&, PaintScrollBar const&);
+
 private:
-    void flush() override;
     void draw_glyph_run(DrawGlyphRun const&) override;
     void fill_rect(FillRect const&) override;
-    void draw_scaled_immutable_bitmap(DrawScaledImmutableBitmap const&) override;
-    void draw_repeated_immutable_bitmap(DrawRepeatedImmutableBitmap const&) override;
-    void draw_external_content(DrawExternalContent const&) override;
+    void draw_scaled_decoded_image_frame(DrawScaledDecodedImageFrame const&) override;
+    void draw_repeated_decoded_image_frame(DrawRepeatedDecodedImageFrame const&) override;
+    void draw_compositor_surface(DrawCompositorSurface const&) override;
+    void draw_video_frame(DrawVideoFrame const&) override;
     void add_clip_rect(AddClipRect const&) override;
     void save(Save const&) override;
     void save_layer(SaveLayer const&) override;
@@ -47,16 +54,29 @@ private:
     void paint_radial_gradient(PaintRadialGradient const&) override;
     void paint_conic_gradient(PaintConicGradient const&) override;
     void add_rounded_rect_clip(AddRoundedRectClip const&) override;
+    void compositor_scroll_node(CompositorScrollNode const&) override;
+    void compositor_sticky_area(CompositorStickyArea const&) override;
+    void compositor_wheel_hit_test_target(CompositorWheelHitTestTarget const&) override;
+    void compositor_wheel_hit_test_target_with_corner_radii(CompositorWheelHitTestTargetWithCornerRadii const&) override;
+    void compositor_main_thread_wheel_event_region(CompositorMainThreadWheelEventRegion const&) override;
+    void compositor_viewport_scrollbar(CompositorViewportScrollbar const&) override;
+    void compositor_blocking_wheel_event_region(CompositorBlockingWheelEventRegion const&) override;
     void paint_scrollbar(PaintScrollBar const&) override;
     void paint_nested_display_list(PaintNestedDisplayList const&) override;
-    void apply_effects(ApplyEffects const&) override;
+    void apply_effects(ApplyEffects const&, Gfx::Filter const*) override;
     void apply_transform(Gfx::FloatPoint origin, Gfx::FloatMatrix4x4 const&) override;
 
     void add_clip_path(Gfx::Path const&) override;
 
     bool would_be_fully_clipped_by_painter(Gfx::IntRect) const override;
 
-    SkPaint paint_style_to_skia_paint(SVGPaintServerPaintStyle const&, Gfx::FloatRect const& bounding_rect);
+    SkPaint paint_style_to_skia_paint(DisplayListPaintStyle const&, Gfx::FloatRect const& bounding_rect);
+    Gfx::Path path_from_data(DisplayListDataSpan) const;
+    ReadonlySpan<Color> gradient_colors(DisplayListGradientColorStops) const;
+    ReadonlySpan<float> gradient_positions(DisplayListGradientColorStops) const;
+
+    RefPtr<Gfx::SkiaBackendContext> m_skia_backend_context;
+    Gfx::DecodedImageFrameSkiaImageCache m_image_cache;
 };
 
 }

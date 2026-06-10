@@ -7,6 +7,7 @@
 #pragma once
 
 #include <AK/HashTable.h>
+#include <AK/OwnPtr.h>
 #include <LibGfx/Path.h>
 #include <LibGfx/Point.h>
 #include <LibWeb/Layout/Box.h>
@@ -220,10 +221,17 @@ struct LayoutState {
 
         Optional<LineBoxFragmentCoordinate> containing_line_box_fragment;
 
-        void add_floating_descendant(Box const& box) { ensure_rare_data().floating_descendants.set(&box); }
-        HashTable<GC::Ptr<Box const>> const& floating_descendants() const
+        void set_inline_end_static_position_rect(StaticPositionRect const& static_position_rect) { ensure_rare_data().inline_end_static_position_rect = static_position_rect; }
+        Optional<StaticPositionRect> const& inline_end_static_position_rect() const
         {
-            static HashTable<GC::Ptr<Box const>> const empty;
+            static Optional<StaticPositionRect> const empty;
+            return m_rare ? m_rare->inline_end_static_position_rect : empty;
+        }
+
+        void add_floating_descendant(Box const& box) { ensure_rare_data().floating_descendants.set(&box); }
+        HashTable<Box const*> const& floating_descendants() const
+        {
+            static auto const& empty = *new HashTable<Box const*>;
             return m_rare ? m_rare->floating_descendants : empty;
         }
 
@@ -256,18 +264,49 @@ struct LayoutState {
             return m_rare ? m_rare->computed_svg_transforms : empty;
         }
 
+        void set_grid_layout_data(OwnPtr<GridLayoutData> grid_layout_data) { ensure_rare_data().grid_layout_data = move(grid_layout_data); }
+        GridLayoutData const* grid_layout_data() const
+        {
+            return m_rare ? m_rare->grid_layout_data.ptr() : nullptr;
+        }
+        OwnPtr<GridLayoutData> take_grid_layout_data()
+        {
+            if (!m_rare)
+                return {};
+            return move(m_rare->grid_layout_data);
+        }
+
         void set_grid_template_columns(RefPtr<CSS::GridTrackSizeListStyleValue const> used_values_for_grid_template_columns) { ensure_rare_data().grid_template_columns = move(used_values_for_grid_template_columns); }
         RefPtr<CSS::GridTrackSizeListStyleValue const> const& grid_template_columns() const
         {
-            static RefPtr<CSS::GridTrackSizeListStyleValue const> const empty;
+            static auto const& empty = *new RefPtr<CSS::GridTrackSizeListStyleValue const>;
             return m_rare ? m_rare->grid_template_columns : empty;
         }
 
         void set_grid_template_rows(RefPtr<CSS::GridTrackSizeListStyleValue const> used_values_for_grid_template_rows) { ensure_rare_data().grid_template_rows = move(used_values_for_grid_template_rows); }
         RefPtr<CSS::GridTrackSizeListStyleValue const> const& grid_template_rows() const
         {
-            static RefPtr<CSS::GridTrackSizeListStyleValue const> const empty;
+            static auto const& empty = *new RefPtr<CSS::GridTrackSizeListStyleValue const>;
             return m_rare ? m_rare->grid_template_rows : empty;
+        }
+
+        void set_flex_layout_data(OwnPtr<FlexLayoutData> flex_layout_data) { ensure_rare_data().flex_layout_data = move(flex_layout_data); }
+        FlexLayoutData const* flex_layout_data() const
+        {
+            return m_rare ? m_rare->flex_layout_data.ptr() : nullptr;
+        }
+        OwnPtr<FlexLayoutData> take_flex_layout_data()
+        {
+            if (!m_rare)
+                return {};
+            return move(m_rare->flex_layout_data);
+        }
+
+        void set_grid_area_size(CSSPixelSize grid_area_size) { ensure_rare_data().grid_area_size = grid_area_size; }
+        Optional<CSSPixelSize> const& grid_area_size() const
+        {
+            static Optional<CSSPixelSize> const empty;
+            return m_rare ? m_rare->grid_area_size : empty;
         }
 
         void set_static_position_rect(StaticPositionRect const& static_position_rect) { ensure_rare_data().static_position_rect = static_position_rect; }
@@ -292,14 +331,36 @@ struct LayoutState {
         CSSPixels border_bottom_collapsed() const { return use_collapsing_borders_model() ? round(border_bottom / 2) : border_bottom; }
 
         struct RareData {
-            HashTable<GC::Ptr<Box const>> floating_descendants;
+            RareData() = default;
+            RareData(RareData const& other)
+                : floating_descendants(other.floating_descendants)
+                , table_cell_coordinates(other.table_cell_coordinates)
+                , computed_svg_path(other.computed_svg_path)
+                , grid_template_columns(other.grid_template_columns)
+                , grid_template_rows(other.grid_template_rows)
+                , grid_area_size(other.grid_area_size)
+                , override_borders_data(other.override_borders_data)
+                , computed_svg_transforms(other.computed_svg_transforms)
+                , static_position_rect(other.static_position_rect)
+            {
+                if (other.grid_layout_data)
+                    grid_layout_data = make<GridLayoutData>(*other.grid_layout_data);
+                if (other.flex_layout_data)
+                    flex_layout_data = make<FlexLayoutData>(*other.flex_layout_data);
+            }
+
+            HashTable<Box const*> floating_descendants;
             Optional<Painting::PaintableBox::TableCellCoordinates> table_cell_coordinates;
             Optional<Gfx::Path> computed_svg_path;
+            OwnPtr<GridLayoutData> grid_layout_data;
+            OwnPtr<FlexLayoutData> flex_layout_data;
             RefPtr<CSS::GridTrackSizeListStyleValue const> grid_template_columns;
             RefPtr<CSS::GridTrackSizeListStyleValue const> grid_template_rows;
+            Optional<CSSPixelSize> grid_area_size;
             Optional<Painting::PaintableBox::BordersDataWithElementKind> override_borders_data;
             Optional<Painting::SVGGraphicsPaintable::ComputedTransforms> computed_svg_transforms;
             Optional<StaticPositionRect> static_position_rect;
+            Optional<StaticPositionRect> inline_end_static_position_rect;
         };
 
         RareData& ensure_rare_data()
@@ -309,7 +370,7 @@ struct LayoutState {
             return *m_rare;
         }
 
-        GC::Ptr<Layout::NodeWithStyle const> m_node { nullptr };
+        Layout::NodeWithStyle const* m_node { nullptr };
         UsedValues const* m_containing_block_used_values { nullptr };
         Optional<CSSPixelPoint> m_cumulative_offset;
 
@@ -331,6 +392,9 @@ struct LayoutState {
 
     void ensure_capacity(u32 node_count);
 
+    void set_should_collect_devtools_layout_data(bool should_collect) { m_should_collect_devtools_layout_data = should_collect; }
+    bool should_collect_devtools_layout_data() const { return m_should_collect_devtools_layout_data; }
+
     UsedValues& get_mutable(NodeWithStyle const&);
     UsedValues const& get(NodeWithStyle const&) const;
 
@@ -346,7 +410,8 @@ private:
     void resolve_relative_positions();
 
     PagedStore<UsedValues> m_used_values_store;
-    GC::Ptr<Layout::NodeWithStyle const> m_subtree_root;
+    Layout::NodeWithStyle const* m_subtree_root { nullptr };
+    bool m_should_collect_devtools_layout_data { false };
 };
 
 inline CSSPixels clamp_to_max_dimension_value(CSSPixels value)

@@ -30,7 +30,7 @@ public:
             FloatingElement,
         };
         Type type {};
-        GC::Ptr<Layout::Node const> node {};
+        Layout::Node const* node { nullptr };
         RefPtr<Gfx::GlyphRun> glyph_run {};
         size_t offset_in_node { 0 };
         size_t length_in_node { 0 };
@@ -52,7 +52,7 @@ public:
 
     InlineLevelIterator(Layout::InlineFormattingContext&, LayoutState&, Layout::BlockContainer const& containing_block, LayoutState::UsedValues const& containing_block_used_values, LayoutMode);
 
-    Optional<Item> next();
+    Optional<Item&> next();
     CSSPixels next_non_whitespace_sequence_width();
 
 private:
@@ -73,14 +73,14 @@ private:
 
     Layout::InlineFormattingContext& m_inline_formatting_context;
     Layout::LayoutState& m_layout_state;
-    GC::Ref<BlockContainer const> m_containing_block;
+    BlockContainer const& m_containing_block;
     LayoutState::UsedValues const& m_containing_block_used_values;
-    GC::Ptr<Layout::Node const> m_current_node;
-    GC::Ptr<Layout::Node const> m_next_node;
+    Layout::Node const* m_current_node { nullptr };
+    Layout::Node const* m_next_node { nullptr };
     LayoutMode const m_layout_mode;
 
     struct TextNodeContext {
-        Vector<TextNode::Chunk> chunks;
+        TextNode::ChunkList const* chunk_list { nullptr };
         size_t next_chunk_index { 0 };
         bool should_collapse_whitespace {};
         bool should_wrap_lines {};
@@ -99,7 +99,7 @@ private:
     Optional<ExtraBoxMetrics> m_extra_leading_metrics;
     Optional<ExtraBoxMetrics> m_extra_trailing_metrics;
 
-    Vector<GC::Ref<NodeWithStyleAndBoxModelMetrics const>> m_box_model_node_stack;
+    Vector<NodeWithStyleAndBoxModelMetrics const*> m_box_model_node_stack;
 
     // Pre-generated items for O(1) iteration and lookahead.
     Vector<Item> m_items;

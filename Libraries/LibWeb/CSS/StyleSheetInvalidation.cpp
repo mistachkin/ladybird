@@ -4,7 +4,9 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibWeb/CSS/CSSImportRule.h>
 #include <LibWeb/CSS/CSSKeyframesRule.h>
+#include <LibWeb/CSS/CSSNestedDeclarations.h>
 #include <LibWeb/CSS/CSSStyleRule.h>
 #include <LibWeb/CSS/CSSStyleSheet.h>
 #include <LibWeb/CSS/ComputedProperties.h>
@@ -33,9 +35,91 @@ bool selector_may_match_light_dom_under_shadow_host(Selector const& selector)
     if (!selector.contains_pseudo_class(PseudoClass::Host))
         return false;
 
-    // A bare :host selector only targets the host itself, but once a shadow rule keeps walking to another compound it
-    // can match light-DOM nodes in the host tree instead of staying confined to the shadow subtree.
-    return selector.compound_selectors().size() > 1;
+    // A bare :host selector only targets the host itself, and pseudo-element transitions such as :host::part() stay
+    // anchored on that same host. We only escape to light-DOM once the selector keeps walking through a real DOM
+    // combinator after matching :host.
+    for (size_t i = 1; i < selector.compound_selectors().size(); ++i) {
+        if (selector.compound_selectors()[i].combinator != Selector::Combinator::PseudoElement)
+            return true;
+    }
+    return false;
+}
+
+static bool selector_may_match_shadow_host(Selector const&);
+static bool selector_may_match_light_dom_outside_shadow_host_via_positive_selector_list(Selector const&);
+
+static bool pseudo_class_has_positive_selector_list_arguments(PseudoClass pseudo_class)
+{
+    return first_is_one_of(pseudo_class, PseudoClass::Is, PseudoClass::Where);
+}
+
+static bool simple_selector_may_match_shadow_host(Selector::SimpleSelector const& simple_selector)
+{
+    if (simple_selector.type != Selector::SimpleSelector::Type::PseudoClass)
+        return false;
+
+    auto const& pseudo_class = simple_selector.pseudo_class();
+    if (pseudo_class.type == PseudoClass::Host)
+        return true;
+
+    if (!pseudo_class_has_positive_selector_list_arguments(pseudo_class.type))
+        return false;
+
+    return any_of(pseudo_class.argument_selector_list, selector_may_match_shadow_host);
+}
+
+static bool selector_may_match_shadow_host(Selector const& selector)
+{
+    return any_of(selector.compound_selectors(), [](auto const& compound_selector) {
+        return any_of(compound_selector.simple_selectors, [](auto const& simple_selector) {
+            return simple_selector_may_match_shadow_host(simple_selector);
+        });
+    });
+}
+
+static bool compound_selector_may_match_shadow_host(Selector::CompoundSelector const& compound_selector)
+{
+    return any_of(compound_selector.simple_selectors, simple_selector_may_match_shadow_host);
+}
+
+static bool simple_selector_may_match_light_dom_outside_shadow_host(Selector::SimpleSelector const& simple_selector)
+{
+    if (simple_selector.type != Selector::SimpleSelector::Type::PseudoClass)
+        return false;
+
+    auto const& pseudo_class = simple_selector.pseudo_class();
+    if (!pseudo_class_has_positive_selector_list_arguments(pseudo_class.type))
+        return false;
+
+    return any_of(pseudo_class.argument_selector_list, selector_may_match_light_dom_outside_shadow_host_via_positive_selector_list);
+}
+
+static bool compound_selector_may_match_light_dom_outside_shadow_host(Selector::CompoundSelector const& compound_selector)
+{
+    return any_of(compound_selector.simple_selectors, simple_selector_may_match_light_dom_outside_shadow_host);
+}
+
+static bool selector_may_match_light_dom_outside_shadow_host_via_positive_selector_list(Selector const& selector)
+{
+    auto const& compound_selectors = selector.compound_selectors();
+    for (size_t i = 0; i < compound_selectors.size(); ++i) {
+        if (compound_selector_may_match_light_dom_outside_shadow_host(compound_selectors[i]))
+            return true;
+
+        if (!compound_selector_may_match_shadow_host(compound_selectors[i]))
+            continue;
+
+        for (size_t j = i + 1; j < compound_selectors.size(); ++j) {
+            if (first_is_one_of(compound_selectors[j].combinator, Selector::Combinator::NextSibling, Selector::Combinator::SubsequentSibling))
+                return true;
+        }
+    }
+    return false;
+}
+
+bool selector_may_match_light_dom_outside_shadow_host(Selector const& selector)
+{
+    return selector_may_match_light_dom_outside_shadow_host_via_positive_selector_list(selector);
 }
 
 bool selector_may_match_light_dom_under_shadow_host(StringView selector_text)
@@ -45,6 +129,15 @@ bool selector_may_match_light_dom_under_shadow_host(StringView selector_text)
     if (!selectors.has_value() || selectors->size() != 1)
         return false;
     return selector_may_match_light_dom_under_shadow_host(selectors->first());
+}
+
+bool selector_may_match_light_dom_outside_shadow_host(StringView selector_text)
+{
+    CSS::Parser::ParsingParams parsing_params;
+    auto selectors = parse_selector(parsing_params, selector_text);
+    if (!selectors.has_value() || selectors->size() != 1)
+        return false;
+    return selector_may_match_light_dom_outside_shadow_host(selectors->first());
 }
 
 static bool is_universal_only_compound(Selector::CompoundSelector const& compound_selector)
@@ -58,16 +151,13 @@ static bool is_universal_only_compound(Selector::CompoundSelector const& compoun
     return true;
 }
 
-static bool is_pseudo_element_only_compound(Selector::CompoundSelector const& compound_selector)
+static bool is_pseudo_element_targeting_compound(Selector::CompoundSelector const& compound_selector)
 {
-    if (compound_selector.simple_selectors.is_empty())
-        return false;
-    for (auto const& simple_selector : compound_selector.simple_selectors) {
-        if (simple_selector.type != Selector::SimpleSelector::Type::PseudoElement)
-            return false;
-    }
-    return true;
+    return !compound_selector.simple_selectors.is_empty()
+        && compound_selector.simple_selectors.first().type == Selector::SimpleSelector::Type::PseudoElement;
 }
+
+static bool rule_requires_broad_add_or_remove_invalidation(CSSRule const&);
 
 // :has() in the rightmost set filters by an element's previously recorded "affected by :has()" flags. Those flags
 // are not yet set for a brand-new rule that has never been matched, so :has() on its own can't narrow the walk.
@@ -93,40 +183,57 @@ struct AnchorInvalidationRule {
     GC::Ptr<CSSStyleSheet const> style_sheet_for_rule;
 };
 
+enum class AllowSkippingUntargetablePseudoElementCompounds {
+    No,
+    Yes,
+};
+
 // If the leading compounds (everything except the rightmost) of `compound_selectors` produce a usable invalidation
 // set, return an anchor rule built from them.
-static Optional<AnchorInvalidationRule> try_build_anchor_for_leading_compounds(Vector<Selector::CompoundSelector> const& compound_selectors, StyleInvalidationData& throwaway_data, GC::Ptr<CSSStyleSheet const> style_sheet_for_rule)
+static Optional<AnchorInvalidationRule> try_build_anchor_for_leading_compounds(Vector<Selector::CompoundSelector> const& compound_selectors, StyleInvalidationData& throwaway_data, GC::Ptr<CSSStyleSheet const> style_sheet_for_rule, AllowSkippingUntargetablePseudoElementCompounds allow_skipping_untargetable_pseudo_element_compounds = AllowSkippingUntargetablePseudoElementCompounds::No)
 {
     if (compound_selectors.size() < 2)
         return {};
 
-    Vector<Selector::CompoundSelector> anchor_compound_selectors;
-    anchor_compound_selectors.ensure_capacity(compound_selectors.size() - 1);
-    for (size_t i = 0; i < compound_selectors.size() - 1; ++i)
-        anchor_compound_selectors.append(compound_selectors[i]);
+    auto anchor_compound_count = compound_selectors.size() - 1;
+    while (anchor_compound_count > 0) {
+        auto const& rightmost_anchor = compound_selectors[anchor_compound_count - 1];
 
-    auto const& rightmost_anchor = anchor_compound_selectors.last();
-    InvalidationSet anchor_set;
-    for (auto const& simple : rightmost_anchor.simple_selectors)
-        build_invalidation_sets_for_simple_selector(simple, anchor_set, ExcludePropertiesNestedInNotPseudoClass::No, throwaway_data, InsideNthChildPseudoClass::No);
-    if (!anchor_set.has_properties())
-        return {};
+        InvalidationSet anchor_set;
+        for (auto const& simple : rightmost_anchor.simple_selectors)
+            build_invalidation_sets_for_simple_selector(simple, anchor_set, ExcludePropertiesNestedInNotPseudoClass::No, throwaway_data, InsideNthChildPseudoClass::No);
 
-    RefPtr<Selector> anchor_selector;
-    if (anchor_compound_selectors.size() > 1)
-        anchor_selector = Selector::create(move(anchor_compound_selectors));
+        if (anchor_set.has_properties()) {
+            Vector<Selector::CompoundSelector> anchor_compound_selectors;
+            anchor_compound_selectors.ensure_capacity(anchor_compound_count);
+            for (size_t i = 0; i < anchor_compound_count; ++i)
+                anchor_compound_selectors.append(compound_selectors[i]);
 
-    return AnchorInvalidationRule { move(anchor_set), move(anchor_selector), style_sheet_for_rule };
+            RefPtr<Selector> anchor_selector;
+            if (anchor_compound_selectors.size() > 1)
+                anchor_selector = Selector::create(move(anchor_compound_selectors));
+
+            return AnchorInvalidationRule { move(anchor_set), move(anchor_selector), style_sheet_for_rule };
+        }
+
+        if (allow_skipping_untargetable_pseudo_element_compounds == AllowSkippingUntargetablePseudoElementCompounds::No
+            || !is_pseudo_element_targeting_compound(rightmost_anchor)) {
+            return {};
+        }
+
+        --anchor_compound_count;
+    }
+
+    return {};
 }
 
-void extend_style_sheet_invalidation_set_with_style_rule(StyleSheetInvalidationSet& result, CSSStyleRule const& style_rule)
+static void extend_style_sheet_invalidation_set_with_selectors(StyleSheetInvalidationSet& result, SelectorList const& selectors, GC::Ptr<CSSStyleSheet const> style_sheet_for_rule)
 {
-    auto* style_sheet_for_rule = const_cast<CSSStyleRule&>(style_rule).parent_style_sheet();
-
     StyleInvalidationData throwaway_data;
 
-    for (auto const& selector : style_rule.absolutized_selectors()) {
+    for (auto const& selector : selectors) {
         result.may_match_light_dom_under_shadow_host |= selector_may_match_light_dom_under_shadow_host(*selector);
+        result.may_match_light_dom_outside_shadow_host |= selector_may_match_light_dom_outside_shadow_host(*selector);
         result.may_match_shadow_host |= selector->contains_pseudo_class(PseudoClass::Host);
 
         auto const& compound_selectors = selector->compound_selectors();
@@ -144,10 +251,45 @@ void extend_style_sheet_invalidation_set_with_style_rule(StyleSheetInvalidationS
             continue;
         }
 
+        // OPTIMIZATION: When the rightmost compound has no class/tag/id/attr feature but does have a
+        //               structural-position pseudo-class (:first-child, :last-child, or :only-child)
+        //               as its only "feature", we can target the boundary children instead of falling
+        //               back to a whole-subtree invalidation. We restrict this to the case with no
+        //               other targetable feature so that selectors like `.foo:first-child` keep
+        //               matching only `.foo` elements rather than every first-child in the document.
+        bool rightmost_has_only_structural_pseudo = false;
+        for (auto const& simple : rightmost.simple_selectors) {
+            if (simple.type != Selector::SimpleSelector::Type::PseudoClass)
+                continue;
+            auto pseudo_class_type = simple.pseudo_class().type;
+            if (pseudo_class_type == PseudoClass::FirstChild
+                || pseudo_class_type == PseudoClass::LastChild
+                || pseudo_class_type == PseudoClass::OnlyChild) {
+                rightmost_has_only_structural_pseudo = true;
+                break;
+            }
+        }
+        if (rightmost_has_only_structural_pseudo) {
+            for (auto const& simple : rightmost.simple_selectors) {
+                if (simple.type != Selector::SimpleSelector::Type::PseudoClass)
+                    continue;
+                auto pseudo_class_type = simple.pseudo_class().type;
+                if (pseudo_class_type == PseudoClass::FirstChild
+                    || pseudo_class_type == PseudoClass::LastChild
+                    || pseudo_class_type == PseudoClass::OnlyChild) {
+                    result.invalidation_set.set_needs_invalidate_pseudo_class(pseudo_class_type);
+                }
+            }
+            continue;
+        }
+
         // The rightmost compound has no targetable properties on its own, but we can still avoid a whole-subtree
         // invalidation if the leading compounds carry an anchor invalidation set that we can match against.
-        if (is_pseudo_element_only_compound(rightmost)) {
-            if (auto anchor = try_build_anchor_for_leading_compounds(compound_selectors, throwaway_data, style_sheet_for_rule); anchor.has_value()) {
+        if (is_pseudo_element_targeting_compound(rightmost)) {
+            // Pseudo-element normalization can leave untargetable pseudo-element-transition compounds before the
+            // final pseudo-element, e.g. `x-host::part(foo):dir(rtl)::before`. Anchor those rules on the nearest
+            // targetable leading compound instead of broadening to the whole subtree.
+            if (auto anchor = try_build_anchor_for_leading_compounds(compound_selectors, throwaway_data, style_sheet_for_rule, AllowSkippingUntargetablePseudoElementCompounds::Yes); anchor.has_value()) {
                 result.pseudo_element_rules.append({
                     .anchor_set = move(anchor->anchor_set),
                     .anchor_selector = move(anchor->anchor_selector),
@@ -172,6 +314,29 @@ void extend_style_sheet_invalidation_set_with_style_rule(StyleSheetInvalidationS
         result.invalidation_set.set_needs_invalidate_whole_subtree();
         return;
     }
+}
+
+void extend_style_sheet_invalidation_set_with_style_rule(StyleSheetInvalidationSet& result, CSSStyleRule const& style_rule)
+{
+    auto* style_sheet_for_rule = const_cast<CSSStyleRule&>(style_rule).parent_style_sheet();
+    extend_style_sheet_invalidation_set_with_selectors(result, style_rule.absolutized_selectors(), style_sheet_for_rule);
+}
+
+void extend_style_sheet_invalidation_set_with_rule(StyleSheetInvalidationSet& result, CSSRule const& rule)
+{
+    if (auto const* style_rule = as_if<CSSStyleRule>(rule)) {
+        extend_style_sheet_invalidation_set_with_style_rule(result, *style_rule);
+        return;
+    }
+
+    if (auto const* nested_declarations = as_if<CSSNestedDeclarations>(rule)) {
+        auto* style_sheet_for_rule = const_cast<CSSNestedDeclarations&>(*nested_declarations).parent_style_sheet();
+        extend_style_sheet_invalidation_set_with_selectors(result, nested_declarations->absolutized_selectors(), style_sheet_for_rule);
+        return;
+    }
+
+    if (rule_requires_broad_add_or_remove_invalidation(rule))
+        result.invalidation_set.set_needs_invalidate_whole_subtree();
 }
 
 static GC::Ptr<DOM::Element const> shadow_host_for_targeted_shadow_root_invalidation(DOM::Node const& root)
@@ -235,6 +400,8 @@ static void apply_trailing_universal_combinator(Selector::Combinator combinator,
         }
         break;
     case Selector::Combinator::None:
+        break;
+    case Selector::Combinator::PseudoElement:
         break;
     }
 }
@@ -316,13 +483,14 @@ void invalidate_root_for_style_sheet_change(DOM::Node& root, StyleSheetInvalidat
 
             if (auto* host = shadow_root->host()) {
                 // Broad shadow-root mutations are only allowed to escape the shadow tree when the stylesheet can
-                // actually reach host-side nodes. A layer-order-only change, for example, still needs a full restyle
-                // inside the shadow tree, but it should not turn into a document-wide invalidation for unrelated
-                // light-DOM.
-                if (result.may_match_light_dom_under_shadow_host && !result.may_match_shadow_host) {
-                    host->invalidate_style(reason);
-                } else if (result.may_match_light_dom_under_shadow_host) {
+                // actually reach host-side nodes. Keep host-contained escapes bounded to the host subtree; a
+                // layer-order-only change, for example, still needs a full restyle inside the shadow tree, but it
+                // should not turn into a document-wide invalidation for unrelated light-DOM. Selectors with
+                // host-side sibling reach still need a root-side invalidation.
+                if (result.may_match_light_dom_outside_shadow_host) {
                     host->root().invalidate_style(reason);
+                } else if (result.may_match_light_dom_under_shadow_host) {
+                    host->invalidate_style(reason);
                 } else if (result.may_match_shadow_host) {
                     host->invalidate_style(reason);
                     shadow_root->set_needs_style_update(true);
@@ -340,16 +508,13 @@ void invalidate_root_for_style_sheet_change(DOM::Node& root, StyleSheetInvalidat
         invalidate_assigned_elements_for_dirty_slots(*shadow_root);
 
         if (auto* host = shadow_root->host()) {
-            // Slotted selectors never match the host itself, so a targeted ::slotted(...) invalidation only needs to
-            // walk the current host's light-DOM subtree. We can identify that case because it reaches host-side nodes
-            // without ever setting may_match_shadow_host.
-            //
-            // :host combinators are different: they can escape to siblings or other nodes rooted alongside the host,
+            // Slotted and host-contained :host selectors only need to walk the current host's light-DOM subtree.
+            // :host selectors with sibling combinators can escape to siblings or other nodes rooted alongside the host,
             // so they still need the broader host-root walk below.
-            if (result.may_match_light_dom_under_shadow_host && !result.may_match_shadow_host) {
-                invalidate_elements_matching_invalidation_set_and_anchor_rules(*host, result, host, shadow_root);
-            } else if (result.may_match_light_dom_under_shadow_host) {
+            if (result.may_match_light_dom_outside_shadow_host) {
                 invalidate_elements_matching_invalidation_set_and_anchor_rules(host->root(), result, host, shadow_root);
+            } else if (result.may_match_light_dom_under_shadow_host) {
+                invalidate_elements_matching_invalidation_set_and_anchor_rules(*host, result, host, shadow_root);
             } else if (result.may_match_shadow_host) {
                 bool host_or_shadow_tree_needs_style_update = false;
                 if (Invalidation::element_matches_any_invalidation_set_property(*host, invalidation_set))
@@ -378,6 +543,100 @@ void invalidate_root_for_style_sheet_change(DOM::Node& root, StyleSheetInvalidat
             }
         }
     }
+}
+
+void add_shadow_root_stylesheet_effects_for_broad_invalidation(DOM::Node& root, StyleSheetInvalidationSet& result, bool requires_broad_invalidation)
+{
+    if (!requires_broad_invalidation)
+        return;
+
+    auto* shadow_root = as_if<DOM::ShadowRoot>(root);
+    if (!shadow_root)
+        return;
+
+    auto effects = determine_shadow_root_stylesheet_effects(*shadow_root);
+    result.may_match_shadow_host |= effects.may_match_shadow_host;
+    result.may_match_light_dom_under_shadow_host |= effects.may_match_light_dom_under_shadow_host;
+    result.may_match_light_dom_outside_shadow_host |= effects.may_match_light_dom_outside_shadow_host;
+}
+
+static bool rule_requires_broad_add_or_remove_invalidation(CSSRule const& rule)
+{
+    if (auto const* import_rule = as_if<CSSImportRule>(rule))
+        return import_rule->layer_name().has_value() || import_rule->has_scope();
+
+    switch (rule.type()) {
+    case CSSRule::Type::Property:
+    case CSSRule::Type::CounterStyle:
+    case CSSRule::Type::LayerBlock:
+    case CSSRule::Type::LayerStatement:
+    // @font-feature-values changes how font-variant-alternates resolves at computed-style time, so
+    // a declaration-time mutation still requires a whole-subtree restyle.
+    case CSSRule::Type::FontFeatureValues:
+        return true;
+    // OPTIMIZATION: @font-face declares a resource whose effect on computed style is deferred until
+    //               the font actually loads (handled by CSSFontLoaded). Adding or removing the
+    //               at-rule itself doesn't change any element's computed style.
+    case CSSRule::Type::FontFace:
+    // OPTIMIZATION: @keyframes rules only matter for elements that already reference the named
+    //               animation. Sheet add/remove handles each contained @keyframes rule with a
+    //               targeted invalidation (see invalidate_root_for_keyframes_rules_in_sheet)
+    //               instead of forcing a whole-subtree restyle here.
+    case CSSRule::Type::Keyframes:
+    default:
+        break;
+    }
+
+    return false;
+}
+
+void invalidate_style_for_stylesheet_change(DOM::Node& document_or_shadow_root, CSSStyleSheet const& sheet, DOM::StyleInvalidationReason reason)
+{
+    if (sheet.rules().length() == 0) {
+        // NOTE: If the added sheet has no rules, we don't have to invalidate anything.
+        return;
+    }
+
+    if (auto* shadow_root = as_if<DOM::ShadowRoot>(document_or_shadow_root)) {
+        shadow_root->style_scope().invalidate_rule_cache();
+    } else {
+        document_or_shadow_root.document().style_scope().invalidate_rule_cache();
+    }
+
+    if (!document_or_shadow_root.is_shadow_root() && document_or_shadow_root.entire_subtree_needs_style_update()) {
+        // NOTE: If the entire subtree is already marked for style update,
+        //       there's no point spending time building invalidation sets.
+        //       Shadow roots are special: :host(...) and ::slotted(...) can
+        //       still require follow-up invalidation outside that subtree.
+        return;
+    }
+
+    // OPTIMIZATION: Build the targeted invalidation set and check for broad-invalidation-triggering rule kinds in
+    //               a single walk over the sheet's effective rules, so the sheet's @media gates evaluate once and
+    //               every rule is visited once instead of twice.
+    StyleSheetInvalidationSet invalidation_set_result;
+    bool sheet_contains_broad_invalidation_rule = false;
+    sheet.for_each_effective_rule(TraversalOrder::Preorder, [&](CSSRule const& rule) {
+        // Add/remove invalidation still has to look at effective non-style rules such as @keyframes or @layer, but
+        // inactive top-level media sheets should contribute nothing at all here.
+        if (!sheet_contains_broad_invalidation_rule && rule_requires_broad_add_or_remove_invalidation(rule))
+            sheet_contains_broad_invalidation_rule = true;
+        if (invalidation_set_result.invalidation_set.needs_invalidate_whole_subtree())
+            return;
+        if (auto const* style_rule = as_if<CSSStyleRule>(rule))
+            extend_style_sheet_invalidation_set_with_style_rule(invalidation_set_result, *style_rule);
+    });
+
+    bool requires_broad_invalidation = invalidation_set_result.invalidation_set.needs_invalidate_whole_subtree()
+        || sheet_contains_broad_invalidation_rule;
+    add_shadow_root_stylesheet_effects_for_broad_invalidation(document_or_shadow_root, invalidation_set_result, requires_broad_invalidation);
+
+    invalidate_root_for_style_sheet_change(document_or_shadow_root, invalidation_set_result, reason, requires_broad_invalidation);
+
+    // OPTIMIZATION: Walk @keyframes rules in the new sheet and dirty only the elements that already
+    //               reference each animation-name, so a sheet add carrying @keyframes does not have
+    //               to escalate to a whole-subtree restyle.
+    invalidate_root_for_keyframes_rules_in_sheet(document_or_shadow_root, sheet);
 }
 
 void invalidate_owners_for_inserted_style_rule(CSSStyleSheet const& style_sheet, CSSStyleRule const& style_rule, DOM::StyleInvalidationReason reason)
@@ -448,13 +707,16 @@ static bool element_or_pseudo_references_animation_name(DOM::Element const& elem
     if (auto computed_properties = element.computed_properties(); computed_properties && references_animation_name_in_properties(*computed_properties))
         return true;
 
-    for (u8 i = 0; i < to_underlying(CSS::PseudoElement::KnownPseudoElementCount); ++i) {
-        auto pseudo_element = static_cast<CSS::PseudoElement>(i);
-        if (auto computed_properties = element.computed_properties(pseudo_element); computed_properties && references_animation_name_in_properties(*computed_properties))
-            return true;
-    }
+    bool synthetic_pseudo_element_references_animation_name = false;
+    element.for_each_synthetic_pseudo_element([&](Web::CSS::PseudoElement, Web::DOM::SyntheticPseudoElement const& pseudo_element) {
+        if (auto computed_properties = pseudo_element.computed_properties(); computed_properties && references_animation_name_in_properties(*computed_properties)) {
+            synthetic_pseudo_element_references_animation_name = true;
+            return IterationDecision::Break;
+        }
+        return IterationDecision::Continue;
+    });
 
-    return false;
+    return synthetic_pseudo_element_references_animation_name;
 }
 
 static void invalidate_elements_affected_by_inserted_keyframes_rule(DOM::Node& root, FlyString const& animation_name)
@@ -510,7 +772,7 @@ static ShadowRootStylesheetEffects determine_shadow_root_stylesheet_effects_for_
     };
 
     style_sheet.for_each_effective_style_producing_rule([&](CSSRule const& rule) {
-        if (effects.may_match_shadow_host && effects.may_match_light_dom_under_shadow_host && effects.may_affect_assigned_nodes_via_slots)
+        if (effects.all_set())
             return;
 
         if (!is<CSSStyleRule>(rule))
@@ -520,11 +782,12 @@ static ShadowRootStylesheetEffects determine_shadow_root_stylesheet_effects_for_
         for (auto const& selector : style_rule.absolutized_selectors()) {
             effects.may_match_shadow_host |= selector->contains_pseudo_class(PseudoClass::Host);
             effects.may_match_light_dom_under_shadow_host |= selector_may_match_light_dom_under_shadow_host(*selector);
+            effects.may_match_light_dom_outside_shadow_host |= selector_may_match_light_dom_outside_shadow_host(*selector);
 
             if (!effects.may_affect_assigned_nodes_via_slots && !slots.is_empty())
                 effects.may_affect_assigned_nodes_via_slots = selector_may_affect_assigned_nodes_via_slot_inheritance(*selector);
 
-            if (effects.may_match_shadow_host && effects.may_match_light_dom_under_shadow_host && effects.may_affect_assigned_nodes_via_slots)
+            if (effects.all_set())
                 return;
         }
     });
@@ -540,6 +803,7 @@ ShadowRootStylesheetEffects determine_shadow_root_stylesheet_effects(DOM::Shadow
         auto sheet_effects = determine_shadow_root_stylesheet_effects_for_sheet(style_sheet, shadow_root);
         effects.may_match_shadow_host |= sheet_effects.may_match_shadow_host;
         effects.may_match_light_dom_under_shadow_host |= sheet_effects.may_match_light_dom_under_shadow_host;
+        effects.may_match_light_dom_outside_shadow_host |= sheet_effects.may_match_light_dom_outside_shadow_host;
         effects.may_affect_assigned_nodes_via_slots |= sheet_effects.may_affect_assigned_nodes_via_slots;
     });
 
@@ -558,9 +822,10 @@ ShadowRootStylesheetEffects determine_shadow_root_stylesheet_effects(CSSStyleShe
         auto sheet_effects = determine_shadow_root_stylesheet_effects_for_sheet(style_sheet, *shadow_root);
         effects.may_match_shadow_host |= sheet_effects.may_match_shadow_host;
         effects.may_match_light_dom_under_shadow_host |= sheet_effects.may_match_light_dom_under_shadow_host;
+        effects.may_match_light_dom_outside_shadow_host |= sheet_effects.may_match_light_dom_outside_shadow_host;
         effects.may_affect_assigned_nodes_via_slots |= sheet_effects.may_affect_assigned_nodes_via_slots;
 
-        if (effects.may_match_shadow_host && effects.may_match_light_dom_under_shadow_host && effects.may_affect_assigned_nodes_via_slots)
+        if (effects.all_set())
             break;
     }
 
@@ -573,10 +838,10 @@ static bool invalidate_shadow_host_side_for_style_sheet_change(DOM::ShadowRoot& 
     if (!host)
         return false;
 
-    if (effects.may_match_light_dom_under_shadow_host && !effects.may_match_shadow_host) {
-        host->invalidate_style(reason);
-    } else if (effects.may_match_light_dom_under_shadow_host) {
+    if (effects.may_match_light_dom_outside_shadow_host) {
         host->root().invalidate_style(reason);
+    } else if (effects.may_match_light_dom_under_shadow_host) {
+        host->invalidate_style(reason);
     } else if (effects.may_affect_assigned_nodes_via_slots) {
         host->invalidate_style(reason);
     } else if (effects.may_match_shadow_host) {
@@ -609,6 +874,38 @@ void invalidate_style_for_style_sheet_owners(CSSStyleSheet const& style_sheet, D
     });
 }
 
+void invalidate_root_for_keyframes_rule(DOM::Node& root, FlyString const& animation_name)
+{
+    // Shadow-scoped keyframes can still affect elements outside the shadow subtree when an active rule in the same
+    // scope sets `animation-name` via :host or ::slotted(...). Mirror the fan-out used by the per-rule helper so the
+    // walk reaches the host (and host-side light DOM) when the shadow scope can match those elements.
+    bool include_host = false;
+    bool include_light_dom_under_shadow_host = false;
+    if (auto* shadow_root = as_if<DOM::ShadowRoot>(root)) {
+        auto effects = determine_shadow_root_stylesheet_effects(*shadow_root);
+        include_host = effects.may_match_shadow_host;
+        include_light_dom_under_shadow_host = effects.may_match_light_dom_under_shadow_host;
+    }
+
+    for_each_tree_affected_by_shadow_root_stylesheet_change(
+        root,
+        include_host,
+        include_light_dom_under_shadow_host,
+        [&](DOM::Node& affected_root) {
+            invalidate_elements_affected_by_inserted_keyframes_rule(affected_root, animation_name);
+        });
+}
+
+void invalidate_root_for_keyframes_rules_in_sheet(DOM::Node& root, CSSStyleSheet const& sheet)
+{
+    sheet.for_each_effective_rule(TraversalOrder::Preorder, [&](CSSRule const& rule) {
+        auto const* keyframes_rule = as_if<CSSKeyframesRule>(rule);
+        if (!keyframes_rule)
+            return;
+        invalidate_root_for_keyframes_rule(root, keyframes_rule->name());
+    });
+}
+
 void invalidate_owners_for_inserted_keyframes_rule(CSSStyleSheet const& style_sheet, CSSKeyframesRule const& keyframes_rule)
 {
     for (auto& document_or_shadow_root : style_sheet.owning_documents_or_shadow_roots()) {
@@ -620,21 +917,7 @@ void invalidate_owners_for_inserted_keyframes_rule(CSSStyleSheet const& style_sh
         if (!document_or_shadow_root->is_shadow_root() && document_or_shadow_root->entire_subtree_needs_style_update())
             continue;
 
-        bool include_host = false;
-        bool include_light_dom_under_shadow_host = false;
-        if (auto* shadow_root = as_if<DOM::ShadowRoot>(*document_or_shadow_root)) {
-            auto effects = determine_shadow_root_stylesheet_effects(*shadow_root);
-            include_host = effects.may_match_shadow_host;
-            include_light_dom_under_shadow_host = effects.may_match_light_dom_under_shadow_host;
-        }
-
-        for_each_tree_affected_by_shadow_root_stylesheet_change(
-            *document_or_shadow_root,
-            include_host,
-            include_light_dom_under_shadow_host,
-            [&](DOM::Node& affected_root) {
-                invalidate_elements_affected_by_inserted_keyframes_rule(affected_root, keyframes_rule.name());
-            });
+        invalidate_root_for_keyframes_rule(*document_or_shadow_root, keyframes_rule.name());
     }
 }
 

@@ -7,6 +7,7 @@
 #pragma once
 
 #include <AK/Utf16View.h>
+#include <AK/WeakPtr.h>
 #include <LibGfx/TextLayout.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/Layout/Node.h>
@@ -15,27 +16,41 @@
 
 namespace Web::Painting {
 
+struct LineBoxData {
+    size_t index { 0 };
+    CSSPixelRect rect;
+};
+
 class WEB_API PaintableFragment {
     friend class PaintableWithLines;
 
 public:
-    explicit PaintableFragment(Layout::LineBoxFragment const&);
+    PaintableFragment(Layout::LineBoxFragment const&, LineBoxData);
 
-    Layout::Node const& layout_node() const { return m_layout_node; }
-    Paintable const& paintable() const { return *m_layout_node->first_paintable(); }
+    Layout::Node const& layout_node() const
+    {
+        VERIFY(m_layout_node);
+        return *m_layout_node;
+    }
+    Paintable const& paintable() const { return *layout_node().first_paintable(); }
 
     size_t start_offset() const { return m_start_offset; }
     size_t length_in_code_units() const { return m_length_in_code_units; }
+
+    size_t dom_start_offset_in_node() const { return m_dom_start_offset_in_node; }
+    size_t dom_end_offset_in_node() const { return m_dom_start_offset_in_node + m_length_in_code_units; }
 
     CSSPixels baseline() const { return m_baseline; }
     CSSPixelPoint offset() const { return m_offset; }
     void set_offset(CSSPixelPoint offset) { m_offset = offset; }
     CSSPixelSize size() const { return m_size; }
+    LineBoxData const& line_box_data() const { return m_line_box_data; }
 
     Vector<ShadowData> const& shadows() const { return m_shadows; }
     void set_shadows(Vector<ShadowData>&& shadows) { m_shadows = shadows; }
 
     CSSPixelRect const absolute_rect() const;
+    CSSPixelRect const absolute_line_box_rect() const;
 
     RefPtr<Gfx::GlyphRun> glyph_run() const { return m_glyph_run; }
     Gfx::Orientation orientation() const;
@@ -82,11 +97,13 @@ public:
 private:
     Optional<SelectionOffsets> compute_selection_offsets(Paintable::SelectionState, size_t start_offset_in_code_units, size_t end_offset_in_code_units) const;
 
-    GC::Ref<Layout::Node const> m_layout_node;
+    WeakPtr<Layout::Node const> m_layout_node;
     CSSPixelPoint m_offset;
     CSSPixelSize m_size;
+    LineBoxData m_line_box_data;
     size_t m_start_offset { 0 };
     size_t m_length_in_code_units { 0 };
+    size_t m_dom_start_offset_in_node { 0 };
     RefPtr<Gfx::GlyphRun> m_glyph_run;
     Vector<ShadowData> m_shadows;
     CSSPixels m_baseline;

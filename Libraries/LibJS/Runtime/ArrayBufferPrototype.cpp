@@ -154,7 +154,7 @@ JS_DEFINE_NATIVE_FUNCTION(ArrayBufferPrototype::resize)
         return js_undefined();
 
     // 9. Let oldBlock be O.[[ArrayBufferData]].
-    auto const& old_block = array_buffer_object->buffer();
+    // NOTE: oldBlock is read directly in step 12.
 
     // 10. Let newBlock be ? CreateByteDataBlock(newByteLength).
     auto new_block = TRY(create_byte_data_block(vm, new_byte_length));
@@ -163,7 +163,9 @@ JS_DEFINE_NATIVE_FUNCTION(ArrayBufferPrototype::resize)
     auto copy_length = min(new_byte_length, array_buffer_object->byte_length());
 
     // 12. Perform CopyDataBlockBytes(newBlock, 0, oldBlock, 0, copyLength).
-    copy_data_block_bytes(new_block.buffer(), 0, old_block, 0, copy_length);
+    auto new_block_bytes = new_block.bytes();
+    auto old_block_bytes = array_buffer_object->bytes();
+    copy_data_block_bytes(new_block_bytes, 0, old_block_bytes, 0, copy_length);
 
     // 13. NOTE: Neither creation of the new Data Block nor copying from the old Data Block are observable. Implementations may implement this method as in-place growth or shrinkage.
 
@@ -264,10 +266,8 @@ JS_DEFINE_NATIVE_FUNCTION(ArrayBufferPrototype::slice)
         return vm.throw_completion<TypeError>(ErrorType::DetachedArrayBuffer);
 
     // 24. Let fromBuf be O.[[ArrayBufferData]].
-    auto& from_buf = array_buffer_object->buffer();
-
     // 25. Let toBuf be new.[[ArrayBufferData]].
-    auto& to_buf = new_array_buffer_object->buffer();
+    // NOTE: fromBuf and toBuf are read directly in step 27b.
 
     // 26. Let currentLen be O.[[ArrayBufferByteLength]].
     auto current_length = array_buffer_object->byte_length();
@@ -276,6 +276,12 @@ JS_DEFINE_NATIVE_FUNCTION(ArrayBufferPrototype::slice)
     if (first < current_length) {
         // a. Let count be min(newLen, currentLen - first).
         auto count = min(new_length, current_length - first);
+
+        // Let fromBuf be O.[[ArrayBufferData]].
+        auto from_buf = array_buffer_object->bytes();
+
+        // Let toBuf be new.[[ArrayBufferData]].
+        auto to_buf = new_array_buffer_object->bytes();
 
         // b. Perform CopyDataBlockBytes(toBuf, 0, fromBuf, first, count).
         copy_data_block_bytes(to_buf, 0, from_buf, first, count);

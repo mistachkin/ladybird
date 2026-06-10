@@ -16,11 +16,22 @@
 
 #ifdef AK_OS_WINDOWS
 #    include <AK/Windows.h>
-#    define localtime_r(time, tm) localtime_s(tm, time)
-#    define gmtime_r(time, tm) gmtime_s(tm, time)
 #    define tzname _tzname
 #    define timegm _mkgmtime
 #endif
+
+static bool fill_tm(time_t& timestamp, struct tm& tm, UnixDateTime::LocalTime& local_time)
+{
+#ifdef AK_OS_WINDOWS
+    if (local_time == UnixDateTime::LocalTime::Yes)
+        return localtime_s(&tm, &timestamp) == 0;
+    return gmtime_s(&tm, &timestamp) == 0;
+#else
+    if (local_time == UnixDateTime::LocalTime::Yes)
+        return localtime_r(&timestamp, &tm) != nullptr;
+    return gmtime_r(&timestamp, &tm) != nullptr;
+#endif
+}
 
 namespace AK {
 
@@ -89,6 +100,45 @@ Duration Duration::from_time_units(i64 time_units, u32 numerator, u32 denominato
     if (nanoseconds == 1'000'000'000) {
         seconds++;
         nanoseconds = 0;
+    }
+    VERIFY(nanoseconds >= 0);
+    VERIFY(nanoseconds < 1'000'000'000);
+    return Duration(seconds, static_cast<u32>(nanoseconds));
+}
+
+Duration Duration::scaled_by(u32 numerator, u32 denominator) const
+{
+    VERIFY(denominator != 0);
+
+    if (numerator == 0)
+        return Duration::zero();
+    if (numerator == denominator)
+        return *this;
+
+    if (Checked<i64>::multiplication_would_overflow(m_seconds, numerator))
+        return Duration(m_seconds < 0 ? NumericLimits<i64>::min() : NumericLimits<i64>::max(), 0);
+    auto seconds_product = m_seconds * static_cast<i64>(numerator);
+    auto seconds = seconds_product / static_cast<i64>(denominator);
+    auto seconds_remainder = seconds_product % static_cast<i64>(denominator);
+    if (seconds_remainder < 0) {
+        if (seconds == NumericLimits<i64>::min())
+            return Duration(NumericLimits<i64>::min(), 0);
+        seconds--;
+        seconds_remainder += denominator;
+    }
+
+    auto numerator_ns = seconds_remainder * 1'000'000'000;
+    numerator_ns += m_nanoseconds * static_cast<i64>(numerator);
+    auto total_ns = (numerator_ns + denominator / 2) / static_cast<i64>(denominator);
+
+    auto extra_seconds = total_ns / 1'000'000'000;
+    auto nanoseconds = total_ns % 1'000'000'000;
+    if (extra_seconds > 0) {
+        Checked<i64> total_seconds = seconds;
+        total_seconds += extra_seconds;
+        if (total_seconds.has_overflow())
+            return Duration(NumericLimits<i64>::max(), 999'999'999);
+        seconds = total_seconds.value();
     }
     VERIFY(nanoseconds >= 0);
     VERIFY(nanoseconds < 1'000'000'000);
@@ -488,13 +538,11 @@ UnixDateTime UnixDateTime::now_coarse()
 
 ErrorOr<void> UnixDateTime::to_string_impl(StringBuilder& builder, StringView format, LocalTime local_time) const
 {
-    struct tm tm;
-
+    struct tm tm {};
     auto timestamp = m_offset.to_timespec().tv_sec;
-    if (local_time == LocalTime::Yes)
-        (void)localtime_r(&timestamp, &tm);
-    else
-        (void)gmtime_r(&timestamp, &tm);
+
+    if (!fill_tm(timestamp, tm, local_time))
+        VERIFY_NOT_REACHED();
 
     size_t const format_len = format.length();
 

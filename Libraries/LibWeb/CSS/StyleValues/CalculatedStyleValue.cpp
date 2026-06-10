@@ -216,7 +216,7 @@ static CalculationNode::NumericValue clamp_and_censor_numeric_value(NumericCalcu
 
 static GC::Ptr<CSSNumericArray> reify_children(JS::Realm& realm, ReadonlySpan<NonnullRefPtr<CalculationNode const>> children)
 {
-    GC::RootVector<GC::Ref<CSSNumericValue>> reified_children { realm.heap() };
+    GC::RootVector<GC::Ref<CSSNumericValue>> reified_children;
     for (auto const& child : children) {
         auto reified_child = child->reify(realm);
         if (!reified_child)
@@ -3193,6 +3193,11 @@ bool CalculatedStyleValue::contains_percentage() const
     return m_calculation->contains_percentage();
 }
 
+bool CalculatedStyleValue::is_fully_simplified() const
+{
+    return resolve_value({}).has_value();
+}
+
 String CalculatedStyleValue::dump() const
 {
     StringBuilder builder;
@@ -3201,7 +3206,7 @@ String CalculatedStyleValue::dump() const
 }
 
 // https://drafts.css-houdini.org/css-typed-om-1/#reify-a-math-expression
-GC::Ref<CSSStyleValue> CalculatedStyleValue::reify(JS::Realm& realm, FlyString const& associated_property) const
+GC::Ref<CSSStyleValue> CalculatedStyleValue::reify(JS::Realm& realm, Utf16FlyString const& associated_property) const
 {
     // NB: This spec algorithm isn't really implementable here - it's incomplete, and assumes we don't already have a
     //     calculation tree. So we have a per-node method instead.

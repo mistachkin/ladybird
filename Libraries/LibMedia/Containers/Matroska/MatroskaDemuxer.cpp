@@ -11,6 +11,7 @@
 #include <LibMedia/Containers/Matroska/Utilities.h>
 #include <LibMedia/DecoderError.h>
 #include <LibMedia/MediaStream.h>
+#include <LibMedia/SeekMode.h>
 
 #include "MatroskaDemuxer.h"
 
@@ -24,8 +25,10 @@ DecoderErrorOr<NonnullRefPtr<MatroskaDemuxer>> MatroskaDemuxer::from_stream(Nonn
 
 MatroskaDemuxer::MatroskaDemuxer(NonnullRefPtr<MediaStream> const& stream, Reader&& reader)
     : m_stream(stream)
+    , m_buffered_scan_cursor(stream->create_cursor())
     , m_reader(move(reader))
 {
+    m_buffered_scan_cursor->set_is_blocking(false);
 }
 
 MatroskaDemuxer::~MatroskaDemuxer() = default;
@@ -48,7 +51,7 @@ static TrackEntry::TrackType matroska_track_type_from_track_type(TrackType type)
 DecoderErrorOr<void> MatroskaDemuxer::create_context_for_track(Track const& track)
 {
     auto iterator = TRY(m_reader.create_sample_iterator(m_stream->create_cursor(), track.identifier()));
-    Threading::MutexLocker locker(m_track_statuses_mutex);
+    Sync::MutexLocker locker(m_track_statuses_mutex);
     VERIFY(m_track_statuses.set(track, TrackStatus(move(iterator))) == HashSetResult::InsertedNewEntry);
     return {};
 }
@@ -81,7 +84,7 @@ DecoderErrorOr<Optional<Track>> MatroskaDemuxer::get_preferred_track_for_type(Tr
 
 MatroskaDemuxer::TrackStatus& MatroskaDemuxer::get_track_status(Track const& track)
 {
-    Threading::MutexLocker locker(m_track_statuses_mutex);
+    Sync::MutexLocker locker(m_track_statuses_mutex);
     auto track_status = m_track_statuses.get(track);
     VERIFY(track_status.has_value());
     return track_status.release_value();
@@ -96,6 +99,25 @@ DecoderErrorOr<CodecID> MatroskaDemuxer::get_codec_id_for_track(Track const& tra
 DecoderErrorOr<ReadonlyBytes> MatroskaDemuxer::get_codec_initialization_data_for_track(Track const& track)
 {
     return TRY(m_reader.track_for_track_number(track.identifier()))->codec_private_data();
+}
+
+AK::Duration MatroskaDemuxer::select_fast_seek_target_for_track(Track const& track, AK::Duration target, SeekMode mode)
+{
+    auto cue_points = m_reader.cue_points_for_track(track.identifier());
+    if (!cue_points.has_value() || cue_points->is_empty())
+        return target;
+    auto const& points = cue_points.value();
+    auto at_or_before = Reader::find_cue_point_index_at_or_before(points, m_reader.duration(), target);
+
+    auto const& cue_at_or_before = points[at_or_before];
+    if (mode == SeekMode::FastBefore)
+        return cue_at_or_before.timestamp;
+
+    VERIFY(mode == SeekMode::FastAfter);
+    auto after_index = at_or_before + 1;
+    if (after_index >= points.size())
+        return target;
+    return points[after_index].timestamp;
 }
 
 DecoderErrorOr<DemuxerSeekResult> MatroskaDemuxer::seek_to_most_recent_keyframe(Track const& track, AK::Duration timestamp, DemuxerSeekOptions options)
@@ -157,12 +179,10 @@ DecoderErrorOr<AK::Duration> MatroskaDemuxer::total_duration()
 
 TimeRanges MatroskaDemuxer::buffered_time_ranges() const
 {
-    // FIXME: Scan the stream for buffered ranges.
-    TimeRanges ranges;
-    auto duration = m_reader.duration();
-    if (duration.has_value())
-        ranges.add_range(AK::Duration::zero(), duration.value());
-    return ranges;
+    auto byte_ranges = m_stream->available_byte_ranges();
+    if (byte_ranges.is_empty())
+        return {};
+    return m_reader.buffered_time_ranges(m_buffered_scan_cursor, byte_ranges);
 }
 
 DecoderErrorOr<AK::Duration> MatroskaDemuxer::duration_of_track(Track const&)

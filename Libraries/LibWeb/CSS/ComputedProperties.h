@@ -9,12 +9,11 @@
 
 #include <AK/HashMap.h>
 #include <AK/NonnullRefPtr.h>
-#include <LibGC/CellAllocator.h>
+#include <AK/RefCounted.h>
 #include <LibGC/Ptr.h>
 #include <LibGfx/Font/Font.h>
 #include <LibGfx/FontCascadeList.h>
 #include <LibGfx/Forward.h>
-#include <LibJS/Heap/Cell.h>
 #include <LibWeb/CSS/ComputedValues.h>
 #include <LibWeb/CSS/EasingFunction.h>
 #include <LibWeb/CSS/FontFeatureData.h>
@@ -40,14 +39,13 @@ enum class AnimatedPropertyResultOfTransition : u8 {
     Yes
 };
 
-class WEB_API ComputedProperties final : public JS::Cell {
-    GC_CELL(ComputedProperties, JS::Cell);
-    GC_DECLARE_ALLOCATOR(ComputedProperties);
-
+class WEB_API ComputedProperties final : public RefCounted<ComputedProperties> {
 public:
+    static NonnullRefPtr<ComputedProperties> create();
+
     static constexpr double normal_line_height_scale = 1.15;
 
-    virtual ~ComputedProperties() override;
+    ~ComputedProperties();
 
     template<typename Callback>
     inline void for_each_property(Callback callback) const
@@ -72,10 +70,14 @@ public:
     bool is_property_inherited(PropertyID property_id) const;
     bool is_animated_property_inherited(PropertyID property_id) const;
     bool is_animated_property_result_of_transition(PropertyID property_id) const;
+    bool depends_on_viewport_metrics() const { return m_depends_on_viewport_metrics; }
+    bool font_metrics_depend_on_viewport_metrics() const { return m_font_metrics_depend_on_viewport_metrics; }
     void set_property_important(PropertyID, Important);
     void set_property_inherited(PropertyID, Inherited);
     void set_animated_property_inherited(PropertyID, Inherited);
     void set_animated_property_result_of_transition(PropertyID, AnimatedPropertyResultOfTransition);
+    void set_depends_on_viewport_metrics() { m_depends_on_viewport_metrics = true; }
+    void set_font_metrics_depend_on_viewport_metrics() { m_font_metrics_depend_on_viewport_metrics = true; }
 
     void set_property(PropertyID, NonnullRefPtr<StyleValue const> value, Inherited = Inherited::No, Important = Important::No);
     void set_property_without_modifying_flags(PropertyID, NonnullRefPtr<StyleValue const> value);
@@ -105,6 +107,7 @@ public:
     CSSPixels text_underline_offset() const;
     TextUnderlinePosition text_underline_position() const;
     Vector<BackgroundLayerData> background_layers() const;
+    Vector<BackgroundLayerData> mask_layers() const;
     BackgroundBox background_color_clip() const;
     Length border_spacing_horizontal() const;
     Length border_spacing_vertical() const;
@@ -199,6 +202,7 @@ public:
     Isolation isolation() const;
     TouchActionData touch_action() const;
     Containment contain() const;
+    Vector<FlyString> container_name() const;
     ContainerType container_type() const;
     MixBlendMode mix_blend_mode() const;
     Optional<FlyString> view_transition_name() const;
@@ -233,7 +237,9 @@ public:
 
     MaskType mask_type() const;
     float stop_opacity() const;
+    Optional<SVGPaint> fill(ColorResolutionContext const&) const;
     float fill_opacity() const;
+    Optional<SVGPaint> stroke(ColorResolutionContext const&) const;
     Vector<Variant<LengthPercentage, float>> stroke_dasharray() const;
     StrokeLinecap stroke_linecap() const;
     StrokeLinejoin stroke_linejoin() const;
@@ -274,20 +280,14 @@ public:
 
     static NonnullRefPtr<Gfx::Font const> font_fallback(bool monospace, bool bold, float point_size);
 
-    bool has_attempted_match_against_pseudo_class(PseudoClass pseudo_class) const
-    {
-        return m_attempted_pseudo_class_matches.get(pseudo_class);
-    }
+    HashMap<PropertyID, NonnullRefPtr<StyleValue const>> const& inheritance_dependent_specified_values() const { return m_inheritance_dependent_specified_values; }
+    void add_inheritance_dependent_specified_value(PropertyID property_id, NonnullRefPtr<StyleValue const> value) { m_inheritance_dependent_specified_values.set(property_id, move(value)); }
 
-    void set_attempted_pseudo_class_matches(PseudoClassBitmap const& results)
-    {
-        m_attempted_pseudo_class_matches = results;
-    }
+    RefPtr<StyleValue const> raw_cascaded_font_size() const { return m_raw_cascaded_font_size; }
+    void set_raw_cascaded_font_size(NonnullRefPtr<StyleValue const> value) { m_raw_cascaded_font_size = move(value); }
 
 private:
     ComputedProperties();
-
-    virtual void visit_edges(Visitor&) override;
 
     Overflow overflow(PropertyID) const;
     Vector<ShadowData> shadow(PropertyID, Layout::Node const&) const;
@@ -302,6 +302,8 @@ private:
     HashMap<PropertyID, NonnullRefPtr<StyleValue const>> m_animated_property_values;
 
     Display m_display_before_box_type_transformation { InitialValues::display() };
+    bool m_depends_on_viewport_metrics { false };
+    bool m_font_metrics_depend_on_viewport_metrics { false };
 
     RefPtr<Gfx::FontCascadeList const> m_cached_computed_font_list;
     RefPtr<Gfx::Font const> m_cached_first_available_computed_font;
@@ -313,7 +315,8 @@ private:
 
     Optional<CSSPixels> m_line_height;
 
-    PseudoClassBitmap m_attempted_pseudo_class_matches;
+    HashMap<PropertyID, NonnullRefPtr<StyleValue const>> m_inheritance_dependent_specified_values;
+    RefPtr<StyleValue const> m_raw_cascaded_font_size;
 };
 
 }

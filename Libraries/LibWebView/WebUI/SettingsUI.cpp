@@ -5,6 +5,7 @@
  */
 
 #include <AK/JsonArray.h>
+#include <AK/Platform.h>
 #include <LibURL/Parser.h>
 #include <LibWebView/Application.h>
 #include <LibWebView/SearchEngine.h>
@@ -12,14 +13,52 @@
 
 namespace WebView {
 
+static StringView config_variable_type_to_string(JsonValue::Type type)
+{
+    switch (type) {
+    case JsonValue::Type::Null:
+        return "null"sv;
+    case JsonValue::Type::Bool:
+        return "boolean"sv;
+    case JsonValue::Type::Number:
+        return "number"sv;
+    case JsonValue::Type::String:
+        return "string"sv;
+    case JsonValue::Type::Array:
+        return "array"sv;
+    case JsonValue::Type::Object:
+        return "object"sv;
+    }
+
+    VERIFY_NOT_REACHED();
+}
+
+static bool should_show_config_variable([[maybe_unused]] ConfigVariableID id)
+{
+#if !defined(AK_OS_MACOS)
+    if (id == ConfigVariableID::UseRoundedWindowCorners)
+        return false;
+#endif
+    if (id == ConfigVariableID::UseServerSideWindowDecorations)
+        return Application::the().supports_server_side_window_decorations();
+
+    return true;
+}
+
 void SettingsUI::register_interfaces()
 {
+    register_interface("loadFeatures"sv, [this](auto const&) {
+        load_features();
+    });
     register_interface("loadCurrentSettings"sv, [this](auto const&) {
         load_current_settings();
     });
 
     register_interface("setNewTabPageURL"sv, [this](auto const& data) {
         set_new_tab_page_url(data);
+    });
+    register_interface("setTabSettings"sv, [this](auto const& data) {
+        set_tab_settings(data);
     });
     register_interface("setDefaultZoomLevelFactor"sv, [this](auto const& data) {
         set_default_zoom_level_factor(data);
@@ -29,6 +68,9 @@ void SettingsUI::register_interfaces()
     });
     register_interface("setBrowsingBehavior"sv, [this](auto const& data) {
         set_browsing_behavior(data);
+    });
+    register_interface("setConfigVariable"sv, [this](auto const& data) {
+        set_config_variable(data);
     });
 
     register_interface("loadAvailableEngines"sv, [this](auto const&) {
@@ -81,9 +123,40 @@ void SettingsUI::register_interfaces()
     });
 }
 
+void SettingsUI::load_features()
+{
+    auto& application = Application::the();
+
+    JsonObject features;
+    features.set("primaryPaste"_string, application.supports_clipboard_type(Application::ClipboardType::Selection));
+    features.set("verticalTabs"_string, application.supports_vertical_tabs());
+
+    async_send_message("loadFeatures"sv, move(features));
+}
+
 void SettingsUI::load_current_settings()
 {
     auto settings = WebView::Application::settings().serialize_json();
+
+    JsonArray config_variables;
+    for (auto const& variable : config_variable_definitions()) {
+        if (!should_show_config_variable(variable.id))
+            continue;
+
+        JsonObject variable_object;
+        variable_object.set("name"sv, variable.name);
+        variable_object.set("title"sv, variable.title);
+        variable_object.set("description"sv, variable.description);
+        variable_object.set("type"sv, config_variable_type_to_string(variable.default_value.type()));
+        if (variable.array_element_type.has_value())
+            variable_object.set("elementType"sv, config_variable_type_to_string(*variable.array_element_type));
+        variable_object.set("defaultValue"sv, variable.default_value);
+        variable_object.set("value"sv, WebView::Application::settings().config_variable(variable.id));
+
+        config_variables.must_append(move(variable_object));
+    }
+
+    settings.as_object().set("configVariableDefinitions"sv, move(config_variables));
     async_send_message("loadSettings"sv, settings);
 }
 
@@ -97,6 +170,20 @@ void SettingsUI::set_new_tab_page_url(JsonValue const& new_tab_page_url)
         return;
 
     WebView::Application::settings().set_new_tab_page_url(parsed_new_tab_page_url.release_value());
+}
+
+void SettingsUI::set_tab_settings(JsonValue const& tab_settings)
+{
+    auto& settings = WebView::Application::settings();
+    auto parsed_tab_settings = Settings::parse_tab_settings(tab_settings);
+    auto const& current_tab_settings = settings.tab_settings();
+
+    // Collapsed/expanded vertical tabs and their width are not controlled by the settings UI. Don't overwrite them.
+    parsed_tab_settings.vertical_tabs_expanded = current_tab_settings.vertical_tabs_expanded;
+    parsed_tab_settings.vertical_tabs_expanded_width = current_tab_settings.vertical_tabs_expanded_width;
+
+    settings.set_tab_settings(parsed_tab_settings);
+    load_current_settings();
 }
 
 void SettingsUI::set_default_zoom_level_factor(JsonValue const& default_zoom_level_factor)
@@ -120,6 +207,21 @@ void SettingsUI::set_browsing_behavior(JsonValue const& browsing_behavior)
 {
     auto parsed_browsing_behavior = Settings::parse_browsing_behavior(browsing_behavior);
     WebView::Application::settings().set_browsing_behavior(parsed_browsing_behavior);
+
+    load_current_settings();
+}
+
+void SettingsUI::set_config_variable(JsonValue const& variable)
+{
+    if (!variable.is_object())
+        return;
+
+    auto name = variable.as_object().get_string("name"sv);
+    auto value = variable.as_object().get("value"sv);
+    if (!name.has_value() || !value.has_value())
+        return;
+
+    WebView::Application::settings().set_config_variable(*name, *value);
 
     load_current_settings();
 }

@@ -16,15 +16,16 @@ class VideoBox final : public ReplacedBox {
     GC_DECLARE_ALLOCATOR(VideoBox);
 
 public:
+    VideoBox(DOM::Document&, DOM::Element&, CSS::ComputedProperties const&);
+
     HTML::HTMLVideoElement& dom_node();
     HTML::HTMLVideoElement const& dom_node() const;
 
     virtual bool can_have_children() const override;
 
-    virtual GC::Ptr<Painting::Paintable> create_paintable() const override;
+    virtual RefPtr<Painting::Paintable> create_paintable() const override;
 
 private:
-    VideoBox(DOM::Document&, DOM::Element&, GC::Ref<CSS::ComputedProperties>);
     virtual CSS::SizeWithAspectRatio natural_size() const override;
 };
 

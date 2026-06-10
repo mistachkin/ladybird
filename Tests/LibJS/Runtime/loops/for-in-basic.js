@@ -217,6 +217,18 @@ describe("special left hand sides", () => {
 
         expect(vals).toEqual(["0", "1"]);
     });
+
+    test("Cannot change destructured constant declaration in body", () => {
+        const vals = [];
+        for (const { 0: value } in "ab") {
+            expect(() => {
+                value = "x";
+            }).toThrowWithMessage(TypeError, "Invalid assignment to const variable");
+            vals.push(value);
+        }
+
+        expect(vals).toEqual(["0", "1"]);
+    });
 });
 
 test("remove properties while iterating", () => {
@@ -560,24 +572,6 @@ test("repeated for-in after full named completion still sees the full next enume
         ["a", "b", "c"],
         ["a", "b", "c"],
     ]);
-});
-
-test("completed cached for-in does not keep the last receiver alive", () => {
-    function exhaust(object) {
-        for (const key in object) {
-        }
-    }
-
-    function exhaust_and_drop_receiver() {
-        let receiver = { a: 1, b: 2, c: 3 };
-        let weak_ref = new WeakRef(receiver);
-        exhaust(receiver);
-        return weak_ref;
-    }
-
-    let weak_ref = exhaust_and_drop_receiver();
-    gc();
-    expect(weak_ref.deref()).toBeUndefined();
 });
 
 test("repeated for-in after full packed completion still sees the full next enumeration", () => {

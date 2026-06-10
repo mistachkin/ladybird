@@ -64,7 +64,7 @@ class WEB_API HTMLInputElement final
 public:
     virtual ~HTMLInputElement() override;
 
-    virtual GC::Ptr<Layout::Node> create_layout_node(GC::Ref<CSS::ComputedProperties>) override;
+    virtual RefPtr<Layout::Node> create_layout_node(CSS::ComputedProperties const&) override;
     virtual void adjust_computed_style(CSS::ComputedProperties&) override;
     virtual void set_being_activated(bool) override;
 
@@ -86,8 +86,8 @@ public:
     WebIDL::ExceptionOr<void> set_value(Utf16String const&);
 
     // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#concept-textarea/input-relevant-value
-    virtual Utf16String relevant_value() const override { return value(); }
-    WebIDL::ExceptionOr<void> set_relevant_value(Utf16String const& value) override { return set_value(value); }
+    virtual Utf16String relevant_value() const override;
+    WebIDL::ExceptionOr<void> set_relevant_value(Utf16String const& value) override;
     virtual Optional<Utf16String> selected_text_for_stringifier() const override;
 
     virtual void set_dirty_value_flag(bool flag) override { m_dirty_value = flag; }
@@ -153,7 +153,7 @@ public:
     SelectedCoordinate selected_coordinate() const { return m_selected_coordinate; }
 
     JS::Object* value_as_date() const;
-    WebIDL::ExceptionOr<void> set_value_as_date(Optional<GC::Root<JS::Object>> const&);
+    WebIDL::ExceptionOr<void> set_value_as_date(GC::Ptr<JS::Object>);
 
     double value_as_number() const;
     WebIDL::ExceptionOr<void> set_value_as_number(double value);
@@ -291,7 +291,7 @@ private:
     virtual Optional<CSSPixels> intrinsic_width() const override;
     virtual Optional<CSSPixels> intrinsic_height() const override;
     virtual Optional<CSSPixelFraction> intrinsic_aspect_ratio() const override;
-    virtual RefPtr<Gfx::ImmutableBitmap> current_image_bitmap_sized(Gfx::IntSize) const override;
+    virtual Optional<Gfx::DecodedImageFrame> current_image_frame_sized(Gfx::IntSize) const override;
     virtual void set_visible_in_viewport(bool) override;
     virtual GC::Ptr<DOM::Element const> to_html_element() const override { return *this; }
     virtual size_t current_frame_index() const override { return 0; }

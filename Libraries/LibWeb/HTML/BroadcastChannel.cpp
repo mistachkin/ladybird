@@ -5,24 +5,26 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/NeverDestroyed.h>
 #include <AK/QuickSort.h>
 #include <LibCore/System.h>
 #include <LibJS/Runtime/Realm.h>
 #include <LibWeb/Bindings/BroadcastChannel.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
+#include <LibWeb/Bindings/MessageEvent.h>
 #include <LibWeb/Bindings/PrincipalHostDefined.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/HTML/BroadcastChannel.h>
 #include <LibWeb/HTML/BroadcastChannelMessage.h>
 #include <LibWeb/HTML/EventNames.h>
 #include <LibWeb/HTML/MessageEvent.h>
+#include <LibWeb/HTML/MessagePort.h>
 #include <LibWeb/HTML/StructuredSerialize.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/HTML/WorkerGlobalScope.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/StorageAPI/StorageKey.h>
-#include <LibWeb/Worker/WebWorkerClient.h>
 
 namespace Web::HTML {
 
@@ -60,23 +62,27 @@ void BroadcastChannelRepository::unregister_channel(GC::Ref<BroadcastChannel> ch
 
 auto const& BroadcastChannelRepository::registered_channels_for_key(StorageAPI::StorageKey key) const
 {
-    static Vector<GC::Weak<BroadcastChannel>> s_empty_channels;
+    static NeverDestroyed<Vector<GC::Weak<BroadcastChannel>>> empty_channels;
 
     auto maybe_channels = m_channels.get(key);
     if (!maybe_channels.has_value())
-        return s_empty_channels;
+        return *empty_channels;
 
     return maybe_channels.value();
 }
 
-static BroadcastChannelRepository s_broadcast_channel_repository;
+static BroadcastChannelRepository& broadcast_channel_repository()
+{
+    static NeverDestroyed<BroadcastChannelRepository> repository;
+    return *repository;
+}
 
 GC_DEFINE_ALLOCATOR(BroadcastChannel);
 
 GC::Ref<BroadcastChannel> BroadcastChannel::construct_impl(JS::Realm& realm, FlyString const& name)
 {
     auto channel = realm.create<BroadcastChannel>(realm, name);
-    s_broadcast_channel_repository.register_channel(channel);
+    broadcast_channel_repository().register_channel(channel);
     return channel;
 }
 
@@ -95,7 +101,7 @@ void BroadcastChannel::initialize(JS::Realm& realm)
 void BroadcastChannel::finalize()
 {
     Base::finalize();
-    s_broadcast_channel_repository.unregister_channel(*this);
+    broadcast_channel_repository().unregister_channel(*this);
 }
 
 // https://html.spec.whatwg.org/multipage/web-messaging.html#eligible-for-messaging
@@ -151,14 +157,7 @@ WebIDL::ExceptionOr<void> BroadcastChannel::post_message(JS::Value message)
     // Steps 6-9.
     deliver_message_locally(message_to_send);
 
-    // NB: Other WebContent processes receive this via the browser-process IPC fanout.
-    //     Child worker processes are not part of that routing path, so forward to them directly here.
     Bindings::principal_host_defined_page(realm()).client().page_did_post_broadcast_channel_message(message_to_send);
-
-    WebWorkerClient::for_each_client([&](WebWorkerClient& client) {
-        client.async_broadcast_channel_message(message_to_send);
-        return IterationDecision::Continue;
-    });
 
     return {};
 }
@@ -169,10 +168,10 @@ void BroadcastChannel::deliver_message_locally(BroadcastChannelMessage const& me
     auto& vm = Bindings::main_thread_vm();
 
     // 6. Let destinations be a list of BroadcastChannel objects that match the following criteria:
-    GC::RootVector<GC::Ref<BroadcastChannel>> destinations(vm.heap());
+    GC::RootVector<GC::Ref<BroadcastChannel>> destinations;
 
     // * The result of running obtain a storage key for non-storage purposes with their relevant settings object equals sourceStorageKey.
-    auto same_origin_broadcast_channels = s_broadcast_channel_repository.registered_channels_for_key(message.storage_key);
+    auto same_origin_broadcast_channels = broadcast_channel_repository().registered_channels_for_key(message.storage_key);
     for (auto const& channel : same_origin_broadcast_channels) {
         // * They are eligible for messaging.
         if (!channel->is_eligible_for_messaging())
@@ -208,9 +207,8 @@ void BroadcastChannel::deliver_message_locally(BroadcastChannelMessage const& me
             //    origin initialized to sourceOrigin, and then abort these steps.
             auto data_or_error = structured_deserialize(vm, message.serialized_message, target_realm);
             if (data_or_error.is_exception()) {
-                MessageEventInit event_init {};
-                event_init.origin = message.source_origin.serialize();
-                auto event = MessageEvent::create(target_realm, HTML::EventNames::messageerror, event_init);
+                Bindings::MessageEventInit event_init;
+                auto event = MessageEvent::create(target_realm, HTML::EventNames::messageerror, event_init, message.source_origin);
                 event->set_is_trusted(true);
                 destination->dispatch_event(event);
                 return;
@@ -218,10 +216,9 @@ void BroadcastChannel::deliver_message_locally(BroadcastChannelMessage const& me
 
             // 4. Fire an event named message at destination, using MessageEvent, with the data attribute initialized to data and
             //    its origin initialized to sourceOrigin.
-            MessageEventInit event_init {};
+            Bindings::MessageEventInit event_init;
             event_init.data = data_or_error.release_value();
-            event_init.origin = message.source_origin.serialize();
-            auto event = MessageEvent::create(target_realm, HTML::EventNames::message, event_init);
+            auto event = MessageEvent::create(target_realm, HTML::EventNames::message, event_init, message.source_origin);
             event->set_is_trusted(true);
             destination->dispatch_event(event);
         }));
@@ -234,7 +231,7 @@ void BroadcastChannel::close()
     // The close() method steps are to set this's closed flag to true.
     m_closed_flag = true;
 
-    s_broadcast_channel_repository.unregister_channel(*this);
+    broadcast_channel_repository().unregister_channel(*this);
 }
 
 // https://html.spec.whatwg.org/multipage/web-messaging.html#handler-broadcastchannel-onmessage

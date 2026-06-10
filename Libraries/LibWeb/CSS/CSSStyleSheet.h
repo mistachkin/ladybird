@@ -11,10 +11,12 @@
 #include <AK/Function.h>
 #include <AK/NonnullRefPtr.h>
 #include <AK/RefPtr.h>
+#include <LibWeb/Bindings/CSSStyleSheet.h>
 #include <LibWeb/CSS/CSSNamespaceRule.h>
 #include <LibWeb/CSS/CSSRule.h>
 #include <LibWeb/CSS/CSSRuleList.h>
 #include <LibWeb/CSS/CSSStyleRule.h>
+#include <LibWeb/CSS/SelectorInsights.h>
 #include <LibWeb/CSS/StyleSheet.h>
 #include <LibWeb/CSS/StyleValues/ImageStyleValue.h>
 #include <LibWeb/DOM/StyleInvalidationReason.h>
@@ -27,12 +29,6 @@ class CSSImportRule;
 class StyleScope;
 struct ShadowRootStylesheetEffects;
 struct StyleCache;
-
-struct CSSStyleSheetInit {
-    Optional<String> base_url {};
-    Variant<GC::Root<MediaList>, String> media { String {} };
-    bool disabled { false };
-};
 
 // https://drafts.csswg.org/cssom-1/#cssstylesheet
 class WEB_API CSSStyleSheet final : public StyleSheet {
@@ -63,7 +59,7 @@ public:
     };
 
     [[nodiscard]] static GC::Ref<CSSStyleSheet> create(JS::Realm&, CSSRuleList&, MediaList&, Optional<::URL::URL> location);
-    static WebIDL::ExceptionOr<GC::Ref<CSSStyleSheet>> construct_impl(JS::Realm&, Optional<CSSStyleSheetInit> const& options = {});
+    static WebIDL::ExceptionOr<GC::Ref<CSSStyleSheet>> construct_impl(JS::Realm&, Optional<Bindings::CSSStyleSheetInit> const& options = {});
 
     virtual ~CSSStyleSheet() override;
 
@@ -91,6 +87,7 @@ public:
     void for_each_effective_style_producing_rule(Function<void(CSSRule const&)> const& callback) const;
     // Returns whether the match state of any media queries changed after evaluation.
     bool evaluate_media_queries(DOM::Document const&);
+    bool evaluate_media_queries(DOM::Document const&, Function<void(CSSRule const&)> const& changed_rule_callback);
     void for_each_effective_keyframes_at_rule(Function<void(CSSKeyframesRule const&)> const& callback) const;
     void for_each_effective_counter_style_at_rule(Function<void(CSSCounterStyleRule const&)> const& callback) const;
 
@@ -102,6 +99,7 @@ public:
     virtual void set_disabled(bool) override;
     void for_each_owning_style_scope(Function<void(StyleScope&)> const&) const;
     NonnullRefPtr<StyleCache> shared_single_constructed_sheet_style_cache(StyleScope&);
+    SelectorInsights const& selector_insights() const;
 
     Optional<FlyString> default_namespace() const;
     GC::Ptr<CSSNamespaceRule> default_namespace_rule() const { return m_default_namespace_rule; }
@@ -124,8 +122,8 @@ public:
 
     bool disallow_modification() const { return m_disallow_modification; }
 
-    void set_source_text(String);
-    Optional<String> source_text(Badge<DOM::Document>) const;
+    void set_source_text(String source) { m_source_text = move(source); }
+    Optional<String> source_text() const { return m_source_text; }
 
     void add_critical_subresource(Subresource&);
     void remove_critical_subresource(Subresource&);
@@ -137,6 +135,7 @@ private:
 
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Cell::Visitor&) override;
+    virtual size_t external_memory_size() const override;
 
     void recalculate_rule_caches();
     void invalidate_shared_style_cache();
@@ -161,11 +160,12 @@ private:
     bool m_constructed { false };
     bool m_disallow_modification { false };
     Optional<bool> m_did_match;
+    mutable Optional<SelectorInsights> m_selector_insights;
     RefPtr<StyleCache> m_shared_single_constructed_sheet_style_cache;
 
     Vector<Subresource&> m_critical_subresources;
 
-    IGNORE_GC Vector<WeakPtr<ImageStyleValue>> m_pending_image_values;
+    Vector<WeakPtr<ImageStyleValue>> m_pending_image_values;
 };
 
 }

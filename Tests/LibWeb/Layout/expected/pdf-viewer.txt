@@ -27,7 +27,7 @@ Viewport <#document> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] [BFC] children
                       TextNode <#text> (not painted)
                     Box <button#viewsManagerToggleButton.toolbarButton> at [9,2] positioned flex-container(row) flex-item [0+0+0 28 0+0+0] [0+0+0 28 0+0+0] [FFC] children: not-inline
                       BlockContainer <(anonymous)> at [15,8] flex-item [0+0+0 16 0+0+0] [0+0+0 16 0+0+0] [BFC] children: inline
-                        TextNode <#text> (not painted)
+                        GeneratedTextNode <(anonymous)> (not painted)
                       BlockContainer <(anonymous)> (not painted) [BFC] children: inline
                         TextNode <#text> (not painted)
                       BlockContainer <span> at [31,16] flex-item [0+0+0 0 0+0+0] [0+0+0 0 0+0+0] [BFC] children: inline
@@ -50,7 +50,7 @@ Viewport <#document> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] [BFC] children
                         TextNode <#text> (not painted)
                       Box <button#viewFindButton.toolbarButton> at [69,2] positioned flex-container(row) [0+0+0 28 0+0+0] [0+0+0 28 0+0+0] [FFC] children: not-inline
                         BlockContainer <(anonymous)> at [75,8] flex-item [0+0+0 16 0+0+0] [0+0+0 16 0+0+0] [BFC] children: inline
-                          TextNode <#text> (not painted)
+                          GeneratedTextNode <(anonymous)> (not painted)
                         BlockContainer <(anonymous)> (not painted) [BFC] children: inline
                           TextNode <#text> (not painted)
                         BlockContainer <span> at [91,16] flex-item [0+0+0 0 0+0+0] [0+0+0 0 0+0+0] [BFC] children: inline
@@ -70,7 +70,7 @@ Viewport <#document> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] [BFC] children
                         TextNode <#text> (not painted)
                       Box <button#previous.toolbarButton> at [98,2] positioned flex-container(row) flex-item [0+0+0 28 0+0+0] [0+0+0 28 0+0+0] [FFC] children: not-inline
                         BlockContainer <(anonymous)> at [104,8] flex-item [0+0+0 16 0+0+0] [0+0+0 16 0+0+0] [BFC] children: inline
-                          TextNode <#text> (not painted)
+                          GeneratedTextNode <(anonymous)> (not painted)
                         BlockContainer <(anonymous)> (not painted) [BFC] children: inline
                           TextNode <#text> (not painted)
                         BlockContainer <span> at [120,16] flex-item [0+0+0 0 0+0+0] [0+0+0 0 0+0+0] [BFC] children: inline
@@ -86,7 +86,7 @@ Viewport <#document> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] [BFC] children
                         TextNode <#text> (not painted)
                       Box <button#next.toolbarButton> at [129,2] positioned flex-container(row) flex-item [0+0+0 28 0+0+0] [0+0+0 28 0+0+0] [FFC] children: not-inline
                         BlockContainer <(anonymous)> at [135,8] flex-item [0+0+0 16 0+0+0] [0+0+0 16 0+0+0] [BFC] children: inline
-                          TextNode <#text> (not painted)
+                          GeneratedTextNode <(anonymous)> (not painted)
                         BlockContainer <(anonymous)> (not painted) [BFC] children: inline
                           TextNode <#text> (not painted)
                         BlockContainer <span> at [151,16] flex-item [0+0+0 0 0+0+0] [0+0+0 0 0+0+0] [BFC] children: inline
@@ -134,7 +134,7 @@ Viewport <#document> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] [BFC] children
                         TextNode <#text> (not painted)
                       Box <button#zoomOutButton.toolbarButton> at [313.9375,2] positioned flex-container(row) flex-item [0+0+0 28 0+0+0] [0+0+0 28 0+0+0] [FFC] children: not-inline
                         BlockContainer <(anonymous)> at [319.9375,8] flex-item [0+0+0 16 0+0+0] [0+0+0 16 0+0+0] [BFC] children: inline
-                          TextNode <#text> (not painted)
+                          GeneratedTextNode <(anonymous)> (not painted)
                         BlockContainer <(anonymous)> (not painted) [BFC] children: inline
                           TextNode <#text> (not painted)
                         BlockContainer <span> at [335.9375,16] flex-item [0+0+0 0 0+0+0] [0+0+0 0 0+0+0] [BFC] children: inline
@@ -152,7 +152,7 @@ Viewport <#document> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] [BFC] children
                         TextNode <#text> (not painted)
                       Box <button#zoomInButton.toolbarButton> at [344.9375,2] positioned flex-container(row) flex-item [0+0+0 28 0+0+0] [0+0+0 28 0+0+0] [FFC] children: not-inline
                         BlockContainer <(anonymous)> at [350.9375,8] flex-item [0+0+0 16 0+0+0] [0+0+0 16 0+0+0] [BFC] children: inline
-                          TextNode <#text> (not painted)
+                          GeneratedTextNode <(anonymous)> (not painted)
                         BlockContainer <(anonymous)> (not painted) [BFC] children: inline
                           TextNode <#text> (not painted)
                         BlockContainer <span> at [366.9375,16] flex-item [0+0+0 0 0+0+0] [0+0+0 0 0+0+0] [BFC] children: inline
@@ -179,7 +179,7 @@ Viewport <#document> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] [BFC] children
                       BlockContainer <(anonymous)> (not painted) [BFC] children: inline
                         TextNode <#text> (not painted)
                       BlockContainer <(anonymous)> at [500.421875,8] positioned [0+0+0 16 0+0+0] [0+0+0 16 0+0+0] [BFC] children: inline
-                        TextNode <#text> (not painted)
+                        GeneratedTextNode <(anonymous)> (not painted)
                     BlockContainer <(anonymous)> (not painted) [BFC] children: inline
                       TextNode <#text> (not painted)
                   BlockContainer <(anonymous)> (not painted) [BFC] children: inline
@@ -197,7 +197,7 @@ Viewport <#document> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] [BFC] children
                           TextNode <#text> (not painted)
                         Box <button#editorHighlightButton.toolbarButton> at [585,2] positioned flex-container(row) [0+0+0 28 0+0+0] [0+0+0 28 0+0+0] [FFC] children: not-inline
                           BlockContainer <(anonymous)> at [591,8] flex-item [0+0+0 16 0+0+0] [0+0+0 16 0+0+0] [BFC] children: inline
-                            TextNode <#text> (not painted)
+                            GeneratedTextNode <(anonymous)> (not painted)
                           BlockContainer <(anonymous)> (not painted) [BFC] children: inline
                             TextNode <#text> (not painted)
                           BlockContainer <span> at [607,16] flex-item [0+0+0 0 0+0+0] [0+0+0 0 0+0+0] [BFC] children: inline
@@ -216,7 +216,7 @@ Viewport <#document> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] [BFC] children
                           TextNode <#text> (not painted)
                         Box <button#editorFreeTextButton.toolbarButton> at [614,2] positioned flex-container(row) [0+0+0 28 0+0+0] [0+0+0 28 0+0+0] [FFC] children: not-inline
                           BlockContainer <(anonymous)> at [620,8] flex-item [0+0+0 16 0+0+0] [0+0+0 16 0+0+0] [BFC] children: inline
-                            TextNode <#text> (not painted)
+                            GeneratedTextNode <(anonymous)> (not painted)
                           BlockContainer <(anonymous)> (not painted) [BFC] children: inline
                             TextNode <#text> (not painted)
                           BlockContainer <span> at [636,16] flex-item [0+0+0 0 0+0+0] [0+0+0 0 0+0+0] [BFC] children: inline
@@ -235,7 +235,7 @@ Viewport <#document> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] [BFC] children
                           TextNode <#text> (not painted)
                         Box <button#editorInkButton.toolbarButton> at [643,2] positioned flex-container(row) [0+0+0 28 0+0+0] [0+0+0 28 0+0+0] [FFC] children: not-inline
                           BlockContainer <(anonymous)> at [649,8] flex-item [0+0+0 16 0+0+0] [0+0+0 16 0+0+0] [BFC] children: inline
-                            TextNode <#text> (not painted)
+                            GeneratedTextNode <(anonymous)> (not painted)
                           BlockContainer <(anonymous)> (not painted) [BFC] children: inline
                             TextNode <#text> (not painted)
                           BlockContainer <span> at [665,16] flex-item [0+0+0 0 0+0+0] [0+0+0 0 0+0+0] [BFC] children: inline
@@ -254,7 +254,7 @@ Viewport <#document> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] [BFC] children
                           TextNode <#text> (not painted)
                         Box <button#editorStampButton.toolbarButton> at [672,2] positioned flex-container(row) [0+0+0 28 0+0+0] [0+0+0 28 0+0+0] [FFC] children: not-inline
                           BlockContainer <(anonymous)> at [678,8] flex-item [0+0+0 16 0+0+0] [0+0+0 16 0+0+0] [BFC] children: inline
-                            TextNode <#text> (not painted)
+                            GeneratedTextNode <(anonymous)> (not painted)
                           BlockContainer <(anonymous)> (not painted) [BFC] children: inline
                             TextNode <#text> (not painted)
                           BlockContainer <span> at [694,16] flex-item [0+0+0 0 0+0+0] [0+0+0 0 0+0+0] [BFC] children: inline
@@ -276,7 +276,7 @@ Viewport <#document> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] [BFC] children
                         TextNode <#text> (not painted)
                     BlockContainer <(anonymous)> (not painted) [BFC] children: inline
                       TextNode <#text> (not painted)
-                    BlockContainer <div#editorModeSeparator.verticalToolbarSeparator> at [704,4.796875] flex-item [2+1+0 0 0+0+2] [0+0+0 22.40625 0+0+0] [BFC] children: not-inline
+                    BlockContainer <div#editorModeSeparator.verticalToolbarSeparator> at [704,4.8125] flex-item [2+1+0 0 0+0+2] [0+0+0 22.390625 0+0+0] [BFC] children: not-inline
                     BlockContainer <(anonymous)> (not painted) [BFC] children: inline
                       TextNode <#text> (not painted)
                     Box <div.toolbarHorizontalGroup.hiddenMediumView> at [707,2] flex-container(row) flex-item [0+0+0 57 0+0+0] [0+0+0 28 0+0+0] [FFC] children: not-inline
@@ -284,7 +284,7 @@ Viewport <#document> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] [BFC] children
                         TextNode <#text> (not painted)
                       Box <button#printButton.toolbarButton> at [707,2] positioned flex-container(row) flex-item [0+0+0 28 0+0+0] [0+0+0 28 0+0+0] [FFC] children: not-inline
                         BlockContainer <(anonymous)> at [713,8] flex-item [0+0+0 16 0+0+0] [0+0+0 16 0+0+0] [BFC] children: inline
-                          TextNode <#text> (not painted)
+                          GeneratedTextNode <(anonymous)> (not painted)
                         BlockContainer <(anonymous)> (not painted) [BFC] children: inline
                           TextNode <#text> (not painted)
                         BlockContainer <span> at [729,16] flex-item [0+0+0 0 0+0+0] [0+0+0 0 0+0+0] [BFC] children: inline
@@ -297,7 +297,7 @@ Viewport <#document> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] [BFC] children
                         TextNode <#text> (not painted)
                       Box <button#downloadButton.toolbarButton> at [736,2] positioned flex-container(row) flex-item [0+0+0 28 0+0+0] [0+0+0 28 0+0+0] [FFC] children: not-inline
                         BlockContainer <(anonymous)> at [742,8] flex-item [0+0+0 16 0+0+0] [0+0+0 16 0+0+0] [BFC] children: inline
-                          TextNode <#text> (not painted)
+                          GeneratedTextNode <(anonymous)> (not painted)
                         BlockContainer <(anonymous)> (not painted) [BFC] children: inline
                           TextNode <#text> (not painted)
                         BlockContainer <span> at [758,16] flex-item [0+0+0 0 0+0+0] [0+0+0 0 0+0+0] [BFC] children: inline
@@ -310,7 +310,7 @@ Viewport <#document> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] [BFC] children
                         TextNode <#text> (not painted)
                     BlockContainer <(anonymous)> (not painted) [BFC] children: inline
                       TextNode <#text> (not painted)
-                    BlockContainer <div.verticalToolbarSeparator.hiddenMediumView> at [768,4.796875] flex-item [2+1+0 0 0+0+2] [0+0+0 22.40625 0+0+0] [BFC] children: not-inline
+                    BlockContainer <div.verticalToolbarSeparator.hiddenMediumView> at [768,4.8125] flex-item [2+1+0 0 0+0+2] [0+0+0 22.390625 0+0+0] [BFC] children: not-inline
                     BlockContainer <(anonymous)> (not painted) [BFC] children: inline
                       TextNode <#text> (not painted)
                     BlockContainer <div#secondaryToolbarToggle.toolbarButtonWithContainer> at [771,2] positioned flex-item [0+0+0 28 0+0+0] [0+0+0 28 0+0+0] [BFC] children: not-inline
@@ -318,7 +318,7 @@ Viewport <#document> at [0,0] [0+0+0 800 0+0+0] [0+0+0 600 0+0+0] [BFC] children
                         TextNode <#text> (not painted)
                       Box <button#secondaryToolbarToggleButton.toolbarButton> at [771,2] positioned flex-container(row) [0+0+0 28 0+0+0] [0+0+0 28 0+0+0] [FFC] children: not-inline
                         BlockContainer <(anonymous)> at [777,8] flex-item [0+0+0 16 0+0+0] [0+0+0 16 0+0+0] [BFC] children: inline
-                          TextNode <#text> (not painted)
+                          GeneratedTextNode <(anonymous)> (not painted)
                         BlockContainer <(anonymous)> (not painted) [BFC] children: inline
                           TextNode <#text> (not painted)
                         BlockContainer <span> at [793,16] flex-item [0+0+0 0 0+0+0] [0+0+0 0 0+0+0] [BFC] children: inline
@@ -474,7 +474,7 @@ ViewportPaintable (Viewport<#document>) [0,0 800x600]
                           PaintableWithLines (BlockContainer<SPAN>) [694,16 0x0] overflow: [694,16 51.734375x72]
                             TextPaintable (TextNode<#text>)
                         PaintableWithLines (BlockContainer(anonymous)) [672,30 28x0]
-                    PaintableWithLines (BlockContainer<DIV>#editorModeSeparator.verticalToolbarSeparator) [703,4.796875 1x22.40625]
+                    PaintableWithLines (BlockContainer<DIV>#editorModeSeparator.verticalToolbarSeparator) [703,4.8125 1x22.390625]
                     PaintableBox (Box<DIV>.toolbarHorizontalGroup.hiddenMediumView) [707,2 57x28]
                       PaintableBox (Box<BUTTON>#printButton.toolbarButton) [707,2 28x28]
                         PaintableWithLines (BlockContainer(anonymous)) [713,8 16x16]
@@ -484,7 +484,7 @@ ViewportPaintable (Viewport<#document>) [0,0 800x600]
                         PaintableWithLines (BlockContainer(anonymous)) [742,8 16x16]
                         PaintableWithLines (BlockContainer<SPAN>) [758,16 0x0] overflow: [758,16 38.234375x18]
                           TextPaintable (TextNode<#text>)
-                    PaintableWithLines (BlockContainer<DIV>.verticalToolbarSeparator.hiddenMediumView) [767,4.796875 1x22.40625]
+                    PaintableWithLines (BlockContainer<DIV>.verticalToolbarSeparator.hiddenMediumView) [767,4.8125 1x22.390625]
                     PaintableWithLines (BlockContainer<DIV>#secondaryToolbarToggle.toolbarButtonWithContainer) [771,2 28x28]
                       PaintableWithLines (BlockContainer(anonymous)) [771,2 28x0]
                       PaintableBox (Box<BUTTON>#secondaryToolbarToggleButton.toolbarButton) [771,2 28x28]

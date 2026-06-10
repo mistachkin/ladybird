@@ -15,40 +15,55 @@
 
 namespace Ladybird {
 
-class Application : public WebView::Application {
+struct WindowConfiguration {
+    Optional<Web::DevicePixels> x {};
+    Optional<Web::DevicePixels> y {};
+    Optional<Web::DevicePixels> width {};
+    Optional<Web::DevicePixels> height {};
+    Optional<bool> maximized {};
+};
+
+class Application final : public WebView::Application {
     WEB_VIEW_APPLICATION(Application)
 
 public:
     virtual ~Application() override;
 
     Function<void(URL::URL)> on_open_file;
-
-    BrowserWindow& new_window(Vector<URL::URL> const& initial_urls, BrowserWindow::IsPopupWindow is_popup_window = BrowserWindow::IsPopupWindow::No, Tab* parent_tab = nullptr, Optional<u64> page_index = {});
+    BrowserWindow& new_window(Vector<URL::URL> const& initial_urls, WindowConfiguration const& = {}, BrowserWindow::IsPopupWindow is_popup_window = BrowserWindow::IsPopupWindow::No, Tab* parent_tab = nullptr, Optional<u64> page_index = {});
 
     BrowserWindow& active_window() const { return *m_active_window; }
     void set_active_window(BrowserWindow& w) { m_active_window = &w; }
 
     Tab* active_tab() const { return m_active_window ? m_active_window->current_tab() : nullptr; }
+    void update_reopen_recently_closed_actions() const;
 
 private:
     explicit Application();
 
     virtual void create_platform_options(WebView::BrowserOptions&, WebView::RequestServerOptions&, WebView::WebContentOptions&) override;
-    virtual NonnullOwnPtr<Core::EventLoop> create_platform_event_loop() override;
+    virtual Core::EventLoop& create_platform_event_loop() override;
 
     virtual Optional<WebView::ViewImplementation&> active_web_view() const override;
     virtual Optional<WebView::ViewImplementation&> open_blank_new_tab(Web::HTML::ActivateTab) const override;
+    virtual void open_url_in_new_window(URL::URL const& url) override;
 
     virtual Optional<ByteString> ask_user_for_download_path(StringView file) const override;
     virtual void display_download_confirmation_dialog(StringView download_name, LexicalPath const& path) const override;
     virtual void display_error_dialog(StringView error_message) const override;
 
-    virtual Utf16String clipboard_text() const override;
+    virtual bool supports_clipboard_type(ClipboardType) const override;
+    virtual Utf16String clipboard_text(ClipboardType) const override;
+    virtual void set_clipboard_text(String, ClipboardType = ClipboardType::Text) override;
+
     virtual Vector<Web::Clipboard::SystemClipboardRepresentation> clipboard_entries() const override;
     virtual void insert_clipboard_entry(Web::Clipboard::SystemClipboardRepresentation) override;
 
+    virtual bool supports_vertical_tabs() const override { return true; }
+    virtual bool supports_server_side_window_decorations() const override { return true; }
+    virtual void update_tabs_display() const override;
+
     virtual void rebuild_bookmarks_menu() const override;
-    virtual void update_bookmarks_bar_display(bool) const override;
     virtual void show_bookmark_context_menu(Gfx::IntPoint, Optional<WebView::BookmarkItem const&>, Optional<String const&> target_folder_id) override;
     virtual Optional<BookmarkID> bookmark_item_id_for_context_menu() const override;
     virtual NonnullRefPtr<BookmarkPromise> display_add_bookmark_dialog() const override;
@@ -58,6 +73,7 @@ private:
 
     virtual void on_devtools_enabled() const override;
     virtual void on_devtools_disabled() const override;
+    virtual void on_recently_closed_entries_changed() const override;
 
     OwnPtr<QApplication> m_application;
     BrowserWindow* m_active_window { nullptr };

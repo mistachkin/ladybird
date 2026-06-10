@@ -10,10 +10,13 @@
 #include <AK/HashMap.h>
 #include <AK/Optional.h>
 #include <AK/Time.h>
+#include <LibCore/AnonymousBuffer.h>
 #include <LibHTTP/Cache/CacheMode.h>
 #include <LibHTTP/Cache/DiskCacheSettings.h>
+#include <LibHTTP/Cache/Utilities.h>
 #include <LibHTTP/Forward.h>
 #include <LibIPC/ConnectionFromClient.h>
+#include <LibRequests/WebSocket.h>
 #include <LibWebSocket/WebSocket.h>
 #include <RequestServer/Forward.h>
 #include <RequestServer/RequestClientEndpoint.h>
@@ -63,15 +66,20 @@ private:
 
     virtual void estimate_cache_size_accessed_since(u64 cache_size_estimation_id, UnixDateTime since) override;
     virtual void remove_cache_entries_accessed_since(UnixDateTime since) override;
+    virtual Messages::RequestServer::StoreCacheAssociatedDataResponse store_cache_associated_data(URL::URL, ByteString method, Vector<HTTP::Header> request_headers, Optional<u64> vary_key, HTTP::CacheEntryAssociatedData, Core::AnonymousBuffer) override;
+    virtual Messages::RequestServer::RetrieveCacheAssociatedDataResponse retrieve_cache_associated_data(URL::URL, ByteString method, Vector<HTTP::Header> request_headers, Optional<u64> vary_key, HTTP::CacheEntryAssociatedData) override;
+    virtual Messages::RequestServer::CreateSyntheticCacheEntryResponse create_synthetic_cache_entry(URL::URL, ByteString method) override;
 
     virtual void websocket_connect(u64 websocket_id, URL::URL, ByteString, Vector<ByteString>, Vector<ByteString>, Vector<HTTP::Header>) override;
     virtual void websocket_send(u64 websocket_id, bool, ByteBuffer) override;
+    virtual void websocket_send_shared(u64 websocket_id, bool, Core::AnonymousBuffer) override;
     virtual void websocket_close(u64 websocket_id, u16, ByteString) override;
     virtual Messages::RequestServer::WebsocketSetCertificateResponse websocket_set_certificate(u64, ByteString, ByteString) override;
 
     static int on_socket_callback(void*, int sockfd, int what, void* user_data, void*);
     static int on_timeout_callback(void*, long timeout_ms, void* user_data);
     void check_active_requests();
+    void fail_websocket(u64 websocket_id, Requests::WebSocket::Error);
 
     ErrorOr<IPC::TransportHandle> create_client_socket();
 

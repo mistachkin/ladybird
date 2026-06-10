@@ -7,8 +7,10 @@
 #pragma once
 
 #include <AK/OwnPtr.h>
+#include <AK/WeakPtr.h>
 #include <LibGC/CellAllocator.h>
 #include <LibJS/Heap/Cell.h>
+#include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/CustomPropertyData.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
@@ -21,18 +23,29 @@ class WEB_API PseudoElement : public JS::Cell {
     GC_CELL(PseudoElement, JS::Cell);
     GC_DECLARE_ALLOCATOR(PseudoElement);
 
-    GC::Ptr<Layout::NodeWithStyle> layout_node() const { return m_layout_node; }
-    GC::Ptr<Layout::NodeWithStyle> unsafe_layout_node() const { return m_layout_node; }
-    void set_layout_node(GC::Ptr<Layout::NodeWithStyle> value) { m_layout_node = value; }
+public:
+    virtual Layout::NodeWithStyle* layout_node() const = 0;
+    virtual Layout::NodeWithStyle* unsafe_layout_node() const = 0;
 
-    GC::Ptr<CSS::CascadedProperties> cascaded_properties() const { return m_cascaded_properties; }
-    void set_cascaded_properties(GC::Ptr<CSS::CascadedProperties> value) { m_cascaded_properties = value; }
+    virtual RefPtr<CSS::ComputedProperties> computed_properties() const = 0;
 
-    GC::Ptr<CSS::ComputedProperties> computed_properties() const { return m_computed_properties; }
-    void set_computed_properties(GC::Ptr<CSS::ComputedProperties> value) { m_computed_properties = value; }
+    virtual RefPtr<CSS::CustomPropertyData const> custom_property_data() const = 0;
+    virtual void set_custom_property_data(RefPtr<CSS::CustomPropertyData const> value) = 0;
+};
 
-    RefPtr<CSS::CustomPropertyData const> custom_property_data() const { return m_custom_property_data; }
-    void set_custom_property_data(RefPtr<CSS::CustomPropertyData const> value) { m_custom_property_data = move(value); }
+class WEB_API SyntheticPseudoElement : public PseudoElement {
+    GC_CELL(SyntheticPseudoElement, PseudoElement);
+    GC_DECLARE_ALLOCATOR(SyntheticPseudoElement);
+
+    Layout::NodeWithStyle* layout_node() const override { return m_layout_node.ptr(); }
+    Layout::NodeWithStyle* unsafe_layout_node() const override { return m_layout_node.ptr(); }
+    void set_layout_node(Layout::NodeWithStyle*);
+
+    RefPtr<CSS::ComputedProperties> computed_properties() const override { return m_computed_properties; }
+    void set_computed_properties(RefPtr<CSS::ComputedProperties> value) { m_computed_properties = value; }
+
+    RefPtr<CSS::CustomPropertyData const> custom_property_data() const override { return m_custom_property_data; }
+    void set_custom_property_data(RefPtr<CSS::CustomPropertyData const> value) override { m_custom_property_data = move(value); }
 
     bool has_non_empty_counters_set() const { return m_counters_set; }
     Optional<CSS::CountersSet const&> counters_set() const;
@@ -45,27 +58,48 @@ class WEB_API PseudoElement : public JS::Cell {
     virtual void visit_edges(JS::Cell::Visitor&) override;
 
 private:
-    GC::Ptr<Layout::NodeWithStyle> m_layout_node;
-    GC::Ptr<CSS::CascadedProperties> m_cascaded_properties;
-    GC::Ptr<CSS::ComputedProperties> m_computed_properties;
+    WeakPtr<Layout::NodeWithStyle> m_layout_node;
+    RefPtr<CSS::ComputedProperties> m_computed_properties;
     RefPtr<CSS::CustomPropertyData const> m_custom_property_data;
     OwnPtr<CSS::CountersSet> m_counters_set;
     CSSPixelPoint m_scroll_offset {};
 };
 
 // https://drafts.csswg.org/css-view-transitions/#pseudo-element-tree
-class PseudoElementTreeNode
-    : public PseudoElement
-    , public TreeNode<PseudoElementTreeNode> {
-    GC_CELL(PseudoElementTreeNode, PseudoElement);
-    GC_DECLARE_ALLOCATOR(PseudoElementTreeNode);
+class SyntheticPseudoElementTreeNode
+    : public SyntheticPseudoElement
+    , public TreeNode<SyntheticPseudoElementTreeNode> {
+    GC_CELL(SyntheticPseudoElementTreeNode, SyntheticPseudoElement);
+    GC_DECLARE_ALLOCATOR(SyntheticPseudoElementTreeNode);
 
 protected:
-    virtual void visit_edges(JS::Cell::Visitor& visitor) override
+    virtual void visit_edges(JS::Cell::Visitor& visitor) override;
+};
+
+class WEB_API ElementReferencePseudoElement : public PseudoElement {
+    GC_CELL(ElementReferencePseudoElement, PseudoElement);
+    GC_DECLARE_ALLOCATOR(ElementReferencePseudoElement);
+
+    ElementReferencePseudoElement(GC::Ref<Element> referenced_element)
+        : m_referenced_element(referenced_element)
     {
-        Base::visit_edges(visitor);
-        TreeNode::visit_edges(visitor);
     }
+
+    Layout::NodeWithStyle* layout_node() const override;
+    Layout::NodeWithStyle* unsafe_layout_node() const override;
+
+    RefPtr<CSS::ComputedProperties> computed_properties() const override;
+
+    RefPtr<CSS::CustomPropertyData const> custom_property_data() const override;
+    void set_custom_property_data(RefPtr<CSS::CustomPropertyData const> value) override;
+
+    GC::Ref<Element> const& referenced_element() const { return m_referenced_element; }
+
+protected:
+    virtual void visit_edges(JS::Cell::Visitor& visitor) override;
+
+private:
+    GC::Ref<Element> m_referenced_element;
 };
 
 }

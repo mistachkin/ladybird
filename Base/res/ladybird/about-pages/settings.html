@@ -2,19 +2,13 @@
 <html>
     <head>
         <title>Settings</title>
+        <link rel="icon" type="image/png" href="resource://icons/48x48/app-browser.png" />
         <link rel="stylesheet" type="text/css" href="resource://ladybird/ladybird.css" />
         <link rel="stylesheet" type="text/css" href="resource://ladybird/about-pages/webui.css" />
         <style>
             @media (prefers-color-scheme: light) {
                 :root {
                     --input-background-color: white;
-                    --border-color: #dcdde1;
-                }
-            }
-
-            @media (prefers-color-scheme: dark) {
-                :root {
-                    --border-color: #3d3d3d;
                 }
             }
 
@@ -66,7 +60,8 @@
             .inline-container input[type="number"],
             .inline-container input[type="text"],
             .inline-container input[type="url"],
-            .inline-container select {
+            .inline-container select,
+            .inline-container textarea {
                 width: 50%;
             }
 
@@ -100,8 +95,7 @@
             }
 
             .description {
-                margin-bottom: 10px;
-
+                margin-top: 8px;
                 font-size: 14px;
                 opacity: 0.7;
             }
@@ -114,13 +108,19 @@
             }
 
             input[type="number"],
+            input[type="search"],
             input[type="text"],
             input[type="url"],
-            select {
+            select,
+            textarea {
                 background-color: var(--input-background-color);
 
                 width: 100%;
                 border: 1px solid var(--border-color);
+            }
+
+            textarea {
+                resize: vertical;
             }
 
             input[type="number"].success,
@@ -283,6 +283,20 @@
                 flex-grow: 1;
             }
 
+            .config-name {
+                font-family: monospace;
+                font-size: 13px;
+
+                margin-top: 6px;
+
+                opacity: 0.7;
+                overflow-wrap: anywhere;
+            }
+
+            .config-title {
+                font-size: 14px;
+            }
+
             .tab-bar {
                 display: flex;
                 gap: 4px;
@@ -339,6 +353,7 @@
             <button class="tab-button" data-tab="permissions">Permissions</button>
             <button class="tab-button" data-tab="privacy">Privacy</button>
             <button class="tab-button" data-tab="network">Network</button>
+            <button class="tab-button" data-tab="advanced">Advanced</button>
         </div>
 
         <div class="tab-panel active" id="tab-general">
@@ -366,17 +381,44 @@
                 </div>
             </div>
 
+            <h3 class="card-title">Tabs</h3>
+            <div class="card">
+                <div class="card-body">
+                    <div class="card-group inline-container">
+                        <label for="enable-vertical-tabs">Use vertical tabs</label>
+                        <input id="enable-vertical-tabs" type="checkbox" switch />
+                    </div>
+                    <div class="card-group inline-container hidden">
+                        <label for="vertical-tabs-expand-on-hover">Expand vertical tabs on hover when collapsed</label>
+                        <input id="vertical-tabs-expand-on-hover" type="checkbox" switch />
+                    </div>
+                </div>
+            </div>
+
             <h3 class="card-title">Browsing Behavior</h3>
             <div class="card">
                 <div class="card-body">
-                    <div class="card-group">
+                    <div class="card-group card-separator">
                         <div class="inline-container">
-                            <label for="enable-autoscroll">Enable autoscrolling</label>
+                            <label for="enable-autoscroll">
+                                Enable autoscrolling
+                                <p class="description">
+                                    Scroll pages by pressing the middle mouse button and moving the mouse.
+                                </p>
+                            </label>
                             <input id="enable-autoscroll" type="checkbox" switch />
                         </div>
-                        <p class="description">
-                            Scroll pages by pressing the middle mouse button and moving the mouse.
-                        </p>
+                    </div>
+                    <div class="card-group card-separator" id="enable-primary-paste-group">
+                        <div class="inline-container">
+                            <label for="enable-primary-paste">
+                                Enable primary pasting
+                                <p class="description">
+                                    Paste text from the clipboard when the middle mouse button is clicked.
+                                </p>
+                            </label>
+                            <input id="enable-primary-paste" type="checkbox" switch />
+                        </div>
                     </div>
                 </div>
             </div>
@@ -385,10 +427,11 @@
         <div class="tab-panel" id="tab-search">
             <div class="card">
                 <div class="card-body">
-                    <p class="card-group">Default Search Engine</p>
                     <div class="card-group">
-                        <p class="description">Select the search engine to use in the address bar.</p>
-
+                        <label>
+                            Default Search Engine
+                            <p class="description">Select the search engine to use in the address bar.</p>
+                        </label>
                         <div class="inline-container">
                             <select id="search-engine" style="width: 100%">
                                 <option value="">Disable search</option>
@@ -402,9 +445,11 @@
 
             <div class="card">
                 <div class="card-body">
-                    <p class="card-group">Search Suggestions</p>
                     <div class="card-group">
-                        <p class="description">Select the engine that will provide search suggestions.</p>
+                        <label>
+                            Search Suggestions
+                            <p class="description">Select the engine that will provide search suggestions.</p>
+                        </label>
                         <select id="autocomplete-engine">
                             <option value="">Disable search suggestions</option>
                             <hr />
@@ -439,8 +484,8 @@
                             <div>
                                 <label for="browsing-data-settings-max-disk-cache-size">
                                     Maximum disk cache size
+                                    <p class="description">Limit the space used for the HTTP disk cache.</p>
                                 </label>
-                                <p class="description">Limit the space used for the HTTP disk cache.</p>
                             </div>
                             <div class="input-field-container">
                                 <input
@@ -473,10 +518,12 @@
                 <div class="card-body">
                     <div class="card-group">
                         <div class="inline-container">
-                            <label for="global-privacy-control-toggle">Global Privacy Control</label>
+                            <label for="global-privacy-control-toggle">
+                                Global Privacy Control
+                                <p class="description">Tell websites not to sell or share your data.</p>
+                            </label>
                             <input id="global-privacy-control-toggle" type="checkbox" switch />
                         </div>
-                        <p class="description">Tell websites not to sell or share your data.</p>
                     </div>
                 </div>
             </div>
@@ -522,6 +569,28 @@
             </div>
         </div>
 
+        <div class="tab-panel" id="tab-advanced">
+            <div class="search-container">
+                <svg
+                    class="search-icon"
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                >
+                    <circle cx="11" cy="11" r="7" />
+                    <line x1="16" y1="16" x2="22" y2="22" />
+                </svg>
+                <input id="config-filter" type="search" class="search-input" placeholder="Filter configuration keys" />
+            </div>
+            <div class="card">
+                <div class="card-body">
+                    <div class="card-group" id="config-list"></div>
+                </div>
+            </div>
+        </div>
+
         <dialog id="languages-dialog" closedby="any">
             <div class="dialog-header">
                 <h3 class="dialog-title">Languages</h3>
@@ -554,8 +623,10 @@
                     <input id="search-custom-name" type="text" placeholder="Example" />
                 </div>
                 <div class="form-group">
-                    <label for="search-custom-url">Search URL</label>
-                    <p class="description">Use %s as a placeholder for the search query</p>
+                    <label for="search-custom-url">
+                        Search URL
+                        <p class="description">Use %s as a placeholder for the search query</p>
+                    </label>
                     <input id="search-custom-url" type="url" placeholder="https://example.com/search?q=%s" />
                 </div>
                 <div class="dialog-controls">
@@ -642,6 +713,7 @@
             };
         </script>
 
+        <script src="resource://ladybird/about-pages/settings/advanced.js" type="module"></script>
         <script src="resource://ladybird/about-pages/settings/browsing-behavior.js" type="module"></script>
         <script src="resource://ladybird/about-pages/settings/default-zoom-level.js" type="module"></script>
         <script src="resource://ladybird/about-pages/settings/languages.js" type="module"></script>
@@ -650,6 +722,7 @@
         <script src="resource://ladybird/about-pages/settings/permissions.js" type="module"></script>
         <script src="resource://ladybird/about-pages/settings/privacy.js" type="module"></script>
         <script src="resource://ladybird/about-pages/settings/search.js" type="module"></script>
+        <script src="resource://ladybird/about-pages/settings/tabs.js" type="module"></script>
 
         <script type="module">
             function switchTab(name) {
@@ -688,6 +761,7 @@
             });
 
             document.addEventListener("WebUILoaded", () => {
+                ladybird.sendMessage("loadFeatures");
                 ladybird.sendMessage("loadCurrentSettings");
             });
         </script>

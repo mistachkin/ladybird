@@ -6,7 +6,9 @@
 
 #pragma once
 
+#include <AK/Optional.h>
 #include <LibGC/Cell.h>
+#include <LibGfx/DecodedImageFrame.h>
 #include <LibGfx/Size.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/PixelUnits.h>
@@ -28,18 +30,14 @@ public:
     Optional<CSSPixelSize> intrinsic_size() const;
     virtual Optional<CSSPixelFraction> intrinsic_aspect_ratio() const = 0;
 
-    virtual RefPtr<Gfx::ImmutableBitmap> current_image_bitmap() const;
-    virtual RefPtr<Gfx::ImmutableBitmap> current_image_bitmap_sized(Gfx::IntSize) const = 0;
+    virtual Optional<Gfx::DecodedImageFrame> current_image_frame() const;
+    virtual Optional<Gfx::DecodedImageFrame> current_image_frame_sized(Gfx::IntSize) const = 0;
 
-    virtual RefPtr<Gfx::ImmutableBitmap> default_image_bitmap() const;
-    virtual RefPtr<Gfx::ImmutableBitmap> default_image_bitmap_sized(Gfx::IntSize) const;
+    virtual Optional<Gfx::DecodedImageFrame> default_image_frame() const;
+    virtual Optional<Gfx::DecodedImageFrame> default_image_frame_sized(Gfx::IntSize) const;
 
     virtual void set_visible_in_viewport(bool) = 0;
-
-    virtual void image_provider_visit_edges(GC::Cell::Visitor& visitor) const
-    {
-        visitor.visit(to_html_element());
-    }
+    virtual void layout_node_was_detached() const { }
 
 protected:
     virtual GC::Ptr<DOM::Element const> to_html_element() const = 0;

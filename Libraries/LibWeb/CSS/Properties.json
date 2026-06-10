@@ -313,7 +313,7 @@
     "affects-layout": false,
     "animation-type": "none",
     "inherited": false,
-    "initial": "0s",
+    "initial": "auto",
     "multiplicity": "coordinating-list",
     "needs-layout-node-for-resolved-value": true,
     "requires-computation": "cascaded-value",
@@ -460,6 +460,7 @@
     "multiplicity": "coordinating-list"
   },
   "background-attachment": {
+    "affects-accumulated-visual-contexts": true,
     "affects-layout": false,
     "animation-type": "discrete",
     "inherited": false,
@@ -1349,6 +1350,7 @@
     ]
   },
   "clip": {
+    "affects-accumulated-visual-contexts": true,
     "affects-layout": false,
     "animation-type": "by-computed-value",
     "inherited": false,
@@ -1365,6 +1367,7 @@
     ]
   },
   "clip-path": {
+    "affects-accumulated-visual-contexts": true,
     "animation-type": "by-computed-value",
     "affects-layout": false,
     "affects-stacking-context": true,
@@ -1505,6 +1508,27 @@
     "requires-computation": "never",
     "valid-types": [
       "contain"
+    ]
+  },
+  "container": {
+    "initial": "none",
+    "longhands": [
+      "container-name",
+      "container-type"
+    ]
+  },
+  "container-name": {
+    "affects-layout": false,
+    "animation-type": "none",
+    "inherited": false,
+    "initial": "none",
+    "multiplicity": "list",
+    "requires-computation": "never",
+    "valid-types": [
+      "custom-ident ![none,and,not,or]"
+    ],
+    "valid-identifiers": [
+      "none"
     ]
   },
   "container-type": {
@@ -1872,6 +1896,7 @@
     ]
   },
   "filter": {
+    "affects-accumulated-visual-contexts": true,
     "affects-layout": false,
     "affects-stacking-context": true,
     "animation-type": "custom",
@@ -2328,7 +2353,7 @@
     "animation-type": "discrete",
     "inherited": false,
     "initial": "auto",
-    "requires-computation": "never",
+    "requires-computation": "cascaded-value",
     "valid-identifiers": [
       "auto"
     ],
@@ -2343,7 +2368,7 @@
     "animation-type": "discrete",
     "inherited": false,
     "initial": "auto",
-    "requires-computation": "never",
+    "requires-computation": "cascaded-value",
     "valid-identifiers": [
       "auto"
     ],
@@ -2371,7 +2396,7 @@
     "animation-type": "discrete",
     "inherited": false,
     "initial": "auto",
-    "requires-computation": "never",
+    "requires-computation": "cascaded-value",
     "valid-identifiers": [
       "auto"
     ],
@@ -2386,7 +2411,7 @@
     "animation-type": "discrete",
     "inherited": false,
     "initial": "auto",
-    "requires-computation": "never",
+    "requires-computation": "cascaded-value",
     "valid-identifiers": [
       "auto"
     ],
@@ -3149,6 +3174,7 @@
     ]
   },
   "mix-blend-mode": {
+    "affects-accumulated-visual-contexts": true,
     "affects-layout": false,
     "animation-type": "discrete",
     "inherited": false,
@@ -3181,6 +3207,7 @@
     "percentages-resolve-to": "length"
   },
   "opacity": {
+    "affects-accumulated-visual-contexts": true,
     "animation-type": "by-computed-value",
     "affects-layout": false,
     "affects-stacking-context": true,
@@ -3562,6 +3589,7 @@
     ]
   },
   "perspective": {
+    "affects-accumulated-visual-contexts": true,
     "animation-type": "by-computed-value",
     "inherited": false,
     "initial": "none",
@@ -3574,6 +3602,7 @@
     ]
   },
   "perspective-origin": {
+    "affects-accumulated-visual-contexts": true,
     "animation-type": "by-computed-value",
     "affects-layout": false,
     "inherited": false,
@@ -3747,6 +3776,7 @@
     "needs-layout-for-getcomputedstyle": true
   },
   "rotate": {
+    "affects-accumulated-visual-contexts": true,
     "animation-type": "custom",
     "inherited": false,
     "initial": "none",
@@ -3805,6 +3835,7 @@
     ]
   },
   "scale": {
+    "affects-accumulated-visual-contexts": true,
     "animation-type": "custom",
     "inherited": false,
     "initial": "none",
@@ -3821,6 +3852,203 @@
     "valid-identifiers": [
       "auto",
       "smooth"
+    ]
+  },
+  "scroll-margin": {
+    "initial": "0",
+    "positional-value-list-shorthand": true,
+    "longhands": [
+      "scroll-margin-top",
+      "scroll-margin-right",
+      "scroll-margin-bottom",
+      "scroll-margin-left"
+    ],
+    "valid-types": [
+      "length [0,∞]"
+    ]
+  },
+  "scroll-margin-block": {
+    "initial": "0",
+    "positional-value-list-shorthand": true,
+    "longhands": [
+      "scroll-margin-block-start",
+      "scroll-margin-block-end"
+    ],
+    "valid-types": [
+      "length [0,∞]"
+    ]
+  },
+  "scroll-margin-block-end": {
+    "logical-alias-for": {
+      "group": "scroll-margin",
+      "mapping": "block-end"
+    }
+  },
+  "scroll-margin-block-start": {
+    "logical-alias-for": {
+      "group": "scroll-margin",
+      "mapping": "block-start"
+    }
+  },
+  "scroll-margin-bottom": {
+    "animation-type": "by-computed-value",
+    "initial": "0",
+    "inherited": false,
+    "requires-computation": "cascaded-value",
+    "valid-types": [
+      "length [0,∞]"
+    ]
+  },
+  "scroll-margin-inline": {
+    "initial": "0",
+    "positional-value-list-shorthand": true,
+    "longhands": [
+      "scroll-margin-inline-start",
+      "scroll-margin-inline-end"
+    ],
+    "valid-types": [
+      "length [0,∞]"
+    ]
+  },
+  "scroll-margin-inline-end": {
+    "logical-alias-for": {
+      "group": "scroll-margin",
+      "mapping": "inline-end"
+    }
+  },
+  "scroll-margin-inline-start": {
+    "logical-alias-for": {
+      "group": "scroll-margin",
+      "mapping": "inline-start"
+    }
+  },
+  "scroll-margin-left": {
+    "animation-type": "by-computed-value",
+    "inherited": false,
+    "initial": "0",
+    "requires-computation": "cascaded-value",
+    "valid-types": [
+      "length [0,∞]"
+    ]
+  },
+  "scroll-margin-right": {
+    "animation-type": "by-computed-value",
+    "inherited": false,
+    "initial": "0",
+    "requires-computation": "cascaded-value",
+    "valid-types": [
+      "length [0,∞]"
+    ]
+  },
+  "scroll-margin-top": {
+    "animation-type": "by-computed-value",
+    "inherited": false,
+    "initial": "0",
+    "requires-computation": "cascaded-value",
+    "valid-types": [
+      "length [0,∞]"
+    ]
+  },
+  "scroll-padding": {
+    "initial": "auto",
+    "positional-value-list-shorthand": true,
+    "longhands": [
+      "scroll-padding-top",
+      "scroll-padding-right",
+      "scroll-padding-bottom",
+      "scroll-padding-left"
+    ],
+    "valid-types": [
+      "length [0,∞]",
+      "percentage [0,∞]"
+    ]
+  },
+  "scroll-padding-block": {
+    "initial": "0",
+    "positional-value-list-shorthand": true,
+    "longhands": [
+      "scroll-padding-block-start",
+      "scroll-padding-block-end"
+    ],
+    "valid-types": [
+      "length [0,∞]",
+      "percentage [0,∞]"
+    ]
+  },
+  "scroll-padding-block-end": {
+    "logical-alias-for": {
+      "group": "scroll-padding",
+      "mapping": "block-end"
+    }
+  },
+  "scroll-padding-block-start": {
+    "logical-alias-for": {
+      "group": "scroll-padding",
+      "mapping": "block-start"
+    }
+  },
+  "scroll-padding-bottom": {
+    "animation-type": "by-computed-value",
+    "initial": "0",
+    "inherited": false,
+    "requires-computation": "cascaded-value",
+    "valid-types": [
+      "length [0,∞]",
+      "percentage [0,∞]"
+    ]
+  },
+  "scroll-padding-inline": {
+    "initial": "0",
+    "positional-value-list-shorthand": true,
+    "longhands": [
+      "scroll-padding-inline-start",
+      "scroll-padding-inline-end"
+    ],
+    "valid-types": [
+      "length [0,∞]",
+      "percentage [0,∞]"
+    ]
+  },
+  "scroll-padding-inline-end": {
+    "logical-alias-for": {
+      "group": "scroll-padding",
+      "mapping": "inline-end"
+    }
+  },
+  "scroll-padding-inline-start": {
+    "logical-alias-for": {
+      "group": "scroll-padding",
+      "mapping": "inline-start"
+    }
+  },
+  "scroll-padding-left": {
+    "animation-type": "by-computed-value",
+    "inherited": false,
+    "initial": "0",
+    "requires-computation": "cascaded-value",
+    "valid-types": [
+      "length [0,∞]",
+      "percentage [0,∞]"
+    ]
+  },
+  "scroll-padding-right": {
+    "animation-type": "by-computed-value",
+    "inherited": false,
+    "initial": "0",
+    "requires-computation": "cascaded-value",
+    "valid-types": [
+      "length [0,∞]",
+      "percentage [0,∞]"
+    ]
+  },
+  "scroll-padding-top": {
+    "animation-type": "by-computed-value",
+    "inherited": false,
+    "initial": "0",
+    "requires-computation": "cascaded-value",
+    "valid-types": [
+      "length [0,∞]",
+      "percentage [0,∞]"
     ]
   },
   "scroll-timeline": {
@@ -4292,6 +4520,7 @@
     ]
   },
   "transform": {
+    "affects-accumulated-visual-contexts": true,
     "animation-type": "custom",
     "inherited": false,
     "initial": "none",
@@ -4318,6 +4547,7 @@
     ]
   },
   "transform-origin": {
+    "affects-accumulated-visual-contexts": true,
     "affects-layout": false,
     "animation-type": "by-computed-value",
     "inherited": false,
@@ -4419,6 +4649,7 @@
     ]
   },
   "translate": {
+    "affects-accumulated-visual-contexts": true,
     "animation-type": "custom",
     "inherited": false,
     "initial": "none",

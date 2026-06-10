@@ -9,6 +9,7 @@
 #include <AK/Function.h>
 #include <AK/NonnullOwnPtr.h>
 #include <AK/Optional.h>
+#include <AK/OwnPtr.h>
 #include <AK/StringView.h>
 
 namespace Unicode {
@@ -27,6 +28,7 @@ public:
     static NonnullOwnPtr<Segmenter> create(SegmenterGranularity segmenter_granularity);
     static NonnullOwnPtr<Segmenter> create(StringView locale, SegmenterGranularity segmenter_granularity);
     static NonnullOwnPtr<Segmenter> create_for_ascii_grapheme(size_t length);
+    static OwnPtr<Segmenter> try_create_for_ascii_line(Utf16View const&);
     virtual ~Segmenter() = default;
 
     static bool should_continue_beyond_word(Utf16View const&);
@@ -50,7 +52,6 @@ public:
     using SegmentationCallback = Function<IterationDecision(size_t)>;
     virtual void for_each_boundary(String, SegmentationCallback) = 0;
     virtual void for_each_boundary(Utf16View const&, SegmentationCallback) = 0;
-    virtual void for_each_boundary(Utf32View const&, SegmentationCallback) = 0;
 
     virtual bool is_current_boundary_word_like() const = 0;
 

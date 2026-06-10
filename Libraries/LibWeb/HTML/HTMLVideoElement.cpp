@@ -7,7 +7,10 @@
  */
 
 #include <LibGfx/Bitmap.h>
+#include <LibGfx/DecodedImageFrame.h>
+#include <LibGfx/YUVData.h>
 #include <LibMedia/Sinks/DisplayingVideoSink.h>
+#include <LibMedia/VideoFrame.h>
 #include <LibWeb/Bindings/HTMLVideoElement.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CSS/ComputedProperties.h>
@@ -65,9 +68,9 @@ void HTMLVideoElement::attribute_changed(FlyString const& name, Optional<String>
     }
 }
 
-GC::Ptr<Layout::Node> HTMLVideoElement::create_layout_node(GC::Ref<CSS::ComputedProperties> style)
+RefPtr<Layout::Node> HTMLVideoElement::create_layout_node(CSS::ComputedProperties const& style)
 {
-    return heap().allocate<Layout::VideoBox>(document(), *this, style);
+    return make_ref_counted<Layout::VideoBox>(document(), *this, style);
 }
 
 Layout::VideoBox* HTMLVideoElement::layout_node()
@@ -135,21 +138,23 @@ u32 HTMLVideoElement::video_height() const
     return 0;
 }
 
-void HTMLVideoElement::update_intrinsic_video_dimensions()
+bool HTMLVideoElement::update_intrinsic_video_dimensions()
 {
     if (selected_video_track_sink() == nullptr) {
+        auto had_intrinsic_video_dimensions = m_intrinsic_video_dimensions.has_value();
         set_intrinsic_video_dimensions({});
-        return;
+        return had_intrinsic_video_dimensions;
     }
 
     auto current_frame = selected_video_track_sink()->current_frame();
     if (current_frame == nullptr)
-        return;
+        return false;
 
-    auto current_frame_size = current_frame->size().to_type<u32>();
+    auto current_frame_size = current_frame->size();
     if (current_frame_size == m_intrinsic_video_dimensions)
-        return;
+        return false;
     set_intrinsic_video_dimensions(current_frame_size);
+    return true;
 }
 
 void HTMLVideoElement::update_natural_dimensions()
@@ -336,12 +341,21 @@ HTMLVideoElement::Representation HTMLVideoElement::current_representation() cons
     return Representation::VideoFrame;
 }
 
-RefPtr<Gfx::ImmutableBitmap> HTMLVideoElement::bitmap() const
+Optional<Gfx::DecodedImageFrame> HTMLVideoElement::current_decoded_image_frame() const
 {
     auto const& sink = selected_video_track_sink();
     if (sink == nullptr)
-        return nullptr;
-    return sink->current_frame();
+        return {};
+    auto current_frame = sink->current_frame();
+    if (!current_frame)
+        return {};
+    auto bitmap_or_error = current_frame->yuv_data().to_bitmap();
+    if (bitmap_or_error.is_error()) {
+        dbgln("Could not convert video frame to bitmap: {}", bitmap_or_error.release_error());
+        return {};
+    }
+    auto bitmap = bitmap_or_error.release_value();
+    return Gfx::DecodedImageFrame { NonnullRefPtr<Gfx::Bitmap const> { *bitmap }, current_frame->color_space() };
 }
 
 }

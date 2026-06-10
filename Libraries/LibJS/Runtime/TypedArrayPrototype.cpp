@@ -376,7 +376,7 @@ JS_DEFINE_NATIVE_FUNCTION(TypedArrayPrototype::copy_within)
             to_end += count_bytes;
 
             if (!from_end.has_overflow() && !to_end.has_overflow()) {
-                auto* base = buffer->buffer().data();
+                auto* base = buffer->data();
                 void const* src = base + from_byte_index;
                 void* dst = base + to_byte_index;
                 memmove(dst, src, count_bytes);
@@ -511,7 +511,7 @@ inline void fast_typed_array_fill(TypedArrayBase& typed_array, u32 begin, u32 en
     }
 
     auto& array_buffer = *typed_array.viewed_array_buffer();
-    auto* slot = reinterpret_cast<T*>(array_buffer.buffer().offset_pointer(computed_begin.value()));
+    auto* slot = reinterpret_cast<T*>(array_buffer.data() + computed_begin.value());
     for (auto i = begin; i < end; ++i)
         *(slot++) = value;
 }
@@ -653,7 +653,7 @@ JS_DEFINE_NATIVE_FUNCTION(TypedArrayPrototype::filter)
     auto callback_function = TRY(callback_from_args(vm, "filter"sv));
 
     // 5. Let kept be a new empty List.
-    GC::RootVector<Value> kept { vm.heap() };
+    GC::RootVector<Value> kept;
 
     // 6. Let captured be 0.
     size_t captured = 0;
@@ -683,7 +683,7 @@ JS_DEFINE_NATIVE_FUNCTION(TypedArrayPrototype::filter)
     }
 
     // 9. Let A be ? TypedArraySpeciesCreate(O, « 𝔽(captured) »).
-    GC::RootVector<Value> arguments(vm.heap());
+    GC::RootVector<Value> arguments;
     arguments.empend(captured);
     auto& realm = *vm.current_realm();
     auto* filter_array = TRY(typed_array_species_create(vm, *typed_array, [&]() -> ThrowCompletionOr<GC::Ref<TypedArrayBase>> { return TRY(typed_array->create_default(realm, captured)); }, move(arguments)));
@@ -1206,7 +1206,7 @@ JS_DEFINE_NATIVE_FUNCTION(TypedArrayPrototype::map)
     auto callback_function = TRY(callback_from_args(vm, "map"sv));
 
     // 5. Let A be ? TypedArraySpeciesCreate(O, « 𝔽(len) »).
-    GC::RootVector<Value> arguments(vm.heap());
+    GC::RootVector<Value> arguments;
     arguments.empend(length);
     auto& realm = *vm.current_realm();
     auto* array = TRY(typed_array_species_create(vm, *typed_array, [&]() -> ThrowCompletionOr<GC::Ref<TypedArrayBase>> { return TRY(typed_array->create_default(realm, length)); }, move(arguments)));
@@ -1469,7 +1469,7 @@ static ThrowCompletionOr<void> set_typed_array_from_typed_array(VM& vm, TypedArr
     auto same_shared_array_buffer = false;
 
     // 18. If IsSharedArrayBuffer(srcBuffer) is true, IsSharedArrayBuffer(targetBuffer) is true, and srcBuffer.[[ArrayBufferData]] is targetBuffer.[[ArrayBufferData]], let sameSharedArrayBuffer be true; otherwise, let sameSharedArrayBuffer be false.
-    if (source_buffer->is_shared_array_buffer() && target_buffer->is_shared_array_buffer() && (&source_buffer->buffer() == &target_buffer->buffer()))
+    if (source_buffer->is_shared_array_buffer() && target_buffer->is_shared_array_buffer() && (source_buffer->data() == target_buffer->data()))
         same_shared_array_buffer = true;
 
     size_t source_byte_index = 0;
@@ -1517,7 +1517,7 @@ static ThrowCompletionOr<void> set_typed_array_from_typed_array(VM& vm, TypedArr
         //     ii. Perform SetValueInBuffer(targetBuffer, targetByteIndex, Uint8, value, true, Unordered).
         //     iii. Set srcByteIndex to srcByteIndex + 1.
         //     iv. Set targetByteIndex to targetByteIndex + 1.
-        target_buffer->buffer().overwrite(target_byte_index, source_buffer->buffer().data() + source_byte_index, limit - target_byte_index);
+        target_buffer->overwrite(target_byte_index, source_buffer->data() + source_byte_index, limit - target_byte_index);
     }
     // 24. Else,
     else {
@@ -1689,7 +1689,7 @@ JS_DEFINE_NATIVE_FUNCTION(TypedArrayPrototype::slice)
     auto count = max(final - k, 0);
 
     // 13. Let A be ? TypedArraySpeciesCreate(O, « 𝔽(count) »).
-    GC::RootVector<Value> arguments(vm.heap());
+    GC::RootVector<Value> arguments;
     arguments.empend(count);
     auto& realm = *vm.current_realm();
     auto* array = TRY(typed_array_species_create(vm, *typed_array, [&]() -> ThrowCompletionOr<GC::Ref<TypedArrayBase>> { return TRY(typed_array->create_default(realm, count)); }, move(arguments)));
@@ -1757,8 +1757,8 @@ JS_DEFINE_NATIVE_FUNCTION(TypedArrayPrototype::slice)
             // OPTIMIZATION: If the buffers are not detached and not shared, we can do a single bulk copy.
             if (!target_buffer.is_detached() && !target_buffer.is_shared_array_buffer()
                 && !source_buffer.is_detached() && !source_buffer.is_shared_array_buffer()
-                && &target_buffer.buffer() != &source_buffer.buffer()) {
-                target_buffer.buffer().overwrite(target_byte_index, source_buffer.buffer().data() + source_byte_index.value(), limit.value() - target_byte_index);
+                && target_buffer.data() != source_buffer.data()) {
+                target_buffer.overwrite(target_byte_index, source_buffer.data() + source_byte_index.value(), limit.value() - target_byte_index);
             } else {
                 // ix. Repeat, while targetByteIndex < limit,
                 while (target_byte_index < limit) {
@@ -1944,7 +1944,7 @@ JS_DEFINE_NATIVE_FUNCTION(TypedArrayPrototype::subarray)
         return typed_array;
     }
 
-    GC::RootVector<Value> arguments(vm.heap());
+    GC::RootVector<Value> arguments;
     Optional<u32> new_length;
 
     // 15. If O.[[ArrayLength]] is auto and end is undefined, then
@@ -2058,7 +2058,7 @@ JS_DEFINE_NATIVE_FUNCTION(TypedArrayPrototype::to_reversed)
     auto length = typed_array_length(typed_array_record);
 
     // 4. Let A be ? TypedArrayCreateSameType(O, « 𝔽(length) »).
-    GC::RootVector<Value> arguments(vm.heap());
+    GC::RootVector<Value> arguments;
     arguments.empend(length);
     auto* array = TRY(typed_array_create_same_type(vm, *typed_array, move(arguments)));
 
@@ -2103,7 +2103,7 @@ JS_DEFINE_NATIVE_FUNCTION(TypedArrayPrototype::to_sorted)
     auto length = typed_array_length(typed_array_record);
 
     // 5. Let A be ? TypedArrayCreateSameType(O, « 𝔽(len) »).
-    GC::RootVector<Value> arguments(vm.heap());
+    GC::RootVector<Value> arguments;
     arguments.empend(length);
     auto* array = TRY(typed_array_create_same_type(vm, *typed_array, move(arguments)));
 
@@ -2183,7 +2183,7 @@ JS_DEFINE_NATIVE_FUNCTION(TypedArrayPrototype::with)
         return vm.throw_completion<RangeError>(ErrorType::TypedArrayInvalidIntegerIndex, actual_index);
 
     // 10. Let A be ? TypedArrayCreateSameType(O, « 𝔽(len) »).
-    GC::RootVector<Value> arguments(vm.heap());
+    GC::RootVector<Value> arguments;
     arguments.empend(length);
     auto* array = TRY(typed_array_create_same_type(vm, *typed_array, move(arguments)));
 

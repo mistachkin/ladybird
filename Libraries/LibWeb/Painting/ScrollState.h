@@ -7,6 +7,8 @@
 #pragma once
 
 #include <LibGfx/Point.h>
+#include <LibIPC/Forward.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/Painting/ScrollFrame.h>
 
 namespace Web::Painting {
@@ -14,12 +16,22 @@ namespace Web::Painting {
 class ScrollStateSnapshot {
 public:
     static ScrollStateSnapshot create(Vector<ScrollFrame> const& scroll_frames, double device_pixels_per_css_pixel);
+    static ScrollStateSnapshot create_from_device_offsets(Vector<Gfx::FloatPoint>&&);
+
+    ReadonlySpan<Gfx::FloatPoint> device_offsets() const { return m_device_offsets; }
 
     Gfx::FloatPoint device_offset_for_index(ScrollFrameIndex index) const
     {
         if (index.value() >= m_device_offsets.size())
             return {};
         return m_device_offsets[index.value()];
+    }
+
+    void set_device_offset_for_index(ScrollFrameIndex index, Gfx::FloatPoint offset)
+    {
+        if (index.value() >= m_device_offsets.size())
+            m_device_offsets.resize(index.value() + 1);
+        m_device_offsets[index.value()] = offset;
     }
 
 private:
@@ -109,5 +121,14 @@ private:
 
     Vector<ScrollFrame> m_scroll_frames;
 };
+
+}
+
+namespace IPC {
+
+template<>
+WEB_API ErrorOr<void> encode(Encoder&, Web::Painting::ScrollStateSnapshot const&);
+template<>
+WEB_API ErrorOr<Web::Painting::ScrollStateSnapshot> decode(Decoder&);
 
 }

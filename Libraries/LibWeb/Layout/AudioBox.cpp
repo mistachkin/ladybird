@@ -10,9 +10,7 @@
 
 namespace Web::Layout {
 
-GC_DEFINE_ALLOCATOR(AudioBox);
-
-AudioBox::AudioBox(DOM::Document& document, DOM::Element& element, GC::Ref<CSS::ComputedProperties> style)
+AudioBox::AudioBox(DOM::Document& document, DOM::Element& element, CSS::ComputedProperties const& style)
     : ReplacedBox(document, element, style)
 {
 }
@@ -33,7 +31,7 @@ bool AudioBox::can_have_children() const
     return dom_node().shadow_root() != nullptr;
 }
 
-GC::Ptr<Painting::Paintable> AudioBox::create_paintable() const
+RefPtr<Painting::Paintable> AudioBox::create_paintable() const
 {
     return Painting::PaintableBox::create(*this);
 }

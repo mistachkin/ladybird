@@ -17,12 +17,15 @@ class WEBVIEW_API SettingsUI : public WebUI {
 private:
     virtual void register_interfaces() override;
 
+    void load_features();
     void load_current_settings();
 
     void set_new_tab_page_url(JsonValue const&);
+    void set_tab_settings(JsonValue const&);
     void set_default_zoom_level_factor(JsonValue const&);
     void set_languages(JsonValue const&);
     void set_browsing_behavior(JsonValue const&);
+    void set_config_variable(JsonValue const&);
 
     void load_available_engines();
     void set_search_engine(JsonValue const&);

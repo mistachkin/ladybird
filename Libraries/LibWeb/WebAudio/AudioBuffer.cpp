@@ -5,6 +5,7 @@
  */
 
 #include <LibJS/Runtime/Completion.h>
+#include <LibJS/Runtime/ExternalMemory.h>
 #include <LibJS/Runtime/Realm.h>
 #include <LibJS/Runtime/TypedArray.h>
 #include <LibJS/Runtime/VM.h>
@@ -20,10 +21,14 @@ GC_DEFINE_ALLOCATOR(AudioBuffer);
 
 WebIDL::ExceptionOr<GC::Ref<AudioBuffer>> AudioBuffer::create(JS::Realm& realm, WebIDL::UnsignedLong number_of_channels, WebIDL::UnsignedLong length, float sample_rate)
 {
-    return construct_impl(realm, { number_of_channels, length, sample_rate });
+    Bindings::AudioBufferOptions options {};
+    options.number_of_channels = number_of_channels;
+    options.length = length;
+    options.sample_rate = sample_rate;
+    return construct_impl(realm, options);
 }
 
-WebIDL::ExceptionOr<GC::Ref<AudioBuffer>> AudioBuffer::construct_impl(JS::Realm& realm, AudioBufferOptions const& options)
+WebIDL::ExceptionOr<GC::Ref<AudioBuffer>> AudioBuffer::construct_impl(JS::Realm& realm, Bindings::AudioBufferOptions const& options)
 {
     // 1. If any of the values in options lie outside its nominal range, throw a NotSupportedError exception and abort the following steps.
     TRY(BaseAudioContext::verify_audio_options_inside_nominal_range(realm, options.number_of_channels, options.length, options.sample_rate));
@@ -82,7 +87,7 @@ WebIDL::ExceptionOr<GC::Ref<JS::Float32Array>> AudioBuffer::get_channel_data(Web
 }
 
 // https://webaudio.github.io/web-audio-api/#dom-audiobuffer-copyfromchannel
-WebIDL::ExceptionOr<void> AudioBuffer::copy_from_channel(GC::Root<JS::Float32Array> const& destination, WebIDL::UnsignedLong channel_number, WebIDL::UnsignedLong buffer_offset) const
+WebIDL::ExceptionOr<void> AudioBuffer::copy_from_channel(GC::Ref<JS::Float32Array> destination, WebIDL::UnsignedLong channel_number, WebIDL::UnsignedLong buffer_offset) const
 {
     // The copyFromChannel() method copies the samples from the specified channel of the AudioBuffer to the destination array.
     //
@@ -108,7 +113,7 @@ WebIDL::ExceptionOr<void> AudioBuffer::copy_from_channel(GC::Root<JS::Float32Arr
 }
 
 // https://webaudio.github.io/web-audio-api/#dom-audiobuffer-copytochannel
-WebIDL::ExceptionOr<void> AudioBuffer::copy_to_channel(GC::Root<JS::Float32Array> const& source, WebIDL::UnsignedLong channel_number, WebIDL::UnsignedLong buffer_offset)
+WebIDL::ExceptionOr<void> AudioBuffer::copy_to_channel(GC::Ref<JS::Float32Array> source, WebIDL::UnsignedLong channel_number, WebIDL::UnsignedLong buffer_offset)
 {
     // The copyToChannel() method copies the samples to the specified channel of the AudioBuffer from the source array.
     //
@@ -135,7 +140,7 @@ WebIDL::ExceptionOr<void> AudioBuffer::copy_to_channel(GC::Root<JS::Float32Array
     return {};
 }
 
-AudioBuffer::AudioBuffer(JS::Realm& realm, AudioBufferOptions const& options)
+AudioBuffer::AudioBuffer(JS::Realm& realm, Bindings::AudioBufferOptions const& options)
     : Bindings::PlatformObject(realm)
     , m_length(options.length)
     , m_sample_rate(options.sample_rate)
@@ -152,6 +157,11 @@ void AudioBuffer::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
     visitor.visit(m_channels);
+}
+
+size_t AudioBuffer::external_memory_size() const
+{
+    return JS::saturating_add_external_memory_size(Base::external_memory_size(), JS::vector_external_memory_size(m_channels));
 }
 
 }

@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <LibGfx/DecodedImageFrame.h>
 #include <LibGfx/Forward.h>
 #include <LibWeb/HTML/DecodedImageData.h>
 
@@ -17,14 +18,14 @@ class BitmapDecodedImageData final : public DecodedImageData {
 
 public:
     struct Frame {
-        RefPtr<Gfx::ImmutableBitmap> bitmap;
+        Gfx::DecodedImageFrame frame;
         int duration { 0 };
     };
 
     static ErrorOr<GC::Ref<BitmapDecodedImageData>> create(JS::Realm&, Vector<Frame>&&, size_t loop_count, bool animated);
     virtual ~BitmapDecodedImageData() override;
 
-    virtual RefPtr<Gfx::ImmutableBitmap> bitmap(size_t frame_index, Gfx::IntSize = {}) const override;
+    virtual Optional<Gfx::DecodedImageFrame> frame(size_t frame_index, Gfx::IntSize = {}) const override;
     virtual int frame_duration(size_t frame_index) const override;
 
     virtual size_t frame_count() const override { return m_frames.size(); }
@@ -36,10 +37,12 @@ public:
     virtual Optional<CSSPixelFraction> intrinsic_aspect_ratio() const override;
 
     virtual Optional<Gfx::IntRect> frame_rect(size_t frame_index) const override;
-    virtual void paint(DisplayListRecordingContext&, size_t frame_index, Gfx::IntRect dst_rect, Gfx::IntRect clip_rect, Gfx::ScalingMode scaling_mode) const override;
+    virtual void paint(DisplayListRecordingContext&, size_t frame_index, Gfx::IntRect dst_rect, Gfx::ScalingMode scaling_mode) const override;
 
 private:
     BitmapDecodedImageData(Vector<Frame>&&, size_t loop_count, bool animated);
+
+    virtual size_t external_memory_size() const override;
 
     Vector<Frame> m_frames;
     size_t m_loop_count { 0 };

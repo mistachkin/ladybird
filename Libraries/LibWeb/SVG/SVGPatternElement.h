@@ -6,7 +6,9 @@
 
 #pragma once
 
+#include <LibGC/RootHashTable.h>
 #include <LibWeb/Forward.h>
+#include <LibWeb/Layout/Node.h>
 #include <LibWeb/SVG/AttributeParser.h>
 #include <LibWeb/SVG/SVGAnimatedLength.h>
 #include <LibWeb/SVG/SVGElement.h>
@@ -45,7 +47,7 @@ public:
 
     Optional<Painting::PaintStyle> to_gfx_paint_style(SVGPaintContext const&, DisplayListRecordingContext&, Layout::Node const& target_layout_node) const;
 
-    virtual GC::Ptr<Layout::Node> create_layout_node(GC::Ref<CSS::ComputedProperties>) override { return nullptr; }
+    virtual RefPtr<Layout::Node> create_layout_node(CSS::ComputedProperties const&) override { return nullptr; }
 
 protected:
     SVGPatternElement(DOM::Document&, DOM::QualifiedName);
@@ -54,16 +56,16 @@ protected:
     virtual void visit_edges(Cell::Visitor&) override;
 
 private:
-    GC::Ptr<SVGPatternElement const> linked_pattern(HashTable<SVGPatternElement const*>& seen_patterns) const;
-    GC::Ptr<SVGPatternElement const> pattern_content_element_impl(HashTable<SVGPatternElement const*>& seen_patterns) const;
+    GC::Ptr<SVGPatternElement const> linked_pattern(GC::RootHashTable<SVGPatternElement const*>& seen_patterns) const;
+    GC::Ptr<SVGPatternElement const> pattern_content_element_impl(GC::RootHashTable<SVGPatternElement const*>& seen_patterns) const;
 
-    SVGUnits pattern_units_impl(HashTable<SVGPatternElement const*>& seen_patterns) const;
-    SVGUnits pattern_content_units_impl(HashTable<SVGPatternElement const*>& seen_patterns) const;
-    Optional<Gfx::AffineTransform> pattern_transform_impl(HashTable<SVGPatternElement const*>& seen_patterns) const;
-    NumberPercentage pattern_x_impl(HashTable<SVGPatternElement const*>& seen_patterns) const;
-    NumberPercentage pattern_y_impl(HashTable<SVGPatternElement const*>& seen_patterns) const;
-    NumberPercentage pattern_width_impl(HashTable<SVGPatternElement const*>& seen_patterns) const;
-    NumberPercentage pattern_height_impl(HashTable<SVGPatternElement const*>& seen_patterns) const;
+    SVGUnits pattern_units_impl(GC::RootHashTable<SVGPatternElement const*>& seen_patterns) const;
+    SVGUnits pattern_content_units_impl(GC::RootHashTable<SVGPatternElement const*>& seen_patterns) const;
+    Optional<Gfx::AffineTransform> pattern_transform_impl(GC::RootHashTable<SVGPatternElement const*>& seen_patterns) const;
+    NumberPercentage pattern_x_impl(GC::RootHashTable<SVGPatternElement const*>& seen_patterns) const;
+    NumberPercentage pattern_y_impl(GC::RootHashTable<SVGPatternElement const*>& seen_patterns) const;
+    NumberPercentage pattern_width_impl(GC::RootHashTable<SVGPatternElement const*>& seen_patterns) const;
+    NumberPercentage pattern_height_impl(GC::RootHashTable<SVGPatternElement const*>& seen_patterns) const;
 
     Optional<SVGUnits> m_pattern_units;
     Optional<SVGUnits> m_pattern_content_units;

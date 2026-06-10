@@ -17,7 +17,7 @@
 namespace Web::TrustedTypes {
 
 #define __ENUMERATE_REQUIRE_KEYWORD_TRUSTED_TYPES_FOR(name, value) \
-    FlyString name = value##_fly_string;
+    FlyString const& name = *new FlyString(value##_fly_string);
 ENUMERATE_REQUIRE_KEYWORD_TRUSTED_TYPES_FOR
 #undef __ENUMERATE_REQUIRE_KEYWORD_TRUSTED_TYPES_FOR
 
@@ -60,7 +60,7 @@ ContentSecurityPolicy::Directives::Directive::Result RequireTrustedTypesForDirec
     if (converted_script_source.is_error() || !converted_script_source.value().has_value())
         return Result::Blocked;
 
-    auto const* converted_script_source_value = converted_script_source.value().value().get_pointer<GC::Root<TrustedScript>>();
+    auto const* converted_script_source_value = converted_script_source.value().value().get_pointer<GC::Ref<TrustedScript>>();
 
     if (!converted_script_source_value)
         return Result::Blocked;

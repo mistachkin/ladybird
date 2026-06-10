@@ -8,7 +8,6 @@
 #include <AK/NonnullRawPtr.h>
 #include <AK/TypeCasts.h>
 #include <LibCore/DirIterator.h>
-#include <LibGC/CellAllocator.h>
 #include <LibWeb/Animations/AnimationTimeline.h>
 #include <LibWeb/Animations/DocumentTimeline.h>
 #include <LibWeb/Animations/ScrollTimeline.h>
@@ -57,15 +56,13 @@
 
 namespace Web::CSS {
 
-GC_DEFINE_ALLOCATOR(ComputedProperties);
-
 ComputedProperties::ComputedProperties() = default;
 
 ComputedProperties::~ComputedProperties() = default;
 
-void ComputedProperties::visit_edges(Visitor& visitor)
+NonnullRefPtr<ComputedProperties> ComputedProperties::create()
 {
-    Base::visit_edges(visitor);
+    return adopt_ref(*new ComputedProperties);
 }
 
 bool ComputedProperties::is_property_important(PropertyID property_id) const
@@ -215,7 +212,8 @@ StyleValue const& ComputedProperties::property(PropertyID property_id, WithAnima
     VERIFY(property_id >= first_longhand_property_id && property_id <= last_longhand_property_id);
 
     // Important properties override animated but not transitioned properties
-    if ((!is_property_important(property_id) || is_animated_property_result_of_transition(property_id)) && return_animated_value == WithAnimationsApplied::Yes) {
+    if (!m_animated_property_values.is_empty() && return_animated_value == WithAnimationsApplied::Yes
+        && (!is_property_important(property_id) || is_animated_property_result_of_transition(property_id))) {
         if (auto animated_value = m_animated_property_values.get(property_id); animated_value.has_value())
             return *animated_value.value();
     }
@@ -419,9 +417,29 @@ float ComputedProperties::opacity() const
     return property(PropertyID::Opacity).as_opacity_value().resolved();
 }
 
+Optional<SVGPaint> ComputedProperties::fill(ColorResolutionContext const& color_resolution_context) const
+{
+    auto const& value = property(PropertyID::Fill);
+
+    if (value.to_keyword() == Keyword::None)
+        return {};
+
+    return SVGPaint::from_style_value(value, color_resolution_context);
+}
+
 float ComputedProperties::fill_opacity() const
 {
     return property(PropertyID::FillOpacity).as_opacity_value().resolved();
+}
+
+Optional<SVGPaint> ComputedProperties::stroke(ColorResolutionContext const& color_resolution_context) const
+{
+    auto const& value = property(PropertyID::Stroke);
+
+    if (value.to_keyword() == Keyword::None)
+        return {};
+
+    return SVGPaint::from_style_value(value, color_resolution_context);
 }
 
 Vector<Variant<LengthPercentage, float>> ComputedProperties::stroke_dasharray() const
@@ -630,6 +648,87 @@ Vector<BackgroundLayerData> ComputedProperties::background_layers() const
             default:
                 VERIFY_NOT_REACHED();
                 break;
+            }
+        } else {
+            VERIFY_NOT_REACHED();
+        }
+
+        layers.unchecked_append(layer);
+    }
+
+    return layers;
+}
+
+Vector<BackgroundLayerData> ComputedProperties::mask_layers() const
+{
+    auto property_values = [&](PropertyID property_id) {
+        auto const& value = property(property_id);
+        if (value.is_value_list())
+            return value.as_value_list().values();
+        return StyleValueVector { value };
+    };
+
+    auto const mask_image_values = property_values(PropertyID::MaskImage);
+
+    if (all_of(mask_image_values, [](auto const& value) { return value->to_keyword() == Keyword::None; }))
+        return {};
+
+    auto mask_clip_values = property_values(PropertyID::MaskClip);
+    auto mask_origin_values = property_values(PropertyID::MaskOrigin);
+    auto mask_position_values = property_values(PropertyID::MaskPosition);
+    auto mask_repeat_values = property_values(PropertyID::MaskRepeat);
+    auto mask_size_values = property_values(PropertyID::MaskSize);
+
+    Vector<BackgroundLayerData> layers;
+    layers.ensure_capacity(mask_image_values.size());
+
+    for (size_t i = 0; i < mask_image_values.size(); i++) {
+        auto const& mask_image_value = mask_image_values[i];
+
+        if (mask_image_value->to_keyword() == Keyword::None || !mask_image_value->is_abstract_image())
+            continue;
+
+        auto const& mask_clip_value = mask_clip_values[i % mask_clip_values.size()];
+        auto const& mask_origin_value = mask_origin_values[i % mask_origin_values.size()];
+        auto const& mask_position_value = mask_position_values[i % mask_position_values.size()];
+        auto const& mask_repeat_value = mask_repeat_values[i % mask_repeat_values.size()];
+        auto const& mask_size_value = mask_size_values[i % mask_size_values.size()];
+
+        BackgroundLayerData layer {
+            .background_image = mask_image_value->as_abstract_image(),
+            .origin = BackgroundBox::BorderBox,
+            .clip = BackgroundBox::BorderBox,
+        };
+
+        if (mask_clip_value->to_keyword() != Keyword::NoClip) {
+            if (auto clip = keyword_to_background_box(mask_clip_value->to_keyword()); clip.has_value())
+                layer.clip = clip.release_value();
+        }
+
+        if (auto origin = keyword_to_background_box(mask_origin_value->to_keyword()); origin.has_value())
+            layer.origin = origin.release_value();
+
+        auto const& position = mask_position_value->as_position();
+        layer.position_x = LengthPercentage::from_style_value(position.edge_x()->as_edge().offset());
+        layer.position_y = LengthPercentage::from_style_value(position.edge_y()->as_edge().offset());
+
+        layer.repeat_x = mask_repeat_value->as_repeat_style().repeat_x();
+        layer.repeat_y = mask_repeat_value->as_repeat_style().repeat_y();
+
+        if (mask_size_value->is_background_size()) {
+            layer.size_type = CSS::BackgroundSize::LengthPercentage;
+            layer.size_x = CSS::LengthPercentageOrAuto::from_style_value(mask_size_value->as_background_size().size_x());
+            layer.size_y = CSS::LengthPercentageOrAuto::from_style_value(mask_size_value->as_background_size().size_y());
+        } else if (mask_size_value->is_keyword()) {
+            switch (mask_size_value->to_keyword()) {
+            case CSS::Keyword::Contain:
+                layer.size_type = CSS::BackgroundSize::Contain;
+                break;
+            case CSS::Keyword::Cover:
+                layer.size_type = CSS::BackgroundSize::Cover;
+                break;
+            default:
+                VERIFY_NOT_REACHED();
             }
         } else {
             VERIFY_NOT_REACHED();
@@ -1866,6 +1965,25 @@ Containment ComputedProperties::contain() const
     return containment;
 }
 
+Vector<FlyString> ComputedProperties::container_name() const
+{
+    auto const& value = property(PropertyID::ContainerName);
+    if (value.to_keyword() == Keyword::None)
+        return {};
+
+    Vector<FlyString> names;
+
+    if (value.is_value_list()) {
+        auto& values = value.as_value_list().values();
+        for (auto const& item : values)
+            names.append(item->as_custom_ident().custom_ident());
+    } else {
+        names.append(value.as_custom_ident().custom_ident());
+    }
+
+    return names;
+}
+
 ContainerType ComputedProperties::container_type() const
 {
     ContainerType container_type {};
@@ -1961,12 +2079,9 @@ Vector<ComputedProperties::AnimationProperties> ComputedProperties::animations(D
         auto duration = [&] -> Variant<double, String> {
             // auto
             if (animation_duration_style_value->to_keyword() == Keyword::Auto) {
-                // For time-driven animations, equivalent to 0s.
-                return 0;
-
-                // FIXME: For scroll-driven animations, equivalent to the duration necessary to fill the timeline in
-                //        consideration of animation-range, animation-delay, and animation-iteration-count. See
-                //        Scroll-driven Animations § 4.1 Finite Timeline Calculations.
+                // Preserve auto until the animation effect is associated with its timeline. Time-driven animations
+                // will resolve this to 0s, while scroll-driven animations fill the progress-based timeline.
+                return "auto"_string;
             }
 
             // <time [0s,∞]>

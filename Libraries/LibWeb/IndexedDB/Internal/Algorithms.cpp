@@ -97,7 +97,7 @@ void open_a_database_connection(JS::Realm& realm, StorageAPI::StorageKey storage
         // 6. If db is null, let db be a new database with name name, version 0 (zero), and with no object stores.
         // If this fails for any reason, return an appropriate error (e.g. a "QuotaExceededError" or "UnknownError" DOMException).
         if (!maybe_db.has_value()) {
-            auto maybe_database = Database::create_for_key_and_name(realm, storage_key, name);
+            auto maybe_database = Database::create_for_key_and_name(realm.heap(), storage_key, name);
 
             if (maybe_database.is_error()) {
                 call_completion(queue, on_complete, WebIDL::OperationError::create(realm, "Unable to create a new database"_utf16));
@@ -125,7 +125,7 @@ void open_a_database_connection(JS::Realm& realm, StorageAPI::StorageKey storage
             dbgln_if(IDB_DEBUG, "open_a_database_connection: Upgrading database from version {} to {}", db->version(), version);
 
             // 1. Let openConnections be the set of all connections, except connection, associated with db.
-            auto open_connections = db->associated_connections_as_heap_vector_except(connection);
+            auto open_connections = db->associated_connections_as_heap_vector_except(realm.heap(), connection);
 
             // 2. For each entry of openConnections that does not have its close pending flag set to true,
             //    queue a database task to fire a version change event named versionchange at entry with db’s version and version.
@@ -227,7 +227,7 @@ void open_a_database_connection(JS::Realm& realm, StorageAPI::StorageKey storage
 
 bool fire_a_version_change_event(JS::Realm& realm, FlyString const& event_name, GC::Ref<DOM::EventTarget> target, u64 old_version, Optional<u64> new_version)
 {
-    IDBVersionChangeEventInit event_init = {};
+    Bindings::IDBVersionChangeEventInit event_init = {};
     // 4. Set event’s oldVersion attribute to oldVersion.
     event_init.old_version = old_version;
     // 5. Set event’s newVersion attribute to newVersion.
@@ -300,7 +300,7 @@ WebIDL::ExceptionOr<GC::Ref<Key>> convert_a_value_to_a_key(JS::Realm& realm, JS:
     if (input.is_object() && (is<JS::TypedArrayBase>(input.as_object()) || is<JS::ArrayBuffer>(input.as_object()) || is<JS::DataView>(input.as_object()))) {
 
         // 1. If input is detached then return invalid.
-        if (WebIDL::is_buffer_source_detached(input))
+        if (WebIDL::BufferSource::is_detached(input))
             return Key::create_invalid(realm, "Detached buffer is not supported as key"_string);
 
         // 2. Let bytes be the result of getting a copy of the bytes held by the buffer source input.
@@ -504,7 +504,7 @@ void delete_a_database(JS::Realm& realm, StorageAPI::StorageKey storage_key, Str
         GC::Ref db = maybe_db.value();
 
         // 5. Let openConnections be the set of all connections associated with db.
-        auto open_connections = db->associated_connections_as_heap_vector();
+        auto open_connections = db->associated_connections_as_heap_vector(realm.heap());
 
         // 6. For each entry of openConnections that does not have its close pending flag set to true,
         //    queue a database task to fire a version change event named versionchange at entry with db’s version and null.
@@ -763,7 +763,7 @@ JS::Value convert_a_key_to_a_value(JS::Realm& realm, GC::Ref<Key> key)
         auto array_buffer = MUST(JS::ArrayBuffer::create(realm, len));
 
         // 4. Set the entries in buffer’s [[ArrayBufferData]] internal slot to the entries in value.
-        buffer.span().copy_to(array_buffer->buffer());
+        array_buffer->overwrite(0, buffer.data(), buffer.size());
 
         // 5. Return buffer.
         return array_buffer;
@@ -2027,7 +2027,7 @@ GC::Ref<JS::Array> retrieve_multiple_items_from_an_object_store(JS::Realm& realm
         count = OptionalNone();
 
     // 2. Let records an empty list.
-    GC::ConservativeVector<ObjectStoreRecord> records(realm.heap());
+    GC::ConservativeVector<ObjectStoreRecord> records;
 
     // 3. If direction is "next" or "nextunique", set records to the first count of store’s list of records whose key is in range.
     if (direction == Bindings::IDBCursorDirection::Next || direction == Bindings::IDBCursorDirection::Nextunique) {
@@ -2293,7 +2293,7 @@ GC::Ref<JS::Array> retrieve_multiple_items_from_an_index(JS::Realm& target_realm
         count = OptionalNone();
 
     // 2. Let records be a an empty list.
-    GC::ConservativeVector<IndexRecord> records(target_realm.heap());
+    GC::ConservativeVector<IndexRecord> records;
 
     // 3. Switching on direction:
     switch (direction) {

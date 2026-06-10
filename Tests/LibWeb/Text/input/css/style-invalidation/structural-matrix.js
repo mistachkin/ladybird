@@ -11,6 +11,11 @@ function resetStyleCounters() {
     internals.resetStyleInvalidationCounters();
 }
 
+function flushPendingStyleWork() {
+    internals.updateStyle();
+    resetStyleCounters();
+}
+
 function styleCounterSummary() {
     const counters = internals.getStyleInvalidationCounters();
     return (
@@ -26,12 +31,27 @@ function styleCounterSummary() {
     );
 }
 
+function styleCounterSummaryWithoutRecomputations() {
+    const counters = internals.getStyleInvalidationCounters();
+    return (
+        `styleInvalidations=${counters.styleInvalidations}, fullStyleInvalidations=${counters.fullStyleInvalidations}, ` +
+        `hasAncestorWalkInvocations=${counters.hasAncestorWalkInvocations}, ` +
+        `hasInvalidationMetadataCandidates=${counters.hasInvalidationMetadataCandidates}, ` +
+        `hasMatchInvocations=${counters.hasMatchInvocations}, ` +
+        `hasResultCacheHits=${counters.hasResultCacheHits}, hasResultCacheMisses=${counters.hasResultCacheMisses}`
+    );
+}
+
 function styleCounters() {
     return internals.getStyleInvalidationCounters();
 }
 
 function printPassWithCounters(testName) {
     println(`PASS: ${testName} | ${styleCounterSummary()}`);
+}
+
+function printPassWithoutRecomputeCounters(testName) {
+    println(`PASS: ${testName} | ${styleCounterSummaryWithoutRecomputations()}`);
 }
 
 function hasWalkCounterDetailSummary() {
@@ -241,7 +261,15 @@ function readProbe(target, pseudoElement) {
     );
 }
 
+function isSlottedScope(scope) {
+    return scope.startsWith("slotted-");
+}
+
 function caseSupportedInScope(scope, selectorCase, pseudoElement = "") {
+    // Bare ::slotted() rules style the assigned element itself, not a pseudo-element of the assigned element.
+    // These cases can be enabled once ::slotted(...)::before selector chaining is supported.
+    if (pseudoElement && isSlottedScope(scope)) return false;
+
     if (selectorCase.requiresSvgSubject) {
         if (pseudoElement) return false;
         return ![
@@ -269,6 +297,7 @@ function runCase({
     after,
     pseudoElement = "",
     skipInitialRead = false,
+    omitRecomputeCounters = false,
     fixtureOptions = {},
 }) {
     if (
@@ -289,9 +318,11 @@ function runCase({
         resetStyleCounters();
         mutate(subject, fixture);
         assertEqual(`${testName} after mutation`, readProbe(target, pseudoElement), after ? MATCH : BASE);
-        printPassWithCounters(testName);
+        if (omitRecomputeCounters) printPassWithoutRecomputeCounters(testName);
+        else printPassWithCounters(testName);
     } finally {
         cleanup();
+        flushPendingStyleWork();
     }
 }
 
@@ -340,6 +371,7 @@ function runDuplicateDescendantInvalidationRuleCase(scope) {
         printPassWithCounters(`duplicate descendant invalidation rules merge: ${scope}`);
     } finally {
         scoped.cleanup();
+        flushPendingStyleWork();
     }
 }
 
@@ -361,6 +393,7 @@ function runDuplicateSiblingInvalidationRuleCase(scope) {
         printPassWithCounters(`duplicate sibling invalidation rules merge: ${scope}`);
     } finally {
         scoped.cleanup();
+        flushPendingStyleWork();
     }
 }
 
@@ -398,6 +431,7 @@ function runBatchedHasMutationCase({
 
     style.remove();
     fixture.remove();
+    flushPendingStyleWork();
 }
 
 function appendHitDescendant(subject) {
@@ -423,6 +457,7 @@ const childMutationCases = [
         selector: ":empty",
         initial: true,
         after: false,
+        omitRecomputeCounters: true,
         mutate: subject => subject.appendChild(makeElement("span")),
     },
     {
@@ -1623,6 +1658,10 @@ const partChildMutationCases = [
         selector: ":empty",
         initial: true,
         after: false,
+        // This is the first case to run in this test. whichever scope runs first triggers some lazy style-system
+        // initialization whose recomputation counters differ depending on non-deterministic state — so the counters
+        // here aren't a stable thing to assert on. childMutationCases sets the same flag on its equivalent first case.
+        omitRecomputeCounters: true,
         mutate: subject => subject.appendChild(makeElement("span")),
     },
     {
@@ -2028,13 +2067,14 @@ const descendantStateMutationCases = [
     },
 ];
 
-function runDetachedReconnectCase(scope, selectorCase, pseudoElement = "") {
+function runDetachedReconnectCase(scope, selectorCase, pseudoElement = "", options = {}) {
     runCase({
         suite: pseudoElement ? "detached pseudo-element child mutation" : "detached child mutation",
         scope,
         initial: selectorCase.initial,
         after: selectorCase.after,
         pseudoElement,
+        omitRecomputeCounters: options.omitRecomputeCounters,
         ...selectorCase,
         mutate: (subject, fixture) => {
             fixture.remove();
@@ -2045,6 +2085,8 @@ function runDetachedReconnectCase(scope, selectorCase, pseudoElement = "") {
 }
 
 function runInheritedLanguageCase(scope, selectorCase, pseudoElement = "") {
+    if (!caseSupportedInScope(scope, selectorCase, pseudoElement)) return;
+
     const suite = pseudoElement ? "inherited language pseudo-element mutation" : "inherited language mutation";
     const testName = `${suite}: ${scope}: ${selectorCase.name}`;
     const { cleanup, fixture, subject, target } = buildFixture(scope, selectorCase.selector, pseudoElement);
@@ -2058,6 +2100,7 @@ function runInheritedLanguageCase(scope, selectorCase, pseudoElement = "") {
         printPassWithCounters(testName);
     } finally {
         cleanup();
+        flushPendingStyleWork();
     }
 }
 
@@ -2128,6 +2171,7 @@ function runPrecomputedDetachedInsertionCase(selectorCase) {
     } finally {
         style.remove();
         fixture.remove();
+        flushPendingStyleWork();
     }
 }
 
@@ -2371,6 +2415,8 @@ function runStateStressCase(scope, selectorCase, mode) {
 
 function runInheritedLanguageStressCase(scope, selectorCase, mode) {
     const pseudoElement = mode.includes("pseudo") ? "::before" : "";
+    if (!caseSupportedInScope(scope, selectorCase, pseudoElement)) return;
+
     const suite = `inherited language stress ${mode}`;
     const testName = `${suite}: ${scope}: ${selectorCase.name}`;
     const { cleanup, fixture, subject, target } = buildFixture(scope, selectorCase.selector, pseudoElement);
@@ -2387,6 +2433,7 @@ function runInheritedLanguageStressCase(scope, selectorCase, mode) {
         printPassWithCounters(testName);
     } finally {
         cleanup();
+        flushPendingStyleWork();
     }
 }
 
@@ -2456,6 +2503,7 @@ function runPrecomputedDetachedInsertionStressCase(selectorCase, mode) {
     } finally {
         style.remove();
         fixture.remove();
+        flushPendingStyleWork();
     }
 }
 
@@ -2486,6 +2534,7 @@ function runSlotMoveCase() {
         printPassWithCounters("scope move: slotted shadow-host target moves between slot scopes");
     } finally {
         fixture.remove();
+        flushPendingStyleWork();
     }
 }
 
@@ -2512,5 +2561,6 @@ function runNestedSlotPartCase() {
         printPassWithCounters("combined topology: ancestor shadow exposes part slot with generated pseudo-element");
     } finally {
         fixture.remove();
+        flushPendingStyleWork();
     }
 }

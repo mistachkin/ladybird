@@ -46,7 +46,6 @@ Optional<String> resolve_named_html_entity(StringView entity_name)
 
 XMLDocumentBuilder::XMLDocumentBuilder(DOM::Document& document, XMLScriptingSupport scripting_support)
     : m_document(document)
-    , m_template_node_stack(document.realm().heap())
     , m_current_node(m_document)
     , m_scripting_support(scripting_support)
 {
@@ -383,7 +382,7 @@ void XMLDocumentBuilder::document_end()
         // FIXME: Set the Document object's navigation id to null.
 
         // Set the Document's load timing info's load event end time to the current high resolution time given window.
-        document->load_timing_info().dom_content_loaded_event_end_time = HighResolutionTime::current_high_resolution_time(window);
+        document->load_timing_info().load_event_end_time = HighResolutionTime::current_high_resolution_time(window);
 
         // Assert: Document's page showing is false.
         VERIFY(!document->page_showing());

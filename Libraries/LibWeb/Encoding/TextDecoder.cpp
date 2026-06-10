@@ -18,7 +18,7 @@ namespace Web::Encoding {
 GC_DEFINE_ALLOCATOR(TextDecoder);
 
 // https://encoding.spec.whatwg.org/#dom-textdecoder
-WebIDL::ExceptionOr<GC::Ref<TextDecoder>> TextDecoder::construct_impl(JS::Realm& realm, FlyString label, Optional<TextDecoderOptions> const& options)
+WebIDL::ExceptionOr<GC::Ref<TextDecoder>> TextDecoder::construct_impl(JS::Realm& realm, FlyString label, Optional<Bindings::TextDecoderOptions> const& options)
 {
     auto& vm = realm.vm();
 
@@ -63,13 +63,13 @@ void TextDecoder::initialize(JS::Realm& realm)
 }
 
 // https://encoding.spec.whatwg.org/#dom-textdecoder-decode
-WebIDL::ExceptionOr<String> TextDecoder::decode(Optional<GC::Root<WebIDL::BufferSource>> const& input, Optional<TextDecodeOptions> const&) const
+WebIDL::ExceptionOr<String> TextDecoder::decode(Optional<WebIDL::BufferSourceVariant> input, Optional<Bindings::TextDecodeOptions> const&) const
 {
     if (!input.has_value())
         return TRY_OR_THROW_OOM(vm(), m_decoder.to_utf8({}));
 
     // FIXME: Implement the streaming stuff.
-    auto data_buffer_or_error = WebIDL::get_buffer_source_copy(*input.value()->raw_object());
+    auto data_buffer_or_error = WebIDL::get_buffer_source_copy(*input);
     if (data_buffer_or_error.is_error())
         return WebIDL::OperationError::create(realm(), "Failed to copy bytes from ArrayBuffer"_utf16);
     auto& data_buffer = data_buffer_or_error.value();

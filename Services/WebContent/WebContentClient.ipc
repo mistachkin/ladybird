@@ -2,16 +2,17 @@
 #include <LibGfx/Color.h>
 #include <LibIPC/TransportHandle.h>
 #include <LibGfx/Cursor.h>
-#include <LibGfx/SharedImage.h>
 #include <LibGfx/ShareableBitmap.h>
 #include <LibHTTP/Cookie/Cookie.h>
 #include <LibHTTP/Cookie/ParsedCookie.h>
+#include <LibHTTP/HSTS/ParsedHSTSPolicy.h>
 #include <LibHTTP/Header.h>
 #include <LibRequests/NetworkError.h>
 #include <LibRequests/RequestTimingInfo.h>
 #include <LibURL/URL.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
 #include <LibWeb/Clipboard/SystemClipboard.h>
+#include <LibWeb/Compositor/Types.h>
 #include <LibWeb/CSS/Selector.h>
 #include <LibWeb/CSS/StyleSheetIdentifier.h>
 #include <LibWeb/HTML/ActivateTab.h>
@@ -21,6 +22,7 @@
 #include <LibWeb/HTML/SelectedFile.h>
 #include <LibWeb/HTML/SelectItem.h>
 #include <LibWeb/HTML/WebViewHints.h>
+#include <LibWeb/HTML/WorkerAgentTypes.h>
 #include <LibWeb/Page/EventResult.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWebView/Attribute.h>
@@ -34,11 +36,13 @@
 
 endpoint WebContentClient
 {
+    allocate_compositor_context_id(u64 page_id, Web::Compositor::PagePresentationRegistration page_presentation_registration) => (Web::Compositor::CompositorContextId context_id)
+    did_destroy_compositor_context(Web::Compositor::CompositorContextId context_id) =|
+
     did_request_new_process_for_navigation(u64 page_id, URL::URL url) =|
     did_start_loading(u64 page_id, URL::URL url, bool is_redirect) =|
     did_finish_loading(u64 page_id, URL::URL url) =|
     did_request_refresh(u64 page_id) =|
-    did_paint(u64 page_id, Gfx::IntRect content_rect, i32 bitmap_id) =|
     did_request_cursor_change(u64 page_id, Gfx::Cursor cursor) =|
     did_change_title(u64 page_id, Utf16String title) =|
     did_change_url(u64 page_id, URL::URL url) =|
@@ -50,7 +54,7 @@ endpoint WebContentClient
     did_unhover_link(u64 page_id) =|
     did_click_link(u64 page_id, URL::URL url, ByteString target, unsigned modifiers) =|
     did_middle_click_link(u64 page_id, URL::URL url, ByteString target, unsigned modifiers) =|
-    did_request_context_menu(u64 page_id, Gfx::IntPoint content_position) =|
+    did_request_context_menu(u64 page_id, Gfx::IntPoint content_position, Web::ContextMenuForInputEventsTarget for_input_events_target) =|
     did_request_link_context_menu(u64 page_id, Gfx::IntPoint content_position, URL::URL url, ByteString target, unsigned modifiers) =|
     did_request_image_context_menu(u64 page_id, Gfx::IntPoint content_position, URL::URL url, ByteString target, unsigned modifiers, Optional<Gfx::ShareableBitmap> bitmap) =|
     did_request_media_context_menu(u64 page_id, Gfx::IntPoint content_position, ByteString target, unsigned modifiers, Web::Page::MediaContextMenu menu) =|
@@ -64,8 +68,12 @@ endpoint WebContentClient
 
     did_inspect_dom_tree(u64 page_id, String dom_tree) =|
     did_inspect_dom_node(u64 page_id, WebView::DOMNodeProperties properties) =|
+    did_inspect_grid_layouts(u64 page_id, String grid_layouts) =|
+    did_inspect_current_grid(u64 page_id, String grid_layout) =|
+    did_inspect_current_flexbox(u64 page_id, String flexbox_layout) =|
     did_inspect_accessibility_tree(u64 page_id, String accessibility_tree) =|
     did_get_hovered_node_id(u64 page_id, Web::UniqueNodeID node_id) =|
+    did_get_node_id_at_position(u64 page_id, u64 request_id, Web::UniqueNodeID node_id) =|
     did_finish_editing_dom_node(u64 page_id, Optional<Web::UniqueNodeID> node_id) =|
     did_mutate_dom(u64 page_id, WebView::Mutation mutation) =|
     did_get_dom_node_html(u64 page_id, String html) =|
@@ -88,6 +96,9 @@ endpoint WebContentClient
     did_update_cookie(HTTP::Cookie::Cookie cookie) =|
     did_expire_cookies_with_time_offset(AK::Duration offset) =|
 
+    did_store_hsts_policy(String domain, HTTP::HSTS::ParsedHSTSPolicy policy) =|
+    did_is_known_hsts_host(String domain) => (bool result)
+
     did_request_storage_item(Web::StorageAPI::StorageEndpointType storage_endpoint, String storage_key, String bottle_key) => (Optional<String> value)
     did_set_storage_item(Web::StorageAPI::StorageEndpointType storage_endpoint, String storage_key, String bottle_key, String value) => (WebView::StorageSetResult result)
     did_remove_storage_item(Web::StorageAPI::StorageEndpointType storage_endpoint, String storage_key, String bottle_key) => ()
@@ -96,9 +107,10 @@ endpoint WebContentClient
     did_post_broadcast_channel_message(u64 page_id, Web::HTML::BroadcastChannelMessage message) =|
 
     did_update_resource_count(u64 page_id, i32 count_waiting) =|
-    did_request_new_web_view(u64 page_id, Web::HTML::ActivateTab activate_tab, Web::HTML::WebViewHints hints, Optional<u64> page_index) => (String handle)
+    did_request_new_web_view(u64 page_id, Web::HTML::ActivateTab activate_tab, Web::HTML::WebViewHints hints) => (u64 new_page_id, String handle)
     did_request_activate_tab(u64 page_id) =|
     did_close_browsing_context(u64 page_id) =|
+    did_change_needs_beforeunload_check(u64 page_id, bool needs_beforeunload_check) =|
     did_request_restore_window(u64 page_id) =|
     did_request_reposition_window(u64 page_id, Gfx::IntPoint position) =|
     did_request_resize_window(u64 page_id, Gfx::IntSize size) =|
@@ -111,13 +123,16 @@ endpoint WebContentClient
     did_request_file_picker(u64 page_id, Web::HTML::FileFilter accepted_file_types, Web::HTML::AllowMultipleFiles allow_multiple_files) =|
     did_request_select_dropdown(u64 page_id, Gfx::IntPoint content_position, i32 minimum_width, Vector<Web::HTML::SelectItem> items) =|
     did_finish_handling_input_event(u64 page_id, Web::EventResult event_result) =|
+    did_update_input_caret_rect(u64 page_id, Optional<Web::DevicePixelRect> rect) =|
     did_change_theme_color(u64 page_id, Gfx::Color color) =|
+    did_change_background_color(u64 page_id, Gfx::Color color) =|
 
     did_insert_clipboard_entry(u64 page_id, Web::Clipboard::SystemClipboardRepresentation entry, String presentation_style) =|
     did_request_clipboard_entries(u64 page_id, u64 request_id) =|
+    did_request_primary_paste(u64 page_id) =|
+    did_update_primary_selection(u64 page_id, String text) =|
 
     did_update_navigation_buttons_state(u64 page_id, bool back_enabled, bool forward_enabled) =|
-    did_allocate_backing_stores(u64 page_id, i32 front_bitmap_id, Gfx::SharedImage front_backing_store, i32 back_bitmap_id, Gfx::SharedImage back_backing_store) =|
 
     did_change_audio_play_state(u64 page_id, Web::HTML::AudioPlayState play_state) =|
 
@@ -132,11 +147,11 @@ endpoint WebContentClient
     did_finish_test(u64 page_id, String text) =|
     did_set_test_timeout(u64 page_id, double milliseconds) =|
     did_receive_reference_test_metadata(u64 page_id, JsonValue result) =|
-    did_receive_test_variant_metadata(u64 page_id, JsonValue result) =|
 
     did_set_browser_zoom(u64 page_id, double factor) =|
 
     did_find_in_page(u64 page_id, size_t current_match_index, Optional<size_t> total_match_count) =|
 
-    request_worker_agent(u64 page_id, Web::Bindings::AgentType worker_type) => (IPC::TransportHandle handle, IPC::TransportHandle request_server_handle, IPC::TransportHandle image_decoder_handle) // FIXME: Add required attributes to select a SharedWorker Agent
+    start_worker_agent(u64 page_id, Web::HTML::WorkerAgentStartRequest request) => (Web::HTML::WorkerAgentId agent_id)
+    close_worker_agent(u64 page_id, Web::HTML::WorkerAgentId agent_id, Web::HTML::WorkerAgentOwnerToken owner_token) =|
 }

@@ -59,8 +59,14 @@ public:
 
     virtual Utf16String name_for_call_stack() const override;
 
-    Utf16FlyString const& name() const { return shared_data().m_name; }
+    Utf16FlyString const& name() const
+    {
+        if (m_name.has_value())
+            return *m_name;
+        return shared_data().m_name;
+    }
     void set_name(Utf16FlyString const& name);
+    void set_inferred_name(Variant<PropertyKey, PrivateName> const& name, Optional<StringView> const& prefix = {});
 
     void set_is_class_constructor() { const_cast<SharedFunctionInstanceData&>(shared_data()).set_is_class_constructor(); }
 
@@ -91,8 +97,12 @@ public:
     Object* home_object() const { return m_home_object; }
     void set_home_object(Object* home_object) { m_home_object = home_object; }
 
-    [[nodiscard]] Utf16View source_text() const { return shared_data().m_source_text; }
-    void set_source_text(Utf16View source_text) { const_cast<SharedFunctionInstanceData&>(shared_data()).m_source_text = move(source_text); }
+    [[nodiscard]] Utf16String source_text() const { return shared_data().source_text(); }
+    void set_source_text(Utf16View source_text) { const_cast<SharedFunctionInstanceData&>(shared_data()).set_source_text(source_text); }
+    void set_source_text_range(SourceCode const& source_code, size_t source_text_offset, size_t source_text_length)
+    {
+        const_cast<SharedFunctionInstanceData&>(shared_data()).set_source_text_range(source_code, source_text_offset, source_text_length);
+    }
 
     Vector<ClassFieldDefinition> const& fields() const { return ensure_class_data().fields; }
     void add_field(ClassFieldDefinition field) { ensure_class_data().fields.append(move(field)); }
@@ -131,21 +141,27 @@ private:
         Object& prototype);
 
     virtual ThrowCompletionOr<Optional<PropertyDescriptor>> internal_get_own_property(PropertyKey const&) const override;
+    virtual ThrowCompletionOr<GC::RootVector<Value>> internal_own_property_keys() const override;
 
     virtual bool is_strict_mode() const override { return shared_data().m_strict; }
 
     ThrowCompletionOr<Value> ordinary_call_evaluate_body(VM&, ExecutionContext&);
 
     [[nodiscard]] bool function_environment_needed() const { return shared_data().m_function_environment_needed; }
+    SharedFunctionInstanceData& shared_data() { return m_shared_data; }
     SharedFunctionInstanceData const& shared_data() const { return m_shared_data; }
 
     virtual void visit_edges(Visitor&) override;
 
     void prepare_for_ordinary_call(VM&, ExecutionContext& callee_context, Object* new_target);
     void ordinary_call_bind_this(VM&, ExecutionContext&, Value this_argument);
+    bool supports_legacy_caller_or_arguments() const;
+    Value legacy_caller() const;
+    Value legacy_arguments() const;
 
     GC::Ref<SharedFunctionInstanceData> m_shared_data;
 
+    Optional<Utf16FlyString> m_name;
     GC::Ptr<PrimitiveString> m_name_string;
 
     // Internal Slots of ECMAScript Function Objects, https://tc39.es/ecma262/#table-internal-slots-of-ecmascript-function-objects

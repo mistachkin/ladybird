@@ -4,7 +4,12 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-use std::alloc::{GlobalAlloc, Layout};
+// Under `cargo test`, fall back to the standard system allocator so that the
+// crate's unit tests don't need to link against the C++ runtime.
+#![cfg(not(test))]
+
+use std::alloc::GlobalAlloc;
+use std::alloc::Layout;
 
 unsafe extern "C" {
     fn ladybird_rust_alloc(size: usize, alignment: usize) -> *mut u8;

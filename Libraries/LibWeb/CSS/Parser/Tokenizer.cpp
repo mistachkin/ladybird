@@ -8,6 +8,7 @@
 #include <AK/Debug.h>
 #include <AK/SourceLocation.h>
 #include <AK/StringConversions.h>
+#include <AK/Utf8View.h>
 #include <AK/Vector.h>
 #include <LibTextCodec/Decoder.h>
 #include <LibWeb/CSS/CharacterTypes.h>
@@ -17,7 +18,7 @@
 namespace Web::CSS::Parser {
 
 // U+FFFD REPLACEMENT CHARACTER (�)
-#define REPLACEMENT_CHARACTER 0xFFFD
+static constexpr u32 REPLACEMENT_CHARACTER = 0xFFFD;
 static constexpr u32 TOKENIZER_EOF = 0xFFFFFFFF;
 
 static inline void log_parse_error(SourceLocation const& location = SourceLocation::current())
@@ -155,14 +156,27 @@ static inline bool is_E(u32 code_point)
     return code_point == 0x45;
 }
 
-Vector<Token> Tokenizer::tokenize(StringView input, StringView encoding)
+Vector<Token> Tokenizer::tokenize(StringView input, StringView encoding, TokenizerInput tokenizer_input)
 {
     // https://www.w3.org/TR/css-syntax-3/#css-filter-code-points
-    auto filter_code_points = [](StringView input, auto encoding) -> String {
+    auto filter_code_points = [](StringView input, auto encoding, TokenizerInput tokenizer_input) -> String {
+        auto standardized_encoding = TextCodec::get_standardized_encoding(encoding);
+        VERIFY(standardized_encoding.has_value());
         auto decoder = TextCodec::decoder_for(encoding);
         VERIFY(decoder.has_value());
 
-        auto decoded_input = MUST(decoder->to_utf8(input));
+        auto decoded_input = [&] {
+            if (tokenizer_input == TokenizerInput::DecodedText) {
+                VERIFY(Utf8View { input }.validate());
+                return String::from_utf8_without_validation(input.bytes());
+            }
+            if (standardized_encoding->equals_ignoring_ascii_case("utf-8"sv) && Utf8View { input }.validate(AllowLonelySurrogates::No)) {
+                if (input.bytes().starts_with({ { 0xef, 0xbb, 0xbf } }))
+                    input = input.substring_view(3);
+                return String::from_utf8_without_validation(input.bytes());
+            }
+            return MUST(decoder->to_utf8(input));
+        }();
 
         // OPTIMIZATION: If the input doesn't contain any filterable characters, we can skip the filtering
         bool const contains_filterable = [&] {
@@ -214,7 +228,7 @@ Vector<Token> Tokenizer::tokenize(StringView input, StringView encoding)
         return builder.to_string_without_validation();
     };
 
-    Tokenizer tokenizer { filter_code_points(input, encoding) };
+    Tokenizer tokenizer { filter_code_points(input, encoding, tokenizer_input) };
     return tokenizer.tokenize();
 }
 
@@ -231,7 +245,7 @@ Vector<Token> Tokenizer::tokenize()
     for (;;) {
         auto token_start = m_position;
         auto token = consume_a_token();
-        token.set_position_range({}, token_start, m_position);
+        token.set_position_range(Badge<Tokenizer> {}, token_start, m_position);
         tokens.append(token);
 
         if (token.is(Token::Type::EndOfFile)) {
@@ -879,8 +893,10 @@ Token Tokenizer::consume_string_token(u32 ending_code_point)
         auto input = next_code_point();
 
         // ending code point
-        if (input == ending_code_point)
+        if (input == ending_code_point) {
+            // Return the <string-token>.
             return Token::create_string(builder.to_fly_string_without_validation(), input_since(original_source_text_start_byte_offset_including_quotation_mark));
+        }
 
         // EOF
         if (is_eof(input)) {

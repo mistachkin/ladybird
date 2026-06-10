@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibGC/Heap.h>
 #include <LibJS/Runtime/AbstractOperations.h>
 #include <LibJS/Runtime/ArrayBuffer.h>
 #include <LibJS/Runtime/ArrayBufferConstructor.h>
@@ -23,7 +24,7 @@ static GC::Ref<Object> prototype_for_shared_state(Realm& realm, DataBlock::Share
 
 ThrowCompletionOr<GC::Ref<ArrayBuffer>> ArrayBuffer::create(Realm& realm, size_t byte_length, DataBlock::Shared is_shared)
 {
-    auto buffer = ByteBuffer::create_zeroed(byte_length);
+    auto buffer = DataBlock::OwnedBackingStore::create_zeroed(byte_length);
     if (buffer.is_error())
         return realm.vm().throw_completion<RangeError>(ErrorType::NotEnoughMemoryToAllocate, byte_length);
 
@@ -32,7 +33,13 @@ ThrowCompletionOr<GC::Ref<ArrayBuffer>> ArrayBuffer::create(Realm& realm, size_t
 
 GC::Ref<ArrayBuffer> ArrayBuffer::create(Realm& realm, ByteBuffer buffer, DataBlock::Shared is_shared)
 {
-    return realm.create<ArrayBuffer>(move(buffer), is_shared, prototype_for_shared_state(realm, is_shared));
+    auto owned_buffer = MUST(DataBlock::OwnedBackingStore::create_uninitialized(buffer.size()));
+    if (!buffer.is_empty())
+        __builtin_memcpy(owned_buffer.data(), buffer.data(), buffer.size());
+
+    auto array_buffer = realm.create<ArrayBuffer>(move(owned_buffer), is_shared, prototype_for_shared_state(realm, is_shared));
+    realm.vm().heap().did_allocate_external_memory(array_buffer->external_memory_size());
+    return array_buffer;
 }
 
 GC::Ref<ArrayBuffer> ArrayBuffer::create(Realm& realm, ByteBuffer* buffer, DataBlock::Shared is_shared)
@@ -40,7 +47,20 @@ GC::Ref<ArrayBuffer> ArrayBuffer::create(Realm& realm, ByteBuffer* buffer, DataB
     return realm.create<ArrayBuffer>(buffer, is_shared, prototype_for_shared_state(realm, is_shared));
 }
 
-ArrayBuffer::ArrayBuffer(ByteBuffer buffer, DataBlock::Shared is_shared, Object& prototype)
+GC::Ref<ArrayBuffer> ArrayBuffer::create(Realm& realm, DataBlock block)
+{
+    auto is_shared = block.is_shared;
+    auto array_buffer = realm.create<ArrayBuffer>(static_cast<ByteBuffer*>(nullptr), is_shared, prototype_for_shared_state(realm, is_shared));
+    array_buffer->set_data_block(move(block));
+    return array_buffer;
+}
+
+GC::Ref<ArrayBuffer> ArrayBuffer::create(Realm& realm, DataBlock::UnownedExternalBuffer buffer, DataBlock::Shared is_shared)
+{
+    return realm.create<ArrayBuffer>(buffer, is_shared, prototype_for_shared_state(realm, is_shared));
+}
+
+ArrayBuffer::ArrayBuffer(DataBlock::OwnedBackingStore buffer, DataBlock::Shared is_shared, Object& prototype)
     : Object(ConstructWithPrototypeTag::Tag, prototype)
     , m_data_block(DataBlock { move(buffer), is_shared })
     , m_detach_key(js_undefined())
@@ -54,10 +74,57 @@ ArrayBuffer::ArrayBuffer(ByteBuffer* buffer, DataBlock::Shared is_shared, Object
 {
 }
 
+ArrayBuffer::ArrayBuffer(DataBlock::UnownedExternalBuffer buffer, DataBlock::Shared is_shared, Object& prototype)
+    : Object(ConstructWithPrototypeTag::Tag, prototype)
+    , m_data_block(DataBlock { move(buffer), is_shared })
+    , m_detach_key(js_undefined())
+{
+}
+
+void ArrayBuffer::account_external_memory_change(size_t old_external_memory_size, size_t new_external_memory_size)
+{
+    if (new_external_memory_size > old_external_memory_size) {
+        heap().did_allocate_external_memory(new_external_memory_size - old_external_memory_size);
+        return;
+    }
+
+    heap().did_free_external_memory(old_external_memory_size - new_external_memory_size);
+}
+
+void ArrayBuffer::set_data_block(DataBlock block)
+{
+    auto old_external_memory_size = external_memory_size();
+    m_data_block = move(block);
+    account_external_memory_change(old_external_memory_size, external_memory_size());
+}
+
+void ArrayBuffer::did_change_data_block_capacity(size_t old_external_memory_size)
+{
+    account_external_memory_change(old_external_memory_size, external_memory_size());
+}
+
+ErrorOr<void> ArrayBuffer::try_resize(size_t new_size, DataBlock::ZeroFillNewBytes zero_fill_new_bytes)
+{
+    auto old_external_memory_size = external_memory_size();
+    TRY(m_data_block.try_resize(new_size, zero_fill_new_bytes));
+    did_change_data_block_capacity(old_external_memory_size);
+    return {};
+}
+
+ErrorOr<void> ArrayBuffer::try_ensure_capacity(size_t new_capacity)
+{
+    auto old_external_memory_size = external_memory_size();
+    TRY(m_data_block.try_ensure_capacity(new_capacity));
+    did_change_data_block_capacity(old_external_memory_size);
+    return {};
+}
+
 void ArrayBuffer::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
     visitor.visit(m_detach_key);
+    if (auto* external = m_data_block.byte_buffer.get_pointer<DataBlock::UnownedExternalBuffer>())
+        visitor.visit(external->owner);
 }
 
 // 6.2.9.1 CreateByteDataBlock ( size ), https://tc39.es/ecma262/#sec-createbytedatablock
@@ -69,7 +136,7 @@ ThrowCompletionOr<DataBlock> create_byte_data_block(VM& vm, size_t size)
 
     // 2. Let db be a new Data Block value consisting of size bytes. If it is impossible to create such a Data Block, throw a RangeError exception.
     // 3. Set all of the bytes of db to 0.
-    auto data_block = ByteBuffer::create_zeroed(size);
+    auto data_block = DataBlock::OwnedBackingStore::create_zeroed(size);
     if (data_block.is_error())
         return vm.throw_completion<RangeError>(ErrorType::NotEnoughMemoryToAllocate, size);
 
@@ -82,7 +149,7 @@ ThrowCompletionOr<DataBlock> create_byte_data_block(VM& vm, size_t size)
 static ThrowCompletionOr<DataBlock> create_shared_byte_data_block(VM& vm, size_t size)
 {
     // 1. Let db be a new Shared Data Block value consisting of size bytes. If it is impossible to create such a Shared Data Block, throw a RangeError exception.
-    auto data_block = ByteBuffer::create_zeroed(size);
+    auto data_block = DataBlock::OwnedBackingStore::create_zeroed(size);
     if (data_block.is_error())
         return vm.throw_completion<RangeError>(ErrorType::NotEnoughMemoryToAllocate, size);
 
@@ -96,10 +163,11 @@ static ThrowCompletionOr<DataBlock> create_shared_byte_data_block(VM& vm, size_t
 }
 
 // 6.2.9.3 CopyDataBlockBytes ( toBlock, toIndex, fromBlock, fromIndex, count ), https://tc39.es/ecma262/#sec-copydatablockbytes
-void copy_data_block_bytes(ByteBuffer& to_block, u64 to_index, ByteBuffer const& from_block, u64 from_index, u64 count)
+void copy_data_block_bytes(Bytes to_block, u64 to_index, ReadonlyBytes from_block, u64 from_index, u64 count)
 {
     // 1. Assert: fromBlock and toBlock are distinct values.
-    VERIFY(&to_block != &from_block);
+    if (count > 0)
+        VERIFY(to_block.data() != from_block.data());
 
     // 2. Let fromSize be the number of bytes in fromBlock.
     auto from_size = from_block.size();
@@ -170,7 +238,7 @@ ThrowCompletionOr<ArrayBuffer*> allocate_array_buffer(VM& vm, FunctionObject& co
     }
 
     // 4. Let obj be ? OrdinaryCreateFromConstructor(constructor, "%ArrayBuffer.prototype%", slots).
-    auto obj = TRY(ordinary_create_from_constructor<ArrayBuffer>(vm, constructor, &Intrinsics::array_buffer_prototype, nullptr, DataBlock::Shared::No));
+    auto obj = TRY(ordinary_create_from_constructor<ArrayBuffer>(vm, constructor, &Intrinsics::array_buffer_prototype, static_cast<ByteBuffer*>(nullptr), DataBlock::Shared::No));
 
     // 5. Let block be ? CreateByteDataBlock(byteLength).
     auto block = TRY(create_byte_data_block(vm, byte_length));
@@ -184,7 +252,7 @@ ThrowCompletionOr<ArrayBuffer*> allocate_array_buffer(VM& vm, FunctionObject& co
     if (allocating_resizable_buffer) {
         // a. If it is not possible to create a Data Block block consisting of maxByteLength bytes, throw a RangeError exception.
         // b. NOTE: Resizable ArrayBuffers are designed to be implementable with in-place growth. Implementations may throw if, for example, virtual memory cannot be reserved up front.
-        if (auto result = obj->buffer().try_ensure_capacity(*max_byte_length); result.is_error())
+        if (auto result = obj->try_ensure_capacity(*max_byte_length); result.is_error())
             return vm.throw_completion<RangeError>(ErrorType::NotEnoughMemoryToAllocate, *max_byte_length);
 
         // c. Set obj.[[ArrayBufferMaxByteLength]] to maxByteLength.
@@ -242,7 +310,7 @@ ThrowCompletionOr<ArrayBuffer*> array_buffer_copy_and_detach(VM& vm, ArrayBuffer
     // 12. Let toBlock be newBuffer.[[ArrayBufferData]].
     // 13. Perform CopyDataBlockBytes(toBlock, 0, fromBlock, 0, copyLength).
     // 14. NOTE: Neither creation of the new Data Block nor copying from the old Data Block are observable. Implementations may implement this method as a zero-copy move or a realloc.
-    copy_data_block_bytes(new_buffer->buffer(), 0, array_buffer.buffer(), 0, copy_length);
+    new_buffer->overwrite(0, array_buffer.data(), copy_length);
 
     // 15. Perform ! DetachArrayBuffer(arrayBuffer).
     MUST(detach_array_buffer(vm, array_buffer));
@@ -253,6 +321,7 @@ ThrowCompletionOr<ArrayBuffer*> array_buffer_copy_and_detach(VM& vm, ArrayBuffer
 
 void ArrayBuffer::detach_buffer()
 {
+    auto old_external_memory_size = external_memory_size();
     for (auto& cached_view : m_cached_views) {
         auto& view = static_cast<TypedArrayBase&>(cached_view);
         if (view.viewed_array_buffer() == this)
@@ -260,21 +329,27 @@ void ArrayBuffer::detach_buffer()
     }
     m_cached_views.clear();
     m_data_block.byte_buffer = Empty {};
+    account_external_memory_change(old_external_memory_size, 0);
 }
 
-ThrowCompletionOr<ByteBuffer> ArrayBuffer::detach_and_take_bytes(VM& vm)
+ThrowCompletionOr<DataBlock> ArrayBuffer::detach_and_take_data_block(VM& vm)
 {
     VERIFY(!is_shared_array_buffer());
 
     if (!same_value(detach_key(), js_undefined()))
         return vm.throw_completion<TypeError>(ErrorType::DetachKeyMismatch, js_undefined(), detach_key());
 
-    auto bytes = m_data_block.byte_buffer.visit(
-        [](Empty) -> ByteBuffer { VERIFY_NOT_REACHED(); },
-        [](ByteBuffer& value) -> ByteBuffer { return move(value); },
-        [](DataBlock::UnownedFixedLengthByteBuffer& value) -> ByteBuffer { return MUST(ByteBuffer::copy(value.buffer->span())); });
-    detach_buffer();
-    return bytes;
+    auto old_external_memory_size = external_memory_size();
+    auto block = move(m_data_block);
+    for (auto& cached_view : m_cached_views) {
+        auto& view = static_cast<TypedArrayBase&>(cached_view);
+        if (view.viewed_array_buffer() == this)
+            view.set_cached_data_ptr(nullptr);
+    }
+    m_cached_views.clear();
+    m_data_block.byte_buffer = Empty {};
+    account_external_memory_change(old_external_memory_size, 0);
+    return block;
 }
 
 void ArrayBuffer::register_cached_typed_array_view(TypedArrayBase& view)
@@ -316,13 +391,11 @@ ThrowCompletionOr<ArrayBuffer*> clone_array_buffer(VM& vm, ArrayBuffer& source_b
     auto* target_buffer = TRY(allocate_array_buffer(vm, realm.intrinsics().array_buffer_constructor(), source_length));
 
     // 3. Let srcBlock be srcBuffer.[[ArrayBufferData]].
-    auto& source_block = source_buffer.buffer();
+    auto source_block = source_buffer.bytes().slice(source_byte_offset, source_length);
 
     // 4. Let targetBlock be targetBuffer.[[ArrayBufferData]].
-    auto& target_block = target_buffer->buffer();
-
     // 5. Perform CopyDataBlockBytes(targetBlock, 0, srcBlock, srcByteOffset, srcLength).
-    copy_data_block_bytes(target_block, 0, source_block, source_byte_offset, source_length);
+    target_buffer->overwrite(0, source_block.data(), source_length);
 
     // 6. Return targetBuffer.
     return target_buffer;
@@ -367,7 +440,7 @@ ThrowCompletionOr<GC::Ref<ArrayBuffer>> allocate_shared_array_buffer(VM& vm, Fun
     //        a. Append [[ArrayBufferByteLength]] to slots.
 
     // 5. Let obj be ? OrdinaryCreateFromConstructor(constructor, "%SharedArrayBuffer.prototype%", slots).
-    auto obj = TRY(ordinary_create_from_constructor<ArrayBuffer>(vm, constructor, &Intrinsics::shared_array_buffer_prototype, nullptr, DataBlock::Shared::Yes));
+    auto obj = TRY(ordinary_create_from_constructor<ArrayBuffer>(vm, constructor, &Intrinsics::shared_array_buffer_prototype, static_cast<ByteBuffer*>(nullptr), DataBlock::Shared::Yes));
 
     // 6. If allocatingGrowableBuffer is true, let allocLength be maxByteLength; otherwise let allocLength be byteLength.
     auto alloc_length = allocating_growable_buffer ? *max_byte_length : byte_length;
@@ -375,7 +448,7 @@ ThrowCompletionOr<GC::Ref<ArrayBuffer>> allocate_shared_array_buffer(VM& vm, Fun
     // 7. Let block be ? CreateSharedByteDataBlock(allocLength).
     // AD-HOC: We track [[ArrayBufferByteLength(Data)]] via the length of the Data Block, so shrink it down to byteLength.
     auto block = TRY(create_shared_byte_data_block(vm, alloc_length));
-    block.buffer().set_size(byte_length);
+    block.set_size(byte_length);
 
     // 8. Set obj.[[ArrayBufferData]] to block.
     obj->set_data_block(move(block));

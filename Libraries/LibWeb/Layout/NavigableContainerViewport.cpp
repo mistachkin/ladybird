@@ -15,10 +15,8 @@
 
 namespace Web::Layout {
 
-GC_DEFINE_ALLOCATOR(NavigableContainerViewport);
-
-NavigableContainerViewport::NavigableContainerViewport(DOM::Document& document, HTML::NavigableContainer& element, GC::Ref<CSS::ComputedProperties> style)
-    : ReplacedBox(document, element, move(style))
+NavigableContainerViewport::NavigableContainerViewport(DOM::Document& document, HTML::NavigableContainer& element, CSS::ComputedProperties const& style)
+    : ReplacedBox(document, element, style)
 {
 }
 
@@ -48,7 +46,7 @@ void NavigableContainerViewport::did_set_content_size()
         dom_node().content_navigable()->set_viewport_size(paintable_box()->content_size());
 }
 
-GC::Ptr<Painting::Paintable> NavigableContainerViewport::create_paintable() const
+RefPtr<Painting::Paintable> NavigableContainerViewport::create_paintable() const
 {
     return Painting::NavigableContainerViewportPaintable::create(*this);
 }

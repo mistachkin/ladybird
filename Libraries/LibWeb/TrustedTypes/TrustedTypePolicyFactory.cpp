@@ -98,7 +98,7 @@ Optional<Utf16String> TrustedTypePolicyFactory::get_property_type(Utf16String co
         TrustedTypeName trusted_type;
     };
 
-    static Vector<TrustedTypesPropertyTypeData> const table {
+    static auto const& table = *new Vector<TrustedTypesPropertyTypeData> {
         { "HTMLIFrameElement"_utf16, "srcdoc"_utf16, TrustedTypeName::TrustedHTML },
         { "HTMLScriptElement"_utf16, "innerText"_utf16, TrustedTypeName::TrustedScript },
         { "HTMLScriptElement"_utf16, "src"_utf16, TrustedTypeName::TrustedScriptURL },
@@ -142,7 +142,7 @@ void TrustedTypePolicyFactory::visit_edges(Visitor& visitor)
 }
 
 // https://w3c.github.io/trusted-types/dist/spec/#dom-trustedtypepolicyfactory-createpolicy
-WebIDL::ExceptionOr<GC::Ref<TrustedTypePolicy>> TrustedTypePolicyFactory::create_policy(Utf16String const& policy_name, TrustedTypePolicyOptions const& policy_options)
+WebIDL::ExceptionOr<GC::Ref<TrustedTypePolicy>> TrustedTypePolicyFactory::create_policy(Utf16String const& policy_name, Bindings::TrustedTypePolicyOptions const& policy_options)
 {
     // 1. Returns the result of executing a Create a Trusted Type Policy algorithm, with the following arguments:
     //      factory: this value
@@ -194,7 +194,7 @@ GC::Ref<TrustedScript const> TrustedTypePolicyFactory::empty_script()
 }
 
 // https://w3c.github.io/trusted-types/dist/spec/#create-trusted-type-policy-algorithm
-WebIDL::ExceptionOr<GC::Ref<TrustedTypePolicy>> TrustedTypePolicyFactory::create_a_trusted_type_policy(Utf16String const& policy_name, TrustedTypePolicyOptions const& options, JS::Object& global)
+WebIDL::ExceptionOr<GC::Ref<TrustedTypePolicy>> TrustedTypePolicyFactory::create_a_trusted_type_policy(Utf16String const& policy_name, Bindings::TrustedTypePolicyOptions const& options, JS::Object& global)
 {
     auto& realm = this->realm();
 
@@ -318,7 +318,7 @@ Optional<TrustedTypeData> get_trusted_type_data_for_attribute(ElementInterface c
 #undef __ENUMERATE
     }
 
-    static Vector<TrustedTypeData> const table {
+    static auto const& table = *new Vector<TrustedTypeData> {
         { "HTMLIFrameElement"_utf16, {}, HTML::AttributeNames::srcdoc, TrustedTypeName::TrustedHTML, InjectionSink::HTMLIFrameElement_srcdoc },
         { "HTMLScriptElement"_utf16, {}, HTML::AttributeNames::src, TrustedTypeName::TrustedScriptURL, InjectionSink::HTMLScriptElement_src },
         { "SVGScriptElement"_utf16, {}, HTML::AttributeNames::href, TrustedTypeName::TrustedScriptURL, InjectionSink::SVGScriptElement_href },

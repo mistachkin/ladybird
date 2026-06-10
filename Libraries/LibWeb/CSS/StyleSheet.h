@@ -24,6 +24,7 @@ public:
     virtual String type() const = 0;
 
     DOM::Element* owner_node() { return m_owner_node; }
+    DOM::Element const* owner_node() const { return m_owner_node; }
     void set_owner_node(DOM::Element*);
 
     Optional<String> href() const;
@@ -57,11 +58,13 @@ public:
     virtual void set_disabled(bool disabled) { m_disabled = disabled; }
 
     CSSStyleSheet* parent_style_sheet() { return m_parent_style_sheet; }
+    CSSStyleSheet const* parent_style_sheet() const { return m_parent_style_sheet; }
     void set_parent_css_style_sheet(CSSStyleSheet*);
 
 protected:
     explicit StyleSheet(JS::Realm&, MediaList& media);
     virtual void visit_edges(Cell::Visitor&) override;
+    virtual size_t external_memory_size() const override;
 
     GC::Ref<MediaList> m_media;
 

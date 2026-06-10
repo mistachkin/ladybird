@@ -8,7 +8,9 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/ByteBuffer.h>
 #include <AK/GenericShorthands.h>
+#include <AK/NumericLimits.h>
 #include <LibJS/Runtime/Array.h>
 #include <LibJS/Runtime/ArrayBuffer.h>
 #include <LibJS/Runtime/DataViewConstructor.h>
@@ -16,6 +18,7 @@
 #include <LibJS/Runtime/Iterator.h>
 #include <LibJS/Runtime/TypedArray.h>
 #include <LibWeb/Bindings/ExceptionOrUtils.h>
+#include <LibWeb/Bindings/UnderlyingSource.h>
 #include <LibWeb/DOM/AbortSignal.h>
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/Streams/AbstractOperations.h>
@@ -28,7 +31,6 @@
 #include <LibWeb/Streams/ReadableStreamOperations.h>
 #include <LibWeb/Streams/ReadableStreamPipeTo.h>
 #include <LibWeb/Streams/ReadableStreamTee.h>
-#include <LibWeb/Streams/UnderlyingSource.h>
 #include <LibWeb/Streams/WritableStream.h>
 #include <LibWeb/Streams/WritableStreamDefaultWriter.h>
 #include <LibWeb/Streams/WritableStreamOperations.h>
@@ -334,7 +336,7 @@ GC::Ref<WebIDL::Promise> readable_stream_pipe_to(ReadableStream& source, Writabl
 
             // 5. Shutdown with an action consisting of getting a promise to wait for all of the actions in actions, and with error.
             auto action = GC::create_function(realm.heap(), [&realm, abort_destination, cancel_source]() {
-                GC::RootVector<GC::Ref<WebIDL::Promise>> actions(realm.heap());
+                GC::RootVector<GC::Ref<WebIDL::Promise>> actions {};
 
                 if (abort_destination)
                     actions.append(abort_destination->function()());
@@ -590,7 +592,7 @@ WebIDL::ExceptionOr<ReadableStreamPair> readable_byte_stream_tee(JS::Realm& real
     });
 
     // 16. Let pullWithBYOBReader be the following steps, given view and forBranch2:
-    auto pull_with_byob_reader = GC::create_function(realm.heap(), [&realm, &stream, params, cancel_promise, forward_reader_error](GC::Ref<WebIDL::ArrayBufferView> view, bool for_branch2) mutable {
+    auto pull_with_byob_reader = GC::create_function(realm.heap(), [&realm, &stream, params, cancel_promise, forward_reader_error](WebIDL::ArrayBufferView view, bool for_branch2) mutable {
         // 1. If reader implements ReadableStreamDefaultReader,
         if (auto const* default_reader = params->reader.get_pointer<GC::Ref<ReadableStreamDefaultReader>>()) {
             // 2. Assert: reader.[[readRequests]] is empty.
@@ -644,7 +646,7 @@ WebIDL::ExceptionOr<ReadableStreamPair> readable_byte_stream_tee(JS::Realm& real
         }
         // 5. Otherwise, perform pullWithBYOBReader, given byobRequest.[[view]] and false.
         else {
-            pull_with_byob_reader->function()(*byob_request->view(), false);
+            pull_with_byob_reader->function()(byob_request->view().downcast<WebIDL::ArrayBufferViewVariant>(), false);
         }
 
         // 6. Return a promise resolved with undefined.
@@ -676,7 +678,7 @@ WebIDL::ExceptionOr<ReadableStreamPair> readable_byte_stream_tee(JS::Realm& real
         }
         // 5. Otherwise, perform pullWithBYOBReader, given byobRequest.[[view]] and true.
         else {
-            pull_with_byob_reader->function()(*byob_request->view(), true);
+            pull_with_byob_reader->function()(byob_request->view().downcast<WebIDL::ArrayBufferViewVariant>(), true);
         }
 
         // 6. Return a promise resolved with undefined.
@@ -1565,7 +1567,7 @@ WebIDL::ExceptionOr<void> set_up_readable_stream_default_controller(ReadableStre
 }
 
 // https://streams.spec.whatwg.org/#set-up-readable-stream-default-controller-from-underlying-source
-WebIDL::ExceptionOr<void> set_up_readable_stream_default_controller_from_underlying_source(ReadableStream& stream, JS::Value underlying_source_value, UnderlyingSource underlying_source, double high_water_mark, GC::Ref<SizeAlgorithm> size_algorithm)
+WebIDL::ExceptionOr<void> set_up_readable_stream_default_controller_from_underlying_source(ReadableStream& stream, JS::Value underlying_source_value, Bindings::UnderlyingSource underlying_source, double high_water_mark, GC::Ref<SizeAlgorithm> size_algorithm)
 {
     auto& realm = stream.realm();
 
@@ -1802,40 +1804,11 @@ JS::Value readable_byte_stream_controller_convert_pull_into_descriptor(JS::Realm
     return MUST(JS::construct(vm, *pull_into_descriptor.view_constructor, buffer, JS::Value(pull_into_descriptor.byte_offset), JS::Value(bytes_filled / element_size)));
 }
 
-// https://streams.spec.whatwg.org/#readable-byte-stream-controller-enqueue
-WebIDL::ExceptionOr<void> readable_byte_stream_controller_enqueue(ReadableByteStreamController& controller, JS::Value chunk)
+static WebIDL::ExceptionOr<void> readable_byte_stream_controller_enqueue_transferred_buffer(ReadableByteStreamController& controller, GC::Ref<JS::ArrayBuffer> transferred_buffer, u32 byte_offset, u32 byte_length)
 {
     auto& realm = controller.realm();
     auto& vm = realm.vm();
-
-    // 1. Let stream be controller.[[stream]].
     auto stream = controller.stream();
-
-    // 2. If controller.[[closeRequested]] is true or stream.[[state]] is not "readable", return.
-    if (controller.close_requested() || stream->state() != ReadableStream::State::Readable)
-        return {};
-
-    // 3. Let buffer be chunk.[[ViewedArrayBuffer]].
-    auto* typed_array = TRY(JS::typed_array_from(vm, chunk));
-    auto* buffer = typed_array->viewed_array_buffer();
-
-    // 4. Let byteOffset be chunk.[[ByteOffset]].
-    auto byte_offset = typed_array->byte_offset();
-
-    // 6. If ! IsDetachedBuffer(buffer) is true, throw a TypeError exception.
-    // FIXME: The streams spec has not been updated for resizable ArrayBuffer objects. We must perform step 6 before
-    //        invoking TypedArrayByteLength in step 5. We also must check if the array is out-of-bounds, rather than
-    //        just detached.
-    auto typed_array_record = JS::make_typed_array_with_buffer_witness_record(*typed_array, JS::ArrayBuffer::Order::SeqCst);
-
-    if (JS::is_typed_array_out_of_bounds(typed_array_record))
-        return vm.throw_completion<JS::TypeError>(JS::ErrorType::BufferOutOfBounds, "TypedArray"sv);
-
-    // 5. Let byteLength be chunk.[[ByteLength]].
-    auto byte_length = JS::typed_array_byte_length(typed_array_record);
-
-    // 7. Let transferredBuffer be ? TransferArrayBuffer(buffer).
-    auto transferred_buffer = TRY(transfer_array_buffer(realm, *buffer));
 
     // 8. If controller.[[pendingPullIntos]] is not empty,
     if (!controller.pending_pull_intos().is_empty()) {
@@ -1918,6 +1891,61 @@ WebIDL::ExceptionOr<void> readable_byte_stream_controller_enqueue(ReadableByteSt
     readable_byte_stream_controller_call_pull_if_needed(controller);
 
     return {};
+}
+
+// https://streams.spec.whatwg.org/#readable-byte-stream-controller-enqueue
+WebIDL::ExceptionOr<void> readable_byte_stream_controller_enqueue(ReadableByteStreamController& controller, JS::Value chunk)
+{
+    auto& realm = controller.realm();
+    auto& vm = realm.vm();
+
+    // 1. Let stream be controller.[[stream]].
+    auto stream = controller.stream();
+
+    // 2. If controller.[[closeRequested]] is true or stream.[[state]] is not "readable", return.
+    if (controller.close_requested() || stream->state() != ReadableStream::State::Readable)
+        return {};
+
+    // 3. Let buffer be chunk.[[ViewedArrayBuffer]].
+    auto* typed_array = TRY(JS::typed_array_from(vm, chunk));
+    auto* buffer = typed_array->viewed_array_buffer();
+
+    // 4. Let byteOffset be chunk.[[ByteOffset]].
+    auto byte_offset = typed_array->byte_offset();
+
+    // 6. If ! IsDetachedBuffer(buffer) is true, throw a TypeError exception.
+    // FIXME: The streams spec has not been updated for resizable ArrayBuffer objects. We must perform step 6 before
+    //        invoking TypedArrayByteLength in step 5. We also must check if the array is out-of-bounds, rather than
+    //        just detached.
+    auto typed_array_record = JS::make_typed_array_with_buffer_witness_record(*typed_array, JS::ArrayBuffer::Order::SeqCst);
+
+    if (JS::is_typed_array_out_of_bounds(typed_array_record))
+        return vm.throw_completion<JS::TypeError>(JS::ErrorType::BufferOutOfBounds, "TypedArray"sv);
+
+    // 5. Let byteLength be chunk.[[ByteLength]].
+    auto byte_length = JS::typed_array_byte_length(typed_array_record);
+
+    // 7. Let transferredBuffer be ? TransferArrayBuffer(buffer).
+    auto transferred_buffer = TRY(transfer_array_buffer(realm, *buffer));
+
+    return readable_byte_stream_controller_enqueue_transferred_buffer(controller, transferred_buffer, byte_offset, byte_length);
+}
+
+WebIDL::ExceptionOr<void> readable_byte_stream_controller_enqueue_native_bytes(ReadableByteStreamController& controller, ByteBuffer bytes)
+{
+    auto& realm = controller.realm();
+
+    auto stream = controller.stream();
+    if (controller.close_requested() || stream->state() != ReadableStream::State::Readable)
+        return {};
+
+    VERIFY(bytes.size() <= NumericLimits<u32>::max());
+    auto byte_length = static_cast<u32>(bytes.size());
+
+    // OPTIMIZATION: Native byte producers have no observable chunk object to detach, so enter the enqueue algorithm after
+    // the TransferArrayBuffer step with an already-owned ArrayBuffer.
+    auto transferred_buffer = JS::ArrayBuffer::create(realm, move(bytes));
+    return readable_byte_stream_controller_enqueue_transferred_buffer(controller, transferred_buffer, 0, byte_length);
 }
 
 // https://streams.spec.whatwg.org/#readable-byte-stream-controller-enqueue-chunk-to-queue
@@ -2077,7 +2105,10 @@ bool readable_byte_stream_controller_fill_pull_into_descriptor_from_queue(Readab
         VERIFY(can_copy_data_block_bytes_buffer(descriptor_buffer, dest_start, queue_buffer, queue_byte_offset, bytes_to_copy));
 
         // 8. Perform ! CopyDataBlockBytes(pullIntoDescriptor’s buffer.[[ArrayBufferData]], destStart, headOfQueue’s buffer.[[ArrayBufferData]], headOfQueue’s byte offset, bytesToCopy).
-        JS::copy_data_block_bytes(pull_into_descriptor.buffer->buffer(), dest_start, head_of_queue.buffer->buffer(), head_of_queue.byte_offset, bytes_to_copy);
+        // NOTE: Stream buffers are never externally backed, so copy_data_block_bytes is safe here.
+        auto descriptor_buffer_bytes = pull_into_descriptor.buffer->bytes();
+        auto queue_buffer_bytes = head_of_queue.buffer->bytes();
+        JS::copy_data_block_bytes(descriptor_buffer_bytes, dest_start, queue_buffer_bytes, head_of_queue.byte_offset, bytes_to_copy);
 
         // 9. If headOfQueue’s byte length is bytesToCopy,
         if (head_of_queue.byte_length == bytes_to_copy) {
@@ -2166,7 +2197,7 @@ GC::Ptr<ReadableStreamBYOBRequest> readable_byte_stream_controller_get_byob_requ
         byob_request->set_controller(controller);
 
         // 5. Set byobRequest.[[view]] to view.
-        byob_request->set_view(realm.create<WebIDL::ArrayBufferView>(view));
+        byob_request->set_view(WebIDL::ArrayBufferView::from_object(view));
 
         // 6. Set controller.[[byobRequest]] to byobRequest.
         controller.set_byob_request(byob_request);
@@ -2289,7 +2320,7 @@ void readable_byte_stream_controller_process_read_requests_using_queue(ReadableB
 }
 
 // https://streams.spec.whatwg.org/#readable-byte-stream-controller-pull-into
-void readable_byte_stream_controller_pull_into(ReadableByteStreamController& controller, WebIDL::ArrayBufferView& view, u64 min, ReadIntoRequest& read_into_request)
+void readable_byte_stream_controller_pull_into(ReadableByteStreamController& controller, WebIDL::ArrayBufferView view, u64 min, ReadIntoRequest& read_into_request)
 {
     auto& realm = controller.realm();
     auto& vm = realm.vm();
@@ -2304,12 +2335,12 @@ void readable_byte_stream_controller_pull_into(ReadableByteStreamController& con
     GC::Ref<JS::NativeFunction> ctor = realm.intrinsics().data_view_constructor();
 
     // 4. If view has a [[TypedArrayName]] internal slot (i.e., it is not a DataView),
-    if (auto const* typed_array = view.bufferable_object().get_pointer<GC::Ref<JS::TypedArrayBase>>()) {
+    if (auto typed_array = view.typed_array_base()) {
         // 1. Set elementSize to the element size specified in the typed array constructors table for view.[[TypedArrayName]].
-        element_size = (*typed_array)->element_size();
+        element_size = typed_array->element_size();
 
         // 2. Set ctor to the constructor specified in the typed array constructors table for view.[[TypedArrayName]].
-        switch ((*typed_array)->kind()) {
+        switch (typed_array->kind()) {
 #define __JS_ENUMERATE(ClassName, snake_name, PrototypeName, ConstructorName, Type) \
     case JS::TypedArrayBase::Kind::ClassName:                                       \
         ctor = realm.intrinsics().snake_name##_constructor();                       \
@@ -2624,7 +2655,7 @@ WebIDL::ExceptionOr<void> readable_byte_stream_controller_respond_internal(Reada
 }
 
 // https://streams.spec.whatwg.org/#readable-byte-stream-controller-respond-with-new-view
-WebIDL::ExceptionOr<void> readable_byte_stream_controller_respond_with_new_view(JS::Realm& realm, ReadableByteStreamController& controller, WebIDL::ArrayBufferView& view)
+WebIDL::ExceptionOr<void> readable_byte_stream_controller_respond_with_new_view(JS::Realm& realm, ReadableByteStreamController& controller, WebIDL::ArrayBufferView view)
 {
     // 1. Assert: controller.[[pendingPullIntos]] is not empty.
     VERIFY(!controller.pending_pull_intos().is_empty());
@@ -2821,7 +2852,7 @@ WebIDL::ExceptionOr<void> set_up_readable_byte_stream_controller(ReadableStream&
 }
 
 // https://streams.spec.whatwg.org/#set-up-readable-byte-stream-controller-from-underlying-source
-WebIDL::ExceptionOr<void> set_up_readable_byte_stream_controller_from_underlying_source(ReadableStream& stream, JS::Value underlying_source, UnderlyingSource const& underlying_source_dict, double high_water_mark)
+WebIDL::ExceptionOr<void> set_up_readable_byte_stream_controller_from_underlying_source(ReadableStream& stream, JS::Value underlying_source, Bindings::UnderlyingSource const& underlying_source_dict, double high_water_mark)
 {
     auto& realm = stream.realm();
 

@@ -7,7 +7,9 @@
 
 #pragma once
 
+#include <AK/NonnullRefPtr.h>
 #include <LibJS/CyclicModule.h>
+#include <LibJS/ExecutableBacking.h>
 #include <LibJS/Export.h>
 #include <LibJS/Forward.h>
 #include <LibJS/ModuleEntry.h>
@@ -19,6 +21,13 @@ namespace FFI {
 
 struct ParsedProgram;
 struct CompiledProgram;
+struct DecodedBytecodeCacheBlob;
+
+}
+
+namespace RustIntegration {
+
+class DecodedBytecodeCache;
 
 }
 
@@ -33,8 +42,9 @@ public:
     static Result<GC::Ref<SourceTextModule>, Vector<ParserError>> parse(StringView source_text, Realm&, StringView filename = {}, Script::HostDefined* host_defined = nullptr);
     static Result<GC::Ref<SourceTextModule>, Vector<ParserError>> parse_from_pre_parsed(FFI::ParsedProgram* parsed, NonnullRefPtr<SourceCode const> source_code, Realm&, Script::HostDefined* host_defined = nullptr);
     static Result<GC::Ref<SourceTextModule>, Vector<ParserError>> parse_from_pre_compiled(FFI::CompiledProgram* compiled, NonnullRefPtr<SourceCode const> source_code, Realm&, Script::HostDefined* host_defined = nullptr);
+    static Result<GC::Ref<SourceTextModule>, Vector<ParserError>> parse_from_bytecode_cache(NonnullRefPtr<RustIntegration::DecodedBytecodeCache>, NonnullRefPtr<SourceCode const> source_code, Realm&, Script::HostDefined* host_defined = nullptr);
 
-    virtual Vector<Utf16FlyString> get_exported_names(VM& vm, HashTable<Module const*>& export_star_set) override;
+    virtual Vector<Utf16FlyString> get_exported_names(VM& vm, GC::RootHashTable<GC::Ref<Module const>>& export_star_set) override;
     virtual ResolvedBinding resolve_export(VM& vm, Utf16FlyString const& export_name, Vector<ResolvedBinding> resolve_set = {}) override;
 
     Object* import_meta() { return m_import_meta; }
@@ -53,14 +63,28 @@ public:
         i32 function_index { -1 }; // index into m_functions_to_initialize, -1 if not a function
     };
 
+    Bytecode::Executable* cached_executable() const { return m_executable; }
+    SharedFunctionInstanceData* top_level_await_shared_data() const { return m_tla_shared_data; }
+    ExecutableBacking const& executable_backing() const { return m_executable_backing; }
+    [[nodiscard]] bool can_generate_bytecode_cache() const;
+    [[nodiscard]] bool can_install_generated_bytecode_cache() const;
+    void begin_bytecode_cache_generation();
+    void finish_bytecode_cache_generation_without_install();
+    bool try_install_bytecode_cache(NonnullRefPtr<RustIntegration::DecodedBytecodeCache>, NonnullRefPtr<SourceCode const> source_code);
+    void install_generated_bytecode_cache(NonnullRefPtr<RustIntegration::DecodedBytecodeCache>, NonnullRefPtr<SourceCode const> source_code);
+
 protected:
     virtual ThrowCompletionOr<void> initialize_environment(VM& vm) override;
     virtual ThrowCompletionOr<void> execute_module(VM& vm, GC::Ptr<PromiseCapability> capability) override;
 
 private:
-    SourceTextModule(Realm&, StringView filename, Script::HostDefined* host_defined, bool has_top_level_await, Vector<ModuleRequest> requested_modules, Vector<ImportEntry> import_entries, Vector<ExportEntry> local_export_entries, Vector<ExportEntry> indirect_export_entries, Vector<ExportEntry> star_export_entries, Optional<Utf16FlyString> default_export_binding_name, Vector<Utf16FlyString> var_declared_names, Vector<LexicalBinding> lexical_bindings, Vector<FunctionToInitialize> functions_to_initialize, GC::Ptr<Bytecode::Executable> executable, GC::Ptr<SharedFunctionInstanceData> tla_shared_data);
+    SourceTextModule(Realm&, StringView filename, Script::HostDefined* host_defined, bool has_top_level_await, Vector<ModuleRequest> requested_modules, Vector<ImportEntry> import_entries, Vector<ExportEntry> local_export_entries, Vector<ExportEntry> indirect_export_entries, Vector<ExportEntry> star_export_entries, Optional<Utf16FlyString> default_export_binding_name, Vector<Utf16FlyString> var_declared_names, Vector<LexicalBinding> lexical_bindings, Vector<FunctionToInitialize> functions_to_initialize, Vector<GC::Root<SharedFunctionInstanceData>> shared_function_data, GC::Ptr<Bytecode::Executable> executable, GC::Ptr<SharedFunctionInstanceData> tla_shared_data, ExecutableBacking);
 
     virtual void visit_edges(Cell::Visitor&) override;
+    virtual size_t external_memory_size() const override;
+    Vector<SharedFunctionInstanceData*> collect_shared_function_data();
+    void complete_bytecode_cache_install(GC::Ptr<Bytecode::Executable>, GC::Ptr<Bytecode::Executable> top_level_await_executable, NonnullRefPtr<RustIntegration::DecodedBytecodeCache>);
+    void verify_executable_backing_invariants();
 
     NonnullOwnPtr<ExecutionContext> m_execution_context; // [[Context]]
     GC::Ptr<Object> m_import_meta;                       // [[ImportMeta]]
@@ -74,8 +98,10 @@ private:
     Vector<FunctionToInitialize> m_functions_to_initialize;
     Optional<Utf16FlyString> m_default_export_binding_name;
 
+    SharedFunctionInstanceDataList m_shared_function_data;
     GC::Ptr<Bytecode::Executable> m_executable;
     GC::Ptr<SharedFunctionInstanceData> m_tla_shared_data;
+    ExecutableBacking m_executable_backing;
 };
 
 }

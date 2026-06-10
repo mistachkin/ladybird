@@ -7,37 +7,65 @@
 
 #pragma once
 
+#include <AK/ByteBuffer.h>
+#include <AK/Error.h>
 #include <AK/Forward.h>
+#include <AK/HashMap.h>
 #include <AK/NonnullRefPtr.h>
-#include <AK/SegmentedVector.h>
+#include <AK/Span.h>
 #include <LibGfx/Color.h>
+#include <LibGfx/DecodedImageFrame.h>
+#include <LibGfx/Filter.h>
 #include <LibGfx/Forward.h>
 #include <LibGfx/PaintStyle.h>
+#include <LibGfx/TextLayout.h>
+#include <LibIPC/Forward.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/Painting/AccumulatedVisualContext.h>
 #include <LibWeb/Painting/DisplayListCommand.h>
+#include <LibWeb/Painting/DisplayListResourceStorage.h>
 #include <LibWeb/Painting/ScrollState.h>
 
 namespace Web::Painting {
 
-class DisplayListPlayer {
+class WEB_API DisplayListPlayer {
 public:
     virtual ~DisplayListPlayer() = default;
 
-    void execute(DisplayList&, ScrollStateSnapshot const&, RefPtr<Gfx::PaintingSurface>);
+    void execute(DisplayList const&, AccumulatedVisualContextTree const&, DisplayListResourceStorage const&, ScrollStateSnapshot const&, RefPtr<Gfx::PaintingSurface>);
+    virtual void flush(Gfx::PaintingSurface&) = 0;
 
 protected:
     Gfx::PaintingSurface& surface() const { return *m_surface; }
-    void execute_impl(DisplayList&, ScrollStateSnapshot const& scroll_state);
-    void execute_display_list_into_surface(DisplayList&, Gfx::PaintingSurface&);
+    DisplayList const& active_display_list() const { return *m_active_display_list; }
+    AccumulatedVisualContextTree const& active_visual_context_tree() const { return *m_active_visual_context_tree; }
+    DisplayListResourceStorage const& resource_storage() const { return *m_resource_storage; }
+    ReadonlyBytes inline_data(DisplayListDataSpan span) const
+    {
+        VERIFY(static_cast<size_t>(span.offset) + span.size <= m_current_command_payload.size());
+        return m_current_command_payload.slice(span.offset, span.size);
+    }
+    template<typename T>
+    ReadonlySpan<T> inline_objects(DisplayListDataSpan span) const
+    {
+        auto bytes = inline_data(span);
+        VERIFY(bytes.size() % sizeof(T) == 0);
+        VERIFY(reinterpret_cast<FlatPtr>(bytes.data()) % alignof(T) == 0);
+        return { reinterpret_cast<T const*>(bytes.data()), bytes.size() / sizeof(T) };
+    }
+    void execute_impl(DisplayList const&, ScrollStateSnapshot const& scroll_state);
+    void execute_impl(DisplayList const&, ScrollStateSnapshot const& scroll_state, ReadonlyBytes command_bytes);
+    void execute_display_list_into_surface(DisplayList const&, AccumulatedVisualContextTree const&, Gfx::PaintingSurface&);
+    void execute_nested_display_list(DisplayList const&, AccumulatedVisualContextTree const&, ScrollStateSnapshot const&, ReadonlyBytes command_bytes);
 
 private:
-    virtual void flush() = 0;
     virtual void draw_glyph_run(DrawGlyphRun const&) = 0;
     virtual void fill_rect(FillRect const&) = 0;
-    virtual void draw_scaled_immutable_bitmap(DrawScaledImmutableBitmap const&) = 0;
-    virtual void draw_repeated_immutable_bitmap(DrawRepeatedImmutableBitmap const&) = 0;
-    virtual void draw_external_content(DrawExternalContent const&) = 0;
+    virtual void draw_scaled_decoded_image_frame(DrawScaledDecodedImageFrame const&) = 0;
+    virtual void draw_repeated_decoded_image_frame(DrawRepeatedDecodedImageFrame const&) = 0;
+    virtual void draw_compositor_surface(DrawCompositorSurface const&) = 0;
+    virtual void draw_video_frame(DrawVideoFrame const&) = 0;
     virtual void save(Save const&) = 0;
     virtual void save_layer(SaveLayer const&) = 0;
     virtual void restore(Restore const&) = 0;
@@ -59,43 +87,142 @@ private:
     virtual void draw_rect(DrawRect const&) = 0;
     virtual void add_rounded_rect_clip(AddRoundedRectClip const&) = 0;
     virtual void paint_nested_display_list(PaintNestedDisplayList const&) = 0;
+    virtual void compositor_scroll_node(CompositorScrollNode const&) = 0;
+    virtual void compositor_sticky_area(CompositorStickyArea const&) = 0;
+    virtual void compositor_wheel_hit_test_target(CompositorWheelHitTestTarget const&) = 0;
+    virtual void compositor_wheel_hit_test_target_with_corner_radii(CompositorWheelHitTestTargetWithCornerRadii const&) = 0;
+    virtual void compositor_main_thread_wheel_event_region(CompositorMainThreadWheelEventRegion const&) = 0;
+    virtual void compositor_viewport_scrollbar(CompositorViewportScrollbar const&) = 0;
+    virtual void compositor_blocking_wheel_event_region(CompositorBlockingWheelEventRegion const&) = 0;
     virtual void paint_scrollbar(PaintScrollBar const&) = 0;
-    virtual void apply_effects(ApplyEffects const&) = 0;
+    virtual void apply_effects(ApplyEffects const&, Gfx::Filter const* = nullptr) = 0;
     virtual void apply_transform(Gfx::FloatPoint origin, Gfx::FloatMatrix4x4 const&) = 0;
     virtual bool would_be_fully_clipped_by_painter(Gfx::IntRect) const = 0;
 
     virtual void add_clip_path(Gfx::Path const&) = 0;
 
+    DisplayList const* m_active_display_list { nullptr };
+    AccumulatedVisualContextTree const* m_active_visual_context_tree { nullptr };
+    DisplayListResourceStorage const* m_resource_storage { nullptr };
     RefPtr<Gfx::PaintingSurface> m_surface;
+    ReadonlyBytes m_current_command_payload;
 };
 
 class DisplayList : public AtomicRefCounted<DisplayList> {
 public:
-    static NonnullRefPtr<DisplayList> create(NonnullRefPtr<AccumulatedVisualContextTree const> visual_context_tree)
-    {
-        return adopt_ref(*new DisplayList(move(visual_context_tree)));
-    }
-
-    bool append(DisplayListCommand&& command, VisualContextIndex context_index);
-
-    struct CommandListItem {
-        VisualContextIndex context_index {};
-        DisplayListCommand command;
+    struct AsyncScrollingMetadata {
+        Gfx::IntRect viewport_rect;
+        u64 wheel_event_listener_state_generation { 0 };
+        bool has_blocking_wheel_event_listeners { false };
+        bool has_blocking_wheel_event_region_covering_viewport { false };
     };
 
-    AccumulatedVisualContextTree const& visual_context_tree() const { return *m_visual_context_tree; }
-
-    auto& commands(Badge<DisplayListRecorder>) { return m_commands; }
-    auto const& commands() const { return m_commands; }
-
-private:
-    explicit DisplayList(NonnullRefPtr<AccumulatedVisualContextTree const> visual_context_tree)
-        : m_visual_context_tree(move(visual_context_tree))
+    static NonnullRefPtr<DisplayList> create(AccumulatedVisualContextTree const& visual_context_tree)
     {
+        return adopt_ref(*new DisplayList(visual_context_tree.version()));
     }
 
-    NonnullRefPtr<AccumulatedVisualContextTree const> const m_visual_context_tree;
-    AK::SegmentedVector<CommandListItem, 512> m_commands;
+    template<DisplayListCommand Command>
+    bool append(Command const& command, AccumulatedVisualContextTree const& visual_context_tree, VisualContextIndex context_index, ReadonlyBytes inline_data = {})
+    {
+        return append_bytes(
+            Command::command_type,
+            display_list_object_bytes(command),
+            inline_data,
+            visual_context_tree,
+            context_index,
+            command_bounding_rectangle(command),
+            command_is_clip(command));
+    }
+
+    u64 compatible_visual_context_tree_version() const { return m_compatible_visual_context_tree_version; }
+    u64 id() const { return m_id; }
+
+    ReadonlyBytes command_bytes() const { return m_command_bytes.span(); }
+    void set_async_scrolling_metadata(AsyncScrollingMetadata metadata) { m_async_scrolling_metadata = metadata; }
+    Optional<AsyncScrollingMetadata> const& async_scrolling_metadata() const { return m_async_scrolling_metadata; }
+
+    static constexpr size_t command_alignment = 16;
+
+    template<typename SpanType, typename Callback>
+    static void for_each_command_header(SpanType command_bytes, Callback callback)
+    {
+        static_assert(IsSame<SpanType, Bytes> || IsSame<SpanType, ReadonlyBytes>);
+        for (size_t offset = 0; offset < command_bytes.size();) {
+            VERIFY(offset + sizeof(DisplayListCommandHeader) <= command_bytes.size());
+            auto header = read_display_list_object<DisplayListCommandHeader>(command_bytes.slice(offset));
+            offset += sizeof(header);
+            VERIFY(offset + header.payload_size <= command_bytes.size());
+            auto payload = SpanType { command_bytes.data() + offset, header.payload_size };
+            offset += header.payload_size;
+            callback(header, payload);
+        }
+    }
+
+    template<typename Callback>
+    void for_each_command_header(Callback callback) const
+    {
+        for_each_command_header(command_bytes(), move(callback));
+    }
+
+    void append_command_sequence(ReadonlyBytes, AccumulatedVisualContextTree const&, VisualContextIndex);
+    ByteBuffer copy_command_bytes_from(size_t command_start_offset) const;
+    size_t command_byte_size() const { return m_command_bytes.size(); }
+
+private:
+    explicit DisplayList(u64 compatible_visual_context_tree_version);
+    DisplayList(u64 compatible_visual_context_tree_version, u64 id, ByteBuffer&& command_bytes, Optional<AsyncScrollingMetadata>);
+
+    static Optional<Gfx::IntRect> command_bounding_rectangle(auto const& command)
+    {
+        if constexpr (requires { command.bounding_rect(); })
+            return command.bounding_rect();
+        else
+            return {};
+    }
+
+    static bool command_is_clip(auto const& command)
+    {
+        if constexpr (requires { command.is_clip(); })
+            return command.is_clip();
+        else
+            return false;
+    }
+
+    bool append_bytes(
+        DisplayListCommandType,
+        ReadonlyBytes payload,
+        ReadonlyBytes inline_data,
+        AccumulatedVisualContextTree const&,
+        VisualContextIndex context_index,
+        Optional<Gfx::IntRect> bounding_rect,
+        bool is_clip);
+
+    u64 m_compatible_visual_context_tree_version { 0 };
+    u64 m_id { 0 };
+    ByteBuffer m_command_bytes;
+    Optional<AsyncScrollingMetadata> m_async_scrolling_metadata;
+
+    template<typename T>
+    friend ErrorOr<void> IPC::encode(IPC::Encoder&, T const&);
+    template<typename T>
+    friend ErrorOr<T> IPC::decode(IPC::Decoder&);
 };
+
+}
+
+namespace IPC {
+
+template<>
+WEB_API ErrorOr<void> encode(Encoder&, Web::Painting::DisplayList::AsyncScrollingMetadata const&);
+template<>
+WEB_API ErrorOr<Web::Painting::DisplayList::AsyncScrollingMetadata> decode(Decoder&);
+
+template<>
+WEB_API ErrorOr<void> encode(Encoder&, Web::Painting::DisplayList const&);
+template<>
+WEB_API ErrorOr<void> encode(Encoder&, NonnullRefPtr<Web::Painting::DisplayList> const&);
+template<>
+WEB_API ErrorOr<NonnullRefPtr<Web::Painting::DisplayList>> decode(Decoder&);
 
 }

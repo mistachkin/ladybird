@@ -12,16 +12,16 @@
 namespace Web::Layout {
 
 class Viewport final : public BlockContainer {
-    GC_CELL(Viewport, BlockContainer);
-    GC_DECLARE_ALLOCATOR(Viewport);
+    LAYOUT_NODE(Viewport, BlockContainer);
 
 public:
-    explicit Viewport(DOM::Document&, GC::Ref<CSS::ComputedProperties>);
+    explicit Viewport(DOM::Document&, CSS::ComputedProperties const&);
     virtual ~Viewport() override;
 
     struct TextPosition {
-        GC::Ref<DOM::Text> dom_node;
+        GC::Weak<DOM::Text> dom_node;
         size_t start_offset { 0 };
+        size_t dom_offset_within_node { 0 };
     };
     struct TextBlock {
         Utf16String text;
@@ -32,10 +32,8 @@ public:
 
     DOM::Document const& dom_node() const;
 
-    virtual void visit_edges(Visitor&) override;
-
 private:
-    virtual GC::Ptr<Painting::Paintable> create_paintable() const override;
+    virtual RefPtr<Painting::Paintable> create_paintable() const override;
 
     void update_text_blocks();
 

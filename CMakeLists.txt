@@ -51,10 +51,10 @@ endif()
 set(LADYBIRD_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 list(APPEND CMAKE_MODULE_PATH "${LADYBIRD_SOURCE_DIR}/Meta/CMake")
 
-include(check_for_dependencies)
-include(gui_framework)
-include(cmake_options NO_POLICY_SCOPE)
 include(compile_options)
+include(check_for_dependencies)
+include(cmake_options)
+include(ladybird_helper_processes)
 
 if(ENABLE_ALL_THE_DEBUG_MACROS)
     include(all_the_debug_macros)
@@ -66,15 +66,6 @@ endif()
 
 if (ENABLE_FUZZERS_LIBFUZZER OR ENABLE_FUZZERS_OSSFUZZ)
     set(ENABLE_FUZZERS ON)
-endif()
-
-# We need to make sure not to build code generators for Fuzzer builds, as they already have their own main.cpp
-# Instead, we import them from a previous install of Lagom. This mandates a two-stage build for fuzzers.
-# The same concern goes for cross-compile builds, where we need the tools built for the host
-set(BUILD_LAGOM_TOOLS ON)
-if (ENABLE_FUZZERS OR CMAKE_CROSSCOMPILING)
-    find_package(LagomTools REQUIRED)
-    set(BUILD_LAGOM_TOOLS OFF)
 endif()
 
 if (ENABLE_COMPILETIME_FORMAT_CHECK)
@@ -131,22 +122,8 @@ include(targets)
 add_lagom_library_install_rules(GenericClangPlugin)
 add_lagom_library_install_rules(JSClangPlugin)
 
-# Create mostly empty targets for system libraries we don't need to build for Lagom
-add_library(NoCoverage INTERFACE)
-# "install" these special targets to placate CMake
-install(TARGETS NoCoverage EXPORT LagomTargets)
-
 add_subdirectory(AK)
 add_subdirectory(Libraries)
-
-# Code Generators and other host tools
-if (BUILD_LAGOM_TOOLS)
-    add_subdirectory(Meta/Lagom/Tools)
-endif()
-
-if (LAGOM_TOOLS_ONLY)
-    return()
-endif()
 
 if (ENABLE_FUZZERS)
     add_subdirectory(Meta/Lagom/Fuzzers)

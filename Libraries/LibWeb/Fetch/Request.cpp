@@ -21,6 +21,25 @@
 
 namespace Web::Fetch {
 
+static bool is_empty(Bindings::RequestInit const& request_init)
+{
+    return !(request_init.method.has_value()
+        || request_init.headers.has_value()
+        || request_init.body.has_value()
+        || request_init.referrer.has_value()
+        || request_init.referrer_policy.has_value()
+        || request_init.mode.has_value()
+        || request_init.credentials.has_value()
+        || request_init.cache.has_value()
+        || request_init.redirect.has_value()
+        || request_init.integrity.has_value()
+        || request_init.keepalive.has_value()
+        || request_init.signal.has_value()
+        || request_init.duplex.has_value()
+        || request_init.priority.has_value()
+        || request_init.window.has_value());
+}
+
 GC_DEFINE_ALLOCATOR(Request);
 
 Request::Request(JS::Realm& realm, GC::Ref<Infrastructure::Request> request)
@@ -99,7 +118,7 @@ GC::Ref<Request> Request::create(JS::Realm& realm, GC::Ref<Infrastructure::Reque
 }
 
 // https://fetch.spec.whatwg.org/#dom-request
-WebIDL::ExceptionOr<GC::Ref<Request>> Request::construct_impl(JS::Realm& realm, RequestInfo const& input, RequestInit const& init)
+WebIDL::ExceptionOr<GC::Ref<Request>> Request::construct_impl(JS::Realm& realm, RequestInfo const& input, Bindings::RequestInit const& init)
 {
     auto& vm = realm.vm();
 
@@ -141,13 +160,13 @@ WebIDL::ExceptionOr<GC::Ref<Request>> Request::construct_impl(JS::Realm& realm, 
     // 6. Otherwise:
     else {
         // 1. Assert: input is a Request object.
-        VERIFY(input.has<GC::Root<Request>>());
+        VERIFY(input.has<GC::Ref<Request>>());
 
         // 2. Set request to input’s request.
-        input_request = input.get<GC::Root<Request>>()->request();
+        input_request = input.get<GC::Ref<Request>>()->request();
 
         // 3. Set signal to input’s signal.
-        input_signal = input.get<GC::Root<Request>>()->signal();
+        input_signal = input.get<GC::Ref<Request>>()->signal();
     }
 
     // 7. Let origin be this’s relevant settings object’s origin.
@@ -261,7 +280,7 @@ WebIDL::ExceptionOr<GC::Ref<Request>> Request::construct_impl(JS::Realm& realm, 
     request->set_initiator_type(Infrastructure::Request::InitiatorType::Fetch);
 
     // 13. If init is not empty, then:
-    if (!init.is_empty()) {
+    if (!is_empty(init)) {
         // 1. If request’s mode is "navigate", then set it to "same-origin".
         if (request->mode() == Infrastructure::Request::Mode::Navigate)
             request->set_mode(Infrastructure::Request::Mode::SameOrigin);
@@ -383,7 +402,7 @@ WebIDL::ExceptionOr<GC::Ref<Request>> Request::construct_impl(JS::Realm& realm, 
 
     // 26. If init["signal"] exists, then set signal to it.
     if (init.signal.has_value())
-        input_signal = *init.signal;
+        input_signal = init.signal->ptr();
 
     // 27. If init["priority"] exists, then:
     if (init.priority.has_value())
@@ -395,7 +414,7 @@ WebIDL::ExceptionOr<GC::Ref<Request>> Request::construct_impl(JS::Realm& realm, 
 
     // 29. Let signals be « signal » if signal is non-null; otherwise « ».
     auto& this_relevant_realm = HTML::relevant_realm(*request_object);
-    Vector<GC::Root<DOM::AbortSignal>> signals;
+    GC::RootVector<GC::Ref<DOM::AbortSignal>> signals;
     if (input_signal != nullptr)
         signals.append(*input_signal);
 
@@ -417,7 +436,7 @@ WebIDL::ExceptionOr<GC::Ref<Request>> Request::construct_impl(JS::Realm& realm, 
     }
 
     // 33. If init is not empty, then:
-    if (!init.is_empty()) {
+    if (!is_empty(init)) {
         // 1. Let headers be a copy of this’s headers and its associated header list.
         // 2. If init["headers"] exists, then set headers to init["headers"].
         auto headers = [&]() -> Variant<HeadersInit, NonnullRefPtr<HTTP::HeaderList>> {
@@ -445,8 +464,8 @@ WebIDL::ExceptionOr<GC::Ref<Request>> Request::construct_impl(JS::Realm& realm, 
 
     // 34. Let inputBody be input’s request’s body if input is a Request object; otherwise null.
     Optional<Infrastructure::Request::BodyType const&> input_body;
-    if (input.has<GC::Root<Request>>())
-        input_body = input.get<GC::Root<Request>>()->request()->body();
+    if (input.has<GC::Ref<Request>>())
+        input_body = input.get<GC::Ref<Request>>()->request()->body();
 
     // 35. If either init["body"] exists and is non-null or inputBody is non-null, and request’s method is `GET` or `HEAD`, then throw a TypeError.
     if (((init.body.has_value() && !init.body->has<Empty>()) || (input_body.has_value() && !input_body.value().has<Empty>())) && request->method().is_one_of("GET"sv, "HEAD"sv))
@@ -458,7 +477,7 @@ WebIDL::ExceptionOr<GC::Ref<Request>> Request::construct_impl(JS::Realm& realm, 
     // 37. If init["body"] exists and is non-null, then:
     if (init.body.has_value() && !init.body->has<Empty>()) {
         // 1. Let bodyWithType be the result of extracting init["body"], with keepalive set to request's keepalive.
-        auto body_with_type = TRY(extract_body(realm, init.body->downcast<GC::Root<Streams::ReadableStream>, GC::Root<FileAPI::Blob>, GC::Root<WebIDL::BufferSource>, GC::Root<XHR::FormData>, GC::Root<DOMURL::URLSearchParams>, String>(), request->keepalive()));
+        auto body_with_type = TRY(extract_body(realm, init.body->downcast<BodyInit>(), request->keepalive()));
 
         // 2. Set initBody to bodyWithType’s body.
         init_body = body_with_type.body;
@@ -495,7 +514,7 @@ WebIDL::ExceptionOr<GC::Ref<Request>> Request::construct_impl(JS::Realm& realm, 
     // 41. If initBody is null and inputBody is non-null, then:
     if (!init_body.has_value() && input_body.has_value()) {
         // 2. If input is unusable, then throw a TypeError.
-        if (input.has<GC::Root<Request>>() && input.get<GC::Root<Request>>()->is_unusable())
+        if (input.has<GC::Ref<Request>>() && input.get<GC::Ref<Request>>()->is_unusable())
             return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Request is unusable"sv };
 
         // FIXME: 2. Set finalBody to the result of creating a proxy for inputBody.
@@ -652,7 +671,7 @@ WebIDL::ExceptionOr<GC::Ref<Request>> Request::clone() const
 
     // 4. Let clonedSignal be the result of creating a dependent abort signal from « this’s signal », using AbortSignal and this’s relevant realm.
     auto& relevant_realm = HTML::relevant_realm(*this);
-    auto cloned_signal = TRY(DOM::AbortSignal::create_dependent_abort_signal(relevant_realm, { m_signal }));
+    auto cloned_signal = TRY(DOM::AbortSignal::create_dependent_abort_signal(relevant_realm, { { *m_signal } }));
 
     // 5. Let clonedRequestObject be the result of creating a Request object, given clonedRequest, this’s headers’s guard, clonedSignal and this’s relevant realm.
     auto cloned_request_object = Request::create(relevant_realm, cloned_request, m_headers->guard(), cloned_signal);

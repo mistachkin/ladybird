@@ -6,6 +6,7 @@
 
 #include <LibJS/Bytecode/Executable.h>
 #include <LibJS/Runtime/ECMAScriptFunctionObject.h>
+#include <LibJS/Runtime/ExternalMemory.h>
 #include <LibJS/Runtime/GlobalEnvironment.h>
 #include <LibJS/Runtime/SharedFunctionInstanceData.h>
 #include <LibJS/Runtime/VM.h>
@@ -28,7 +29,7 @@ Result<GC::Ref<Script>, Vector<ParserError>> Script::parse(StringView source_tex
         return Vector<ParserError> {};
     if (rust_compilation->is_error())
         return rust_compilation->release_error();
-    return realm.heap().allocate<Script>(realm, filename, move(rust_compilation->value()), host_defined);
+    return realm.heap().allocate<Script>(realm, filename, move(rust_compilation->value()), ExecutableBacking::source(), host_defined);
 }
 
 Result<GC::Ref<Script>, Vector<ParserError>> Script::create_from_parsed(FFI::ParsedProgram* parsed, NonnullRefPtr<SourceCode const> source_code, Realm& realm, HostDefined* host_defined)
@@ -39,7 +40,7 @@ Result<GC::Ref<Script>, Vector<ParserError>> Script::create_from_parsed(FFI::Par
         return Vector<ParserError> {};
     if (rust_compilation->is_error())
         return rust_compilation->release_error();
-    return realm.heap().allocate<Script>(realm, filename, move(rust_compilation->value()), host_defined);
+    return realm.heap().allocate<Script>(realm, filename, move(rust_compilation->value()), ExecutableBacking::source(), host_defined);
 }
 
 Result<GC::Ref<Script>, Vector<ParserError>> Script::create_from_compiled(FFI::CompiledProgram* compiled, NonnullRefPtr<SourceCode const> source_code, Realm& realm, HostDefined* host_defined)
@@ -50,12 +51,92 @@ Result<GC::Ref<Script>, Vector<ParserError>> Script::create_from_compiled(FFI::C
         return Vector<ParserError> {};
     if (rust_compilation->is_error())
         return rust_compilation->release_error();
-    return realm.heap().allocate<Script>(realm, filename, move(rust_compilation->value()), host_defined);
+    return realm.heap().allocate<Script>(realm, filename, move(rust_compilation->value()), ExecutableBacking::heap_bytecode(), host_defined);
 }
 
-Script::Script(Realm& realm, StringView filename, RustIntegration::ScriptResult&& result, HostDefined* host_defined)
+Result<GC::Ref<Script>, Vector<ParserError>> Script::create_from_bytecode_cache(NonnullRefPtr<RustIntegration::DecodedBytecodeCache> bytecode_cache, NonnullRefPtr<SourceCode const> source_code, Realm& realm, HostDefined* host_defined)
+{
+    auto filename = source_code->filename();
+    auto rust_compilation = RustIntegration::materialize_bytecode_cache_script(bytecode_cache, move(source_code), realm);
+    if (!rust_compilation.has_value())
+        return Vector<ParserError> {};
+    if (rust_compilation->is_error())
+        return rust_compilation->release_error();
+    return realm.heap().allocate<Script>(realm, filename, move(rust_compilation->value()), ExecutableBacking::mapped_bytecode_cache(move(bytecode_cache)), host_defined);
+}
+
+bool Script::try_install_bytecode_cache(NonnullRefPtr<RustIntegration::DecodedBytecodeCache> bytecode_cache, NonnullRefPtr<SourceCode const> source_code)
+{
+    if (m_executable_backing.is_mapped_bytecode_cache())
+        return false;
+
+    if (!m_executable)
+        return false;
+
+    auto shared_function_data = collect_shared_function_data();
+    auto executable = RustIntegration::try_install_bytecode_cache_script(bytecode_cache, move(source_code), realm(), *m_executable, shared_function_data);
+    if (!executable)
+        return false;
+
+    complete_bytecode_cache_install(*executable, move(bytecode_cache));
+    return true;
+}
+
+void Script::install_generated_bytecode_cache(NonnullRefPtr<RustIntegration::DecodedBytecodeCache> bytecode_cache, NonnullRefPtr<SourceCode const> source_code)
+{
+    VERIFY(can_install_generated_bytecode_cache());
+    VERIFY(m_executable);
+
+    auto shared_function_data = collect_shared_function_data();
+    auto executable = RustIntegration::install_generated_bytecode_cache_script(bytecode_cache, move(source_code), realm(), *m_executable, shared_function_data);
+    complete_bytecode_cache_install(executable, move(bytecode_cache));
+}
+
+bool Script::can_generate_bytecode_cache() const
+{
+    return m_executable && m_executable_backing.can_generate_bytecode_cache();
+}
+
+bool Script::can_install_generated_bytecode_cache() const
+{
+    return m_executable && m_executable_backing.can_install_generated_bytecode_cache();
+}
+
+void Script::begin_bytecode_cache_generation()
+{
+    VERIFY(can_generate_bytecode_cache());
+    m_executable_backing.begin_bytecode_cache_generation();
+    verify_executable_backing_invariants();
+}
+
+void Script::finish_bytecode_cache_generation_without_install()
+{
+    m_executable_backing.finish_bytecode_cache_generation_without_install();
+    verify_executable_backing_invariants();
+}
+
+Vector<SharedFunctionInstanceData*> Script::collect_shared_function_data()
+{
+    Vector<SharedFunctionInstanceData*> shared_function_data;
+    shared_function_data.ensure_capacity(m_shared_function_data.size_slow());
+    m_shared_function_data.for_each([&](auto& shared_data) {
+        shared_function_data.unchecked_append(&shared_data);
+    });
+    return shared_function_data;
+}
+
+void Script::complete_bytecode_cache_install(GC::Ref<Bytecode::Executable> executable, NonnullRefPtr<RustIntegration::DecodedBytecodeCache> bytecode_cache)
+{
+    m_executable = executable;
+    m_shared_function_data.clear_non_bytecode_cache_compile_inputs();
+    m_executable_backing.finish_bytecode_cache_install(move(bytecode_cache));
+    verify_executable_backing_invariants();
+}
+
+Script::Script(Realm& realm, StringView filename, RustIntegration::ScriptResult&& result, ExecutableBacking executable_backing, HostDefined* host_defined)
     : m_realm(realm)
     , m_executable(result.executable)
+    , m_executable_backing(executable_backing)
     , m_lexical_names(move(result.lexical_names))
     , m_var_names(move(result.var_names))
     , m_declared_function_names(move(result.declared_function_names))
@@ -66,9 +147,25 @@ Script::Script(Realm& realm, StringView filename, RustIntegration::ScriptResult&
     , m_filename(filename)
     , m_host_defined(host_defined)
 {
+    for (auto& shared_data : result.shared_function_data)
+        m_shared_function_data.append(*shared_data);
+
     m_functions_to_initialize.ensure_capacity(result.functions_to_initialize.size());
     for (auto& f : result.functions_to_initialize)
         m_functions_to_initialize.append({ *f.shared_data, move(f.name) });
+
+    verify_executable_backing_invariants();
+}
+
+void Script::verify_executable_backing_invariants()
+{
+    VERIFY(m_executable);
+
+    if (!m_executable_backing.requires_non_bytecode_cache_compile_inputs_to_be_cleared())
+        return;
+
+    VERIFY(!m_shared_function_data.contains_rust_function_ast());
+    VERIFY(!m_shared_function_data.contains_precompiled_bytecode());
 }
 
 // 16.1.7 GlobalDeclarationInstantiation ( script, env ), https://tc39.es/ecma262/#sec-globaldeclarationinstantiation
@@ -211,12 +308,26 @@ void Script::visit_edges(Cell::Visitor& visitor)
     Base::visit_edges(visitor);
     visitor.visit(m_realm);
     visitor.visit(m_executable);
+    m_shared_function_data.visit_edges(visitor);
     for (auto const& function : m_functions_to_initialize)
         visitor.visit(function.shared_data);
     if (m_host_defined)
         m_host_defined->visit_host_defined_self(visitor);
     for (auto const& loaded_module : m_loaded_modules)
         visitor.visit(loaded_module.module);
+}
+
+size_t Script::external_memory_size() const
+{
+    size_t size = vector_external_memory_size(m_loaded_modules);
+    size = saturating_add_external_memory_size(size, vector_external_memory_size(m_lexical_names));
+    size = saturating_add_external_memory_size(size, vector_external_memory_size(m_var_names));
+    size = saturating_add_external_memory_size(size, vector_external_memory_size(m_functions_to_initialize));
+    size = saturating_add_external_memory_size(size, m_declared_function_names.capacity() * sizeof(Utf16FlyString));
+    size = saturating_add_external_memory_size(size, vector_external_memory_size(m_var_scoped_names));
+    size = saturating_add_external_memory_size(size, vector_external_memory_size(m_annex_b_candidate_names));
+    size = saturating_add_external_memory_size(size, vector_external_memory_size(m_lexical_bindings));
+    return size;
 }
 
 }

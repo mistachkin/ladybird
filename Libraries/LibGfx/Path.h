@@ -9,11 +9,13 @@
 #include <AK/Forward.h>
 #include <AK/NonnullOwnPtr.h>
 #include <AK/String.h>
+#include <AK/Vector.h>
 #include <LibGfx/AffineTransform.h>
 #include <LibGfx/Forward.h>
 #include <LibGfx/Point.h>
 #include <LibGfx/Rect.h>
 #include <LibGfx/WindingRule.h>
+#include <LibIPC/Forward.h>
 
 namespace Gfx {
 
@@ -39,16 +41,20 @@ public:
     virtual void append_path(Gfx::Path const&) = 0;
     virtual void intersect(Gfx::Path const&) = 0;
 
+    [[nodiscard]] virtual Vector<u8> serialize_to_bytes() const = 0;
+    virtual void deserialize_from_bytes(ReadonlyBytes) = 0;
+
     [[nodiscard]] virtual bool is_empty() const = 0;
     virtual Gfx::FloatPoint last_point() const = 0;
     virtual Gfx::FloatRect bounding_box() const = 0;
+    virtual float length() const = 0;
     virtual void set_fill_type(Gfx::WindingRule winding_rule) = 0;
     virtual bool contains(FloatPoint point, Gfx::WindingRule) const = 0;
 
     virtual NonnullOwnPtr<PathImpl> clone() const = 0;
     virtual NonnullOwnPtr<PathImpl> copy_transformed(Gfx::AffineTransform const&) const = 0;
-    virtual NonnullOwnPtr<PathImpl> place_text_along(Utf8View const& text, Font const&) const = 0;
-    virtual NonnullOwnPtr<PathImpl> place_text_along(Utf16View const& text, Font const&) const = 0;
+    virtual NonnullOwnPtr<PathImpl> place_text_along(Utf8View const& text, Font const&, float offset = 0) const = 0;
+    virtual NonnullOwnPtr<PathImpl> place_text_along(Utf16View const& text, Font const&, float offset = 0) const = 0;
 
     virtual String to_svg_string() const = 0;
 };
@@ -56,6 +62,8 @@ public:
 class Path {
 public:
     Path() = default;
+
+    [[nodiscard]] static Path from_serialized_bytes(ReadonlyBytes);
 
     Path(Path const& other)
         : m_impl(other.impl().clone())
@@ -104,16 +112,19 @@ public:
     void append_path(Gfx::Path const& other) { impl().append_path(other); }
     void intersect(Gfx::Path const& other) { impl().intersect(other); }
 
+    [[nodiscard]] Vector<u8> serialize_to_bytes() const { return impl().serialize_to_bytes(); }
+
     [[nodiscard]] bool is_empty() const { return impl().is_empty(); }
     Gfx::FloatPoint last_point() const { return impl().last_point(); }
     Gfx::FloatRect bounding_box() const { return impl().bounding_box(); }
+    float length() const { return impl().length(); }
     bool contains(FloatPoint point, Gfx::WindingRule winding_rule) const { return impl().contains(point, winding_rule); }
     void set_fill_type(Gfx::WindingRule winding_rule) { impl().set_fill_type(winding_rule); }
 
     Gfx::Path clone() const { return Gfx::Path { impl().clone() }; }
     Gfx::Path copy_transformed(Gfx::AffineTransform const& transform) const { return Gfx::Path { impl().copy_transformed(transform) }; }
-    Gfx::Path place_text_along(Utf8View const& text, Font const& font) const { return Gfx::Path { impl().place_text_along(text, font) }; }
-    Gfx::Path place_text_along(Utf16View const& text, Font const& font) const { return Gfx::Path { impl().place_text_along(text, font) }; }
+    Gfx::Path place_text_along(Utf8View const& text, Font const& font, float offset = 0) const { return Gfx::Path { impl().place_text_along(text, font, offset) }; }
+    Gfx::Path place_text_along(Utf16View const& text, Font const& font, float offset = 0) const { return Gfx::Path { impl().place_text_along(text, font, offset) }; }
 
     String to_svg_string() const { return impl().to_svg_string(); }
 
@@ -130,5 +141,15 @@ private:
 
     NonnullOwnPtr<PathImpl> m_impl { PathImpl::create() };
 };
+
+}
+
+namespace IPC {
+
+template<>
+ErrorOr<void> encode(Encoder&, Gfx::Path const&);
+
+template<>
+ErrorOr<Gfx::Path> decode(Decoder&);
 
 }

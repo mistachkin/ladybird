@@ -6,8 +6,9 @@
  */
 
 #include <LibGfx/Bitmap.h>
-#include <LibGfx/ImmutableBitmap.h>
+#include <LibGfx/DecodedImageFrame.h>
 #include <LibWeb/HTML/Canvas/CanvasDrawImage.h>
+#include <LibWeb/HTML/DecodedImageData.h>
 #include <LibWeb/HTML/ImageBitmap.h>
 
 namespace Web::HTML {
@@ -15,63 +16,71 @@ namespace Web::HTML {
 Gfx::IntSize canvas_image_source_dimensions(CanvasImageSource const& image)
 {
     return image.visit(
-        [](GC::Root<HTMLImageElement> const& source) -> Gfx::IntSize {
-            if (auto immutable_bitmap = source->immutable_bitmap())
-                return immutable_bitmap->size();
+        [](GC::Ref<HTMLImageElement> source) -> Gfx::IntSize {
+            if (auto frame = source->current_image_frame(); frame.has_value())
+                return frame->size();
 
             // FIXME: This is very janky and not correct.
             return { source->width(), source->height() };
         },
-        [](GC::Root<SVG::SVGImageElement> const& source) -> Gfx::IntSize {
-            if (auto immutable_bitmap = source->current_image_bitmap())
-                return immutable_bitmap->size();
+        [](GC::Ref<SVG::SVGImageElement> source) -> Gfx::IntSize {
+            if (auto decoded_image_frame = source->current_image_frame(); decoded_image_frame.has_value())
+                return decoded_image_frame->size();
 
             // FIXME: This is very janky and not correct.
             return { source->width()->anim_val()->value(), source->height()->anim_val()->value() };
         },
-        [](GC::Root<HTMLCanvasElement> const& source) -> Gfx::IntSize {
+        [](GC::Ref<HTMLCanvasElement> source) -> Gfx::IntSize {
             if (auto painting_surface = source->surface())
                 return painting_surface->size();
             return { source->width(), source->height() };
         },
-        [](GC::Root<ImageBitmap> const& source) -> Gfx::IntSize {
+        [](GC::Ref<ImageBitmap> source) -> Gfx::IntSize {
             if (auto* bitmap = source->bitmap())
                 return bitmap->size();
             return { source->width(), source->height() };
         },
-        [](GC::Root<OffscreenCanvas> const& source) -> Gfx::IntSize {
+        [](GC::Ref<OffscreenCanvas> source) -> Gfx::IntSize {
             if (auto bitmap = source->bitmap())
                 return bitmap->size();
             return {};
         },
-        [](GC::Root<HTMLVideoElement> const& source) -> Gfx::IntSize {
-            if (auto bitmap = source->bitmap())
-                return bitmap->size();
+        [](GC::Ref<HTMLVideoElement> source) -> Gfx::IntSize {
             return { source->video_width(), source->video_height() };
         });
 }
 
-RefPtr<Gfx::ImmutableBitmap> canvas_image_source_bitmap(CanvasImageSource const& image)
+Optional<Gfx::DecodedImageFrame> canvas_image_source_frame(CanvasImageSource const& image)
 {
     return image.visit(
-        [](OneOf<GC::Root<HTMLImageElement>, GC::Root<SVG::SVGImageElement>> auto const& element) {
-            return element->default_image_bitmap();
+        [](OneOf<GC::Ref<HTMLImageElement>, GC::Ref<SVG::SVGImageElement>> auto const& element) -> Optional<Gfx::DecodedImageFrame> {
+            auto image_data = element->decoded_image_data();
+            if (!image_data)
+                return {};
+
+            Gfx::IntSize size;
+            auto intrinsic_width = element->intrinsic_width();
+            auto intrinsic_height = element->intrinsic_height();
+            if (intrinsic_width.has_value() && intrinsic_height.has_value())
+                size = { intrinsic_width->to_int(), intrinsic_height->to_int() };
+
+            return image_data->frame(0, size);
         },
-        [](GC::Root<HTMLCanvasElement> const& canvas) -> RefPtr<Gfx::ImmutableBitmap> {
+        [](GC::Ref<HTMLCanvasElement> const& canvas) -> Optional<Gfx::DecodedImageFrame> {
             canvas->present();
             auto surface = canvas->surface();
             if (!surface)
-                return Gfx::ImmutableBitmap::create(*canvas->get_bitmap_from_surface());
-            return Gfx::ImmutableBitmap::create_snapshot_from_painting_surface(*surface);
+                return Gfx::DecodedImageFrame { *canvas->get_bitmap_from_surface() };
+            return Gfx::DecodedImageFrame { *surface->snapshot_bitmap() };
         },
-        [](OneOf<GC::Root<ImageBitmap>, GC::Root<OffscreenCanvas>> auto const& source) -> RefPtr<Gfx::ImmutableBitmap> {
+        [](OneOf<GC::Ref<ImageBitmap>, GC::Ref<OffscreenCanvas>> auto const& source) -> Optional<Gfx::DecodedImageFrame> {
             auto bitmap = source->bitmap();
             if (!bitmap)
                 return {};
-            return Gfx::ImmutableBitmap::create(*bitmap);
+            return Gfx::DecodedImageFrame { *bitmap };
         },
-        [](GC::Root<HTMLVideoElement> const& source) -> RefPtr<Gfx::ImmutableBitmap> {
-            return source->bitmap();
+        [](GC::Ref<HTMLVideoElement> const& source) -> Optional<Gfx::DecodedImageFrame> {
+            return source->current_decoded_image_frame();
         });
 }
 

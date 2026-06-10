@@ -10,6 +10,7 @@
 #include <AK/NonnullRefPtr.h>
 #include <LibWeb/Bindings/SourceBuffer.h>
 #include <LibWeb/DOM/EventTarget.h>
+#include <LibWeb/WebIDL/Buffers.h>
 
 namespace Web::MediaSourceExtensions {
 
@@ -45,12 +46,12 @@ public:
     bool updating() const;
 
     // https://w3c.github.io/media-source/#dom-sourcebuffer-buffered
-    GC::Ref<HTML::TimeRanges> buffered();
+    WebIDL::ExceptionOr<GC::Ref<HTML::TimeRanges>> buffered();
 
     void set_content_type(String const& type);
 
     // https://w3c.github.io/media-source/#addsourcebuffer-method
-    WebIDL::ExceptionOr<void> append_buffer(GC::Root<WebIDL::BufferSource> const&);
+    WebIDL::ExceptionOr<void> append_buffer(WebIDL::BufferSource);
 
     // https://w3c.github.io/media-source/#dom-sourcebuffer-abort
     WebIDL::ExceptionOr<void> abort();
@@ -70,7 +71,7 @@ protected:
     virtual void visit_edges(Cell::Visitor&) override;
 
 private:
-    WebIDL::ExceptionOr<void> prepare_append();
+    WebIDL::ExceptionOr<void> prepare_append(size_t new_data_size, AK::Duration current_time);
     void run_buffer_append_algorithm();
     void run_append_error_algorithm();
     void on_first_initialization_segment_processed(InitializationSegmentData const&);

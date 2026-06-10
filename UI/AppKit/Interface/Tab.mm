@@ -4,12 +4,15 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Function.h>
+#include <AK/OwnPtr.h>
 #include <AK/String.h>
 #include <LibCore/Resource.h>
 #include <LibURL/URL.h>
 #include <LibWebView/Application.h>
 #include <LibWebView/Settings.h>
 #include <LibWebView/ViewImplementation.h>
+#include <LibWebView/WebContentClient.h>
 
 #import <Application/ApplicationDelegate.h>
 #import <Interface/BookmarksBar.h>
@@ -25,8 +28,64 @@
 
 static constexpr CGFloat const WINDOW_WIDTH = 1000;
 static constexpr CGFloat const WINDOW_HEIGHT = 800;
+static constexpr CGFloat const TAB_ICON_SIZE = 16;
+static constexpr NSUInteger const TAB_LOADING_SPINNER_SEGMENT_COUNT = 12;
+
+class TabSettingsObserver final : public WebView::SettingsObserver {
+public:
+    explicit TabSettingsObserver(Tab* tab)
+        : m_tab(tab)
+    {
+    }
+
+private:
+    // These are forward-declared so that they may access non-public Tab methods.
+    virtual void show_bookmarks_bar_changed() override;
+    virtual void config_variable_changed(WebView::ConfigVariableID variable) override;
+
+    __weak Tab* m_tab { nil };
+};
+
+static NSImage* tab_loading_spinner_icon(NSUInteger frame)
+{
+    auto* image = [NSImage imageWithSize:NSMakeSize(TAB_ICON_SIZE, TAB_ICON_SIZE)
+                                 flipped:NO
+                          drawingHandler:^BOOL(NSRect) {
+                              auto* context = [NSGraphicsContext currentContext].CGContext;
+                              auto* color = [NSColor labelColor];
+                              static constexpr CGFloat radians_per_segment = 2.0 * 3.14159265358979323846 / TAB_LOADING_SPINNER_SEGMENT_COUNT;
+
+                              CGContextSaveGState(context);
+                              CGContextTranslateCTM(context, TAB_ICON_SIZE / 2.0, TAB_ICON_SIZE / 2.0);
+
+                              for (NSUInteger segment = 0; segment < TAB_LOADING_SPINNER_SEGMENT_COUNT; ++segment) {
+                                  auto alpha = static_cast<CGFloat>(((segment + frame % TAB_LOADING_SPINNER_SEGMENT_COUNT) % TAB_LOADING_SPINNER_SEGMENT_COUNT) + 1) / TAB_LOADING_SPINNER_SEGMENT_COUNT;
+                                  auto* segment_color = [color colorWithAlphaComponent:alpha];
+
+                                  CGContextSaveGState(context);
+                                  CGContextRotateCTM(context, static_cast<CGFloat>(segment) * radians_per_segment);
+                                  CGContextSetStrokeColorWithColor(context, segment_color.CGColor);
+                                  CGContextSetLineWidth(context, 2);
+                                  CGContextSetLineCap(context, kCGLineCapRound);
+                                  CGContextMoveToPoint(context, 0, -4);
+                                  CGContextAddLineToPoint(context, 0, -7);
+                                  CGContextStrokePath(context);
+                                  CGContextRestoreGState(context);
+                              }
+
+                              CGContextRestoreGState(context);
+                              return YES;
+                          }];
+    return image;
+}
 
 @interface Tab () <LadybirdWebViewObserver>
+{
+    BOOL m_loading;
+    NSUInteger m_loading_spinner_frame;
+    __strong NSTimer* m_loading_spinner_timer;
+    OwnPtr<TabSettingsObserver> m_settings_observer;
+}
 
 @property (nonatomic, strong) NSString* title;
 @property (nonatomic, strong) NSImage* favicon;
@@ -86,6 +145,8 @@ static constexpr CGFloat const WINDOW_HEIGHT = 800;
         [self setTitleVisibility:NSWindowTitleHidden];
         [self setIsVisible:YES];
 
+        m_settings_observer = make<TabSettingsObserver>(self);
+
         auto* bookmarks_bar = [[BookmarksBar alloc] init];
         self.bookmarks_bar_controller = [[NSTitlebarAccessoryViewController alloc] init];
         [self.bookmarks_bar_controller setView:bookmarks_bar];
@@ -110,6 +171,11 @@ static constexpr CGFloat const WINDOW_HEIGHT = 800;
     }
 
     return self;
+}
+
+- (void)dealloc
+{
+    [m_loading_spinner_timer invalidate];
 }
 
 #pragma mark - Public methods
@@ -141,15 +207,66 @@ static constexpr CGFloat const WINDOW_HEIGHT = 800;
     return (TabController*)[self windowController];
 }
 
+- (NSImage*)tabIcon
+{
+    if (m_loading)
+        return tab_loading_spinner_icon(m_loading_spinner_frame);
+    return self.favicon;
+}
+
+- (NSString*)displayTitle
+{
+    if (!WebView::Application::settings().config_variable_as_bool(WebView::ConfigVariableID::ShowWebContentProcessIDInTabTitle))
+        return self.title;
+
+    auto title = MUST(String::formatted("{} [{}]", Ladybird::ns_string_to_string(self.title), [[self web_view] view].client().pid()));
+    return Ladybird::string_to_ns_string(title);
+}
+
+- (void)updateLoadingSpinner
+{
+    if (!m_loading)
+        return;
+
+    m_loading_spinner_frame = (m_loading_spinner_frame + 1) % TAB_LOADING_SPINNER_SEGMENT_COUNT;
+    [self updateTabTitleAndFavicon];
+}
+
+- (void)setTabLoading:(BOOL)loading
+{
+    if (m_loading == loading)
+        return;
+
+    m_loading = loading;
+    m_loading_spinner_frame = 0;
+
+    if (m_loading) {
+        __weak Tab* weak_self = self;
+        m_loading_spinner_timer = [NSTimer timerWithTimeInterval:0.08
+                                                         repeats:YES
+                                                           block:^(NSTimer*) {
+                                                               Tab* strong_self = weak_self;
+                                                               if (strong_self == nil)
+                                                                   return;
+                                                               [strong_self updateLoadingSpinner];
+                                                           }];
+        [[NSRunLoop mainRunLoop] addTimer:m_loading_spinner_timer forMode:NSRunLoopCommonModes];
+    } else {
+        [m_loading_spinner_timer invalidate];
+        m_loading_spinner_timer = nil;
+    }
+
+    [self updateTabTitleAndFavicon];
+}
+
 - (void)updateTabTitleAndFavicon
 {
     static constexpr CGFloat TITLE_FONT_SIZE = 12;
-    static constexpr CGFloat FAVICON_SIZE = 16;
 
     NSFont* title_font = [NSFont systemFontOfSize:TITLE_FONT_SIZE];
 
     auto* favicon_attachment = [[NSTextAttachment alloc] init];
-    favicon_attachment.image = self.favicon;
+    favicon_attachment.image = [self tabIcon];
 
     // By default, the image attachment will "automatically adapt to the surrounding font and color
     // attributes in attributed strings". Therefore, we specify a clear color here to prevent the
@@ -160,15 +277,16 @@ static constexpr CGFloat const WINDOW_HEIGHT = 800;
                               range:NSMakeRange(0, [favicon_attribute length])];
 
     // adjust the favicon image to middle center the title text
-    CGFloat offset_y = (title_font.capHeight - FAVICON_SIZE) / 2.f;
-    [favicon_attachment setBounds:CGRectMake(0, offset_y, FAVICON_SIZE, FAVICON_SIZE)];
+    CGFloat offset_y = (title_font.capHeight - TAB_ICON_SIZE) / 2.f;
+    [favicon_attachment setBounds:CGRectMake(0, offset_y, TAB_ICON_SIZE, TAB_ICON_SIZE)];
 
     auto* title_attributes = @{
         NSForegroundColorAttributeName : [NSColor textColor],
         NSFontAttributeName : title_font
     };
 
-    auto* title_attribute = [[NSAttributedString alloc] initWithString:self.title
+    auto* display_title = [self displayTitle];
+    auto* title_attribute = [[NSAttributedString alloc] initWithString:display_title
                                                             attributes:title_attributes];
 
     auto* spacing_attribute = [[NSAttributedString alloc] initWithString:@"  "
@@ -180,6 +298,8 @@ static constexpr CGFloat const WINDOW_HEIGHT = 800;
     [title_and_favicon appendAttributedString:title_attribute];
 
     [[self tab] setAttributedTitle:title_and_favicon];
+    if ([[self tab] respondsToSelector:@selector(setToolTip:)])
+        [(id)[self tab] setToolTip:display_title];
 }
 
 - (void)togglePageMuteState:(id)button
@@ -261,13 +381,17 @@ static constexpr CGFloat const WINDOW_HEIGHT = 800;
 {
     self.title = Ladybird::string_to_ns_string(url.serialize());
     self.favicon = [Tab defaultFavicon];
+    [self setTabLoading:YES];
     [self updateTabTitleAndFavicon];
 
+    [[self tabController] onFaviconChange:nil];
     [[self tabController] onLoadStart:url isRedirect:is_redirect];
 }
 
 - (void)onLoadFinish:(URL::URL const&)url
 {
+    [self setTabLoading:NO];
+    [[self tabController] onLoadFinish:url];
 }
 
 - (void)onURLChange:(URL::URL const&)url
@@ -287,6 +411,7 @@ static constexpr CGFloat const WINDOW_HEIGHT = 800;
     [favicon setResizingMode:NSImageResizingModeStretch];
     self.favicon = favicon;
     [self updateTabTitleAndFavicon];
+    [[self tabController] onFaviconChange:favicon];
 }
 
 - (BookmarksBar*)bookmarksBar
@@ -344,3 +469,14 @@ static constexpr CGFloat const WINDOW_HEIGHT = 800;
 }
 
 @end
+
+void TabSettingsObserver::show_bookmarks_bar_changed()
+{
+    [m_tab updateBookmarksBarDisplay:WebView::Application::settings().show_bookmarks_bar()];
+}
+
+void TabSettingsObserver::config_variable_changed(WebView::ConfigVariableID variable)
+{
+    if (variable == WebView::ConfigVariableID::ShowWebContentProcessIDInTabTitle)
+        [m_tab updateTabTitleAndFavicon];
+}

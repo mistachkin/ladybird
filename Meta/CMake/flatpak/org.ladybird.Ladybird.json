@@ -133,7 +133,7 @@
           "type": "git",
           "url": "https://chromium.googlesource.com/angle/angle",
           "commit": "79ac1a8cd767a32cce6401203e20c4bd4ca4d539",
-          "branch": "chromium/7258_13",
+          "x-branch": "chromium/7258_13",
           "dest": "angle",
           "disable-submodules": true
         },
@@ -235,6 +235,32 @@
         "/lib/icu",
         "/lib/libicutu.so*",
         "/share/icu"
+      ]
+    },
+    {
+      "name": "libpsl",
+      "buildsystem": "meson",
+      "sources": [
+        {
+          "type": "git",
+          "url": "https://github.com/rockdaboot/libpsl.git",
+          "tag": "0.21.5"
+        },
+        {
+          "type": "file",
+          "url": "https://raw.githubusercontent.com/publicsuffix/list/303b81a2140a3192d336f22af389a28daf6efab6/public_suffix_list.dat",
+          "sha256": "82d4d57e397177be3a627df27f88dc0ab04f54d081bc94c68f82c3e100855e0b",
+          "dest": "list/"
+        }
+      ],
+      "config-opts": [
+        "-Ddocs=false",
+        "-Druntime=libicu",
+        "-Dtests=false",
+        "--libdir=/app/lib"
+      ],
+      "cleanup": [
+        "/bin"
       ]
     },
     {
@@ -493,8 +519,8 @@
         {
           "type": "git",
           "url": "https://skia.googlesource.com/skia.git",
-          "commit": "3dde9e726a05abcd66e0ccafc4397b7b045213bd",
-          "branch": "chrome/m144"
+          "commit": "cd0c5f445516ea4e90e02b5f634cbc5ca23b5a44",
+          "x-branch": "chrome/m144"
         },
         {
           "type": "file",
@@ -513,6 +539,21 @@
         "./skia-configure.sh",
         "./skia-build.sh",
         "./skia-install.sh"
+      ]
+    },
+    {
+      "name": "libedit",
+      "buildsystem": "autotools",
+      "sources": [
+        {
+          "type": "archive",
+          "url": "https://thrysoee.dk/editline/libedit-20240808-3.1.tar.gz",
+          "sha256": "5f0573349d77c4a48967191cdd6634dd7aa5f6398c6a57fe037cc02696d6099f"
+        }
+      ],
+      "config-opts": [
+        "--prefix=/app",
+        "--libdir=/app/lib"
       ]
     },
     {
@@ -714,9 +755,9 @@
       "sources": [
         {
           "type": "file",
-          "url": "https://raw.githubusercontent.com/publicsuffix/list/32c68ce9d52e12df5b914b2b248cb893147301f7/public_suffix_list.dat",
-          "dest": "Caches/PublicSuffix/",
-          "sha256": "e79e372bcc6fcdb51f7a31e3c0c504530838432669af2ac544d2491de0a86030"
+          "url": "https://raw.githubusercontent.com/chromium/chromium/aa04f175415addb04bb78936b0d8b973fbd8ea61/net/http/transport_security_state_static.json",
+          "dest": "Caches/HSTSPreload/",
+          "sha256": "4ca70f051571a198246bc337bd357f759fb8f9fdeddbe66b65960997540ee163"
         },
         {
           "type": "shell",

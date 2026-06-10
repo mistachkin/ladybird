@@ -105,10 +105,10 @@ static RefPtr<StyleValue const> interpolate_scale(DOM::Element& element, Calcula
     if (a_from.to_keyword() == Keyword::None && a_to.to_keyword() == Keyword::None)
         return a_from;
 
-    static auto one = TransformationStyleValue::create(PropertyID::Scale, TransformFunction::Scale, { NumberStyleValue::create(1), NumberStyleValue::create(1) });
+    static auto const& one = TransformationStyleValue::create(PropertyID::Scale, TransformFunction::Scale, { NumberStyleValue::create(1), NumberStyleValue::create(1) }).leak_ref();
 
-    auto const& from = a_from.to_keyword() == Keyword::None ? *one : a_from;
-    auto const& to = a_to.to_keyword() == Keyword::None ? *one : a_to;
+    auto const& from = a_from.to_keyword() == Keyword::None ? one : a_from;
+    auto const& to = a_to.to_keyword() == Keyword::None ? one : a_to;
 
     auto const& from_transform = from.as_transformation();
     auto const& to_transform = to.as_transformation();
@@ -122,9 +122,9 @@ static RefPtr<StyleValue const> interpolate_scale(DOM::Element& element, Calcula
     RefPtr<StyleValue const> interpolated_z;
 
     if (from_transform.values().size() == 3 || to_transform.values().size() == 3) {
-        static auto one_value = NumberStyleValue::create(1);
-        auto from = from_transform.values().size() == 3 ? from_transform.values()[2] : one_value;
-        auto to = to_transform.values().size() == 3 ? to_transform.values()[2] : one_value;
+        static auto const& one_value = NumberStyleValue::create(1).leak_ref();
+        auto from = from_transform.values().size() == 3 ? from_transform.values()[2] : ValueComparingNonnullRefPtr<StyleValue const> { one_value };
+        auto to = to_transform.values().size() == 3 ? to_transform.values()[2] : ValueComparingNonnullRefPtr<StyleValue const> { one_value };
         interpolated_z = interpolate_value(element, calculation_context, from, to, delta, allow_discrete);
         if (!interpolated_z)
             return {};
@@ -363,11 +363,11 @@ static RefPtr<StyleValue const> interpolate_translate(DOM::Element& element, Cal
     if (a_from.to_keyword() == Keyword::None && a_to.to_keyword() == Keyword::None)
         return a_from;
 
-    static auto zero_px = LengthStyleValue::create(Length::make_px(0));
-    static auto zero = TransformationStyleValue::create(PropertyID::Translate, TransformFunction::Translate, { zero_px, zero_px });
+    static auto const& zero_px = LengthStyleValue::create(Length::make_px(0)).leak_ref();
+    static auto const& zero = TransformationStyleValue::create(PropertyID::Translate, TransformFunction::Translate, { zero_px, zero_px }).leak_ref();
 
-    auto const& from = a_from.to_keyword() == Keyword::None ? *zero : a_from;
-    auto const& to = a_to.to_keyword() == Keyword::None ? *zero : a_to;
+    auto const& from = a_from.to_keyword() == Keyword::None ? zero : a_from;
+    auto const& to = a_to.to_keyword() == Keyword::None ? zero : a_to;
 
     auto const& from_transform = from.as_transformation();
     auto const& to_transform = to.as_transformation();
@@ -426,11 +426,11 @@ static RefPtr<StyleValue const> interpolate_rotate(DOM::Element& element, Calcul
     if (a_from.to_keyword() == Keyword::None && a_to.to_keyword() == Keyword::None)
         return a_from;
 
-    static auto zero_degrees_value = AngleStyleValue::create(Angle::make_degrees(0));
-    static auto zero = TransformationStyleValue::create(PropertyID::Rotate, TransformFunction::Rotate, { zero_degrees_value });
+    static auto const& zero_degrees_value = AngleStyleValue::create(Angle::make_degrees(0)).leak_ref();
+    static auto const& zero = TransformationStyleValue::create(PropertyID::Rotate, TransformFunction::Rotate, { zero_degrees_value }).leak_ref();
 
-    auto const& from = a_from.to_keyword() == Keyword::None ? *zero : a_from;
-    auto const& to = a_to.to_keyword() == Keyword::None ? *zero : a_to;
+    auto const& from = a_from.to_keyword() == Keyword::None ? zero : a_from;
+    auto const& to = a_to.to_keyword() == Keyword::None ? zero : a_to;
 
     auto const& from_transform = from.as_transformation();
     auto const& to_transform = to.as_transformation();
@@ -577,6 +577,15 @@ static void append_grid_track_with_line_names(GridTrackSizeList& list, ExplicitG
 
 static Optional<GridTrackSizeList> interpolate_grid_track_size_list(DOM::Element& element, CalculationContext const& calculation_context, GridTrackSizeList const& from, GridTrackSizeList const& to, float delta)
 {
+    // https://drafts.csswg.org/css-grid-2/#track-sizing
+    // Animation type: if the list lengths match, by computed value type per item in the computed track list;
+    // discrete otherwise.
+    //
+    // https://drafts.csswg.org/css-grid-2/#computed-track-list-subgrid
+    // The computed track list of a subgrid axis is the subgrid keyword followed by a list of line names.
+    if (from.is_subgrid() || to.is_subgrid())
+        return {};
+
     auto interpolate_grid_size = [&](GridSize const& from_grid_size, GridSize const& to_grid_size) -> GridSize {
         return GridSize { *interpolate_value(element, calculation_context, from_grid_size.style_value(), to_grid_size.style_value(), delta, AllowDiscrete::Yes) };
     };
@@ -665,9 +674,9 @@ ValueComparingRefPtr<StyleValue const> interpolate_property(DOM::Element& elemen
         }
 
         if (property_id == PropertyID::FontStyle) {
-            auto static oblique_0deg_value = FontStyleStyleValue::create(FontStyleKeyword::Oblique, AngleStyleValue::create(Angle::make_degrees(0)));
-            auto from_value = from->as_font_style().font_style() == FontStyleKeyword::Normal ? oblique_0deg_value : from;
-            auto to_value = to->as_font_style().font_style() == FontStyleKeyword::Normal ? oblique_0deg_value : to;
+            static auto const& oblique_0deg_value = FontStyleStyleValue::create(FontStyleKeyword::Oblique, AngleStyleValue::create(Angle::make_degrees(0))).leak_ref();
+            auto from_value = from->as_font_style().font_style() == FontStyleKeyword::Normal ? ValueComparingNonnullRefPtr<StyleValue const> { oblique_0deg_value } : from;
+            auto to_value = to->as_font_style().font_style() == FontStyleKeyword::Normal ? ValueComparingNonnullRefPtr<StyleValue const> { oblique_0deg_value } : to;
             return interpolate_value(element, calculation_context, from_value, to_value, delta, allow_discrete);
         }
 
@@ -1240,11 +1249,11 @@ RefPtr<StyleValue const> interpolate_transform(DOM::Element& element, Calculatio
             generic_function = TransformFunction::Matrix3d;
             // NB: Called during animation interpolation.
             auto paintable_box = [&] -> Optional<Painting::PaintableBox const&> {
-                if (auto* box = element.unsafe_paintable_box())
+                if (auto box = element.unsafe_paintable_box())
                     return *box;
                 return {};
             }();
-            parameters = matrix_to_style_value_vector(MUST(transform->to_matrix(paintable_box)));
+            parameters = matrix_to_style_value_vector(transform->to_matrix(paintable_box));
         }
         return TransformationStyleValue::create(PropertyID::Transform, generic_function, move(parameters));
     };
@@ -1343,17 +1352,19 @@ RefPtr<StyleValue const> interpolate_transform(DOM::Element& element, Calculatio
     //     iterating over Va and Vb.
     // NB: Called during animation interpolation.
     Optional<Painting::PaintableBox const&> paintable_box;
-    if (auto* paintable = as_if<Painting::PaintableBox>(element.unsafe_paintable()))
-        paintable_box = *paintable;
+    auto paintable = element.unsafe_paintable();
+    if (auto const* box = as_if<Painting::PaintableBox>(paintable.ptr()))
+        paintable_box = *box;
 
     auto post_multiply_remaining_transformations = [&paintable_box](size_t start_index, Vector<NonnullRefPtr<TransformationStyleValue const>> const& transformations) -> Optional<FloatMatrix4x4> {
         FloatMatrix4x4 result = FloatMatrix4x4::identity();
         for (auto index = start_index; index < transformations.size(); ++index) {
-            auto transformation_matrix = transformations[index]->to_matrix(paintable_box);
-            if (transformation_matrix.is_error())
+            auto const& transformation = transformations[index];
+            if (!paintable_box.has_value() && !transformation->can_be_converted_to_matrix_without_reference_box())
                 return {};
-            result = result * transformation_matrix.value();
+            result = result * transformation->to_matrix(paintable_box);
         }
+
         return result;
     };
     auto from_matrix = post_multiply_remaining_transformations(index, from_transformations);
@@ -1415,9 +1426,8 @@ RefPtr<StyleValue const> interpolate_box_shadow(DOM::Element& element, Calculati
 
     // NB: Called during style interpolation.
     ColorResolutionContext color_resolution_context {};
-    if (auto node = element.unsafe_layout_node()) {
-        color_resolution_context = ColorResolutionContext::for_layout_node_with_style(*element.unsafe_layout_node());
-    }
+    if (auto* node = element.unsafe_layout_node())
+        color_resolution_context = ColorResolutionContext::for_layout_node_with_style(*node);
 
     for (size_t i = 0; i < from_shadows.size(); i++) {
         auto const& from_shadow = from_shadows[i]->as_shadow();
@@ -1729,9 +1739,8 @@ static RefPtr<StyleValue const> interpolate_value_impl(DOM::Element& element, Ca
     case StyleValue::Type::Color: {
         // NB: Called during style interpolation.
         ColorResolutionContext color_resolution_context {};
-        if (auto node = element.unsafe_layout_node()) {
-            color_resolution_context = ColorResolutionContext::for_layout_node_with_style(*element.unsafe_layout_node());
-        }
+        if (auto* node = element.unsafe_layout_node())
+            color_resolution_context = ColorResolutionContext::for_layout_node_with_style(*node);
 
         if (auto interpolated = interpolate_color(from, to, delta, {}, color_resolution_context))
             return interpolated;
@@ -2258,6 +2267,15 @@ static T composite_raw_values(T underlying_raw_value, T animated_raw_value)
 
 static Optional<GridTrackSizeList> composite_grid_track_size_list(PropertyID property_id, CalculationContext const& calculation_context, GridTrackSizeList const& underlying, GridTrackSizeList const& animated, Bindings::CompositeOperation composite_operation)
 {
+    // https://drafts.csswg.org/css-grid-2/#track-sizing
+    // Animation type: if the list lengths match, by computed value type per item in the computed track list;
+    // discrete otherwise.
+    //
+    // https://drafts.csswg.org/css-grid-2/#computed-track-list-subgrid
+    // The computed track list of a subgrid axis is the subgrid keyword followed by a list of line names.
+    if (underlying.is_subgrid() || animated.is_subgrid())
+        return {};
+
     auto composite_grid_size = [&](GridSize const& underlying_grid_size, GridSize const& animated_grid_size) -> Optional<GridSize> {
         if (auto composited_value = composite_value(property_id, underlying_grid_size.style_value(), animated_grid_size.style_value(), composite_operation))
             return GridSize { *composited_value };

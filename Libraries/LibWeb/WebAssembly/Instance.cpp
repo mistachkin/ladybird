@@ -22,17 +22,15 @@ namespace Web::WebAssembly {
 
 GC_DEFINE_ALLOCATOR(Instance);
 
-WebIDL::ExceptionOr<GC::Ref<Instance>> Instance::construct_impl(JS::Realm& realm, Module& module, Optional<GC::Root<JS::Object>>& import_object_handle)
+WebIDL::ExceptionOr<GC::Ref<Instance>> Instance::construct_impl(JS::Realm& realm, Module& module, GC::Ptr<JS::Object> import_object)
 {
-    GC::Ptr<JS::Object> import_object = import_object_handle.has_value() ? import_object_handle.value().ptr() : nullptr;
-
     auto& vm = realm.vm();
 
     auto module_instance = TRY(Detail::instantiate_module(vm, module.compiled_module()->module, import_object));
     return realm.create<Instance>(realm, move(module_instance));
 }
 
-Instance::Instance(JS::Realm& realm, NonnullOwnPtr<Wasm::ModuleInstance> module_instance)
+Instance::Instance(JS::Realm& realm, NonnullRefPtr<Wasm::ModuleInstance> module_instance)
     : Bindings::PlatformObject(realm)
     , m_exports(Object::create(realm, nullptr))
     , m_module_instance(move(module_instance))
@@ -81,10 +79,9 @@ void Instance::initialize(JS::Realm& realm)
                 m_exports->define_direct_property(name, *object, JS::default_attributes);
             },
             [&](Wasm::TableAddress const& address) {
-                Optional<GC::Ptr<Table>> object = m_table_instances.get(address);
+                Optional<GC::Ptr<Table>> object = cache.get_table_instance(address);
                 if (!object.has_value()) {
                     object = realm.create<Table>(realm, address);
-                    m_table_instances.set(address, *object);
                 }
 
                 m_exports->define_direct_property(name, *object, JS::default_attributes);
@@ -100,7 +97,6 @@ void Instance::visit_edges(Visitor& visitor)
     Base::visit_edges(visitor);
     visitor.visit(m_exports);
     visitor.visit(m_function_instances);
-    visitor.visit(m_table_instances);
 }
 
 }

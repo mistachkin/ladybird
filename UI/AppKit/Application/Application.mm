@@ -27,7 +27,7 @@ namespace Ladybird {
 
 Application::Application() = default;
 
-NonnullOwnPtr<Core::EventLoop> Application::create_platform_event_loop()
+Core::EventLoop& Application::create_platform_event_loop()
 {
     if (!browser_options().headless_mode.has_value()) {
         Core::EventLoopManager::install(*new EventLoopManagerMacOS);
@@ -58,6 +58,12 @@ Optional<WebView::ViewImplementation&> Application::open_blank_new_tab(Web::HTML
     auto* tab = (Tab*)[controller window];
 
     return [[tab web_view] view];
+}
+
+void Application::open_url_in_new_window(URL::URL const& url)
+{
+    ApplicationDelegate* delegate = [NSApp delegate];
+    (void)[delegate createNewTab:url fromTab:nil activateTab:Web::HTML::ActivateTab::Yes];
 }
 
 Optional<ByteString> Application::ask_user_for_download_path(StringView file) const
@@ -104,7 +110,7 @@ void Application::display_error_dialog(StringView error_message) const
                    completionHandler:nil];
 }
 
-Utf16String Application::clipboard_text() const
+Utf16String Application::clipboard_text(ClipboardType) const
 {
     auto* paste_board = [NSPasteboard generalPasteboard];
 
@@ -162,12 +168,6 @@ void Application::rebuild_bookmarks_menu() const
 {
     ApplicationDelegate* delegate = [NSApp delegate];
     [delegate rebuildBookmarksMenu];
-}
-
-void Application::update_bookmarks_bar_display(bool show_bookmarks_bar) const
-{
-    ApplicationDelegate* delegate = [NSApp delegate];
-    [delegate updateBookmarksBarDisplay:show_bookmarks_bar];
 }
 
 void Application::show_bookmark_context_menu(Gfx::IntPoint content_position, Optional<WebView::BookmarkItem const&> item, Optional<String const&> target_folder_id)

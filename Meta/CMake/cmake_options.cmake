@@ -40,7 +40,6 @@ option(ENABLE_MEMORY_SANITIZER "Enable memory sanitizer testing in gcc/clang" OF
 option(ENABLE_FUZZERS "Build fuzzing targets" OFF)
 option(ENABLE_FUZZERS_LIBFUZZER "Build fuzzers using Clang's libFuzzer" OFF)
 option(ENABLE_FUZZERS_OSSFUZZ "Build OSS-Fuzz compatible fuzzers" OFF)
-option(LAGOM_TOOLS_ONLY "Don't build libraries, utilities and tests, only host build tools" OFF)
 option(ENABLE_LAGOM_CCACHE "Enable ccache for Lagom builds" ON)
 set(LAGOM_USE_LINKER "" CACHE STRING "The linker to use (e.g. lld, mold) instead of the system default")
 set(LAGOM_LINK_POOL_SIZE "" CACHE STRING "The maximum number of parallel jobs to use for linking")
@@ -51,25 +50,5 @@ if (ENABLE_FUZZERS_LIBFUZZER)
     # With libfuzzer, we need to avoid a duplicate main() linker error giving false negatives
     set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY CACHE STRING "Type of target to use for try_compile()" FORCE)
 endif()
-
-include(CheckCXXSourceCompiles)
-set(BLOCKS_REQUIRED_LIBRARIES "")
-if (NOT APPLE)
-    find_package(BlocksRuntime)
-    if (BlocksRuntime_FOUND)
-        set(BLOCKS_REQUIRED_LIBRARIES BlocksRuntime::BlocksRuntime)
-        set(CMAKE_REQUIRED_LIBRARIES BlocksRuntime::BlocksRuntime)
-    endif()
-endif()
-check_cxx_source_compiles([=[
-    int main() { __block int x = 0; auto b = ^{++x;}; b(); }
-]=] CXX_COMPILER_SUPPORTS_BLOCKS)
-
-set(CMAKE_REQUIRED_FLAGS "-fobjc-arc")
-check_cxx_source_compiles([=[
-    int main() { auto b = ^{}; auto __weak w = b; w(); }
-]=] CXX_COMPILER_SUPPORTS_OBJC_ARC)
-unset(CMAKE_REQUIRED_FLAGS)
-unset(CMAKE_REQUIRED_LIBRARIES)
 
 include(${CMAKE_CURRENT_LIST_DIR}/lagom_install_options.cmake)

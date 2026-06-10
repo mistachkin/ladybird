@@ -14,6 +14,7 @@
 #include <AK/StringBuilder.h>
 #include <AK/Time.h>
 #include <LibFileSystem/FileSystem.h>
+#include <LibGC/Heap.h>
 #include <LibJS/Bytecode/Executable.h>
 #include <LibJS/Runtime/AbstractOperations.h>
 #include <LibJS/Runtime/Array.h>
@@ -26,6 +27,7 @@
 #include <LibJS/Runtime/FunctionEnvironment.h>
 #include <LibJS/Runtime/Iterator.h>
 #include <LibJS/Runtime/NativeFunction.h>
+#include <LibJS/Runtime/NativeJavaScriptBackedFunction.h>
 #include <LibJS/Runtime/PromiseCapability.h>
 #include <LibJS/Runtime/Reference.h>
 #include <LibJS/Runtime/Symbol.h>
@@ -192,7 +194,7 @@ VM::VM(ErrorMessages error_messages)
 
         // The default implementation of HostResizeArrayBuffer is to return NormalCompletion(unhandled).
 
-        if (auto result = buffer.buffer().try_resize(new_byte_length, ByteBuffer::ZeroFillNewElements::Yes); result.is_error())
+        if (auto result = buffer.try_resize(new_byte_length, DataBlock::ZeroFillNewBytes::Yes); result.is_error())
             return throw_completion<RangeError>(ErrorType::NotEnoughMemoryToAllocate, new_byte_length);
 
         return HandledByHost::Handled;
@@ -236,6 +238,18 @@ VM::~VM()
 {
     --s_vm_count;
     VERIFY(s_vm_count == 0);
+}
+
+SharedFunctionInstanceData* VM::active_shared_function_data()
+{
+    auto* function = active_function_object();
+    if (!function)
+        return nullptr;
+    if (auto* ecmascript_function = as_if<ECMAScriptFunctionObject>(*function))
+        return &ecmascript_function->shared_data();
+    if (auto* native_javascript_backed_function = as_if<NativeJavaScriptBackedFunction>(*function))
+        return &native_javascript_backed_function->shared_data();
+    return nullptr;
 }
 
 Utf16String const& VM::error_message(ErrorMessage type) const
@@ -485,7 +499,9 @@ void VM::run_queued_finalization_registry_cleanup_jobs()
     while (!m_finalization_registry_cleanup_jobs.is_empty()) {
         auto registry = m_finalization_registry_cleanup_jobs.take_last();
         // FIXME: Handle any uncatched exceptions here.
-        (void)registry->cleanup();
+        auto result = registry->cleanup();
+        if (result.is_error() && registry->has_empty_cells())
+            m_finalization_registry_cleanup_jobs.append(registry);
     }
 }
 
@@ -609,6 +625,8 @@ VM::StoredModule* VM::get_stored_module(ImportedModuleReferrer const&, ByteStrin
     return &(*end_or_module);
 }
 
+static ByteString resolve_module_filename(StringView filename, Utf16View const& module_type);
+
 ThrowCompletionOr<void> VM::link_and_eval_module(SourceTextModule& module)
 {
     return link_and_eval_module(static_cast<CyclicModule&>(module));
@@ -617,6 +635,19 @@ ThrowCompletionOr<void> VM::link_and_eval_module(SourceTextModule& module)
 ThrowCompletionOr<void> VM::link_and_eval_module(CyclicModule& module)
 {
     auto filename = module.filename();
+    if (!filename.is_empty()) {
+        auto absolute_filename = resolve_module_filename(LexicalPath::absolute_path("."sv, filename), {});
+        if (!get_stored_module(GC::Ref { module }, absolute_filename, {})) {
+            // Register the entry module before loading dependencies so self-imports resolve to this Module Record.
+            m_loaded_modules.empend(
+                GC::Ref { module },
+                move(absolute_filename),
+                String {},
+                make_root(static_cast<Module&>(module)),
+                true);
+        }
+    }
+
     auto& promise_capability = module.load_requested_modules(nullptr);
 
     if (auto const& promise = as<Promise>(*promise_capability.promise()); promise.state() == Promise::State::Rejected)
@@ -739,14 +770,14 @@ void VM::load_imported_module(ImportedModuleReferrer referrer, ModuleRequest con
 
 #if JS_MODULE_DEBUG
     ByteString referencing_module_string = referrer.visit(
-        [&](Empty) -> ByteString {
-            return ".";
+        [&](GC::Ref<Script> const& script) {
+            return ByteString::formatted("Script @ {}", script.ptr());
         },
-        [&](auto& script_or_module) {
-            if constexpr (IsSame<Script*, decltype(script_or_module)>) {
-                return ByteString::formatted("Script @ {}", script_or_module.ptr());
-            }
-            return ByteString::formatted("Module @ {}", script_or_module.ptr());
+        [&](GC::Ref<CyclicModule> const& module) {
+            return ByteString::formatted("Module @ {}", module.ptr());
+        },
+        [&](GC::Ref<Realm> const& realm) {
+            return ByteString::formatted("Realm @ {}", realm.ptr());
         });
 
     dbgln_if(JS_MODULE_DEBUG, "[JS MODULE] load_imported_module({}, {})", referencing_module_string, filename);

@@ -32,7 +32,7 @@ public:
 
     virtual void serialize(StringBuilder&, SerializationMode) const override;
 
-    void paint(DisplayListRecordingContext&, DevicePixelRect const& dest_rect, CSS::ImageRendering) const override;
+    void paint(DisplayListRecordingContext&, DOM::Document const&, DevicePixelRect const& dest_rect, CSS::ImageRendering) const override;
 
     virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const override;
     virtual bool equals(StyleValue const& other) const override;
@@ -52,7 +52,7 @@ public:
         return ColorInterpolationMethodStyleValue::default_color_interpolation_method(m_properties.color_syntax);
     }
 
-    bool is_paintable() const override { return true; }
+    bool is_paintable(DOM::Document const&) const override { return true; }
 
     void resolve_for_size(Layout::NodeWithStyle const&, CSSPixelSize) const override;
 
@@ -80,12 +80,7 @@ private:
         bool operator==(Properties const&) const = default;
     } m_properties;
 
-    struct ResolvedDataCacheKey {
-        Length::ResolutionContext length_resolution_context;
-        CSSPixelSize size;
-        bool operator==(ResolvedDataCacheKey const&) const = default;
-    };
-    mutable Optional<ResolvedDataCacheKey> m_resolved_data_cache_key;
+    mutable Optional<CSSPixelSize> m_resolved_size;
 
     struct ResolvedData {
         Painting::RadialGradientData data;

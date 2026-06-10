@@ -1,29 +1,42 @@
 include(audio)
 
-include(ffmpeg)
-
 set(SOURCES
+    Audio/AudioBuffer.cpp
     Audio/AudioDevices.cpp
+    Audio/WSOLAAlgorithm.cpp
+    Audio/WSOLAInternals.cpp
+    Audio/WSOLATimeStretcher.cpp
+    Codecs/FLAC.cpp
+    Codecs/Opus.cpp
+    Codecs/Vorbis.cpp
+    Containers/ConstantBitrateContainerNavigator.cpp
+    Containers/FLACNavigator.cpp
+    Containers/IndexedContainerNavigator.cpp
+    Containers/MP3Navigator.cpp
+    Containers/OggNavigator.cpp
     Containers/Matroska/MatroskaDemuxer.cpp
     Containers/Matroska/Reader.cpp
+    Containers/Matroska/SampleIterator.cpp
+    Containers/Matroska/Streamer.cpp
+    GenericTimeProvider.cpp
     IncrementallyPopulatedStream.cpp
     PlaybackManager.cpp
     PlaybackStates/StartingStateHandler.cpp
     PlaybackStates/PausedStateHandler.cpp
     PlaybackStates/PlaybackStateHandler.cpp
     PlaybackStates/ResumingStateHandler.cpp
-    Providers/AudioDataProvider.cpp
-    Providers/GenericTimeProvider.cpp
-    Providers/VideoDataProvider.cpp
-    Sinks/AudioMixingSink.cpp
+    Processors/AudioMixer.cpp
+    Processors/AudioTimeStretchProcessor.cpp
+    Producers/DecodedAudioProducer.cpp
+    Producers/DecodedVideoProducer.cpp
+    Sinks/AudioPlaybackSink.cpp
     Sinks/DisplayingVideoSink.cpp
-    TimedImage.cpp
     TimeRanges.cpp
     VideoFrame.cpp
 )
 
 ladybird_lib(LibMedia media EXPLICIT_SYMBOL_EXPORT)
-target_link_libraries(LibMedia PRIVATE LibCore LibCrypto LibIPC LibGfx LibThreading LibUnicode)
+target_link_libraries(LibMedia PRIVATE LibCore LibCrypto LibIPC LibGfx LibSync LibThreading LibUnicode)
 
 target_sources(LibMedia PRIVATE
         FFmpeg/FFmpegAudioConverter.cpp

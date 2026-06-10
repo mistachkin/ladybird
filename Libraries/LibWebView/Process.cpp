@@ -47,6 +47,7 @@ ErrorOr<Process::ProcessAndIPCTransport> Process::spawn_and_connect_to_process(C
     Array<int, 2> stderr_pipe {};
 
     Core::ProcessSpawnOptions spawn_options = options;
+    spawn_options.die_with_parent = true;
 
     if (capture_output) {
         stdout_pipe = TRY(Core::System::pipe2(O_CLOEXEC));
@@ -69,7 +70,7 @@ ErrorOr<Process::ProcessAndIPCTransport> Process::spawn_and_connect_to_process(C
     auto port_b_recv = TRY(Core::MachPort::create_with_right(Core::MachPort::PortRight::Receive));
     auto port_b_send = TRY(port_b_recv.insert_right(Core::MachPort::MessageRight::MakeSend));
 
-    Threading::MutexLocker child_registration_locker(Application::transport_bootstrap_server().child_registration_lock());
+    Sync::MutexLocker child_registration_locker(Application::transport_bootstrap_server().child_registration_lock());
     auto process = TRY(Core::Process::spawn(spawn_options));
 
     Application::transport_bootstrap_server().register_child_transport(process.pid(), IPC::TransportBootstrapMachPorts { move(port_b_recv), move(port_a_send) });

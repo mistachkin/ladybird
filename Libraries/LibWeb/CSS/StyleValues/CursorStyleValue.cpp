@@ -17,6 +17,7 @@
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/Painting/DisplayListPlayerSkia.h>
 #include <LibWeb/Painting/DisplayListRecorder.h>
+#include <LibWeb/Painting/DisplayListResourceStorage.h>
 
 namespace Web::CSS {
 
@@ -57,17 +58,13 @@ bool CursorStyleValue::is_computationally_independent() const
 Optional<Gfx::ImageCursor> CursorStyleValue::make_image_cursor(Layout::NodeWithStyle const& layout_node) const
 {
     auto const& image = *m_properties.image;
-    if (!image.is_paintable()) {
+    auto const& document = layout_node.document();
+    if (!image.is_paintable(document)) {
         const_cast<AbstractImageStyleValue&>(image).load_any_resources(const_cast<DOM::Document&>(layout_node.document()));
         return {};
     }
 
-    auto const& document = layout_node.document();
-
-    CacheKey cache_key {
-        .length_resolution_context = Length::ResolutionContext::for_layout_node(layout_node),
-        .current_color = layout_node.computed_values().color(),
-    };
+    auto const& current_color = layout_node.computed_values().color();
 
     // Create a bitmap if needed.
     // The cursor size for a given image never changes. It's based either on the image itself, or our default size,
@@ -84,7 +81,7 @@ Optional<Gfx::ImageCursor> CursorStyleValue::make_image_cursor(Layout::NodeWithS
         // 32x32 is selected arbitrarily.
         // FIXME: Ask the OS for the default size?
         CSSPixelSize const default_cursor_size { 32, 32 };
-        auto cursor_css_size = run_default_sizing_algorithm({}, {}, { image.natural_width(), image.natural_height(), image.natural_aspect_ratio() }, default_cursor_size);
+        auto cursor_css_size = run_default_sizing_algorithm({}, {}, { image.natural_width(document), image.natural_height(document), image.natural_aspect_ratio(document) }, default_cursor_size);
         // FIXME: How do we determine what cursor sizes the OS allows?
         // We don't multiply by the pixel ratio, because we want to use the image's actual pixel size.
         DevicePixelSize cursor_device_size { cursor_css_size.to_type<double>().to_rounded<int>() };
@@ -99,8 +96,8 @@ Optional<Gfx::ImageCursor> CursorStyleValue::make_image_cursor(Layout::NodeWithS
     }
 
     // Repaint the bitmap if necessary
-    if (m_cache_key != cache_key) {
-        m_cache_key = move(cache_key);
+    if (m_cached_bitmap_color != current_color) {
+        m_cached_bitmap_color = current_color;
 
         // Clear whatever was in the bitmap before.
         auto& bitmap = *m_cached_bitmap->bitmap();
@@ -108,19 +105,22 @@ Optional<Gfx::ImageCursor> CursorStyleValue::make_image_cursor(Layout::NodeWithS
         painter->clear_rect(bitmap.rect().to_type<float>(), Color::Transparent);
 
         // Paint the cursor into a bitmap.
-        auto display_list = Painting::DisplayList::create(Painting::AccumulatedVisualContextTree::create());
-        Painting::DisplayListRecorder display_list_recorder(display_list);
+        auto visual_context_tree = Painting::AccumulatedVisualContextTree::create();
+        auto display_list = Painting::DisplayList::create(visual_context_tree);
+        Painting::DisplayListResourceStorage resource_storage;
+        Painting::DisplayListRecorder display_list_recorder(display_list, visual_context_tree, resource_storage);
         DisplayListRecordingContext paint_context { display_list_recorder, document.page().palette(), document.page().client().device_pixels_per_css_pixel(), document.page().chrome_metrics() };
 
         image.resolve_for_size(layout_node, CSSPixelSize { bitmap.size() });
-        image.paint(paint_context, DevicePixelRect { bitmap.rect() }, ImageRendering::Auto);
+        image.paint(paint_context, document, DevicePixelRect { bitmap.rect() }, ImageRendering::Auto);
 
         switch (document.page().client().display_list_player_type()) {
         case DisplayListPlayerType::SkiaGPUIfAvailable:
         case DisplayListPlayerType::SkiaCPU: {
             auto painting_surface = Gfx::PaintingSurface::wrap_bitmap(bitmap);
             Painting::DisplayListPlayerSkia display_list_player;
-            display_list_player.execute(*display_list, {}, painting_surface);
+            display_list_player.execute(*display_list, visual_context_tree, resource_storage, {}, painting_surface);
+            display_list_player.flush(*painting_surface);
             break;
         }
         }

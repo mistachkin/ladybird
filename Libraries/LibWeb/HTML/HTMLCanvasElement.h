@@ -6,10 +6,11 @@
 
 #pragma once
 
+#include <AK/Optional.h>
 #include <LibGfx/Forward.h>
 #include <LibGfx/PaintingSurface.h>
 #include <LibWeb/HTML/HTMLElement.h>
-#include <LibWeb/Painting/ExternalContentSource.h>
+#include <LibWeb/Painting/DisplayListResourceIds.h>
 #include <LibWeb/WebIDL/Types.h>
 
 namespace Web::HTML {
@@ -21,7 +22,7 @@ class HTMLCanvasElement final : public HTMLElement {
 public:
     static constexpr bool OVERRIDES_FINALIZE = true;
 
-    using RenderingContext = Variant<GC::Root<CanvasRenderingContext2D>, GC::Root<WebGL::WebGLRenderingContext>, GC::Root<WebGL::WebGL2RenderingContext>, Empty>;
+    using RenderingContext = Variant<GC::Ref<CanvasRenderingContext2D>, GC::Ref<WebGL::WebGLRenderingContext>, GC::Ref<WebGL::WebGL2RenderingContext>, Empty>;
 
     virtual ~HTMLCanvasElement() override;
 
@@ -42,17 +43,18 @@ public:
 
     virtual void attribute_changed(FlyString const& local_name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
 
-    String to_data_url(StringView type, JS::Value quality);
-    WebIDL::ExceptionOr<void> to_blob(GC::Ref<WebIDL::CallbackType> callback, StringView type, JS::Value quality);
+    String to_data_url(StringView type, Optional<JS::Value> quality);
+    WebIDL::ExceptionOr<void> to_blob(GC::Ref<WebIDL::CallbackType> callback, StringView type, Optional<JS::Value> quality);
     RefPtr<Gfx::Bitmap> get_bitmap_from_surface();
 
     void present();
+    void republish_compositor_surface();
     void set_canvas_content_dirty();
 
     RefPtr<Gfx::PaintingSurface> surface() const;
     void allocate_painting_surface_if_needed();
 
-    Painting::ExternalContentSource& ensure_external_content_source();
+    Painting::CompositorSurfaceId ensure_compositor_surface_id();
 
     CSS::ComputationContext canvas_font_computation_context();
 
@@ -66,16 +68,18 @@ private:
     virtual bool is_presentational_hint(FlyString const&) const override;
     virtual void apply_presentational_hints(Vector<CSS::StyleProperty>&) const override;
 
-    virtual GC::Ptr<Layout::Node> create_layout_node(GC::Ref<CSS::ComputedProperties>) override;
+    virtual RefPtr<Layout::Node> create_layout_node(CSS::ComputedProperties const&) override;
     virtual void adjust_computed_style(CSS::ComputedProperties&) override;
 
     template<typename ContextType>
     JS::ThrowCompletionOr<HasOrCreatedContext> create_webgl_context(JS::Value options);
     void reset_context_to_default_state();
     void notify_context_about_canvas_size_change();
+    void clear_compositor_surface();
+    void update_compositor_surface();
 
     Variant<GC::Ref<HTML::CanvasRenderingContext2D>, GC::Ref<WebGL::WebGLRenderingContext>, GC::Ref<WebGL::WebGL2RenderingContext>, Empty> m_context;
-    RefPtr<Painting::ExternalContentSource> m_external_content_source;
+    Optional<Painting::CompositorSurfaceId> m_compositor_surface_id;
     bool m_canvas_content_dirty { false };
 };
 

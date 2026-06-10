@@ -59,8 +59,6 @@ class UnixDateTime;
 class Utf16FlyString;
 class Utf16String;
 class Utf16View;
-class Utf32CodePointIterator;
-class Utf32View;
 class Utf8CodePointIterator;
 class Utf8View;
 
@@ -119,9 +117,6 @@ class Badge;
 
 template<typename T>
 class FixedArray;
-
-template<size_t precision, typename Underlying = i32>
-class FixedPoint;
 
 template<typename>
 class Function;
@@ -235,8 +230,6 @@ using AK::Utf16FlyString;
 using AK::Utf16GenericLexer;
 using AK::Utf16String;
 using AK::Utf16View;
-using AK::Utf32CodePointIterator;
-using AK::Utf32View;
 using AK::Utf8CodePointIterator;
 using AK::Utf8View;
 using AK::ValueComparingNonnullRefPtr;

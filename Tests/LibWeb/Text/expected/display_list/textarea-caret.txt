@@ -1,11 +1,19 @@
 AccumulatedVisualContext Tree:
-  [1] scroll_frame_id=1 (PaintableWithLines(BlockContainer<PRE>#out))
-    [2] clip=[9,9 104x34] (PaintableWithLines(BlockContainer<DIV>))
+  [0] transform=[1,0,0,1,0,0] origin=(0,0) (ViewportPaintable(Viewport<#document>))
+    [1] scroll_frame_id=1 (PaintableWithLines(BlockContainer<PRE>#out))
+      [2] clip=[9,9 104x34] (PaintableWithLines(BlockContainer<DIV>))
 
 DisplayList:
 SaveLayer@0
+  CompositorWheelHitTestTarget@0 target_scroll_frame_index=0 rect=[0,0 800x600]
+  CompositorWheelHitTestTarget@1 target_scroll_frame_index=0 rect=[0,0 800x57]
+  CompositorWheelHitTestTarget@1 target_scroll_frame_index=0 rect=[8,8 784x36]
+  CompositorWheelHitTestTarget@1 target_scroll_frame_index=0 rect=[8,8 784x36]
+  CompositorWheelHitTestTarget@1 target_scroll_frame_index=0 rect=[8,8 106x36]
   FillRect@1 rect=[8,8 106x36] color=rgb(255, 255, 255)
   FillPath@1 path_bounding_rect=[8,8 106x36]
+  CompositorWheelHitTestTarget@2 target_scroll_frame_index=0 rect=[11,11 100x15]
+  CompositorWheelHitTestTarget@2 target_scroll_frame_index=0 rect=[11,11 100x15]
   DrawGlyphRun@2 rect=[11,11 30x15] translation=[11,22.390625] color=rgb(0, 0, 0)
   FillRect@2 rect=[11,11 1x15] color=rgb(0, 0, 0)
   FillPath@1 path_bounding_rect=[6,6 110x40]

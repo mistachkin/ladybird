@@ -397,6 +397,7 @@ macro load_primitive_string_utf16_code_unit(string, index, code_unit, out_of_bou
 
     load64 utf16_data, [string, PRIMITIVE_STRING_UTF16_STRING]
     branch_zero utf16_data, fail
+    assert_nonzero utf16_data
 
     load8 scratch, [string, PRIMITIVE_STRING_UTF16_SHORT_STRING_BYTE_COUNT_AND_FLAG]
     and scratch, UTF16_SHORT_STRING_FLAG
@@ -436,30 +437,60 @@ macro dispatch_current()
     goto_handler pc
 end
 
-# Walk the environment chain using a cached EnvironmentCoordinate.
+# Walk the environment chain using a statically computed EnvironmentCoordinate.
 # Input: m_cache_field is the offset of the EnvironmentCoordinate inside
 # the bytecode instruction.
 # Output: target_env points at the resolved environment, bind_index holds
 # the binding index within it.
-# On failure (invalid cache, screwed by eval): jumps to fail_label.
+# On failure (the caller's binding operation fails): jumps to fail_label.
 macro walk_env_chain(m_cache_field, target_env, bind_index, fail_label)
-    temp coord_addr, hops, sentinel, screw
+    temp coord_addr, hops
     lea coord_addr, [pb, pc]
     add coord_addr, m_cache_field
     load_pair32 hops, bind_index, [coord_addr, ENVIRONMENT_COORDINATE_HOPS], [coord_addr, ENVIRONMENT_COORDINATE_INDEX]
-    mov sentinel, ENVIRONMENT_COORDINATE_INVALID
-    branch_eq hops, sentinel, fail_label
     load64 target_env, [exec_ctx, EXECUTION_CONTEXT_LEXICAL_ENVIRONMENT]
+    assert_nonzero target_env
     branch_zero hops, .walk_done
 .walk_loop:
-    load8 screw, [target_env, ENVIRONMENT_SCREWED_BY_EVAL]
-    branch_nonzero screw, fail_label
     load64 target_env, [target_env, ENVIRONMENT_OUTER]
+    assert_nonzero target_env
     sub hops, 1
     branch_nonzero hops, .walk_loop
 .walk_done:
-    load8 screw, [target_env, ENVIRONMENT_SCREWED_BY_EVAL]
-    branch_nonzero screw, fail_label
+    assert_nonzero target_env
+end
+
+# Walk the environment chain using a runtime EnvironmentCoordinate cache.
+# The cache lives in Executable::environment_coordinate_caches so bytecode can
+# remain immutable while dynamic binding lookups still warm up.
+macro walk_cached_env_chain(m_environment_field, target_env, bind_index, fail_label)
+    temp exe, caches, coord_addr, hops, sentinel, flag
+    load32 coord_addr, [pb, pc, m_cache]
+    mul coord_addr, coord_addr, ENVIRONMENT_COORDINATE_SIZE
+    load64 exe, [exec_ctx, EXECUTION_CONTEXT_EXECUTABLE]
+    load64 caches, [exe, EXECUTABLE_ENVIRONMENT_COORDINATE_CACHES_DATA]
+    add coord_addr, caches
+    load_pair32 hops, bind_index, [coord_addr, ENVIRONMENT_COORDINATE_HOPS], [coord_addr, ENVIRONMENT_COORDINATE_INDEX]
+    mov sentinel, ENVIRONMENT_COORDINATE_INVALID
+    branch_eq hops, sentinel, fail_label
+    load64 target_env, [exec_ctx, m_environment_field]
+    assert_nonzero target_env
+    branch_zero hops, .walk_done
+.walk_loop:
+    load8 flag, [target_env, ENVIRONMENT_DECLARATIVE]
+    branch_zero flag, fail_label
+    load8 flag, [target_env, ENVIRONMENT_SCREWED_BY_EVAL]
+    branch_nonzero flag, fail_label
+    load64 target_env, [target_env, ENVIRONMENT_OUTER]
+    branch_zero target_env, fail_label
+    sub hops, 1
+    branch_nonzero hops, .walk_loop
+.walk_done:
+    assert_nonzero target_env
+    load8 flag, [target_env, ENVIRONMENT_DECLARATIVE]
+    branch_zero flag, fail_label
+    load8 flag, [target_env, ENVIRONMENT_SCREWED_BY_EVAL]
+    branch_nonzero flag, fail_label
 end
 
 # Pop an inline frame and resume the caller without bouncing through C++.
@@ -493,10 +524,35 @@ macro pop_inline_frame_and_resume(caller_frame, value_reg)
 
     mov exec_ctx, caller_frame
     load64 exe, [exec_ctx, EXECUTION_CONTEXT_EXECUTABLE]
+    assert_nonzero exe
     load64 pb, [exe, EXECUTABLE_BYTECODE_DATA]
+    assert_nonzero pb
     lea values, [exec_ctx, SIZEOF_EXECUTION_CONTEXT]
     mov pc, ret_pc
     dispatch_current
+end
+
+macro load_property_lookup_cache(cache, fail_label)
+    temp exe, caches
+    load32 cache, [pb, pc, m_cache]
+    mul cache, cache, PROPERTY_LOOKUP_CACHE_SIZE
+    load64 exe, [exec_ctx, EXECUTION_CONTEXT_EXECUTABLE]
+    load64 caches, [exe, EXECUTABLE_PROPERTY_LOOKUP_CACHES_DATA]
+    add cache, caches
+    load64 cache, [cache, PROPERTY_LOOKUP_CACHE_DATA]
+    branch_zero cache, fail_label
+    branch_bits_clear cache, PROPERTY_LOOKUP_CACHE_POLYMORPHIC_DATA_TAG, .data_loaded
+    sub cache, PROPERTY_LOOKUP_CACHE_POLYMORPHIC_DATA_TAG
+.data_loaded:
+end
+
+macro load_global_variable_cache(cache)
+    temp exe, caches
+    load32 cache, [pb, pc, m_cache]
+    mul cache, cache, GLOBAL_VARIABLE_CACHE_SIZE
+    load64 exe, [exec_ctx, EXECUTION_CONTEXT_EXECUTABLE]
+    load64 caches, [exe, EXECUTABLE_GLOBAL_VARIABLE_CACHES_DATA]
+    add cache, caches
 end
 
 # ============================================================================
@@ -661,6 +717,7 @@ handler JumpIf
     branch_eq tag, INT32_TAG, .is_int32
     # Slow path: call helper to convert to boolean
     call_helper asm_helper_to_boolean, condition, truthy
+    assert_lt_unsigned truthy, 2
     branch_nonzero truthy, .take_true
     jmp .take_false
 .is_bool:
@@ -684,6 +741,7 @@ handler JumpTrue
     branch_eq tag, BOOLEAN_TAG, .is_bool
     branch_eq tag, INT32_TAG, .is_int32
     call_helper asm_helper_to_boolean, condition, truthy
+    assert_lt_unsigned truthy, 2
     branch_nonzero truthy, .take
     dispatch_next
 .is_bool:
@@ -704,6 +762,7 @@ handler JumpFalse
     branch_eq tag, BOOLEAN_TAG, .is_bool
     branch_eq tag, INT32_TAG, .is_int32
     call_helper asm_helper_to_boolean, condition, truthy
+    assert_lt_unsigned truthy, 2
     branch_zero truthy, .take
     dispatch_next
 .is_bool:
@@ -878,6 +937,7 @@ handler Not
     # Slow path for remaining types (object, string, etc)
     # NB: Objects go through slow path to handle [[IsHTMLDDA]]
     call_helper asm_helper_to_boolean, value, truthy
+    assert_lt_unsigned truthy, 2
     branch_zero truthy, .store_true
     jmp .store_false
 .is_bool:
@@ -950,6 +1010,7 @@ end
 handler GetLexicalEnvironment
     temp env, tag
     load64 env, [exec_ctx, EXECUTION_CONTEXT_LEXICAL_ENVIRONMENT]
+    assert_nonzero env
     mov tag, CELL_TAG_SHIFTED
     or env, tag
     store_operand m_dst, env
@@ -964,72 +1025,180 @@ end
 # Environment / binding access
 # ============================================================================
 
+macro load_binding_value(env, idx, binding_values, value)
+    load64 binding_values, [env, BINDING_VALUES_DATA_PTR]
+    assert_nonzero binding_values
+    load64 value, [binding_values, idx, 8]
+end
+
+macro check_binding_initialized(env, idx, binding_values, value, empty, fail_label)
+    load_binding_value env, idx, binding_values, value
+    mov empty, EMPTY_VALUE
+    branch_eq value, empty, fail_label
+end
+
+macro store_binding_value(env, idx, binding_values, value)
+    load64 binding_values, [env, BINDING_VALUES_DATA_PTR]
+    assert_nonzero binding_values
+    store64 [binding_values, idx, 8], value
+end
+
+macro load_binding_flags(env, idx, flags, flag)
+    temp shape, shape_size, local_index, rare_data
+    load64 shape, [env, DECLARATIVE_ENVIRONMENT_SHAPE]
+    branch_zero shape, .load_environment_flags
+    load64 shape_size, [shape, ENVIRONMENT_SHAPE_BINDING_FLAGS]
+    branch_ge_unsigned idx, shape_size, .load_environment_local_flags
+    load64 flags, [shape, ENVIRONMENT_SHAPE_BINDING_FLAGS_DATA_PTR]
+    assert_nonzero flags
+    load8 flag, [flags, idx]
+    jmp .done
+.load_environment_local_flags:
+    load64 rare_data, [env, DECLARATIVE_ENVIRONMENT_RARE_DATA]
+    assert_nonzero rare_data
+    load64 flags, [rare_data, BINDING_FLAGS_DATA_PTR]
+    assert_nonzero flags
+    mov local_index, idx
+    sub local_index, shape_size
+    load8 flag, [flags, local_index]
+    jmp .done
+.load_environment_flags:
+    load64 rare_data, [env, DECLARATIVE_ENVIRONMENT_RARE_DATA]
+    assert_nonzero rare_data
+    load64 flags, [rare_data, BINDING_FLAGS_DATA_PTR]
+    assert_nonzero flags
+    load8 flag, [flags, idx]
+.done:
+end
+
+macro load_environment_serial(env, serial)
+    temp rare_data
+    load64 rare_data, [env, DECLARATIVE_ENVIRONMENT_RARE_DATA]
+    branch_zero rare_data, .zero
+    load64 serial, [rare_data, DECLARATIVE_ENVIRONMENT_RARE_DATA_SERIAL]
+    jmp .done
+.zero:
+    mov serial, 0
+.done:
+end
+
 # Inline environment chain walk + binding value load with TDZ check.
 handler GetBinding
-    temp env, idx, binding, init, value
+    temp env, idx, binding_values, value, empty
     walk_env_chain m_cache, env, idx, .slow
-    load64 binding, [env, BINDINGS_DATA_PTR]
-    mul idx, idx, SIZEOF_BINDING
-    add binding, idx
-    # Check binding is initialized (TDZ)
-    load8 init, [binding, BINDING_INITIALIZED]
-    branch_zero init, .slow
-    load64 value, [binding, BINDING_VALUE]
+    check_binding_initialized env, idx, binding_values, value, empty, .slow
     store_operand m_dst, value
     dispatch_next
 .slow:
     call_slow_path asm_slow_path_get_binding
 end
 
+handler DynamicGetBinding
+    temp env, idx, binding_values, value, empty
+    walk_cached_env_chain EXECUTION_CONTEXT_LEXICAL_ENVIRONMENT, env, idx, .slow
+    check_binding_initialized env, idx, binding_values, value, empty, .slow
+    store_operand m_dst, value
+    dispatch_next
+.slow:
+    call_slow_path asm_slow_path_dynamic_get_binding
+end
+
 # Inline environment chain walk + direct binding value load.
 handler GetInitializedBinding
-    temp env, idx, binding, value
+    temp env, idx, binding_values, value
     walk_env_chain m_cache, env, idx, .slow
-    load64 binding, [env, BINDINGS_DATA_PTR]
-    mul idx, idx, SIZEOF_BINDING
-    add binding, idx
-    load64 value, [binding, BINDING_VALUE]
+    load_binding_value env, idx, binding_values, value
     store_operand m_dst, value
     dispatch_next
 .slow:
     call_slow_path asm_slow_path_get_initialized_binding
 end
 
-# Inline environment chain walk + initialize binding (set value + initialized=true).
+handler DynamicGetInitializedBinding
+    temp env, idx, binding_values, value
+    walk_cached_env_chain EXECUTION_CONTEXT_LEXICAL_ENVIRONMENT, env, idx, .slow
+    load_binding_value env, idx, binding_values, value
+    store_operand m_dst, value
+    dispatch_next
+.slow:
+    call_slow_path asm_slow_path_dynamic_get_initialized_binding
+end
+
+# Inline environment chain walk + initialize binding.
 handler InitializeLexicalBinding
-    temp env, idx, binding, value, one
+    temp env, idx, value, binding_values
     walk_env_chain m_cache, env, idx, .slow
-    load64 binding, [env, BINDINGS_DATA_PTR]
-    mul idx, idx, SIZEOF_BINDING
-    add binding, idx
     load_operand value, m_src
-    store64 [binding, BINDING_VALUE], value
-    # Set initialized = true
-    mov one, 1
-    store8 [binding, BINDING_INITIALIZED], one
+    store_binding_value env, idx, binding_values, value
     dispatch_next
 .slow:
     call_slow_path asm_slow_path_initialize_lexical_binding
 end
 
+handler DynamicInitializeLexicalBinding
+    temp env, idx, value, binding_values
+    walk_cached_env_chain EXECUTION_CONTEXT_LEXICAL_ENVIRONMENT, env, idx, .slow
+    load_operand value, m_src
+    store_binding_value env, idx, binding_values, value
+    dispatch_next
+.slow:
+    call_slow_path asm_slow_path_dynamic_initialize_lexical_binding
+end
+
+handler DynamicInitializeVariableBinding
+    temp env, idx, value, binding_values
+    walk_cached_env_chain EXECUTION_CONTEXT_VARIABLE_ENVIRONMENT, env, idx, .slow
+    load_operand value, m_src
+    store_binding_value env, idx, binding_values, value
+    dispatch_next
+.slow:
+    call_slow_path asm_slow_path_dynamic_initialize_variable_binding
+end
+
 # Inline environment chain walk + set mutable binding.
 handler SetLexicalBinding
-    temp env, idx, binding, flag, value
+    temp env, idx, flag, value, binding_values, flags, empty
     walk_env_chain m_cache, env, idx, .slow
-    load64 binding, [env, BINDINGS_DATA_PTR]
-    mul idx, idx, SIZEOF_BINDING
-    add binding, idx
-    # Check initialized (TDZ)
-    load8 flag, [binding, BINDING_INITIALIZED]
-    branch_zero flag, .slow
+    check_binding_initialized env, idx, binding_values, value, empty, .slow
     # Check mutable
-    load8 flag, [binding, BINDING_MUTABLE]
+    load_binding_flags env, idx, flags, flag
+    and flag, BINDING_FLAG_MUTABLE
     branch_zero flag, .slow
     load_operand value, m_src
-    store64 [binding, BINDING_VALUE], value
+    store_binding_value env, idx, binding_values, value
     dispatch_next
 .slow:
     call_slow_path asm_slow_path_set_lexical_binding
+end
+
+handler DynamicSetLexicalBinding
+    temp env, idx, flag, value, binding_values, flags, empty
+    walk_cached_env_chain EXECUTION_CONTEXT_LEXICAL_ENVIRONMENT, env, idx, .slow
+    check_binding_initialized env, idx, binding_values, value, empty, .slow
+    # Check mutable
+    load_binding_flags env, idx, flags, flag
+    and flag, BINDING_FLAG_MUTABLE
+    branch_zero flag, .slow
+    load_operand value, m_src
+    store_binding_value env, idx, binding_values, value
+    dispatch_next
+.slow:
+    call_slow_path asm_slow_path_dynamic_set_lexical_binding
+end
+
+handler DynamicSetVariableBinding
+    temp env, idx, flag, value, binding_values, flags, empty
+    walk_cached_env_chain EXECUTION_CONTEXT_VARIABLE_ENVIRONMENT, env, idx, .slow
+    check_binding_initialized env, idx, binding_values, value, empty, .slow
+    # Check mutable
+    load_binding_flags env, idx, flags, flag
+    and flag, BINDING_FLAG_MUTABLE
+    branch_zero flag, .slow
+    load_operand value, m_src
+    store_binding_value env, idx, binding_values, value
+    dispatch_next
+.slow:
+    call_slow_path asm_slow_path_dynamic_set_variable_binding
 end
 
 # x++: save original to dst first, then increment src in-place.
@@ -1348,16 +1517,9 @@ end
 
 # Inline environment chain walk + get callee and this.
 handler GetCalleeAndThisFromEnvironment
-    temp env, idx, binding, init, value
+    temp env, idx, binding_values, value, empty
     walk_env_chain m_cache, env, idx, .slow
-    load64 binding, [env, BINDINGS_DATA_PTR]
-    mul idx, idx, SIZEOF_BINDING
-    add binding, idx
-    # TDZ state lives in Binding.initialized; the value slot itself starts as
-    # undefined, so checking for EMPTY would miss cached second-hit calls.
-    load8 init, [binding, BINDING_INITIALIZED]
-    branch_zero init, .slow
-    load64 value, [binding, BINDING_VALUE]
+    check_binding_initialized env, idx, binding_values, value, empty, .slow
     store_operand m_callee, value
     # this = undefined (DeclarativeEnvironment.with_base_object() always returns nullptr)
     mov value, UNDEFINED_SHIFTED
@@ -1365,6 +1527,19 @@ handler GetCalleeAndThisFromEnvironment
     dispatch_next
 .slow:
     call_slow_path asm_slow_path_get_callee_and_this
+end
+
+handler DynamicGetCalleeAndThisFromEnvironment
+    temp env, idx, binding_values, value, empty
+    walk_cached_env_chain EXECUTION_CONTEXT_LEXICAL_ENVIRONMENT, env, idx, .slow
+    check_binding_initialized env, idx, binding_values, value, empty, .slow
+    store_operand m_callee, value
+    # this = undefined for cached declarative environment references.
+    mov value, UNDEFINED_SHIFTED
+    store_operand m_this_value, value
+    dispatch_next
+.slow:
+    call_slow_path asm_slow_path_dynamic_get_callee_and_this
 end
 
 handler LooselyEquals
@@ -1514,6 +1689,7 @@ handler PutByValue
     load32 size, [obj, OBJECT_INDEXED_ARRAY_LIKE_SIZE]
     branch_ge_unsigned index, size, .slow
     load64 elements, [obj, OBJECT_INDEXED_ELEMENTS]
+    assert_nonzero elements
     load_operand src, m_src
     store64 [elements, index, 8], src
     dispatch_next
@@ -1543,6 +1719,7 @@ handler PutByValue
     # nullptr means uncached -> C++ helper will resolve the access.
     load64 elements, [obj, TYPED_ARRAY_CACHED_DATA_PTR]
     branch_zero elements, .try_typed_array_slow
+    assert_nonzero elements
     # Cached pointers only exist for fixed-length typed arrays, so array_length
     # is known to hold a concrete u32 value here.
     load32 capacity, [obj, TYPED_ARRAY_ARRAY_LENGTH_VALUE]
@@ -1628,17 +1805,19 @@ handler GetById
     branch_ne tag, OBJECT_TAG, .try_cache
     unbox_object obj, base
     load64 shape, [obj, OBJECT_SHAPE]
-    # Get PropertyLookupCache* (direct pointer from instruction stream)
-    load64 plc, [pb, pc, m_cache]
-    load_pair64 cache_shape, cache_proto, [plc, PROPERTY_LOOKUP_CACHE_ENTRY0_SHAPE], [plc, PROPERTY_LOOKUP_CACHE_ENTRY0_PROTOTYPE]
+    assert_nonzero shape
+    load_property_lookup_cache plc, .try_cache
+    assert_nonzero plc
+    load_pair64 cache_shape, cache_proto, [plc, PROPERTY_LOOKUP_CACHE_ENTRY_SHAPE], [plc, PROPERTY_LOOKUP_CACHE_ENTRY_PROTOTYPE]
     branch_ne cache_shape, shape, .try_cache
     branch_nonzero cache_proto, .proto
     # Check dictionary generation matches
-    load_pair32 prop_offset, dict_gen, [plc, PROPERTY_LOOKUP_CACHE_ENTRY0_PROPERTY_OFFSET], [plc, PROPERTY_LOOKUP_CACHE_ENTRY0_DICTIONARY_GENERATION]
+    load_pair32 prop_offset, dict_gen, [plc, PROPERTY_LOOKUP_CACHE_ENTRY_PROPERTY_OFFSET], [plc, PROPERTY_LOOKUP_CACHE_ENTRY_DICTIONARY_GENERATION]
     load32 cur_dict_gen, [shape, SHAPE_DICTIONARY_GENERATION]
     branch_ne dict_gen, cur_dict_gen, .try_cache
     # IC hit! Load property value via get_direct (own property)
     load64 props, [obj, OBJECT_NAMED_PROPERTIES]
+    assert_nonzero props
     load64 value, [props, prop_offset, 8]
     # Check value is not an accessor
     extract_tag tag, value
@@ -1647,14 +1826,15 @@ handler GetById
     dispatch_next
 .proto:
     # cache_proto = prototype Object*, shape = object's shape, plc = PLC base
-    load64 prop_offset, [plc, PROPERTY_LOOKUP_CACHE_ENTRY0_PROTOTYPE_CHAIN_VALIDITY]
+    load64 prop_offset, [plc, PROPERTY_LOOKUP_CACHE_ENTRY_PROTOTYPE_CHAIN_VALIDITY]
     branch_zero prop_offset, .try_cache
     load8 tag, [prop_offset, PROTOTYPE_CHAIN_VALIDITY_VALID]
     branch_zero tag, .try_cache
-    load_pair32 prop_offset, dict_gen, [plc, PROPERTY_LOOKUP_CACHE_ENTRY0_PROPERTY_OFFSET], [plc, PROPERTY_LOOKUP_CACHE_ENTRY0_DICTIONARY_GENERATION]
+    load_pair32 prop_offset, dict_gen, [plc, PROPERTY_LOOKUP_CACHE_ENTRY_PROPERTY_OFFSET], [plc, PROPERTY_LOOKUP_CACHE_ENTRY_DICTIONARY_GENERATION]
     load32 cur_dict_gen, [shape, SHAPE_DICTIONARY_GENERATION]
     branch_ne dict_gen, cur_dict_gen, .try_cache
     load64 props, [cache_proto, OBJECT_NAMED_PROPERTIES]
+    assert_nonzero props
     load64 value, [props, prop_offset, 8]
     extract_tag tag, value
     branch_eq tag, ACCESSOR_TAG, .try_cache
@@ -1678,15 +1858,18 @@ handler PutById
     branch_ne tag, OBJECT_TAG, .try_cache
     unbox_object obj, base
     load64 shape, [obj, OBJECT_SHAPE]
-    load64 plc, [pb, pc, m_cache]
-    load_pair64 cache_shape, cache_proto, [plc, PROPERTY_LOOKUP_CACHE_ENTRY0_SHAPE], [plc, PROPERTY_LOOKUP_CACHE_ENTRY0_PROTOTYPE]
+    assert_nonzero shape
+    load_property_lookup_cache plc, .try_cache
+    assert_nonzero plc
+    load_pair64 cache_shape, cache_proto, [plc, PROPERTY_LOOKUP_CACHE_ENTRY_SHAPE], [plc, PROPERTY_LOOKUP_CACHE_ENTRY_PROTOTYPE]
     branch_ne cache_shape, shape, .try_cache
     branch_nonzero cache_proto, .try_cache
-    load_pair32 prop_offset, dict_gen, [plc, PROPERTY_LOOKUP_CACHE_ENTRY0_PROPERTY_OFFSET], [plc, PROPERTY_LOOKUP_CACHE_ENTRY0_DICTIONARY_GENERATION]
+    load_pair32 prop_offset, dict_gen, [plc, PROPERTY_LOOKUP_CACHE_ENTRY_PROPERTY_OFFSET], [plc, PROPERTY_LOOKUP_CACHE_ENTRY_DICTIONARY_GENERATION]
     load32 cur_dict_gen, [shape, SHAPE_DICTIONARY_GENERATION]
     branch_ne dict_gen, cur_dict_gen, .try_cache
     # Check current value at prop_offset is not an accessor
     load64 props, [obj, OBJECT_NAMED_PROPERTIES]
+    assert_nonzero props
     load64 value, [props, prop_offset, 8]
     extract_tag tag, value
     branch_eq tag, ACCESSOR_TAG, .try_cache
@@ -1727,6 +1910,7 @@ handler GetByValue
     load32 size, [obj, OBJECT_INDEXED_ARRAY_LIKE_SIZE]
     branch_ge_unsigned index, size, .slow
     load64 elements, [obj, OBJECT_INDEXED_ELEMENTS]
+    assert_nonzero elements
     load64 dst, [elements, index, 8]
     # NB: No accessor check needed -- Packed/Holey storage
     #     can only hold default-attributed data properties.
@@ -1739,6 +1923,7 @@ handler GetByValue
     branch_ge_unsigned index, size, .slow
     load64 elements, [obj, OBJECT_INDEXED_ELEMENTS]
     branch_zero elements, .slow
+    assert_nonzero elements
     mov capacity_addr, elements
     sub capacity_addr, 8
     load32 capacity, [capacity_addr, 0]
@@ -1751,6 +1936,7 @@ handler GetByValue
 .try_typed_array:
     load64 elements, [obj, TYPED_ARRAY_CACHED_DATA_PTR]
     branch_zero elements, .try_typed_array_slow
+    assert_nonzero elements
     # Cached pointers only exist for fixed-length typed arrays, so array_length
     # is known to hold a concrete u32 value here.
     load32 capacity, [obj, TYPED_ARRAY_ARRAY_LENGTH_VALUE]
@@ -1850,14 +2036,17 @@ handler GetLength
     branch_bits_set flags, OBJECT_FLAG_HAS_MAGICAL_LENGTH, .magical_length
     # Non-magical length: IC fast path (same as GetById)
     load64 shape, [obj, OBJECT_SHAPE]
-    load64 plc, [pb, pc, m_cache]
-    load_pair64 cache_shape, cache_proto, [plc, PROPERTY_LOOKUP_CACHE_ENTRY0_SHAPE], [plc, PROPERTY_LOOKUP_CACHE_ENTRY0_PROTOTYPE]
+    assert_nonzero shape
+    load_property_lookup_cache plc, .slow
+    assert_nonzero plc
+    load_pair64 cache_shape, cache_proto, [plc, PROPERTY_LOOKUP_CACHE_ENTRY_SHAPE], [plc, PROPERTY_LOOKUP_CACHE_ENTRY_PROTOTYPE]
     branch_ne cache_shape, shape, .slow
     branch_nonzero cache_proto, .slow
-    load_pair32 prop_offset, dict_gen, [plc, PROPERTY_LOOKUP_CACHE_ENTRY0_PROPERTY_OFFSET], [plc, PROPERTY_LOOKUP_CACHE_ENTRY0_DICTIONARY_GENERATION]
+    load_pair32 prop_offset, dict_gen, [plc, PROPERTY_LOOKUP_CACHE_ENTRY_PROPERTY_OFFSET], [plc, PROPERTY_LOOKUP_CACHE_ENTRY_DICTIONARY_GENERATION]
     load32 cur_dict_gen, [shape, SHAPE_DICTIONARY_GENERATION]
     branch_ne dict_gen, cur_dict_gen, .slow
     load64 props, [obj, OBJECT_NAMED_PROPERTIES]
+    assert_nonzero props
     load64 value, [props, prop_offset, 8]
     extract_tag tag, value
     branch_eq tag, ACCESSOR_TAG, .slow
@@ -1885,23 +2074,28 @@ end
 
 # Inline cache fast path for global variable access via the global object.
 handler GetGlobal
-    temp realm, global_object, env, gvc, cache_serial, env_serial, shape, cache_shape, cur_dict_gen, prop_offset, dict_gen, props, value, tag, has_env, in_module, idx, binding, init, result
+    temp realm, global_object, env, gvc, cache_serial, env_serial, shape, cache_shape, cur_dict_gen, prop_offset, dict_gen, props, value, tag, has_env, in_module, idx, binding_values, empty, result
     load64 realm, [exec_ctx, EXECUTION_CONTEXT_REALM]
     load_pair64 global_object, env, [realm, REALM_GLOBAL_OBJECT], [realm, REALM_GLOBAL_DECLARATIVE_ENVIRONMENT]
-    load64 gvc, [pb, pc, m_cache]
+    assert_nonzero global_object
+    assert_nonzero env
+    load_global_variable_cache gvc
+    assert_nonzero gvc
     load64 cache_serial, [gvc, GLOBAL_VARIABLE_CACHE_ENVIRONMENT_SERIAL]
-    load64 env_serial, [env, DECLARATIVE_ENVIRONMENT_SERIAL]
+    load_environment_serial env, env_serial
     branch_ne cache_serial, env_serial, .slow
     # Shape-based fast path: check entries[0].shape matches global_object.shape
     # (falls through to env binding path on shape mismatch)
     load64 shape, [global_object, OBJECT_SHAPE]
-    load64 cache_shape, [gvc, PROPERTY_LOOKUP_CACHE_ENTRY0_SHAPE]
+    assert_nonzero shape
+    load64 cache_shape, [gvc, GLOBAL_VARIABLE_CACHE_ENTRY_SHAPE]
     branch_ne cache_shape, shape, .try_env_binding
     load32 cur_dict_gen, [shape, SHAPE_DICTIONARY_GENERATION]
-    load_pair32 prop_offset, dict_gen, [gvc, PROPERTY_LOOKUP_CACHE_ENTRY0_PROPERTY_OFFSET], [gvc, PROPERTY_LOOKUP_CACHE_ENTRY0_DICTIONARY_GENERATION]
+    load_pair32 prop_offset, dict_gen, [gvc, GLOBAL_VARIABLE_CACHE_ENTRY_PROPERTY_OFFSET], [gvc, GLOBAL_VARIABLE_CACHE_ENTRY_DICTIONARY_GENERATION]
     branch_ne dict_gen, cur_dict_gen, .try_env_binding
     # IC hit! Load property value via get_direct
     load64 props, [global_object, OBJECT_NAMED_PROPERTIES]
+    assert_nonzero props
     load64 value, [props, prop_offset, 8]
     extract_tag tag, value
     branch_eq tag, ACCESSOR_TAG, .slow
@@ -1915,12 +2109,7 @@ handler GetGlobal
     branch_nonzero in_module, .slow_env
     # Inline env binding: index into global_declarative_environment bindings.
     load32 idx, [gvc, GLOBAL_VARIABLE_CACHE_ENVIRONMENT_BINDING_INDEX]
-    load64 binding, [env, BINDINGS_DATA_PTR]
-    mul idx, idx, SIZEOF_BINDING
-    add binding, idx
-    load8 init, [binding, BINDING_INITIALIZED]
-    branch_zero init, .slow
-    load64 value, [binding, BINDING_VALUE]
+    check_binding_initialized env, idx, binding_values, value, empty, .slow
     store_operand m_dst, value
     dispatch_next
 .slow_env:
@@ -1933,21 +2122,26 @@ end
 
 # Inline cache fast path for global variable store via the global object.
 handler SetGlobal
-    temp realm, global_object, env, gvc, cache_serial, env_serial, shape, cache_shape, cur_dict_gen, prop_offset, dict_gen, props, value, tag, has_env, in_module, idx, binding, flag, src, result
+    temp realm, global_object, env, gvc, cache_serial, env_serial, shape, cache_shape, cur_dict_gen, prop_offset, dict_gen, props, value, tag, has_env, in_module, idx, flag, src, binding_values, flags, empty, result
     load64 realm, [exec_ctx, EXECUTION_CONTEXT_REALM]
     load_pair64 global_object, env, [realm, REALM_GLOBAL_OBJECT], [realm, REALM_GLOBAL_DECLARATIVE_ENVIRONMENT]
-    load64 gvc, [pb, pc, m_cache]
+    assert_nonzero global_object
+    assert_nonzero env
+    load_global_variable_cache gvc
+    assert_nonzero gvc
     load64 cache_serial, [gvc, GLOBAL_VARIABLE_CACHE_ENVIRONMENT_SERIAL]
-    load64 env_serial, [env, DECLARATIVE_ENVIRONMENT_SERIAL]
+    load_environment_serial env, env_serial
     branch_ne cache_serial, env_serial, .slow
     load64 shape, [global_object, OBJECT_SHAPE]
-    load64 cache_shape, [gvc, PROPERTY_LOOKUP_CACHE_ENTRY0_SHAPE]
+    assert_nonzero shape
+    load64 cache_shape, [gvc, GLOBAL_VARIABLE_CACHE_ENTRY_SHAPE]
     branch_ne cache_shape, shape, .try_env_binding
     load32 cur_dict_gen, [shape, SHAPE_DICTIONARY_GENERATION]
-    load_pair32 prop_offset, dict_gen, [gvc, PROPERTY_LOOKUP_CACHE_ENTRY0_PROPERTY_OFFSET], [gvc, PROPERTY_LOOKUP_CACHE_ENTRY0_DICTIONARY_GENERATION]
+    load_pair32 prop_offset, dict_gen, [gvc, GLOBAL_VARIABLE_CACHE_ENTRY_PROPERTY_OFFSET], [gvc, GLOBAL_VARIABLE_CACHE_ENTRY_DICTIONARY_GENERATION]
     branch_ne dict_gen, cur_dict_gen, .try_env_binding
     # IC hit! Load current value to check it's not an accessor.
     load64 props, [global_object, OBJECT_NAMED_PROPERTIES]
+    assert_nonzero props
     load64 value, [props, prop_offset, 8]
     extract_tag tag, value
     branch_eq tag, ACCESSOR_TAG, .slow
@@ -1960,15 +2154,12 @@ handler SetGlobal
     load8 in_module, [gvc, GLOBAL_VARIABLE_CACHE_IN_MODULE_ENVIRONMENT]
     branch_nonzero in_module, .slow_env
     load32 idx, [gvc, GLOBAL_VARIABLE_CACHE_ENVIRONMENT_BINDING_INDEX]
-    load64 binding, [env, BINDINGS_DATA_PTR]
-    mul idx, idx, SIZEOF_BINDING
-    add binding, idx
-    load8 flag, [binding, BINDING_INITIALIZED]
-    branch_zero flag, .slow
-    load8 flag, [binding, BINDING_MUTABLE]
+    check_binding_initialized env, idx, binding_values, value, empty, .slow
+    load_binding_flags env, idx, flags, flag
+    and flag, BINDING_FLAG_MUTABLE
     branch_zero flag, .slow
     load_operand src, m_src
-    store64 [binding, BINDING_VALUE], src
+    store_binding_value env, idx, binding_values, src
     dispatch_next
 .slow_env:
     call_interp asm_try_set_global_env_binding, result
@@ -1986,9 +2177,8 @@ handler Call
     #    callee frame here and dispatch at pc = 0 of the callee bytecode.
     #    Cases that need function-environment allocation or sloppy primitive
     #    this-boxing can't stay in pure asm but also don't want the full
-    #    slow path (which would insert a run_executable() boundary and an
-    #    observable microtask drain), so they detour through the
-    #    asm_try_inline_call helper at .call_interp_inline.
+    #    slow path, so they detour through the asm_try_inline_call helper at
+    #    .call_interp_inline.
     #
     #  - RawNativeFunction: build a callee ExecutionContext here, call the
     #    stored C++ function pointer directly via call_raw_native, and then
@@ -2020,6 +2210,7 @@ handler Call
     branch_bits_clear flags, OBJECT_FLAG_IS_ECMASCRIPT_FUNCTION_OBJECT, .call_try_native
 
     load64 shared_data, [callee, ECMASCRIPT_FUNCTION_OBJECT_SHARED_DATA]
+    assert_nonzero shared_data
     load_pair64 exec_ptr, meta, [shared_data, SHARED_FUNCTION_INSTANCE_DATA_EXECUTABLE], [shared_data, SHARED_FUNCTION_INSTANCE_DATA_ASM_CALL_METADATA]
     branch_bits_clear meta, SHARED_FUNCTION_INSTANCE_DATA_ASM_CALL_METADATA_CAN_INLINE_CALL, .call_slow
     # NewFunctionEnvironment() allocation and lexical-this resolution both use
@@ -2048,8 +2239,11 @@ handler Call
 
 .sloppy_global_this:
     load64 scratch, [callee, OBJECT_SHAPE]
+    assert_nonzero scratch
     load64 scratch, [scratch, SHAPE_REALM]
+    assert_nonzero scratch
     load64 scratch, [scratch, REALM_GLOBAL_ENVIRONMENT]
+    assert_nonzero scratch
     load64 scratch, [scratch, GLOBAL_ENVIRONMENT_GLOBAL_THIS_VALUE]
     # Match Value(Object*): keep only the low 48 pointer bits before boxing.
     shl scratch, 16
@@ -2067,6 +2261,8 @@ handler Call
     mov formal_count, passed_count
 .arg_count_ready:
     load_pair32 regs_locals_count, total_slots, [exec_ptr, EXECUTABLE_REGISTERS_AND_LOCALS_COUNT], [exec_ptr, EXECUTABLE_REGISTERS_AND_LOCALS_AND_CONSTANTS_COUNT]
+    assert_nonzero exec_ptr
+    assert_ge_unsigned total_slots, regs_locals_count
 
     # Inline InterpreterStack::allocate().
     add total_slots, formal_count
@@ -2077,7 +2273,10 @@ handler Call
     load_vm vm_ptr
     lea vm_ptr, [vm_ptr, VM_INTERPRETER_STACK]
     load_pair64 frame_base, stack_limit, [vm_ptr, INTERPRETER_STACK_TOP], [vm_ptr, INTERPRETER_STACK_LIMIT]
+    assert_nonzero frame_base
+    assert_nonzero stack_limit
     add frame_bytes, frame_base
+    assert_ge_unsigned frame_bytes, frame_base
     branch_ge_unsigned stack_limit, frame_bytes, .stack_ok
     jmp .call_slow
 
@@ -2093,10 +2292,13 @@ handler Call
     store32 [frame_base, EXECUTION_CONTEXT_PASSED_ARGUMENT_COUNT], scratch
 
     load64 realm, [callee, OBJECT_SHAPE]
+    assert_nonzero realm
     load64 realm, [realm, SHAPE_REALM]
+    assert_nonzero realm
     store_pair64 [frame_base, EXECUTION_CONTEXT_FUNCTION], [frame_base, EXECUTION_CONTEXT_REALM], callee, realm
 
     load_pair64 lex_env, priv_env, [callee, ECMASCRIPT_FUNCTION_OBJECT_ENVIRONMENT], [callee, ECMASCRIPT_FUNCTION_OBJECT_PRIVATE_ENVIRONMENT]
+    assert_nonzero lex_env
     store_pair64 [frame_base, EXECUTION_CONTEXT_LEXICAL_ENVIRONMENT], [frame_base, EXECUTION_CONTEXT_VARIABLE_ENVIRONMENT], lex_env, lex_env
     store64 [frame_base, EXECUTION_CONTEXT_PRIVATE_ENVIRONMENT], priv_env
     store_pair64 [frame_base, EXECUTION_CONTEXT_THIS_VALUE], [frame_base, EXECUTION_CONTEXT_EXECUTABLE], this_value, exec_ptr
@@ -2119,6 +2321,7 @@ handler Call
     mov scratch, EXECUTION_CONTEXT_NO_YIELD_CONTINUATION
     store32 [frame_base, EXECUTION_CONTEXT_YIELD_CONTINUATION], scratch
     store8 [frame_base, EXECUTION_CONTEXT_YIELD_IS_AWAIT], 0
+    store8 [frame_base, EXECUTION_CONTEXT_YIELD_VALUE_IS_ITERATOR_RESULT], 0
     store8 [frame_base, EXECUTION_CONTEXT_CALLER_IS_CONSTRUCT], 0
     store64 [frame_base, EXECUTION_CONTEXT_CALLER_FRAME], exec_ctx
     load_pair32 return_pc, return_dst, [pb, pc, m_length], [pb, pc, m_dst]
@@ -2152,6 +2355,7 @@ handler Call
     xor const_idx, const_idx
 .copy_constants_loop:
     branch_ge_unsigned const_idx, const_count, .copy_arguments
+    assert_nonzero const_data
     load64 const_value, [const_data, const_idx, 8]
     store64 [value_tail, write_idx, 8], const_value
     add const_idx, 1
@@ -2160,6 +2364,7 @@ handler Call
 
 .copy_arguments:
     load32 arg_count, [pb, pc, m_argument_count]
+    assert_ge_unsigned formal_count, arg_count
     mov write_idx, regs_locals_count
     add write_idx, const_count
     lea scratch, [exec_ctx, SIZEOF_EXECUTION_CONTEXT]
@@ -2191,6 +2396,7 @@ handler Call
 .enter_callee:
     load64 pb, [frame_base, EXECUTION_CONTEXT_EXECUTABLE]
     load64 pb, [pb, EXECUTABLE_BYTECODE_DATA]
+    assert_nonzero pb
     load_vm vm_ptr
     store64 [vm_ptr, VM_RUNNING_EXECUTION_CONTEXT], frame_base
     mov exec_ctx, frame_base
@@ -2199,16 +2405,18 @@ handler Call
     goto_handler pc
 .call_interp_inline:
     # Shared escape hatch for the cases that need C++ help to build the
-    # inline frame correctly but must not take the full Call slow path,
-    # since that would insert a run_executable() boundary and observable
-    # microtask drain.
+    # inline frame correctly but can still stay in the asm-managed inline-frame
+    # machinery.
     call_interp asm_try_inline_call, result
     branch_nonzero result, .call_slow
     load_vm vm_ptr
     load64 exec_ctx, [vm_ptr, VM_RUNNING_EXECUTION_CONTEXT]
+    assert_nonzero exec_ctx
     lea values, [exec_ctx, SIZEOF_EXECUTION_CONTEXT]
     load64 scratch, [exec_ctx, EXECUTION_CONTEXT_EXECUTABLE]
+    assert_nonzero scratch
     load64 pb, [scratch, EXECUTABLE_BYTECODE_DATA]
+    assert_nonzero pb
     xor pc, pc
     goto_handler pc
 .call_try_native:
@@ -2233,7 +2441,10 @@ handler Call
     load_vm vm_ptr
     lea vm_ptr, [vm_ptr, VM_INTERPRETER_STACK]
     load_pair64 frame_base, stack_limit, [vm_ptr, INTERPRETER_STACK_TOP], [vm_ptr, INTERPRETER_STACK_LIMIT]
+    assert_nonzero frame_base
+    assert_nonzero stack_limit
     add native_total_bytes, frame_base
+    assert_ge_unsigned native_total_bytes, frame_base
     branch_ge_unsigned stack_limit, native_total_bytes, .native_interpreter_stack_ok
     jmp .call_slow
 
@@ -2266,13 +2477,17 @@ handler Call
 
     # Shape stores a Realm pointer; use it as the callee EC realm.
     load64 realm, [callee, OBJECT_SHAPE]
+    assert_nonzero realm
     load64 realm, [realm, SHAPE_REALM]
+    assert_nonzero realm
     store_pair64 [frame_base, EXECUTION_CONTEXT_FUNCTION], [frame_base, EXECUTION_CONTEXT_REALM], callee, realm
 
     # Mirror NativeFunction::internal_call: a raw native has no environment
     # of its own, so lexical/variable/private environments are copied
     # straight from the caller frame.
     load_pair64 lex_env, scratch, [exec_ctx, EXECUTION_CONTEXT_LEXICAL_ENVIRONMENT], [exec_ctx, EXECUTION_CONTEXT_VARIABLE_ENVIRONMENT]
+    assert_nonzero lex_env
+    assert_nonzero scratch
     store_pair64 [frame_base, EXECUTION_CONTEXT_LEXICAL_ENVIRONMENT], [frame_base, EXECUTION_CONTEXT_VARIABLE_ENVIRONMENT], lex_env, scratch
     load64 priv_env, [exec_ctx, EXECUTION_CONTEXT_PRIVATE_ENVIRONMENT]
     store64 [frame_base, EXECUTION_CONTEXT_PRIVATE_ENVIRONMENT], priv_env
@@ -2292,6 +2507,7 @@ handler Call
     mov scratch, EXECUTION_CONTEXT_NO_YIELD_CONTINUATION
     store32 [frame_base, EXECUTION_CONTEXT_YIELD_CONTINUATION], scratch
     store8 [frame_base, EXECUTION_CONTEXT_YIELD_IS_AWAIT], 0
+    store8 [frame_base, EXECUTION_CONTEXT_YIELD_VALUE_IS_ITERATOR_RESULT], 0
     store8 [frame_base, EXECUTION_CONTEXT_CALLER_IS_CONSTRUCT], 0
 
     # While asm runs, the authoritative program counter lives in the `pc`
@@ -2347,14 +2563,17 @@ handler Call
     # is 0 for a Value, 1 for an ErrorValue; anything else means the native
     # threw and payload is the thrown Value, not a return value.
     load64 native_func, [callee, RAW_NATIVE_FUNCTION_NATIVE_FUNCTION]
+    assert_nonzero native_func
     call_raw_native native_func, native_return, variant
     and variant, 0xFF
+    assert_lt_unsigned variant, 2
     branch_nonzero variant, .call_raw_native_exception
 
     # Normal return path: tear the callee frame off the interpreter stack,
     # restore the caller as the running ExecutionContext, write the return
     # value into the caller's m_dst operand, and dispatch the next insn.
     load64 frame_base, [exec_ctx, EXECUTION_CONTEXT_CALLER_FRAME]
+    assert_nonzero frame_base
     load_vm vm_ptr
     store64 [vm_ptr, VM_RUNNING_EXECUTION_CONTEXT], frame_base
     store64 [vm_ptr, VM_INTERPRETER_STACK_TOP], exec_ctx
@@ -2384,9 +2603,12 @@ handler Call
     # helper already updated to the handler entry).
     load_vm vm_ptr
     load64 exec_ctx, [vm_ptr, VM_RUNNING_EXECUTION_CONTEXT]
+    assert_nonzero exec_ctx
     lea values, [exec_ctx, SIZEOF_EXECUTION_CONTEXT]
     load64 scratch, [exec_ctx, EXECUTION_CONTEXT_EXECUTABLE]
+    assert_nonzero scratch
     load64 pb, [scratch, EXECUTABLE_BYTECODE_DATA]
+    assert_nonzero pb
     load32 native_pc, [exec_ctx, EXECUTION_CONTEXT_PROGRAM_COUNTER]
     mov pc, native_pc
     goto_handler pc
@@ -2569,11 +2791,14 @@ handler CallBuiltinStringFromCharCode
     branch_ge_unsigned code_unit, 0x80, .single_code_unit
 
     call_helper asm_helper_single_ascii_character_string, code_unit, result
+    assert_tag result, STRING_TAG
     store_operand m_dst, result
     dispatch_next
 
 .single_code_unit:
+    assert_lt_unsigned code_unit, 0x10000
     call_helper asm_helper_single_utf16_code_unit_string, code_unit, result
+    assert_tag result, STRING_TAG
     store_operand m_dst, result
     dispatch_next
 
@@ -2627,14 +2852,17 @@ handler CallBuiltinStringPrototypeCharAt
 
     load_primitive_string_utf16_code_unit string, index, code_unit, .empty, .slow
     branch_ge_unsigned code_unit, 0x80, .slow
+    assert_lt_unsigned code_unit, 0x80
 
     call_helper asm_helper_single_ascii_character_string, code_unit, result
+    assert_tag result, STRING_TAG
     store_operand m_dst, result
     dispatch_next
 
 .empty:
     mov zero, 0
     call_helper asm_helper_empty_string, zero, result
+    assert_tag result, STRING_TAG
     store_operand m_dst, result
     dispatch_next
 
@@ -2672,7 +2900,10 @@ handler ObjectPropertyIteratorNext
     # enumeration.
     load_pair64 cache, cached_shape, [iterator, PROPERTY_NAME_ITERATOR_PROPERTY_CACHE], [iterator, PROPERTY_NAME_ITERATOR_SHAPE]
     load64 receiver, [iterator, PROPERTY_NAME_ITERATOR_OBJECT]
+    assert_nonzero cache
+    assert_nonzero receiver
     load64 current_shape, [receiver, OBJECT_SHAPE]
+    assert_nonzero current_shape
     branch_ne current_shape, cached_shape, .slow
 
     load8 is_dict, [iterator, PROPERTY_NAME_ITERATOR_SHAPE_IS_DICTIONARY]
@@ -2703,6 +2934,7 @@ handler ObjectPropertyIteratorNext
     load_pair32 indexed_count, next_indexed, [iterator, PROPERTY_NAME_ITERATOR_INDEXED_PROPERTY_COUNT], [iterator, PROPERTY_NAME_ITERATOR_NEXT_INDEXED_PROPERTY]
     branch_ge_unsigned next_indexed, indexed_count, .named
     load64 key, [cache, OBJECT_PROPERTY_ITERATOR_CACHE_DATA_PROPERTY_VALUES_DATA]
+    assert_nonzero key
     load64 key, [key, next_indexed, 8]
     add next_indexed, 1
     store32 [iterator, PROPERTY_NAME_ITERATOR_NEXT_INDEXED_PROPERTY], next_indexed
@@ -2714,11 +2946,13 @@ handler ObjectPropertyIteratorNext
 .named:
     load64 named_index, [iterator, PROPERTY_NAME_ITERATOR_NEXT_PROPERTY]
     load64 named_size, [cache, OBJECT_PROPERTY_ITERATOR_CACHE_DATA_PROPERTY_VALUES_SIZE]
+    assert_ge_unsigned named_size, indexed_count
     sub named_size, indexed_count
     branch_ge_unsigned named_index, named_size, .done
     mov key_index, named_index
     add key_index, indexed_count
     load64 named_data, [cache, OBJECT_PROPERTY_ITERATOR_CACHE_DATA_PROPERTY_VALUES_DATA]
+    assert_nonzero named_data
     load64 key, [named_data, key_index, 8]
     add named_index, 1
     store64 [iterator, PROPERTY_NAME_ITERATOR_NEXT_PROPERTY], named_index

@@ -1,6 +1,6 @@
-$abb2d42c for-of-iteration-env-capacity.js:1:14
+$078cac4d for-of-iteration-env-capacity.js:1:14
   Registers: 13
-  Blocks:    10
+  Blocks:    9
   Locals:    x~0
   Constants:
     [0] = Undefined
@@ -19,35 +19,31 @@ block1:
 
 block2:
   [  68] IteratorNextUnpack dst_value:reg11, dst_done:reg12, iterator_object:reg6, iterator_next:reg7, iterator_done:reg8
-  [  80] JumpIf condition:reg12, true_target:block1, false_target:block5
+  [  80] JumpIf condition:reg12, true_target:block1, false_target:block4
 
 block3:
   [  90] Catch dst:reg10
   [  98] SetLexicalEnvironment environment:reg4
   [  a0] Mov dst:reg9, src:Int32(1)
+  [  b0] JumpStrictlyEquals lhs:reg9, rhs:Int32(1), true_target:block5, false_target:block6
 
 block4:
-  [  b0] JumpStrictlyEquals lhs:reg9, rhs:Int32(1), true_target:block6, false_target:block7
+  [  c8] Mov2 dst1:x~0, src1:reg11, dst2:reg5, src2:x~0
+  [  e0] Jump target:block2
 
 block5:
-  [  c8] Mov dst:x~0, src:reg11
-  [  d8] ThrowIfTDZ src:x~0
-  [  e0] Mov dst:reg5, src:x~0
-  [  f0] Jump target:block2
+  [  e8] IteratorClose iterator_object:reg6, iterator_next:reg7, iterator_done:reg8, completion_value:reg10
+  [ 100] Throw src:reg10
 
 block6:
-  [  f8] IteratorClose iterator_object:reg6, iterator_next:reg7, iterator_done:reg8, completion_value:reg10
-  [ 110] Throw src:reg10
+  [ 108] IteratorClose iterator_object:reg6, iterator_next:reg7, iterator_done:reg8, completion_value:Undefined
+  [ 120] JumpStrictlyEquals lhs:reg9, rhs:Int32(2), true_target:block7, false_target:block8
 
 block7:
-  [ 118] IteratorClose iterator_object:reg6, iterator_next:reg7, iterator_done:reg8, completion_value:Undefined
-  [ 130] JumpStrictlyEquals lhs:reg9, rhs:Int32(2), true_target:block8, false_target:block9
+  [ 138] Return value:reg10
 
 block8:
-  [ 148] Return value:reg10
-
-block9:
-  [ 150] Throw src:reg10
+  [ 140] Throw src:reg10
 
 Exception handlers:
-  [  c8 ..   f8] => handler block3
+  [  c8 ..   e8] => handler block3

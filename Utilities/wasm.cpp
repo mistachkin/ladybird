@@ -20,8 +20,8 @@
 #include <LibJS/Runtime/BigInt.h>
 #include <LibJS/Runtime/VM.h>
 #include <LibJS/Script.h>
-#if !defined(AK_OS_WINDOWS)
-#    include <LibLine/Editor.h>
+#if defined(AK_OS_WINDOWS)
+#    include <AK/Windows.h>
 #endif
 #include <LibMain/Main.h>
 #include <LibWasm/AbstractMachine/AbstractMachine.h>
@@ -31,8 +31,11 @@
 #if !defined(AK_OS_WINDOWS)
 #    include <LibWasm/Wasi.h>
 #endif
+#include <LibCore/Process.h>
 #include <math.h>
-#include <signal.h>
+#if !defined(AK_OS_WINDOWS)
+#    include <unistd.h>
+#endif
 
 static OwnPtr<Stream> g_stdout {};
 static OwnPtr<Wasm::Printer> g_printer {};
@@ -300,6 +303,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
     StringView filename;
     bool print = false;
     bool print_compiled = false;
+    bool dump_native = false;
     bool attempt_instantiate = false;
     bool export_all_imports = false;
     [[maybe_unused]] bool wasi = false;
@@ -320,6 +324,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
     parser.add_positional_argument(filename, "File name to parse", "file");
     parser.add_option(print, "Print the parsed module", "print", 'p');
     parser.add_option(print_compiled, "Print the compiled module", "print-compiled");
+    parser.add_option(dump_native, "Disassemble Cranelift-compiled native code for each function", "dump-native");
     parser.add_option(specific_function_address, "Optional compiled function address to print", "print-function", 'f', "address");
     parser.add_option(attempt_instantiate, "Attempt to instantiate the module", "instantiate", 'i');
     parser.add_option(exported_function_to_execute, "Attempt to execute the named exported function from the module (implies -i)", "execute", 'e', "name");
@@ -579,7 +584,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         printer.print(*parse_result);
     }
 
-    if (attempt_instantiate || print_compiled) {
+    if (attempt_instantiate || print_compiled || dump_native) {
 #if !defined(AK_OS_WINDOWS)
         Optional<Wasm::Wasi::Implementation> wasi_impl;
 
@@ -610,9 +615,9 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         }
 #endif
 
-        Core::EventLoop main_loop;
+        Core::EventLoop::initialize_for_current_thread();
         // First, resolve the linked modules
-        Vector<NonnullOwnPtr<Wasm::ModuleInstance>> linked_instances;
+        Vector<NonnullRefPtr<Wasm::ModuleInstance>> linked_instances;
         Vector<NonnullRefPtr<Wasm::Module>> linked_modules;
         for (auto& name : modules_to_link_in) {
             auto parse_result = parse(name);
@@ -665,17 +670,10 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
 
         if (export_all_imports) {
             HashMap<Wasm::Linker::Name, Wasm::ExternValue> exports;
-            for (auto& entry : linker.unresolved_imports()) {
-                if (!entry.type.has<Wasm::TypeIndex>())
-                    continue;
-                auto type = parse_result->type_section().types()[entry.type.get<Wasm::TypeIndex>().value()];
 
-                if (!type.is_function())
-                    continue;
-                auto& func = type.function();
-
-                auto address = machine.store().allocate(Wasm::HostFunction(
-                    [name = entry.name, func = func](auto&, auto arguments) -> Wasm::Result {
+            auto allocate_function_stub = [&](Wasm::FunctionType const& func, ByteString const& name) {
+                return *machine.store().allocate(Wasm::HostFunction(
+                    [name, func](auto&, auto arguments) -> Wasm::Result {
                         StringBuilder argument_builder;
                         bool first = true;
                         size_t index = 0;
@@ -700,8 +698,43 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
                         return Wasm::Result { move(result) };
                     },
                     func,
-                    entry.name));
-                exports.set(entry, *address);
+                    name));
+            };
+
+            for (auto& entry : linker.unresolved_imports()) {
+                Optional<Wasm::ExternValue> address;
+                entry.type.visit(
+                    [&](Wasm::TypeIndex const& type_index) {
+                        auto& type = parse_result->type_section().types()[type_index.value()];
+                        if (!type.is_function()) {
+                            dbgln("[wasm runtime] Cannot stub import {}::{} of non-function {}", entry.module, entry.name, type.name());
+                            return;
+                        }
+                        address = allocate_function_stub(type.function(), entry.name);
+                    },
+                    [&](Wasm::FunctionType const& func) {
+                        address = allocate_function_stub(func, entry.name);
+                    },
+                    [&](Wasm::TableType const& table_type) {
+                        address = *machine.store().allocate(table_type);
+                    },
+                    [&](Wasm::MemoryType const& memory_type) {
+                        address = *machine.store().allocate(memory_type);
+                    },
+                    [&](Wasm::GlobalType const& global_type) {
+                        address = *machine.store().allocate(global_type, Wasm::Value(global_type.type()));
+                    },
+                    [&](Wasm::TagType const& tag_type) {
+                        auto& type = parse_result->type_section().types()[tag_type.type().value()];
+                        if (!type.is_function()) {
+                            dbgln("[wasm runtime] Cannot stub tag import {}::{}: type is not a function", entry.module, entry.name);
+                            return;
+                        }
+                        address = *machine.store().allocate(type.function(), tag_type.flags());
+                    });
+
+                if (address.has_value())
+                    exports.set(entry, address.release_value());
             }
 
             linker.link(exports);
@@ -809,6 +842,158 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
                 }
 
                 TRY(g_stdout->write_until_depleted("\n"sv.bytes()));
+            }
+        }
+
+        if (dump_native) {
+            Span<Wasm::FunctionAddress const> functions = module_instance->functions();
+            Wasm::FunctionAddress spec = specific_function_address.value_or(0);
+
+            if (specific_function_address.has_value())
+                functions = { &spec, 1 };
+            for (auto address : functions) {
+                auto* function = machine.store().get(address)->get_pointer<Wasm::WasmFunction>();
+                if (!function)
+                    continue;
+                auto& ci = function->code().func().body().compiled_instructions;
+                if (!ci.cranelift_compiled || ci.cranelift_code_size == 0)
+                    continue;
+
+                ByteString export_name;
+                for (auto& entry : function->module().exports()) {
+                    if (entry.value() == address) {
+                        export_name = ByteString::formatted(" '{}'", entry.name());
+                        break;
+                    }
+                }
+
+                auto const* code_ptr = bit_cast<u8 const*>(ci.dispatches[0].handler_ptr);
+                auto code_size = ci.cranelift_code_size;
+
+#if defined(AK_OS_WINDOWS)
+                char tmp_path[MAX_PATH];
+                {
+                    char tmp_dir[MAX_PATH];
+                    GetTempPathA(MAX_PATH, tmp_dir);
+                    GetTempFileNameA(tmp_dir, "wn", 0, tmp_path);
+                }
+                {
+                    auto tmp_file = Core::File::open(StringView { tmp_path, strlen(tmp_path) }, Core::File::OpenMode::Write);
+                    if (tmp_file.is_error()) {
+                        warnln("Failed to create temp file for function #{}", address.value());
+                        continue;
+                    }
+                    (void)tmp_file.value()->write_until_depleted({ code_ptr, code_size });
+                }
+#else
+                char tmp_path[] = "/tmp/wasm-native-XXXXXX";
+                int fd = mkstemp(tmp_path);
+                if (fd < 0) {
+                    warnln("Failed to create temp file for function #{}", address.value());
+                    continue;
+                }
+
+                {
+                    auto tmp_file = MUST(Core::File::adopt_fd(fd, Core::File::OpenMode::Write));
+
+#    if ARCH(AARCH64) && defined(AK_OS_MACOS)
+                    // Write a minimal Mach-O object file so objdump can disassemble it.
+                    struct [[gnu::packed]] {
+                        u32 magic = 0xFEEDFACF;
+                        u32 cputype = 0x0100000C; // CPU_TYPE_ARM64
+                        u32 cpusubtype = 0;
+                        u32 filetype = 1; // MH_OBJECT
+                        u32 ncmds = 1;
+                        u32 sizeofcmds = 72 + 80; // segment + section
+                        u32 flags = 0;
+                        u32 reserved = 0;
+                    } mach_header;
+
+                    struct [[gnu::packed]] {
+                        u32 cmd = 0x19; // LC_SEGMENT_64
+                        u32 cmdsize = 72 + 80;
+                        char segname[16] = {};
+                        u64 vmaddr = 0;
+                        u64 vmsize;
+                        u64 fileoff;
+                        u64 filesize;
+                        u32 maxprot = 7;
+                        u32 initprot = 7;
+                        u32 nsects = 1;
+                        u32 flags = 0;
+                    } segment;
+                    segment.vmsize = code_size;
+                    segment.fileoff = sizeof(mach_header) + sizeof(segment) + 80;
+                    segment.filesize = code_size;
+
+                    struct [[gnu::packed]] {
+                        char sectname[16] = "__text";
+                        char segname[16] = "__TEXT";
+                        u64 addr = 0;
+                        u64 size;
+                        u32 offset;
+                        u32 align = 2;
+                        u32 reloff = 0;
+                        u32 nreloc = 0;
+                        u32 flags = 0x80000400; // S_REGULAR | S_ATTR_PURE_INSTRUCTIONS
+                        u32 reserved1 = 0;
+                        u32 reserved2 = 0;
+                        u32 reserved3 = 0;
+                    } section;
+                    static_assert(sizeof(section) == 80);
+                    section.size = code_size;
+                    section.offset = static_cast<u32>(segment.fileoff);
+
+                    (void)tmp_file->write_until_depleted({ &mach_header, sizeof(mach_header) });
+                    (void)tmp_file->write_until_depleted({ &segment, sizeof(segment) });
+                    (void)tmp_file->write_until_depleted({ &section, sizeof(section) });
+#    endif
+                    (void)tmp_file->write_until_depleted({ code_ptr, code_size });
+                }
+#endif
+
+                outln("Function #{}{} ({} bytes):", address.value(), export_name, code_size);
+                fflush(stdout);
+
+#if defined(AK_OS_WINDOWS)
+                auto result = Core::Process::spawn({
+                    .name = "ndisasm"sv,
+                    .executable = "ndisasm"sv,
+                    .search_for_executable_in_path = true,
+                    .arguments = { "-b"sv, (sizeof(void*) == sizeof(u64) ? "64"sv : "32"sv), tmp_path },
+                });
+#elif defined(AK_OS_MACOS)
+                auto cmd = ByteString::formatted("/usr/bin/objdump -d {} | tail -n +7", tmp_path);
+                auto result = Core::Process::spawn({
+                    .name = "sh"sv,
+                    .executable = "/bin/sh"sv,
+                    .arguments = { "-c"sv, cmd },
+                });
+#else
+#    if ARCH(X86_64)
+                auto cmd = ByteString::formatted("/usr/bin/objdump -D -b binary -m i386:x86-64 {} | tail -n +8", tmp_path);
+#    elif ARCH(AARCH64)
+                auto cmd = ByteString::formatted("/usr/bin/objdump -D -b binary -m aarch64 {} | tail -n +8", tmp_path);
+#    else
+                auto cmd = ByteString::formatted("/usr/bin/objdump -D -b binary {} | tail -n +8", tmp_path);
+#    endif
+                auto result = Core::Process::spawn({
+                    .name = "sh"sv,
+                    .executable = "/bin/sh"sv,
+                    .arguments = { "-c"sv, cmd },
+                });
+#endif
+                if (!result.is_error())
+                    (void)result.release_value().wait_for_termination();
+                else
+                    warnln("Failed to run disassembler: {}", result.error());
+
+#if defined(AK_OS_WINDOWS)
+                DeleteFileA(tmp_path);
+#else
+                unlink(tmp_path);
+#endif
+                outln();
             }
         }
 

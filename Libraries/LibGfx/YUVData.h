@@ -27,10 +27,19 @@ struct YUVDataImpl;
 
 // Holds planar YUV data with metadata needed for GPU conversion.
 // Uses FixedArray for deterministic buffer sizing.
-// Not ref-counted - owned directly by ImmutableBitmap via NonnullOwnPtr.
+// Not ref-counted - owned directly by decoded video frame objects via NonnullOwnPtr.
 class YUVData final {
 public:
+    struct PlaneSizes {
+        size_t y;
+        size_t u;
+        size_t v;
+        size_t total;
+    };
+
+    static ErrorOr<PlaneSizes> plane_sizes(IntSize size, u8 bit_depth, Media::Subsampling);
     static ErrorOr<NonnullOwnPtr<YUVData>> create(IntSize size, u8 bit_depth, Media::Subsampling, Media::CodingIndependentCodePoints);
+    static ErrorOr<NonnullOwnPtr<YUVData>> create_from_data(IntSize size, u8 bit_depth, Media::Subsampling, Media::CodingIndependentCodePoints, ReadonlyBytes y_data, ReadonlyBytes u_data, ReadonlyBytes v_data);
 
     ~YUVData();
 
@@ -43,12 +52,13 @@ public:
     Bytes y_data();
     Bytes u_data();
     Bytes v_data();
+    ReadonlyBytes y_data() const;
+    ReadonlyBytes u_data() const;
+    ReadonlyBytes v_data() const;
 
     ErrorOr<NonnullRefPtr<Bitmap>> to_bitmap() const;
 
     SkYUVAPixmaps make_pixmaps() const;
-
-    void expand_samples_to_full_16_bit_range();
 
 private:
     explicit YUVData(NonnullOwnPtr<Details::YUVDataImpl>);

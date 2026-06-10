@@ -14,10 +14,10 @@ namespace Web::CSS {
 Supports::Supports(NonnullOwnPtr<BooleanExpression>&& condition)
     : m_condition(move(condition))
 {
-    m_matches = m_condition->evaluate_to_boolean(nullptr);
+    m_matches = m_condition->evaluate_to_boolean({});
 }
 
-MatchResult Supports::Declaration::evaluate(DOM::Document const*) const
+MatchResult Supports::Declaration::evaluate(BooleanExpressionEvaluationContext const&) const
 {
     return as_match_result(m_matches);
 }
@@ -33,7 +33,7 @@ void Supports::Declaration::dump(StringBuilder& builder, int indent_levels) cons
     builder.appendff("Declaration: `{}`, matches={}\n", m_declaration, m_matches);
 }
 
-MatchResult Supports::Selector::evaluate(DOM::Document const*) const
+MatchResult Supports::Selector::evaluate(BooleanExpressionEvaluationContext const&) const
 {
     return as_match_result(m_matches);
 }
@@ -49,7 +49,7 @@ void Supports::Selector::dump(StringBuilder& builder, int indent_levels) const
     builder.appendff("Selector: `{}` matches={}\n", m_selector, m_matches);
 }
 
-MatchResult Supports::FontTech::evaluate(DOM::Document const*) const
+MatchResult Supports::FontTech::evaluate(BooleanExpressionEvaluationContext const&) const
 {
     return as_match_result(m_matches);
 }
@@ -65,7 +65,7 @@ void Supports::FontTech::dump(StringBuilder& builder, int indent_levels) const
     builder.appendff("FontTech: `{}` matches={}\n", m_tech, m_matches);
 }
 
-MatchResult Supports::FontFormat::evaluate(DOM::Document const*) const
+MatchResult Supports::FontFormat::evaluate(BooleanExpressionEvaluationContext const&) const
 {
     return as_match_result(m_matches);
 }
@@ -81,7 +81,7 @@ void Supports::FontFormat::dump(StringBuilder& builder, int indent_levels) const
     builder.appendff("FontFormat: `{}` matches={}\n", m_format, m_matches);
 }
 
-MatchResult Supports::Env::evaluate(DOM::Document const*) const
+MatchResult Supports::Env::evaluate(BooleanExpressionEvaluationContext const&) const
 {
     return as_match_result(m_matches);
 }
@@ -95,6 +95,26 @@ void Supports::Env::dump(StringBuilder& builder, int indent_levels) const
 {
     indent(builder, indent_levels);
     builder.appendff("Env: `{}` matches={}\n", m_variable_name, m_matches);
+}
+
+MatchResult Supports::AtRule::evaluate(BooleanExpressionEvaluationContext const&) const
+{
+    return as_match_result(m_matches);
+}
+
+String Supports::AtRule::to_string() const
+{
+    StringBuilder builder;
+    builder.append("at-rule(@"sv);
+    serialize_an_identifier(builder, m_name);
+    builder.append(')');
+    return builder.to_string_without_validation();
+}
+
+void Supports::AtRule::dump(StringBuilder& builder, int indent_levels) const
+{
+    indent(builder, indent_levels);
+    builder.appendff("AtRule: `@{}` matches={}\n", m_name, m_matches);
 }
 
 String Supports::to_string() const

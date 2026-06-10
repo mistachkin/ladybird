@@ -95,7 +95,7 @@ WebIDL::ExceptionOr<GC::Ref<AudioBufferSourceNode>> BaseAudioContext::create_buf
 // https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createchannelmerger
 WebIDL::ExceptionOr<GC::Ref<ChannelMergerNode>> BaseAudioContext::create_channel_merger(WebIDL::UnsignedLong number_of_inputs)
 {
-    ChannelMergerOptions options;
+    Bindings::ChannelMergerOptions options;
     options.number_of_inputs = number_of_inputs;
 
     return ChannelMergerNode::create(realm(), *this, options);
@@ -110,7 +110,7 @@ WebIDL::ExceptionOr<GC::Ref<ConstantSourceNode>> BaseAudioContext::create_consta
 // https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createdelay
 WebIDL::ExceptionOr<GC::Ref<DelayNode>> BaseAudioContext::create_delay(double max_delay_time)
 {
-    DelayOptions options;
+    Bindings::DelayOptions options;
     options.max_delay_time = max_delay_time;
 
     return DelayNode::create(realm(), *this, options);
@@ -119,7 +119,7 @@ WebIDL::ExceptionOr<GC::Ref<DelayNode>> BaseAudioContext::create_delay(double ma
 // https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createchannelsplitter
 WebIDL::ExceptionOr<GC::Ref<ChannelSplitterNode>> BaseAudioContext::create_channel_splitter(WebIDL::UnsignedLong number_of_outputs)
 {
-    ChannelSplitterOptions options;
+    Bindings::ChannelSplitterOptions options;
     options.number_of_outputs = number_of_outputs;
 
     return ChannelSplitterNode::create(realm(), *this, options);
@@ -153,9 +153,9 @@ WebIDL::ExceptionOr<GC::Ref<PannerNode>> BaseAudioContext::create_panner()
     return PannerNode::create(realm(), *this);
 }
 
-WebIDL::ExceptionOr<GC::Ref<PeriodicWave>> BaseAudioContext::create_periodic_wave(Vector<float> const& real, Vector<float> const& imag, Optional<PeriodicWaveConstraints> const& constraints)
+WebIDL::ExceptionOr<GC::Ref<PeriodicWave>> BaseAudioContext::create_periodic_wave(Vector<float> const& real, Vector<float> const& imag, Optional<Bindings::PeriodicWaveConstraints> const& constraints)
 {
-    PeriodicWaveOptions options;
+    Bindings::PeriodicWaveOptions options;
     options.real = real;
     options.imag = imag;
     if (constraints.has_value())
@@ -227,7 +227,7 @@ void BaseAudioContext::queue_control_message(ControlMessage message)
 }
 
 // https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-decodeaudiodata
-GC::Ref<WebIDL::Promise> BaseAudioContext::decode_audio_data(GC::Root<JS::ArrayBuffer> const& audio_data, GC::Ptr<WebIDL::CallbackType> success_callback, GC::Ptr<WebIDL::CallbackType> error_callback)
+GC::Ref<WebIDL::Promise> BaseAudioContext::decode_audio_data(GC::Ref<JS::ArrayBuffer> audio_data, GC::Ptr<WebIDL::CallbackType> success_callback, GC::Ptr<WebIDL::CallbackType> error_callback)
 {
     auto& realm = this->realm();
 
@@ -281,7 +281,7 @@ GC::Ref<WebIDL::Promise> BaseAudioContext::decode_audio_data(GC::Root<JS::ArrayB
 }
 
 // https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-decodeaudiodata
-void BaseAudioContext::queue_a_decoding_operation(GC::Ref<JS::PromiseCapability> promise, [[maybe_unused]] GC::Root<JS::ArrayBuffer> audio_data, GC::Ptr<WebIDL::CallbackType> success_callback, GC::Ptr<WebIDL::CallbackType> error_callback)
+void BaseAudioContext::queue_a_decoding_operation(GC::Ref<JS::PromiseCapability> promise, [[maybe_unused]] GC::Ref<JS::ArrayBuffer> audio_data, GC::Ptr<WebIDL::CallbackType> success_callback, GC::Ptr<WebIDL::CallbackType> error_callback)
 {
     auto& realm = this->realm();
 

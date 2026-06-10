@@ -125,7 +125,7 @@ void HTMLDetailsElement::queue_a_details_toggle_event_task(String old_state, Str
     auto task_id = queue_an_element_task(HTML::Task::Source::DOMManipulation, [this, old_state, new_state = move(new_state)]() mutable {
         // 1. Fire an event named toggle at element, using ToggleEvent, with the oldState attribute initialized to
         //    oldState and the newState attribute initialized to newState.
-        ToggleEventInit event_init {};
+        Bindings::ToggleEventInit event_init {};
         event_init.old_state = move(old_state);
         event_init.new_state = move(new_state);
 
@@ -235,6 +235,7 @@ WebIDL::ExceptionOr<void> HTMLDetailsElement::create_shadow_tree_if_needed()
     auto shadow_root = realm.create<DOM::ShadowRoot>(document(), *this, Bindings::ShadowRootMode::Closed);
     shadow_root->set_user_agent_internal(true);
     shadow_root->set_slot_assignment(Bindings::SlotAssignmentMode::Manual);
+    set_shadow_root(shadow_root);
 
     // The first child element is a slot that is expected to take the details element's first summary element child, if any.
     auto summary_slot = TRY(DOM::create_element(document(), HTML::TagNames::slot, Namespace::HTML));
@@ -242,8 +243,8 @@ WebIDL::ExceptionOr<void> HTMLDetailsElement::create_shadow_tree_if_needed()
 
     // The second child element is a slot that is expected to take the details element's remaining descendants, if any.
     auto descendants_slot = TRY(DOM::create_element(document(), HTML::TagNames::slot, Namespace::HTML));
-    descendants_slot->set_use_pseudo_element(CSS::PseudoElement::DetailsContent);
     MUST(shadow_root->append_child(descendants_slot));
+    descendants_slot->set_associated_shadow_host_pseudo_element(CSS::PseudoElement::DetailsContent);
 
     // The third child element is either a link or style element with the following styles for the default summary:
     auto style = TRY(DOM::create_element(document(), HTML::TagNames::style, Namespace::HTML));
@@ -262,7 +263,6 @@ WebIDL::ExceptionOr<void> HTMLDetailsElement::create_shadow_tree_if_needed()
 
     m_summary_slot = static_cast<HTML::HTMLSlotElement&>(*summary_slot);
     m_descendants_slot = static_cast<HTML::HTMLSlotElement&>(*descendants_slot);
-    set_shadow_root(shadow_root);
 
     return {};
 }
@@ -272,12 +272,12 @@ void HTMLDetailsElement::update_shadow_tree_slots()
     if (!shadow_root())
         return;
 
-    Vector<HTMLSlotElement::SlottableHandle> summary_assignment;
-    Vector<HTMLSlotElement::SlottableHandle> descendants_assignment;
+    GC::ConservativeVector<HTMLSlotElement::SlottableHandle> summary_assignment;
+    GC::ConservativeVector<HTMLSlotElement::SlottableHandle> descendants_assignment;
 
     auto* summary = first_child_of_type<HTMLSummaryElement>();
     if (summary != nullptr)
-        summary_assignment.append(GC::make_root(static_cast<DOM::Element&>(*summary)));
+        summary_assignment.append(GC::Ref { static_cast<DOM::Element&>(*summary) });
 
     for_each_in_subtree([&](auto& child) {
         if (&child == summary)
@@ -286,7 +286,7 @@ void HTMLDetailsElement::update_shadow_tree_slots()
             return TraversalDecision::Continue;
 
         child.as_slottable().visit([&](auto& node) {
-            descendants_assignment.append(GC::make_root(node));
+            descendants_assignment.append(node);
         });
 
         return TraversalDecision::Continue;

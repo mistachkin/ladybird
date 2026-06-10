@@ -19,14 +19,58 @@
 
 namespace Web::Layout {
 
-GC_DEFINE_ALLOCATOR(TextNode);
-
 TextNode::TextNode(DOM::Document& document, DOM::Text& text)
     : Node(document, &text)
 {
 }
 
+TextNode::TextNode(DOM::Document& document, DOM::Text& text, AttachToDOMNode attach_to_dom_node)
+    : Node(document, &text, attach_to_dom_node)
+{
+}
+
+TextNode::TextNode(DOM::Document& document)
+    : Node(document, nullptr)
+{
+}
+
 TextNode::~TextNode() = default;
+
+DOM::Element const* TextNode::parent_element_for_text_transform() const
+{
+    return dom_node().parent_element();
+}
+
+bool TextNode::is_password_input() const
+{
+    return dom_node().is_password_input();
+}
+
+GeneratedTextNode::GeneratedTextNode(DOM::Document& document, Utf16String text)
+    : TextNode(document)
+    , m_text(move(text))
+{
+}
+
+GeneratedTextNode::~GeneratedTextNode() = default;
+
+DOM::Element const* GeneratedTextNode::parent_element_for_text_transform() const
+{
+    if (is_generated_for_pseudo_element())
+        return pseudo_element_generator();
+    if (auto const* parent = this->parent(); parent && parent->is_generated_for_pseudo_element())
+        return parent->pseudo_element_generator();
+    return nullptr;
+}
+
+TextSliceNode::TextSliceNode(DOM::Document& document, DOM::Text& text, AttachToDOMNode attach_to_dom_node, size_t dom_start_offset, size_t dom_length)
+    : TextNode(document, text, attach_to_dom_node)
+    , m_dom_start_offset(dom_start_offset)
+    , m_dom_length_in_code_units(dom_length)
+{
+}
+
+TextSliceNode::~TextSliceNode() = default;
 
 // https://w3c.github.io/mathml-core/#new-text-transform-values
 static Utf16String apply_math_auto_text_transform(Utf16String const& string)
@@ -294,40 +338,70 @@ static Utf16String apply_text_transform(Utf16String const& string, CSS::TextTran
     VERIFY_NOT_REACHED();
 }
 
+TextNode::TextForRenderingCacheKey TextNode::create_text_for_rendering_cache_key() const
+{
+    auto text_transform = computed_values().text_transform();
+    Optional<String> lang;
+    if (first_is_one_of(text_transform, CSS::TextTransform::Uppercase, CSS::TextTransform::Lowercase, CSS::TextTransform::Capitalize)) {
+        if (auto parent_element = parent_element_for_text_transform())
+            lang = parent_element->lang();
+    }
+
+    return {
+        .text_transform = text_transform,
+        .white_space_collapse = computed_values().white_space_collapse(),
+        .lang = move(lang),
+        .is_password_input = is_password_input(),
+        .dom_start_offset = dom_start_offset(),
+        .dom_length = dom_length(),
+    };
+}
+
 void TextNode::invalidate_text_for_rendering()
 {
-    m_text_for_rendering = {};
-    m_grapheme_segmenter.clear();
-    m_line_segmenter.clear();
+    m_text_dependent_cache = {};
 }
 
 Utf16String const& TextNode::text_for_rendering() const
 {
-    if (!m_text_for_rendering.has_value())
-        const_cast<TextNode*>(this)->compute_text_for_rendering();
-    return *m_text_for_rendering;
+    return ensure_text_dependent_cache().text_for_rendering;
 }
 
-void TextNode::compute_text_for_rendering()
+TextNode::TextDependentCache const& TextNode::ensure_text_dependent_cache() const
 {
-    if (dom_node().is_password_input()) {
-        m_text_for_rendering = Utf16String::repeated(u'●', dom_node().data().length_in_code_points());
-        return;
+    auto key = create_text_for_rendering_cache_key();
+    if (!m_text_dependent_cache.has_value() || m_text_dependent_cache->key != key) {
+        auto text_for_rendering = compute_text_for_rendering(key);
+        m_text_dependent_cache = TextDependentCache {
+            .key = move(key),
+            .text_for_rendering = move(text_for_rendering),
+            .grapheme_segmenter = {},
+            .line_segmenter = {},
+            .chunk_cache = {},
+        };
+    }
+    return *m_text_dependent_cache;
+}
+
+Utf16String TextNode::compute_text_for_rendering(TextForRenderingCacheKey const& cache_key) const
+{
+    auto const& text_data = text();
+    if (cache_key.is_password_input) {
+        return Utf16String::repeated(u'●', text_data.length_in_code_points());
     }
 
     // Apply text-transform
     // FIXME: This can generate more code points than there were before; we need to find a better way to map the
     //        resulting paintable fragments' offsets into the original text node data.
     //        See: https://github.com/LadybirdBrowser/ladybird/issues/6177
-    auto parent_element = dom_node().parent_element();
-    auto const maybe_lang = parent_element ? parent_element->lang() : Optional<String> {};
-    auto const lang = maybe_lang.has_value() ? maybe_lang.value() : Optional<StringView> {};
-    auto text = apply_text_transform(dom_node().data(), computed_values().text_transform(), lang);
+    auto const lang = cache_key.lang.has_value() ? Optional<StringView> { cache_key.lang->bytes_as_string_view() } : Optional<StringView> {};
+    auto text = apply_text_transform(text_data, cache_key.text_transform, lang);
+    if (cache_key.dom_start_offset > 0 || cache_key.dom_length < text_data.length_in_code_units())
+        text = Utf16String::from_utf16(text.utf16_view().substring_view(cache_key.dom_start_offset, cache_key.dom_length));
 
     // The logic below deals with converting whitespace characters. If we don't have them, return early.
     if (text.is_empty() || !any_of(text, is_ascii_space)) {
-        m_text_for_rendering = move(text);
-        return;
+        return text;
     }
 
     // https://drafts.csswg.org/css-text-4/#white-space-phase-1
@@ -336,7 +410,7 @@ void TextNode::compute_text_for_rendering()
 
     // If white-space-collapse is set to collapse or preserve-breaks, white space characters are considered collapsible
     // and are processed by performing the following steps:
-    auto white_space_collapse = computed_values().white_space_collapse();
+    auto white_space_collapse = cache_key.white_space_collapse;
     if (first_is_one_of(white_space_collapse, CSS::WhiteSpaceCollapse::Collapse, CSS::WhiteSpaceCollapse::PreserveBreaks)) {
         // 1. FIXME: Any sequence of collapsible spaces and tabs immediately preceding or following a segment break is removed.
 
@@ -377,8 +451,7 @@ void TextNode::compute_text_for_rendering()
 
     // AD-HOC: Prevent allocating a StringBuilder for a single space/newline/tab.
     if (text == " "sv || (convert_tabs && text == "\t"sv) || (convert_newlines && text == "\n"sv)) {
-        m_text_for_rendering = " "_utf16;
-        return;
+        return " "_utf16;
     }
 
     // AD-HOC: It's important to not change the amount of code units in the resulting transformed text, so ChunkIterator
@@ -393,34 +466,76 @@ void TextNode::compute_text_for_rendering()
         text = text_builder.to_utf16_string();
     }
 
-    m_text_for_rendering = move(text);
+    return text;
 }
 
 Unicode::Segmenter& TextNode::grapheme_segmenter() const
 {
-    if (!m_grapheme_segmenter) {
-        auto const& text = text_for_rendering();
+    auto const& cache = ensure_text_dependent_cache();
+    auto const& text = cache.text_for_rendering;
+    if (!cache.grapheme_segmenter) {
         // Fast path: For ASCII text, every character is its own grapheme.
         // We can use a trivial segmenter that avoids all ICU overhead.
         if (text.is_ascii()) {
-            m_grapheme_segmenter = Unicode::Segmenter::create_for_ascii_grapheme(text.length_in_code_units());
+            cache.grapheme_segmenter = Unicode::Segmenter::create_for_ascii_grapheme(text.length_in_code_units());
         } else {
-            m_grapheme_segmenter = document().grapheme_segmenter().clone();
-            m_grapheme_segmenter->set_segmented_text(text);
+            cache.grapheme_segmenter = document().grapheme_segmenter().clone();
+            cache.grapheme_segmenter->set_segmented_text(text);
         }
     }
 
-    return *m_grapheme_segmenter;
+    return *cache.grapheme_segmenter;
 }
 
 Unicode::Segmenter& TextNode::line_segmenter() const
 {
-    if (!m_line_segmenter) {
-        m_line_segmenter = document().line_segmenter().clone();
-        m_line_segmenter->set_segmented_text(text_for_rendering());
+    auto const& cache = ensure_text_dependent_cache();
+    auto const& text = cache.text_for_rendering;
+    if (!cache.line_segmenter) {
+        if (auto ascii = Unicode::Segmenter::try_create_for_ascii_line(text.utf16_view())) {
+            cache.line_segmenter = ascii.release_nonnull();
+        } else {
+            cache.line_segmenter = document().line_segmenter().clone();
+            cache.line_segmenter->set_segmented_text(text);
+        }
     }
 
-    return *m_line_segmenter;
+    return *cache.line_segmenter;
+}
+
+TextNode::ChunkList const& TextNode::chunks_for_layout(bool should_wrap_lines, bool should_respect_linebreaks) const
+{
+    auto const& cache = ensure_text_dependent_cache();
+
+    auto const& computed_values = this->computed_values();
+    ChunkCacheKey key {
+        .should_wrap_lines = should_wrap_lines,
+        .should_respect_linebreaks = should_respect_linebreaks,
+        .white_space_collapse = computed_values.white_space_collapse(),
+        .word_break = computed_values.word_break(),
+        .font_cascade_list = computed_values.font_list(),
+    };
+
+    if (cache.chunk_cache.has_value() && cache.chunk_cache->key == key)
+        return cache.chunk_cache->chunk_list;
+
+    TextNode::ChunkIterator chunk_iterator { *this, should_wrap_lines, should_respect_linebreaks };
+    Vector<TextNode::Chunk> chunks;
+    while (true) {
+        auto chunk = chunk_iterator.next();
+        if (!chunk.has_value())
+            break;
+        chunks.append(chunk.release_value());
+    }
+
+    cache.chunk_cache = ChunkCacheEntry {
+        .key = key,
+        .chunk_list = {
+            .chunks = move(chunks),
+            .should_collapse_whitespace = chunk_iterator.should_collapse_whitespace(),
+        },
+    };
+    return cache.chunk_cache->chunk_list;
 }
 
 static bool is_interword_space(u32 code_point)
@@ -799,7 +914,7 @@ Optional<TextNode::Chunk> TextNode::ChunkIterator::try_commit_chunk(size_t start
     return {};
 }
 
-GC::Ptr<Painting::Paintable> TextNode::create_paintable() const
+RefPtr<Painting::Paintable> TextNode::create_paintable() const
 {
     return Painting::TextPaintable::create(*this);
 }

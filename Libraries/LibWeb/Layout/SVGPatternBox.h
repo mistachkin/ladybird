@@ -12,17 +12,16 @@
 namespace Web::Layout {
 
 class SVGPatternBox final : public SVGBox {
-    GC_CELL(SVGPatternBox, SVGBox);
-    GC_DECLARE_ALLOCATOR(SVGPatternBox);
+    LAYOUT_NODE(SVGPatternBox, SVGBox);
 
 public:
-    SVGPatternBox(DOM::Document&, SVG::SVGPatternElement&, GC::Ref<CSS::ComputedProperties>);
+    SVGPatternBox(DOM::Document&, SVG::SVGPatternElement&, CSS::ComputedProperties const&);
     virtual ~SVGPatternBox() override = default;
 
     SVG::SVGPatternElement& dom_node() { return as<SVG::SVGPatternElement>(SVGBox::dom_node()); }
     SVG::SVGPatternElement const& dom_node() const { return as<SVG::SVGPatternElement>(SVGBox::dom_node()); }
 
-    virtual GC::Ptr<Painting::Paintable> create_paintable() const override;
+    virtual RefPtr<Painting::Paintable> create_paintable() const override;
 
 private:
     virtual bool is_svg_pattern_box() const final { return true; }

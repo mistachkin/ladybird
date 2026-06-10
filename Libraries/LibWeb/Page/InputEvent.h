@@ -36,6 +36,7 @@ struct WEB_API KeyEvent {
     UIEvents::KeyModifier modifiers { UIEvents::KeyModifier::Mod_None };
     u32 code_point { 0 };
     bool repeat { false };
+    bool should_insert_text { false };
 
     OwnPtr<BrowserInputData> browser_data;
 };
@@ -57,11 +58,12 @@ struct WEB_API MouseEvent {
     UIEvents::MouseButton button { UIEvents::MouseButton::None };
     UIEvents::MouseButton buttons { UIEvents::MouseButton::None };
     UIEvents::KeyModifier modifiers { UIEvents::KeyModifier::Mod_None };
-    int wheel_delta_x { 0 };
-    int wheel_delta_y { 0 };
+    double wheel_delta_x { 0 };
+    double wheel_delta_y { 0 };
     int click_count { 0 };
 
     OwnPtr<BrowserInputData> browser_data;
+    bool async_scroll_performed_default_action { false };
 };
 
 struct WEB_API DragEvent {
@@ -87,6 +89,7 @@ struct WEB_API DragEvent {
 
 struct WEB_API PinchEvent {
     Web::DevicePixelPoint position;
+    UIEvents::KeyModifier modifiers { UIEvents::KeyModifier::Mod_None };
     double scale_delta;
 };
 

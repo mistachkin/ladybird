@@ -20,6 +20,16 @@
 
 namespace Ladybird {
 
+static GdkRGBA to_gdk_rgba(Gfx::Color color)
+{
+    return GdkRGBA {
+        static_cast<float>(color.red()) / 255.0f,
+        static_cast<float>(color.green()) / 255.0f,
+        static_cast<float>(color.blue()) / 255.0f,
+        static_cast<float>(color.alpha()) / 255.0f
+    };
+}
+
 WebContentView::WebContentView(LadybirdWebView* widget, RefPtr<WebView::WebContentClient> parent_client, size_t page_index)
     : m_widget(widget)
 {
@@ -27,6 +37,7 @@ WebContentView::WebContentView(LadybirdWebView* widget, RefPtr<WebView::WebConte
     m_client_state.page_index = page_index;
 
     m_device_pixel_ratio = gtk_widget_get_scale_factor(GTK_WIDGET(widget));
+    set_page_background_color_to_system_canvas(adw_style_manager_get_dark(adw_style_manager_get_default()));
 
     // Store ourselves in the GObject widget
     ladybird_web_view_set_impl(widget, this);
@@ -95,12 +106,19 @@ void WebContentView::enqueue_native_event(Web::MouseEvent::Type type, double x, 
 
 void WebContentView::enqueue_native_event(Web::KeyEvent::Type type, guint keyval, GdkModifierType state)
 {
+    auto modifiers = gdk_modifier_to_web(state);
+    auto code_point = gdk_keyval_to_unicode(keyval);
+    auto should_insert_text = type == Web::KeyEvent::Type::KeyDown
+        && code_point != 0
+        && !(modifiers & (Web::UIEvents::KeyModifier::Mod_Ctrl | Web::UIEvents::KeyModifier::Mod_Alt | Web::UIEvents::KeyModifier::Mod_Super));
+
     Web::KeyEvent event {
         .type = type,
         .key = gdk_keyval_to_web(keyval),
-        .modifiers = gdk_modifier_to_web(state),
-        .code_point = gdk_keyval_to_unicode(keyval),
+        .modifiers = modifiers,
+        .code_point = code_point,
         .repeat = false,
+        .should_insert_text = should_insert_text,
         .browser_data = {},
     };
     enqueue_input_event(move(event));
@@ -120,6 +138,9 @@ void WebContentView::finish_handling_key_event(Web::KeyEvent const& event)
     switch (event.key) {
     case Web::UIEvents::Key_C:
         app.copy_selection_action().activate();
+        break;
+    case Web::UIEvents::Key_X:
+        app.cut_selection_action().activate();
         break;
     case Web::UIEvents::Key_V:
         app.paste_action().activate();
@@ -193,9 +214,7 @@ void WebContentView::paint(GtkSnapshot* snapshot)
         graphene_rect_t texture_rect = GRAPHENE_RECT_INIT(0, 0, draw_width, draw_height);
         gtk_snapshot_append_texture(snapshot, m_cached_texture, &texture_rect);
 
-        // Fill uncovered areas with theme-appropriate background
-        auto is_dark = adw_style_manager_get_dark(adw_style_manager_get_default());
-        GdkRGBA bg = is_dark ? GdkRGBA { 0.14, 0.14, 0.14, 1.0 } : GdkRGBA { 1.0, 1.0, 1.0, 1.0 };
+        auto bg = to_gdk_rgba(page_background_color());
 
         if (draw_width < width) {
             graphene_rect_t right_rect = GRAPHENE_RECT_INIT(draw_width, 0, static_cast<float>(width) - draw_width, static_cast<float>(height));
@@ -206,8 +225,7 @@ void WebContentView::paint(GtkSnapshot* snapshot)
             gtk_snapshot_append_color(snapshot, &bg, &bottom_rect);
         }
     } else {
-        auto is_dark = adw_style_manager_get_dark(adw_style_manager_get_default());
-        GdkRGBA bg = is_dark ? GdkRGBA { 0.14, 0.14, 0.14, 1.0 } : GdkRGBA { 1.0, 1.0, 1.0, 1.0 };
+        auto bg = to_gdk_rgba(page_background_color());
         graphene_rect_t full_rect = GRAPHENE_RECT_INIT(0, 0, static_cast<float>(width), static_cast<float>(height));
         gtk_snapshot_append_color(snapshot, &bg, &full_rect);
     }
@@ -274,6 +292,7 @@ void WebContentView::set_has_focus(bool has_focus)
 void WebContentView::update_palette()
 {
     auto is_dark = adw_style_manager_get_dark(adw_style_manager_get_default());
+    set_page_background_color_to_system_canvas(is_dark);
     auto theme_file = is_dark ? "Dark"sv : "Default"sv;
     auto theme_ini = MUST(Core::Resource::load_from_uri(MUST(String::formatted("resource://themes/{}.ini", theme_file))));
     auto theme_or_error = Gfx::load_system_theme(theme_ini->filesystem_path().to_byte_string());

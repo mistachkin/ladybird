@@ -430,7 +430,7 @@ public:
     decltype(auto) downcast() &&
     {
         if constexpr (sizeof...(NewTs) == 1 && (IsSpecializationOf<NewTs, Variant> && ...)) {
-            return move(*this).template downcast_variant<NewTs...>();
+            return move(*this).downcast_variant(TypeWrapper<NewTs...> {});
         } else {
             Variant<NewTs...> instance { Variant<NewTs...>::invalid_index, Detail::VariantConstructTag {} };
             visit([&](auto& value) {
@@ -500,9 +500,20 @@ private:
         Visitor(Fs&&... args)
             : Fs(forward<Fs>(args))...
         {
+            static_assert((visitor_accepts_possible_alternative<Fs>() && ...), "Variant visitor has an overload for a type this Variant cannot contain");
         }
 
         using Fs::operator()...;
+
+    private:
+        template<typename VisitorFunction>
+        static consteval bool visitor_accepts_possible_alternative()
+        {
+            if constexpr (!requires { &VisitorFunction::operator(); })
+                return true;
+            else
+                return (requires { declval<VisitorFunction>()(declval<Ts&>()); } || ...);
+        }
     };
 
     // Note: Make sure not to default-initialize!

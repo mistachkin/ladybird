@@ -128,23 +128,24 @@ float LinearGradientStyleValue::angle_degrees(CSSPixelSize gradient_size) const
             return angle;
         },
         [&](NonnullRefPtr<StyleValue const> const& style_value) {
-            return Angle::from_style_value(style_value, {}).to_degrees();
+            auto angle = Angle::from_style_value(style_value, {}).to_degrees();
+            // Note: With -webkit-linear-gradient, 0deg points to the right instead of top,
+            // and the direction is reversed (counter-clockwise instead of clockwise)
+            if (m_properties.gradient_type == GradientType::WebKit)
+                return 90.0 - angle;
+            return angle;
         });
 }
 
 void LinearGradientStyleValue::resolve_for_size(Layout::NodeWithStyle const& node, CSSPixelSize size) const
 {
-    ResolvedDataCacheKey cache_key {
-        .length_resolution_context = Length::ResolutionContext::for_layout_node(node),
-        .size = size,
-    };
-    if (m_resolved_data_cache_key != cache_key) {
-        m_resolved_data_cache_key = move(cache_key);
+    if (m_resolved_size != size) {
+        m_resolved_size = move(size);
         m_resolved = Painting::resolve_linear_gradient_data(node, size, *this);
     }
 }
 
-void LinearGradientStyleValue::paint(DisplayListRecordingContext& context, DevicePixelRect const& dest_rect, CSS::ImageRendering) const
+void LinearGradientStyleValue::paint(DisplayListRecordingContext& context, DOM::Document const&, DevicePixelRect const& dest_rect, CSS::ImageRendering) const
 {
     VERIFY(m_resolved.has_value());
     context.display_list_recorder().fill_rect_with_linear_gradient(dest_rect.to_type<int>(), m_resolved.value());

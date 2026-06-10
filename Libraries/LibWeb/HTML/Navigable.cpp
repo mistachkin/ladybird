@@ -6,9 +6,13 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/NeverDestroyed.h>
+#include <LibCore/Timer.h>
 #include <LibWeb/CSS/ComputedProperties.h>
+#include <LibWeb/CSS/PseudoElement.h>
 #include <LibWeb/CSS/SystemColor.h>
 #include <LibWeb/CSS/VisualViewport.h>
+#include <LibWeb/Compositor/CompositorHost.h>
 #include <LibWeb/ContentSecurityPolicy/BlockingAlgorithms.h>
 #include <LibWeb/ContentSecurityPolicy/Directives/DirectiveOperations.h>
 #include <LibWeb/ContentSecurityPolicy/PolicyList.h>
@@ -16,7 +20,9 @@
 #include <LibWeb/Crypto/Crypto.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/DocumentLoading.h>
+#include <LibWeb/DOM/Element.h>
 #include <LibWeb/DOM/Event.h>
+#include <LibWeb/DOM/Position.h>
 #include <LibWeb/DOM/Range.h>
 #include <LibWeb/DOM/Text.h>
 #include <LibWeb/Fetch/Fetching/Fetching.h>
@@ -28,6 +34,7 @@
 #include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/BrowsingContextGroup.h>
 #include <LibWeb/HTML/DocumentState.h>
+#include <LibWeb/HTML/EventLoop/EventLoop.h>
 #include <LibWeb/HTML/HTMLIFrameElement.h>
 #include <LibWeb/HTML/HTMLInputElement.h>
 #include <LibWeb/HTML/History.h>
@@ -52,14 +59,17 @@
 #include <LibWeb/Layout/Viewport.h>
 #include <LibWeb/Loader/GeneratedPagesLoader.h>
 #include <LibWeb/Page/Page.h>
-#include <LibWeb/Painting/DisplayListPlayerSkia.h>
-#include <LibWeb/Painting/ExternalContentSource.h>
 #include <LibWeb/Painting/Paintable.h>
 #include <LibWeb/Painting/PaintableBox.h>
 #include <LibWeb/Painting/ViewportPaintable.h>
 #include <LibWeb/Platform/EventLoopPlugin.h>
 #include <LibWeb/Selection/Selection.h>
+#include <LibWeb/UIEvents/InputTypes.h>
+#include <LibWeb/WebIDL/Promise.h>
 #include <LibWeb/XHR/FormData.h>
+
+#include <AK/Debug.h>
+#include <AK/StdLibExtras.h>
 
 namespace Web::HTML {
 
@@ -175,10 +185,7 @@ private:
     virtual void visit_edges(Cell::Visitor& visitor) override
     {
         Base::visit_edges(visitor);
-        navigation_params.visit(
-            [](auto const&) {},
-            [&](GC::Ref<NavigationParams> const& p) { visitor.visit(p); },
-            [&](GC::Ref<NonFetchSchemeNavigationParams> const& p) { visitor.visit(p); });
+        visitor.visit(navigation_params);
     }
 };
 
@@ -238,16 +245,13 @@ void PopulateSessionHistoryEntryDocumentOutput::visit_edges(Cell::Visitor& visit
 {
     Base::visit_edges(visitor);
     visitor.visit(document);
-    navigation_params.visit(
-        [](auto const&) {},
-        [&](GC::Ref<NavigationParams> const& p) { visitor.visit(p); },
-        [&](GC::Ref<NonFetchSchemeNavigationParams> const& p) { visitor.visit(p); });
+    visitor.visit(navigation_params);
 }
 
 HashTable<GC::RawRef<Navigable>>& all_navigables()
 {
-    static HashTable<GC::RawRef<Navigable>> set;
-    return set;
+    static NeverDestroyed<HashTable<GC::RawRef<Navigable>>> set;
+    return *set;
 }
 
 // https://html.spec.whatwg.org/multipage/document-sequences.html#child-navigable
@@ -273,22 +277,19 @@ bool Navigable::is_ancestor_of(GC::Ref<Navigable> other) const
     return false;
 }
 
-Navigable::Navigable(GC::Ref<Page> page, bool is_svg_page)
+Navigable::Navigable(
+    GC::Ref<Page> page,
+    bool is_svg_page,
+    Compositor::PagePresentationRegistration page_presentation_registration)
     : m_page(page)
     , m_event_handler({}, *this)
     , m_is_svg_page(is_svg_page)
-    , m_backing_store_manager(heap().allocate<Painting::BackingStoreManager>(*this))
-    , m_rendering_thread([page_client = &page->client()](Gfx::IntRect const& viewport_rect, i32 bitmap_id) {
-        if (page_client)
-            page_client->page_did_paint(viewport_rect, bitmap_id);
-    })
 {
     all_navigables().set(*this);
 
-    if (!m_is_svg_page) {
-        auto display_list_player_type = page->client().display_list_player_type();
-        m_rendering_thread.set_skia_player(make<Painting::DisplayListPlayerSkia>());
-        m_rendering_thread.start(display_list_player_type);
+    if (!m_is_svg_page && page->has_compositor_host()) {
+        auto context_id = page->client().allocate_compositor_context_id(page_presentation_registration);
+        m_compositor_context = page->compositor_host().create_context(context_id);
     }
 }
 
@@ -296,11 +297,18 @@ Navigable::~Navigable() = default;
 
 void Navigable::set_has_been_destroyed()
 {
+    cancel_hover_update_after_async_scroll();
+    destroy_compositor_context();
     m_has_been_destroyed = true;
+    resolve_all_pending_async_scroll_operations();
 }
 
 void Navigable::remove_from_all_navigables()
 {
+    cancel_hover_update_after_async_scroll();
+    destroy_compositor_context();
+    resolve_all_pending_async_scroll_operations();
+
     if (m_active_document)
         m_active_document->set_navigable(nullptr);
     all_navigables().remove(*this);
@@ -308,6 +316,8 @@ void Navigable::remove_from_all_navigables()
 
 void Navigable::finalize()
 {
+    cancel_hover_update_after_async_scroll();
+    destroy_compositor_context();
     all_navigables().remove(*this);
     Base::finalize();
 }
@@ -318,13 +328,16 @@ void Navigable::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_page);
     visitor.visit(m_parent);
     visitor.visit(m_active_document);
+    visitor.visit(m_input_method_composition_node);
     visitor.visit(m_container);
-    visitor.visit(m_backing_store_manager);
     m_event_handler.visit_edges(visitor);
 
     for (auto& navigation_params : m_pending_navigations) {
         navigation_params.visit_edges(visitor);
     }
+
+    for (auto& async_scroll_operation : m_pending_async_scroll_operations)
+        visitor.visit(async_scroll_operation.promise);
 }
 
 void Navigable::NavigateParams::visit_edges(Cell::Visitor& visitor)
@@ -421,9 +434,16 @@ void Navigable::initialize_navigable(NonnullRefPtr<DocumentState> document_state
 
     // 5. Set navigable's parent to parent.
     m_parent = parent;
-    if (parent && !m_is_svg_page) {
-        m_external_content_source = Painting::ExternalContentSource::create();
-        m_rendering_thread.set_presentation_mode(RenderingThread::PublishToExternalContent { external_content_source() });
+    if (parent) {
+        m_should_show_line_box_borders = parent->m_should_show_line_box_borders;
+        m_should_show_caret_hit_test_debug_overlay = parent->m_should_show_caret_hit_test_debug_overlay;
+    }
+    if (parent && !m_is_svg_page && has_compositor_context() && parent->has_compositor_context()) {
+        m_compositor_surface_id = Painting::allocate_compositor_surface_id();
+        compositor_context().set_presentation_mode(Compositor::PublishToCompositorSurface {
+            .target_context_id = parent->compositor_context().id(),
+            .surface_id = *m_compositor_surface_id,
+        });
     }
 
     // 6. Set the initial visibility state of documentState's document to navigable's traversable navigable's system visibility state.
@@ -465,10 +485,14 @@ void Navigable::activate_history_entry(RefPtr<SessionHistoryEntry> entry, GC::Re
 
     // 4. Set navigable's active session history entry to entry.
     m_active_session_history_entry = entry;
-    if (m_active_document && m_active_document != new_document)
+    if (m_active_document && m_active_document != new_document) {
+        // The pending post-scroll hover refresh belongs to the outgoing document; drop it.
+        cancel_hover_update_after_async_scroll();
         m_active_document->set_navigable(nullptr);
+    }
     m_active_document = new_document;
     new_document->set_navigable(this);
+    set_needs_to_record_display_list();
 
     // 5. Make active newDocument.
     new_document->make_active();
@@ -515,11 +539,15 @@ Optional<UniqueNodeID> Navigable::active_document_id() const
 
 void Navigable::set_active_document(GC::Ptr<DOM::Document> document)
 {
-    if (m_active_document && m_active_document != document)
+    if (m_active_document && m_active_document != document) {
+        // The pending post-scroll hover refresh belongs to the outgoing document; drop it.
+        cancel_hover_update_after_async_scroll();
         m_active_document->set_navigable(nullptr);
+    }
     m_active_document = document;
     if (document)
         document->set_navigable(this);
+    set_needs_to_record_display_list();
 
     VERIFY(m_active_session_history_entry);
     Optional<UniqueNodeID> document_id;
@@ -612,14 +640,15 @@ GC::Ptr<TraversableNavigable> Navigable::top_level_traversable()
 }
 
 // https://html.spec.whatwg.org/multipage/browsing-the-web.html#set-the-ongoing-navigation
-void Navigable::set_ongoing_navigation(Variant<Empty, Traversal, String> ongoing_navigation)
+void Navigable::set_ongoing_navigation(Variant<Empty, Traversal, String> ongoing_navigation, NavigationAPIAbortBehavior navigation_api_abort_behavior)
 {
     // 1. If navigable's ongoing navigation is equal to newValue, then return.
     if (m_ongoing_navigation == ongoing_navigation)
         return;
 
     // 2. Inform the navigation API about aborting navigation given navigable.
-    inform_the_navigation_api_about_aborting_navigation();
+    if (navigation_api_abort_behavior == NavigationAPIAbortBehavior::Abort)
+        inform_the_navigation_api_about_aborting_navigation();
 
     // 3. Set navigable's ongoing navigation to newValue.
     auto was_traversal = m_ongoing_navigation.has<Traversal>();
@@ -2049,7 +2078,7 @@ void Navigable::begin_navigation(NavigateParams params)
         // 2. Let entryListForFiring be formDataEntryList if documentResource is a POST resource; otherwise, null.
         auto entry_list_for_firing = [&]() -> Optional<GC::ConservativeVector<XHR::FormDataEntry>> {
             if (document_resource.has<POSTResource>())
-                return GC::ConservativeVector { vm.heap(), params.form_data_entry_list.value() };
+                return GC::ConservativeVector { params.form_data_entry_list.value() };
             return {};
         }();
 
@@ -2151,8 +2180,81 @@ void Navigable::begin_navigation(NavigateParams params)
                 // 7. Let navigationParams be null.
                 NavigationParamsVariant navigation_params = Navigable::NullOrError {};
 
-                // FIXME: 8. If response is non-null:
+                // 8. If response is non-null:
                 if (response) {
+                    auto response_url = response->url();
+                    VERIFY(response_url.has_value());
+
+                    // 1. Let sourcePolicyContainer be a clone of the sourceDocument's policy container, if
+                    //    sourceDocument is not null; otherwise null.
+                    auto source_policy_container = source_snapshot_params->source_policy_container;
+
+                    // 2. Let policyContainer be the result of determining navigation params policy container given
+                    //    response's URL, null, sourcePolicyContainer, navigable's container document's policy container,
+                    //    and null.
+                    GC::Ptr<PolicyContainer> parent_policy_container;
+                    if (auto container_document = this->container_document())
+                        parent_policy_container = container_document->policy_container();
+                    else if (*response_url == URL::about_srcdoc()) {
+                        // NOTE: Specification assumes that only navigables corresponding to iframes can be navigated to about:srcdoc.
+                        //       We also use srcdoc to implement load_html() for top level navigables so we need a policy container
+                        //       because the navigable might not have a container.
+                        parent_policy_container = heap().allocate<PolicyContainer>(heap());
+                    }
+                    auto policy_container = determine_navigation_params_policy_container(*response_url, heap(), {}, source_policy_container, parent_policy_container, {});
+
+                    // 3. Let finalSandboxFlags be the union of targetSnapshotParams's sandboxing flags and
+                    //    policyContainer's CSP list's CSP-derived sandboxing flags.
+                    auto final_sandbox_flags = target_snapshot_params.sandboxing_flags | policy_container->csp_list->csp_derived_sandboxing_flags();
+
+                    // 4. Let responseOrigin be the result of determining the origin given response's URL,
+                    //    finalSandboxFlags, and documentState's initiator origin.
+                    auto response_origin = determine_the_origin(response_url, final_sandbox_flags, document_state->initiator_origin());
+
+                    // 5. Let coop be a new opener policy.
+                    OpenerPolicy response_coop = {};
+
+                    // 6. Let coopEnforcementResult be a new opener policy enforcement result with
+                    //    url: response's URL
+                    //    origin: responseOrigin
+                    //    opener policy: coop
+                    OpenerPolicyEnforcementResult coop_enforcement_result {
+                        .url = *response_url,
+                        .origin = response_origin,
+                        .opener_policy = response_coop,
+                    };
+
+                    // 7. Set navigationParams to a new navigation params, with
+                    //    id: navigationId
+                    //    navigable: navigable
+                    //    request: null
+                    //    response: response
+                    //    fetch controller: null
+                    //    commit early hints: null
+                    //    COOP enforcement result: coopEnforcementResult
+                    //    reserved environment: null
+                    //    origin: responseOrigin
+                    //    policy container: policyContainer
+                    //    final sandboxing flag set: finalSandboxFlags
+                    //    opener policy: coop
+                    //    FIXME: navigation timing type: "navigate"
+                    //    about base URL: documentState's about base URL
+                    //    user involvement: userInvolvement
+                    navigation_params = heap().allocate<NavigationParams>(
+                        navigation_id,
+                        this,
+                        nullptr,
+                        response,
+                        nullptr,
+                        nullptr,
+                        move(coop_enforcement_result),
+                        nullptr,
+                        move(response_origin),
+                        policy_container,
+                        final_sandbox_flags,
+                        response_coop,
+                        document_state->about_base_url(),
+                        user_involvement);
                 }
 
                 // 9. Attempt to populate the history entry's document for historyEntry, given navigable, "navigate",
@@ -2813,12 +2915,11 @@ CSSPixelPoint Navigable::to_top_level_position(CSSPixelPoint a_position)
             break;
         if (!ancestor->container())
             return {};
-        auto const* paintable = ancestor->container()->paintable();
+        auto paintable = ancestor->container()->paintable();
         if (!paintable)
             return {};
 
-        if (auto const* paintable_box = as_if<Painting::PaintableBox>(*paintable);
-            paintable_box && paintable_box->accumulated_visual_context_index().value()) {
+        if (auto const* paintable_box = as_if<Painting::PaintableBox>(*paintable)) {
             auto point = paintable_box->absolute_position();
             point.translate_by(position);
             position = paintable_box->transform_rect_to_viewport({ point, { 0, 0 } }).location();
@@ -2836,15 +2937,18 @@ void Navigable::set_viewport_size(CSSPixelSize size, InvalidateDisplayList inval
 
     m_viewport_size = size;
 
-    if (!m_is_svg_page) {
-        m_backing_store_manager->restart_resize_timer();
-        m_backing_store_manager->resize_backing_stores_if_needed(Web::Painting::BackingStoreManager::WindowResizingInProgress::Yes);
+    if (has_compositor_context()) {
+        compositor_context().viewport_size_updated(
+            page().css_to_device_rect(viewport_rect()).size().to_type<int>(),
+            Compositor::WindowResizingInProgress::Yes);
         m_pending_set_browser_zoom_request = false;
     }
 
     if (auto document = active_document()) {
-        // NOTE: Resizing the viewport changes the reference value for viewport-relative CSS lengths.
-        document->invalidate_style(DOM::StyleInvalidationReason::NavigableSetViewportSize);
+        if (invalidate_display_list == InvalidateDisplayList::Yes)
+            document->invalidate_style(DOM::StyleInvalidationReason::NavigableSetViewportSize);
+        else
+            document->invalidate_style_for_viewport_change();
         document->set_needs_media_query_evaluation();
         document->set_needs_layout_update(DOM::SetNeedsLayoutReason::NavigableSetViewportSize);
     }
@@ -2897,6 +3001,194 @@ void Navigable::perform_scroll_of_viewport_scrolling_box(CSSPixelPoint new_posit
 
     // Schedule the HTML event loop to ensure that a `resize` event gets fired.
     HTML::main_thread_event_loop().schedule();
+}
+
+static CSSPixelPoint async_scroll_offset_to_css_pixels(Gfx::FloatPoint async_scroll_offset, double device_pixels_per_css_pixel)
+{
+    return {
+        CSSPixels { async_scroll_offset.x() / device_pixels_per_css_pixel },
+        CSSPixels { async_scroll_offset.y() / device_pixels_per_css_pixel },
+    };
+}
+
+static Optional<CSS::PseudoElement> pseudo_element_from_async_scroll_node_stable_id(Compositor::AsyncScrollNodeStableID const& stable_id)
+{
+    if (stable_id.kind != Compositor::AsyncScrollNodeKind::PseudoElement)
+        return {};
+    if (stable_id.pseudo_element_type >= to_underlying(CSS::PseudoElement::KnownPseudoElementCount))
+        return {};
+    return static_cast<CSS::PseudoElement>(stable_id.pseudo_element_type);
+}
+
+static DOM::Element* element_for_async_scroll_node_stable_id(DOM::Document& document, Compositor::AsyncScrollNodeStableID const& stable_id)
+{
+    auto* node = DOM::Node::from_unique_id(stable_id.node_id);
+    auto* element = as_if<DOM::Element>(node);
+    if (!element || &element->document() != &document)
+        return nullptr;
+    return element;
+}
+
+static bool adopt_async_element_scroll_delta(DOM::Document& document, Compositor::AsyncScrollNodeStableID const& stable_id, CSSPixelPoint scroll_delta)
+{
+    auto* element = element_for_async_scroll_node_stable_id(document, stable_id);
+    if (!element)
+        return false;
+
+    Optional<CSS::PseudoElement> pseudo_element;
+    switch (stable_id.kind) {
+    case Compositor::AsyncScrollNodeKind::Viewport:
+        return false;
+    case Compositor::AsyncScrollNodeKind::Element:
+        break;
+    case Compositor::AsyncScrollNodeKind::PseudoElement:
+        pseudo_element = pseudo_element_from_async_scroll_node_stable_id(stable_id);
+        if (!pseudo_element.has_value())
+            return false;
+        if (!element->get_pseudo_element(*pseudo_element).has_value())
+            return false;
+        break;
+    }
+
+    auto scroll_offset = element->scroll_offset(pseudo_element);
+    scroll_offset.translate_by(scroll_delta);
+    if (element->scroll_offset(pseudo_element) == scroll_offset)
+        return false;
+
+    element->set_scroll_offset(pseudo_element, scroll_offset);
+
+    document.set_needs_to_refresh_scroll_state(true);
+    if (!document.pending_scroll_events().contains_slow(DOM::Document::PendingScrollEvent { *element, EventNames::scroll }))
+        document.pending_scroll_events().append({ *element, EventNames::scroll });
+    element->set_needs_repaint(InvalidateDisplayList::No);
+    return true;
+}
+
+static void queue_async_scroll_operation_promise_resolution(GC::Ref<WebIDL::Promise> promise)
+{
+    auto& realm = promise->promise()->shape().realm();
+    HTML::queue_a_microtask(nullptr, GC::create_function(realm.heap(), [promise] {
+        auto& realm = promise->promise()->shape().realm();
+        HTML::TemporaryExecutionContext execution_context {
+            realm,
+            HTML::TemporaryExecutionContext::CallbacksEnabled::Yes
+        };
+        WebIDL::resolve_promise(realm, promise);
+    }));
+}
+
+void Navigable::wait_for_async_scroll_operation(Compositor::AsyncScrollOperationID operation_id, GC::Ref<WebIDL::Promise> promise)
+{
+    if (has_been_destroyed() || !all_navigables().contains(*this)) {
+        queue_async_scroll_operation_promise_resolution(promise);
+        return;
+    }
+
+    m_pending_async_scroll_operations.append({ operation_id, promise });
+}
+
+void Navigable::resolve_async_scroll_operation(Compositor::AsyncScrollOperationID operation_id)
+{
+    m_pending_async_scroll_operations.remove_first_matching([&](auto const& pending) {
+        if (pending.operation_id != operation_id)
+            return false;
+
+        queue_async_scroll_operation_promise_resolution(pending.promise);
+        return true;
+    });
+}
+
+void Navigable::resolve_all_pending_async_scroll_operations()
+{
+    while (!m_pending_async_scroll_operations.is_empty()) {
+        auto pending = m_pending_async_scroll_operations.take_last();
+        queue_async_scroll_operation_promise_resolution(pending.promise);
+    }
+}
+
+static bool adopt_async_viewport_scroll_delta(Navigable& navigable, CSSPixelPoint scroll_delta)
+{
+    auto scroll_offset = navigable.viewport_scroll_offset();
+    scroll_offset.translate_by(scroll_delta);
+    if (scroll_offset == navigable.viewport_scroll_offset())
+        return false;
+    navigable.perform_scroll_of_viewport_scrolling_box(scroll_offset);
+    return true;
+}
+
+void Navigable::adopt_pending_async_scroll_offsets()
+{
+    if (!page().async_scrolling_enabled() || !has_compositor_context())
+        return;
+
+    // The compositor process may have already presented newer scroll offsets. Adopt the latest ones before running
+    // rendering-update observers so they see the same scroll positions as the user.
+    auto async_scroll_updates = compositor_context().take_pending_async_scroll_updates();
+    if (async_scroll_updates.scroll_offsets.is_empty() && async_scroll_updates.completed_operation_ids.is_empty())
+        return;
+
+    auto document = active_document();
+    if (!document) {
+        for (auto operation_id : async_scroll_updates.completed_operation_ids)
+            resolve_async_scroll_operation(operation_id);
+        return;
+    }
+
+    auto device_pixels_per_css_pixel = page().client().device_pixels_per_css_pixel();
+    bool adopted_any_scroll_delta = false;
+    for (auto const& async_scroll_offset : async_scroll_updates.scroll_offsets) {
+        auto css_scroll_delta = async_scroll_offset_to_css_pixels(async_scroll_offset.unadopted_scroll_delta, device_pixels_per_css_pixel);
+        if (async_scroll_offset.stable_node_id.kind == Compositor::AsyncScrollNodeKind::Viewport) {
+            if (async_scroll_offset.stable_node_id.node_id != document->unique_id())
+                continue;
+            if (adopt_async_viewport_scroll_delta(*this, css_scroll_delta)) {
+                adopted_any_scroll_delta = true;
+                dbgln_if(COMPOSITOR_DEBUG, "[Compositor] Main thread adopting async viewport delta {},{}",
+                    async_scroll_offset.unadopted_scroll_delta.x(), async_scroll_offset.unadopted_scroll_delta.y());
+            }
+            continue;
+        }
+
+        if (adopt_async_element_scroll_delta(*document, async_scroll_offset.stable_node_id, css_scroll_delta)) {
+            adopted_any_scroll_delta = true;
+            dbgln_if(COMPOSITOR_DEBUG, "[Compositor] Main thread adopting async element delta {},{}",
+                async_scroll_offset.unadopted_scroll_delta.x(), async_scroll_offset.unadopted_scroll_delta.y());
+        }
+    }
+
+    if (adopted_any_scroll_delta)
+        schedule_hover_update_after_async_scroll();
+
+    for (auto operation_id : async_scroll_updates.completed_operation_ids)
+        resolve_async_scroll_operation(operation_id);
+}
+
+void Navigable::schedule_hover_update_after_async_scroll()
+{
+    static constexpr int hover_update_after_async_scroll_delay_ms = 100;
+
+    if (!m_async_scroll_hover_update_timer) {
+        m_async_scroll_hover_update_timer = Core::Timer::create_single_shot(hover_update_after_async_scroll_delay_ms, [this] {
+            update_hover_after_async_scroll_stops();
+        });
+        m_async_scroll_hover_update_timer->start();
+        return;
+    }
+
+    m_async_scroll_hover_update_timer->restart(hover_update_after_async_scroll_delay_ms);
+}
+
+void Navigable::update_hover_after_async_scroll_stops()
+{
+    if (has_been_destroyed())
+        return;
+    event_handler().update_hover_after_scroll();
+}
+
+void Navigable::cancel_hover_update_after_async_scroll()
+{
+    if (m_async_scroll_hover_update_timer)
+        m_async_scroll_hover_update_timer->stop();
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#rendering-opportunity
@@ -2958,30 +3250,39 @@ void Navigable::inform_the_navigation_api_about_aborting_navigation()
 
 bool Navigable::is_focused() const
 {
+    if (!m_page->client().has_focus())
+        return false;
     return &m_page->focused_navigable() == this;
 }
 
 static String visible_text_in_range(DOM::Range const& range)
 {
-    // NOTE: This is an adaption of Range stringification, but we skip over DOM nodes that don't have a corresponding layout node.
+    // NOTE: This is an adaption of Range stringification — but we skip over DOM nodes that don't have a corresponding
+    //       layout node, and over nodes whose used value of user-select is 'none'. The latter implements
+    //       https://drafts.csswg.org/css-ui/#valdef-user-select-none — applied at the clipboard-extraction boundary.
     StringBuilder builder;
 
+    auto is_user_select_none = [](DOM::Node const& node) {
+        auto const* layout = node.layout_node();
+        return layout && layout->user_select_used_value() == CSS::UserSelect::None;
+    };
+
     if (range.start_container() == range.end_container() && is<DOM::Text>(*range.start_container())) {
-        if (!range.start_container()->layout_node())
+        if (!range.start_container()->layout_node() || is_user_select_none(*range.start_container()))
             return String {};
         return static_cast<DOM::Text const&>(*range.start_container()).data().substring_view(range.start_offset(), range.end_offset() - range.start_offset()).to_utf8_but_should_be_ported_to_utf16();
     }
 
-    if (is<DOM::Text>(*range.start_container()) && range.start_container()->layout_node())
+    if (is<DOM::Text>(*range.start_container()) && range.start_container()->layout_node() && !is_user_select_none(*range.start_container()))
         builder.append(static_cast<DOM::Text const&>(*range.start_container()).data().substring_view(range.start_offset()));
 
     range.for_each_contained([&](GC::Ref<DOM::Node> node) {
-        if (is<DOM::Text>(*node) && node->layout_node())
+        if (is<DOM::Text>(*node) && node->layout_node() && !is_user_select_none(*node))
             builder.append(static_cast<DOM::Text const&>(*node).data());
         return IterationDecision::Continue;
     });
 
-    if (is<DOM::Text>(*range.end_container()) && range.end_container()->layout_node())
+    if (is<DOM::Text>(*range.end_container()) && range.end_container()->layout_node() && !is_user_select_none(*range.end_container()))
         builder.append(static_cast<DOM::Text const&>(*range.end_container()).data().substring_view(0, range.end_offset()));
 
     return MUST(builder.to_string());
@@ -3010,6 +3311,24 @@ String Navigable::selected_text() const
     return visible_text_in_range(*range);
 }
 
+String Navigable::cut_selected_text() const
+{
+    auto document = active_document();
+    if (!document)
+        return {};
+
+    auto* target = document->active_input_events_target();
+    if (!target)
+        return {};
+
+    auto text = selected_text();
+    if (text.is_empty())
+        return {};
+
+    target->handle_delete(UIEvents::InputTypes::deleteByCut);
+    return text;
+}
+
 void Navigable::select_all()
 {
     auto document = active_document();
@@ -3034,6 +3353,75 @@ void Navigable::paste(Utf16String const& text)
         return;
 
     m_event_handler.handle_paste(text);
+}
+
+void Navigable::set_marked_text_from_input_method(Utf16String const& text)
+{
+    // Platform input methods call this on each composition update, with the current marked/preedit text. LibWeb owns
+    // the marked-text range – so each update replaces the previously-marked text. The UI doesn't track the preedit
+    // extent or pass a replacement length. An empty marked string means there's no preedit: so, clear any text marked
+    // thus far, and end the composition — rather than starting or keeping a composition that has no marked text.
+    if (text.is_empty()) {
+        if (m_input_method_composition_node)
+            replace_input_method_marked_text(text);
+        m_input_method_composition_node = nullptr;
+        return;
+    }
+    replace_input_method_marked_text(text);
+}
+
+void Navigable::commit_text_from_input_method(Utf16String const& text)
+{
+    // The input method has committed text and finished the composition. Replace the marked text with the committed
+    // text, then end the composition — so the text becomes ordinary editable content.
+    replace_input_method_marked_text(text);
+    m_input_method_composition_node = nullptr;
+}
+
+void Navigable::unmark_text_from_input_method()
+{
+    // The input method has finished the composition — leaving the current marked text in place. End the composition
+    // without altering the content.
+    m_input_method_composition_node = nullptr;
+}
+
+void Navigable::replace_input_method_marked_text(Utf16String const& text)
+{
+    // Insert text from a platform input method into the currently-focused editable, via the same input-events target
+    // that keyboard typing uses — so observers see the correct InputEvent.inputType.
+    auto document = active_document();
+    if (!document || !document->is_fully_active()) {
+        m_input_method_composition_node = nullptr;
+        return;
+    }
+    auto* target = document->active_input_events_target();
+    if (!target) {
+        m_input_method_composition_node = nullptr;
+        return;
+    }
+
+    // Drop a stale composition start (for example, if the editable content was replaced out from under us).
+    if (m_input_method_composition_node && !m_input_method_composition_node->is_connected())
+        m_input_method_composition_node = nullptr;
+
+    // The caret is the end of the marked text. Read it while the selection is still collapsed. Forming the marked-text
+    // selection below would otherwise make cursor_position() return null for form controls.
+    auto caret = document->cursor_position();
+    if (!caret)
+        return;
+
+    if (m_input_method_composition_node) {
+        // A composition is already in progress. Select the existing marked text [composition start, caret] — so that
+        // the insertion below replaces it.
+        target->set_selection_anchor(*m_input_method_composition_node, m_input_method_composition_offset);
+        target->set_selection_focus(caret->node(), caret->offset());
+    } else {
+        // Begin a new composition at the caret. The marked text spans from here to the caret as it is updated.
+        m_input_method_composition_node = caret->node();
+        m_input_method_composition_offset = caret->offset();
+    }
+
+    target->handle_insert(UIEvents::InputTypes::insertText, text);
 }
 
 // https://drafts.csswg.org/css-view-transitions-1/#snapshot-containing-block
@@ -3085,57 +3473,186 @@ void Navigable::set_has_session_history_entry_and_ready_for_navigation()
     }
 }
 
-void Navigable::ready_to_paint()
+Painting::CompositorSurfaceId Navigable::compositor_surface_id() const
 {
-    m_rendering_thread.ready_to_paint();
+    VERIFY(m_compositor_surface_id.has_value());
+    return *m_compositor_surface_id;
 }
 
-NonnullRefPtr<Painting::ExternalContentSource> Navigable::external_content_source() const
+void Navigable::clear_compositor_surface()
 {
-    VERIFY(m_external_content_source);
-    return *m_external_content_source;
+    if (!m_compositor_surface_id.has_value())
+        return;
+    if (auto parent = this->parent(); parent && parent->has_compositor_context())
+        parent->compositor_context().clear_compositor_surface(*m_compositor_surface_id);
+    m_compositor_surface_id.clear();
 }
 
-void Navigable::record_display_list_and_scroll_state(PaintConfig paint_config)
+void Navigable::destroy_compositor_context()
 {
+    clear_compositor_surface();
+    m_compositor_context.clear();
+}
+
+void Navigable::repaint_after_compositor_process_reconnect()
+{
+    resolve_all_pending_async_scroll_operations();
+
+    if (has_compositor_context()) {
+        if (auto parent = this->parent();
+            parent && parent->has_compositor_context() && has_compositor_surface_id()) {
+            compositor_context().set_presentation_mode(Compositor::PublishToCompositorSurface {
+                .target_context_id = parent->compositor_context().id(),
+                .surface_id = *m_compositor_surface_id,
+            });
+        }
+        compositor_context().viewport_size_updated(
+            page().css_to_device_rect(viewport_rect()).size().to_type<int>(),
+            Compositor::WindowResizingInProgress::No);
+
+        m_needs_repaint = true;
+        m_needs_to_record_display_list = true;
+        m_compositor_display_list_paint_config.clear();
+        m_compositor_display_list_resources = {};
+    }
+
+    for (auto const& child_navigable : child_navigables())
+        child_navigable->repaint_after_compositor_process_reconnect();
+}
+
+void Navigable::set_should_show_line_box_borders(bool value)
+{
+    m_should_show_line_box_borders = value;
+    set_needs_repaint();
+
+    for (auto const& child_navigable : child_navigables())
+        child_navigable->set_should_show_line_box_borders(value);
+}
+
+void Navigable::set_should_show_caret_hit_test_debug_overlay(bool value)
+{
+    m_should_show_caret_hit_test_debug_overlay = value;
+
+    if (auto document = active_document()) {
+        if (value)
+            document->set_needs_repaint(Badge<HTML::Navigable> {}, InvalidateDisplayList::Yes);
+        else
+            document->set_caret_hit_test_debug_rect({});
+    }
+
+    for (auto const& child_navigable : child_navigables())
+        child_navigable->set_should_show_caret_hit_test_debug_overlay(value);
+}
+
+bool Navigable::record_display_list_and_scroll_state(PaintConfig paint_config)
+{
+    if (!has_compositor_context())
+        return false;
+
     m_needs_repaint = false;
     auto document = active_document();
     if (!document)
-        return;
+        return false;
 
-    auto display_list = document->record_display_list(paint_config);
-    if (!display_list)
-        return;
+    adopt_pending_async_scroll_offsets();
+    document->update_paint_and_hit_testing_properties_if_needed();
 
-    auto& document_paintable = *document->paintable();
-    document_paintable.refresh_scroll_state();
+    auto should_record_display_list = m_needs_to_record_display_list
+        || !m_compositor_display_list_paint_config.has_value()
+        || !(m_compositor_display_list_paint_config.value() == paint_config);
 
-    m_rendering_thread.update_display_list(*display_list, Painting::ScrollStateSnapshot(document_paintable.scroll_state_snapshot()));
+    RefPtr<Painting::DisplayList> display_list;
+    Painting::DisplayListResourceSet display_list_resources;
+    Painting::DisplayListResourceTransaction resource_transaction;
+    Optional<Painting::AccumulatedVisualContextTree> visual_context_tree;
+    if (should_record_display_list) {
+        display_list = document->record_display_list(paint_config, m_display_list_resource_storage);
+        if (!display_list)
+            return false;
+        auto recorded_document_paintable = document->paintable();
+        VERIFY(recorded_document_paintable);
+        visual_context_tree = recorded_document_paintable->visual_context_tree();
+        display_list_resources = m_display_list_resource_storage.collect_referenced_resources(*display_list);
+        display_list_resources.include(m_display_list_resource_storage.cache_referenced_resources());
+        resource_transaction = m_display_list_resource_storage.create_transaction(
+            m_compositor_display_list_resources,
+            display_list_resources);
+    }
+
+    auto document_paintable = document->paintable();
+    VERIFY(document_paintable);
+    auto visual_context_tree_needs_compositor_update = document_paintable->visual_context_tree_needs_compositor_update();
+    document_paintable->refresh_scroll_state();
+
+    Painting::ScrollStateSnapshot scroll_state_snapshot { document_paintable->scroll_state_snapshot() };
+    if (should_record_display_list) {
+        compositor_context().update_display_list(*display_list, visual_context_tree.release_value(), move(resource_transaction), move(scroll_state_snapshot));
+        document_paintable->did_update_visual_context_tree_in_compositor();
+        m_display_list_resource_storage.retain_only(display_list_resources);
+        m_compositor_display_list_resources = move(display_list_resources);
+        m_needs_to_record_display_list = false;
+        m_compositor_display_list_paint_config = paint_config;
+    } else {
+        if (visual_context_tree_needs_compositor_update) {
+            compositor_context().update_visual_context_tree(document_paintable->visual_context_tree());
+            document_paintable->did_update_visual_context_tree_in_compositor();
+        }
+        compositor_context().update_scroll_state(move(scroll_state_snapshot));
+    }
+    return true;
 }
 
 void Navigable::paint_next_frame()
 {
+    if (has_been_destroyed())
+        return;
+    if (!has_compositor_context()) {
+        m_needs_repaint = false;
+        return;
+    }
+
     auto viewport_rect = page().css_to_device_rect(this->viewport_rect()).to_type<int>();
-    PaintConfig paint_config { .paint_overlay = true, .should_show_line_box_borders = m_should_show_line_box_borders };
+    PaintConfig paint_config { .paint_overlay = true, .should_show_line_box_borders = m_should_show_line_box_borders, .should_show_caret_hit_test_debug_overlay = m_should_show_caret_hit_test_debug_overlay };
     if (is_top_level_traversable()) {
         paint_config.canvas_fill_rect = Gfx::IntRect { {}, viewport_rect.size() };
     } else {
-        // Nested navigables publish transparent bitmaps to their preconfigured ExternalContentSource instead of filling
+        // Nested navigables publish transparent bitmaps to their preconfigured compositor surface instead of filling
         // the canvas for the UI process.
-        VERIFY(m_external_content_source);
+        if (!m_compositor_surface_id.has_value())
+            return;
     }
 
-    record_display_list_and_scroll_state(paint_config);
+    auto should_defer_main_thread_present_for_async_scroll = [&] {
+        return page().async_scrolling_enabled()
+            && compositor_context().should_defer_main_thread_present_for_async_scroll();
+    };
+    if (should_defer_main_thread_present_for_async_scroll())
+        return;
 
-    auto frame_id = m_rendering_thread.present_frame(viewport_rect);
-    if (!is_top_level_traversable())
-        m_rendering_thread.wait_for_frame(frame_id);
+    if (!record_display_list_and_scroll_state(paint_config))
+        return;
+
+    viewport_rect = page().css_to_device_rect(this->viewport_rect()).to_type<int>();
+    if (should_defer_main_thread_present_for_async_scroll()) {
+        dbgln_if(COMPOSITOR_DEBUG, "[Compositor] Main thread deferred present while async scroll is pending");
+        return;
+    }
+
+    compositor_context().present_frame(viewport_rect);
 }
 
 void Navigable::render_screenshot(Gfx::PaintingSurface& painting_surface, PaintConfig paint_config, Function<void()>&& callback)
 {
-    record_display_list_and_scroll_state(paint_config);
-    m_rendering_thread.request_screenshot(painting_surface, move(callback));
+    if (!has_compositor_context()) {
+        callback();
+        return;
+    }
+
+    if (!record_display_list_and_scroll_state(paint_config)) {
+        callback();
+        return;
+    }
+    compositor_context().request_screenshot(painting_surface, move(callback));
 }
 
 GC::Ref<WebIDL::Promise> Navigable::scroll_viewport_by_delta(CSSPixelPoint delta)
@@ -3196,8 +3713,8 @@ GC::Ref<WebIDL::Promise> Navigable::perform_a_scroll_of_the_viewport(CSSPixelPoi
     // NB: Must update layout before accessing paintables.
     doc->update_layout(DOM::UpdateLayoutReason::NavigableViewportScroll);
 
-    // AD-HOC: Skip scrolling unscrollable boxes.
-    if (!doc->paintable_box()->could_be_scrolled_by_wheel_event())
+    // AD-HOC: Skip scrolling unscrollable boxes, unless this scroll can pan the visual viewport.
+    if (!doc->paintable_box()->could_be_scrolled_by_wheel_event() && visual_dx == 0.0 && visual_dy == 0.0)
         return WebIDL::create_resolved_promise(doc->realm(), JS::js_undefined());
 
     auto scrolling_area = doc->paintable_box()->scrollable_overflow_rect()->to_type<float>();
@@ -3219,12 +3736,8 @@ GC::Ref<WebIDL::Promise> Navigable::perform_a_scroll_of_the_viewport(CSSPixelPoi
     //     from this step.
     // FIXME: Get a Promise from this.
     vv->scroll_by({ visual_dx, visual_dy });
-    if (visual_dx != 0.0 || visual_dy != 0.0) {
-        doc->set_needs_accumulated_visual_contexts_update(true);
-        doc->set_needs_repaint(Badge<HTML::Navigable> {}, InvalidateDisplayList::Yes);
-    } else {
+    if (visual_dx == 0.0 && visual_dy == 0.0)
         doc->set_needs_repaint(Badge<HTML::Navigable> {}, InvalidateDisplayList::No);
-    }
 
     // 16. Let scrollPromise be a new Promise.
     auto scroll_promise = WebIDL::create_promise(doc->realm());

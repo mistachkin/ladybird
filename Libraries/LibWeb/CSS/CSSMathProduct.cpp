@@ -43,14 +43,14 @@ WebIDL::ExceptionOr<GC::Ref<CSSMathProduct>> CSSMathProduct::multiply_all_types_
 }
 
 // https://drafts.css-houdini.org/css-typed-om-1/#dom-cssmathproduct-cssmathproduct
-WebIDL::ExceptionOr<GC::Ref<CSSMathProduct>> CSSMathProduct::construct_impl(JS::Realm& realm, Vector<CSSNumberish> values)
+WebIDL::ExceptionOr<GC::Ref<CSSMathProduct>> CSSMathProduct::construct_impl(JS::Realm& realm, ReadonlySpan<CSSNumberish> values)
 {
     // The CSSMathProduct(...args) constructor is defined identically to the above, except that in step 3 it multiplies
     // the types instead of adding, and in the last step it returns a CSSMathProduct.
     // NB: So, the steps below are a modification of the CSSMathSum steps.
 
     // 1. Replace each item of args with the result of rectifying a numberish value for the item.
-    GC::RootVector<GC::Ref<CSSNumericValue>> converted_values { realm.heap() };
+    GC::RootVector<GC::Ref<CSSNumericValue>> converted_values;
     converted_values.ensure_capacity(values.size());
     for (auto const& value : values) {
         converted_values.append(rectify_a_numberish_value(realm, value));

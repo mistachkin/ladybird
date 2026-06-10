@@ -78,6 +78,7 @@ CSSRotate
 CSSRule
 CSSRuleList
 CSSScale
+CSSScopeRule
 CSSSkew
 CSSSkewX
 CSSSkewY
@@ -99,6 +100,7 @@ CacheStorage
 CanvasGradient
 CanvasPattern
 CanvasRenderingContext2D
+CaretPosition
 ChannelMergerNode
 ChannelSplitterNode
 CharacterData
@@ -353,6 +355,8 @@ PerformanceObserverEntryList
 PerformanceResourceTiming
 PerformanceTiming
 PeriodicWave
+PermissionStatus
+Permissions
 Plugin
 PluginArray
 PointerEvent
@@ -593,4 +597,5 @@ removeTestErrorHandler
 spoofCurrentURL
 test
 timeout
+uniqueLocalhostHostname
 webkitURL

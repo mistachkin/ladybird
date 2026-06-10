@@ -6,6 +6,8 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Atomic.h>
+#include <AK/NumericLimits.h>
 #include <AK/TypeCasts.h>
 #include <AK/Utf16String.h>
 #include <LibGfx/Font/Font.h>
@@ -22,17 +24,16 @@
 
 namespace Gfx {
 
-Font::Font(NonnullRefPtr<Typeface const> typeface, float point_width, float point_height, unsigned dpi_x, unsigned dpi_y, FontVariationSettings const variations, ShapeFeatures const& features)
-    : m_typeface(move(typeface))
+static Atomic<u64> s_next_id { 1 };
+
+Font::Font(NonnullRefPtr<Typeface const> typeface, float point_width, float point_height, FontVariationSettings const variations, ShapeFeatures const& features)
+    : m_id(s_next_id.fetch_add(1, AK::MemoryOrder::memory_order_relaxed))
+    , m_typeface(move(typeface))
     , m_point_width(point_width)
     , m_point_height(point_height)
     , m_font_variation_settings(move(variations))
     , m_shape_features(features)
 {
-    float const units_per_em = m_typeface->units_per_em();
-    m_x_scale = (point_width * dpi_x) / (POINTS_PER_INCH * units_per_em);
-    m_y_scale = (point_height * dpi_y) / (POINTS_PER_INCH * units_per_em);
-
     m_pixel_size = m_point_height * (DEFAULT_DPI / POINTS_PER_INCH);
 
     auto const* sk_typeface = as<TypefaceSkia>(*m_typeface).sk_typeface();
@@ -42,27 +43,12 @@ Font::Font(NonnullRefPtr<Typeface const> typeface, float point_width, float poin
     font.getMetrics(&skMetrics);
 
     FontPixelMetrics metrics;
-    metrics.size = font.getSize();
     metrics.x_height = skMetrics.fXHeight;
     metrics.advance_of_ascii_zero = font.measureText("0", 1, SkTextEncoding::kUTF8);
     metrics.ascent = -skMetrics.fAscent;
     metrics.descent = skMetrics.fDescent;
-    metrics.line_gap = skMetrics.fLeading;
 
     m_pixel_metrics = metrics;
-}
-
-ScaledFontMetrics Font::metrics() const
-{
-    SkFontMetrics sk_metrics;
-    skia_font(1).getMetrics(&sk_metrics);
-
-    ScaledFontMetrics metrics;
-    metrics.ascender = -sk_metrics.fAscent;
-    metrics.descender = sk_metrics.fDescent;
-    metrics.line_gap = sk_metrics.fLeading;
-    metrics.x_height = sk_metrics.fXHeight;
-    return metrics;
 }
 
 float Font::width(Utf16View const& view) const { return measure_text_width(view, *this); }
@@ -73,18 +59,13 @@ float Font::glyph_width(u32 code_point) const
     return measure_text_width(string.utf16_view(), *this);
 }
 
-NonnullRefPtr<Font> Font::scaled_with_size(float point_size) const
+NonnullRefPtr<Font> Font::with_size(float point_size) const
 {
     if (point_size == m_point_height && point_size == m_point_width)
         return *const_cast<Font*>(this);
 
     // FIXME: Should we be discarding m_font_variation_settings and m_shape_features here?
     return m_typeface->font(point_size);
-}
-
-NonnullRefPtr<Font> Font::with_size(float point_size) const
-{
-    return scaled_with_size(point_size);
 }
 
 float Font::pixel_size() const
@@ -113,12 +94,26 @@ Font const& Font::bold_variant() const
     return *m_bold_variant;
 }
 
+static int scale_for_harfbuzz(float pixel_size)
+{
+    auto scaled_pixel_size = static_cast<double>(pixel_size) * text_shaping_resolution;
+    if (__builtin_isnan(scaled_pixel_size))
+        return 0;
+    if (scaled_pixel_size >= NumericLimits<int>::max())
+        return NumericLimits<int>::max();
+    if (scaled_pixel_size <= NumericLimits<int>::min())
+        return NumericLimits<int>::min();
+    return static_cast<int>(scaled_pixel_size);
+}
+
 hb_font_t* Font::harfbuzz_font() const
 {
     if (!m_harfbuzz_font) {
         m_harfbuzz_font = hb_font_create(typeface().harfbuzz_typeface());
-        hb_font_set_scale(m_harfbuzz_font, pixel_size() * text_shaping_resolution, pixel_size() * text_shaping_resolution);
-        hb_font_set_ptem(m_harfbuzz_font, point_size());
+        auto harfbuzz_scale = scale_for_harfbuzz(pixel_size());
+        hb_font_set_scale(m_harfbuzz_font, harfbuzz_scale, harfbuzz_scale);
+        // HarfBuzz uses ptem for AAT 'trak' table lookup; use CSS pixels instead of physical points here.
+        hb_font_set_ptem(m_harfbuzz_font, pixel_size());
 
         auto variations = m_font_variation_settings.axes;
         if (!variations.is_empty()) {
@@ -143,23 +138,13 @@ SkFont Font::skia_font(float scale) const
     return sk_font;
 }
 
-Font::ShapingCache::~ShapingCache()
-{
-    clear();
-}
+Font::ShapingCache::~ShapingCache() = default;
 
 void Font::ShapingCache::clear()
 {
-    for (auto& it : map) {
-        hb_buffer_destroy(it.value);
-    }
     map.clear();
-    for (auto& buffer : single_ascii_character_map) {
-        if (buffer) {
-            hb_buffer_destroy(buffer);
-            buffer = nullptr;
-        }
-    }
+    for (auto& slot : single_ascii_character_map)
+        slot = nullptr;
 }
 
 static bool hb_face_has_table(hb_face_t* face, hb_tag_t tag)

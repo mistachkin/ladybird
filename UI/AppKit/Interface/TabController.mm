@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibCore/EventLoop.h>
 #include <LibWebView/Application.h>
 #include <LibWebView/Autocomplete.h>
 #include <LibWebView/BookmarkStore.h>
@@ -31,6 +32,11 @@ static NSString* const TOOLBAR_ZOOM_IDENTIFIER = @"ToolbarZoomIdentifier";
 static NSString* const TOOLBAR_BOOKMARK_IDENTIFIER = @"ToolbarBookmarkIdentifier";
 static NSString* const TOOLBAR_NEW_TAB_IDENTIFIER = @"ToolbarNewTabIdentifier";
 static NSString* const TOOLBAR_TAB_OVERVIEW_IDENTIFIER = @"ToolbarTabOverviewIdentifier";
+
+enum class LocationFieldDisplay {
+    Editing,
+    NotEditing,
+};
 
 static NSString* candidate_by_trimming_root_trailing_slash(NSString* candidate);
 
@@ -157,20 +163,131 @@ static NSInteger autocomplete_suggestion_index(NSString* suggestion_text, Vector
     return NSNotFound;
 }
 
+static NSImage* location_field_globe_icon()
+{
+    static NSImage* image;
+    static dispatch_once_t token;
+    dispatch_once(&token, ^{
+        image = [NSImage imageWithSystemSymbolName:@"globe" accessibilityDescription:@"Page icon"];
+        [image setSize:NSMakeSize(16, 16)];
+    });
+    return image;
+}
+
 @interface LocationSearchField : NSSearchField
+{
+    BOOL m_loading;
+    BOOL m_shows_page_icon;
+    NSImage* m_favicon;
+    NSProgressIndicator* m_loading_indicator;
+}
 
 - (BOOL)becomeFirstResponder;
+- (void)setLoading:(BOOL)loading;
+- (void)setFavicon:(NSImage*)favicon;
+- (void)setShowsPageIcon:(BOOL)showsPageIcon;
+
+@property (nonatomic, copy) void (^willBeginEditing)(void);
 
 @end
 
 @implementation LocationSearchField
 
+- (instancetype)init
+{
+    if (self = [super init]) {
+        m_loading_indicator = [[NSProgressIndicator alloc] init];
+        [m_loading_indicator setStyle:NSProgressIndicatorStyleSpinning];
+        [m_loading_indicator setControlSize:NSControlSizeSmall];
+        [m_loading_indicator setDisplayedWhenStopped:NO];
+        [m_loading_indicator setHidden:YES];
+        [self addSubview:m_loading_indicator];
+
+        [self updateLeadingIcon];
+    }
+
+    return self;
+}
+
 - (BOOL)becomeFirstResponder
 {
     BOOL result = [super becomeFirstResponder];
-    if (result)
+    if (result) {
+        if (self.willBeginEditing)
+            self.willBeginEditing();
         [self performSelector:@selector(selectText:) withObject:self afterDelay:0];
+    }
     return result;
+}
+
+- (void)mouseDown:(NSEvent*)event
+{
+    [super mouseDown:event];
+
+    if (self.willBeginEditing)
+        self.willBeginEditing();
+}
+
+- (void)layout
+{
+    [super layout];
+
+    auto* cell = (NSSearchFieldCell*)[self cell];
+    auto search_button_rect = [cell searchButtonRectForBounds:[self bounds]];
+    auto indicator_size = NSMakeSize(16, 16);
+    [m_loading_indicator setFrame:NSMakeRect(
+                                      NSMidX(search_button_rect) - indicator_size.width / 2,
+                                      NSMidY(search_button_rect) - indicator_size.height / 2,
+                                      indicator_size.width,
+                                      indicator_size.height)];
+}
+
+- (void)setLoading:(BOOL)loading
+{
+    if (m_loading == loading)
+        return;
+
+    m_loading = loading;
+    if (m_loading) {
+        [m_loading_indicator setHidden:NO];
+        [m_loading_indicator startAnimation:self];
+    } else {
+        [m_loading_indicator stopAnimation:self];
+        [m_loading_indicator setHidden:YES];
+    }
+
+    [self updateLeadingIcon];
+}
+
+- (void)setFavicon:(NSImage*)favicon
+{
+    m_favicon = [favicon copy];
+    [m_favicon setSize:NSMakeSize(16, 16)];
+    [m_favicon setTemplate:NO];
+    [self updateLeadingIcon];
+}
+
+- (void)setShowsPageIcon:(BOOL)showsPageIcon
+{
+    m_shows_page_icon = showsPageIcon;
+    [self updateLeadingIcon];
+}
+
+- (void)updateLeadingIcon
+{
+    auto* cell = (NSSearchFieldCell*)[self cell];
+    auto* search_button = [cell searchButtonCell];
+
+    if (m_loading) {
+        [search_button setImage:nil];
+    } else if (m_shows_page_icon && m_favicon != nil) {
+        [search_button setImage:m_favicon];
+    } else if (!m_shows_page_icon) {
+        [search_button setImage:[NSImage imageWithSystemSymbolName:@"magnifyingglass"
+                                          accessibilityDescription:@"Search"]];
+    } else {
+        [search_button setImage:location_field_globe_icon()];
+    }
 }
 
 // NSSearchField does not provide an intrinsic width, which causes an ambiguous layout warning when the toolbar auto-
@@ -196,6 +313,7 @@ static NSInteger autocomplete_suggestion_index(NSString* suggestion_text, Vector
     bool m_fullscreen_requested_for_web_content;
     bool m_fullscreen_exit_was_ui_initiated;
     bool m_fullscreen_should_restore_tab_bar;
+    Function<void()> m_pending_immediate_close;
 }
 
 @property (nonatomic, assign) BOOL already_requested_close;
@@ -276,18 +394,13 @@ static NSInteger autocomplete_suggestion_index(NSString* suggestion_text, Vector
             }
 
             auto selected_row = [self applyInlineAutocomplete:suggestions];
-            if (result_kind == WebView::AutocompleteResultKind::Intermediate && [self.autocomplete isVisible]) {
-                if (auto selected_suggestion = [self.autocomplete selectedSuggestion];
-                    selected_suggestion.has_value()) {
-                    for (auto const& suggestion : suggestions) {
-                        if (suggestion.text == *selected_suggestion)
-                            return;
-                    }
-                }
 
-                [self.autocomplete clearSelection];
+            // Do not update the popup while results are still changing.
+            // Intermediate updates are triggered on every keystroke and would
+            // cause visible flicker in the suggestion list.
+            // Only final results are used to refresh the UI.
+            if (result_kind == WebView::AutocompleteResultKind::Intermediate && [self.autocomplete isVisible])
                 return;
-            }
 
             [self.autocomplete showWithSuggestions:move(suggestions)
                                        selectedRow:selected_row];
@@ -322,6 +435,19 @@ static NSInteger autocomplete_suggestion_index(NSString* suggestion_text, Vector
 - (void)onLoadStart:(URL::URL const&)url isRedirect:(BOOL)isRedirect
 {
     [self setLocationFieldText:url.serialize()];
+    [(LocationSearchField*)[self.location_toolbar_item view] setFavicon:nil];
+    [(LocationSearchField*)[self.location_toolbar_item view] setLoading:YES];
+}
+
+- (void)onLoadFinish:(URL::URL const&)url
+{
+    (void)url;
+    [(LocationSearchField*)[self.location_toolbar_item view] setLoading:NO];
+}
+
+- (void)onFaviconChange:(NSImage*)favicon
+{
+    [(LocationSearchField*)[self.location_toolbar_item view] setFavicon:favicon];
 }
 
 - (void)onURLChange:(URL::URL const&)url
@@ -352,6 +478,7 @@ static NSInteger autocomplete_suggestion_index(NSString* suggestion_text, Vector
 
 - (void)focusLocationToolbarItem
 {
+    [self restoreLocationFieldForEditing];
     [self tab].preferred_first_responder = self.location_toolbar_item.view;
     [self.window makeFirstResponder:self.location_toolbar_item.view];
 }
@@ -387,9 +514,15 @@ static NSInteger autocomplete_suggestion_index(NSString* suggestion_text, Vector
     self.tab.titlebarAppearsTransparent = YES;
 }
 
-- (void)setLocationFieldText:(StringView)url
+- (void)setLocationFieldText:(StringView)url display:(LocationFieldDisplay)display
 {
     NSMutableAttributedString* attributed_url;
+    auto maybe_url = URL::create_with_url_or_path(url);
+    auto display_url = MUST(String::from_utf8(url));
+    if (display == LocationFieldDisplay::NotEditing && maybe_url.has_value())
+        display_url = WebView::url_for_display(*maybe_url);
+
+    auto url_parts = WebView::break_url_into_parts(url);
 
     auto* dark_attributes = @{
         NSForegroundColorAttributeName : [NSColor systemGrayColor],
@@ -398,11 +531,22 @@ static NSInteger autocomplete_suggestion_index(NSString* suggestion_text, Vector
         NSForegroundColorAttributeName : [NSColor textColor],
     };
 
-    if (auto url_parts = WebView::break_url_into_parts(url); url_parts.has_value()) {
+    if (url_parts.has_value()) {
         attributed_url = [[NSMutableAttributedString alloc] init];
 
+        auto scheme_and_subdomain = url_parts->scheme_and_subdomain;
+        auto remainder = url_parts->remainder;
+        if (display == LocationFieldDisplay::NotEditing && maybe_url.has_value() && maybe_url->scheme().is_one_of("http"sv, "https"sv)) {
+            auto scheme_prefix_length = maybe_url->scheme().bytes_as_string_view().length() + "://"sv.length();
+            scheme_and_subdomain = scheme_and_subdomain.substring_view(scheme_prefix_length);
+            if (scheme_and_subdomain.starts_with("www."sv, CaseSensitivity::CaseInsensitive))
+                scheme_and_subdomain = scheme_and_subdomain.substring_view(4);
+            if (remainder == "/"sv)
+                remainder = {};
+        }
+
         auto* attributed_scheme_and_subdomain = [[NSAttributedString alloc]
-            initWithString:Ladybird::string_to_ns_string(url_parts->scheme_and_subdomain)
+            initWithString:Ladybird::string_to_ns_string(scheme_and_subdomain)
                 attributes:dark_attributes];
 
         auto* attributed_effective_tld_plus_one = [[NSAttributedString alloc]
@@ -410,7 +554,7 @@ static NSInteger autocomplete_suggestion_index(NSString* suggestion_text, Vector
                 attributes:highlight_attributes];
 
         auto* attributed_remainder = [[NSAttributedString alloc]
-            initWithString:Ladybird::string_to_ns_string(url_parts->remainder)
+            initWithString:Ladybird::string_to_ns_string(remainder)
                 attributes:dark_attributes];
 
         [attributed_url appendAttributedString:attributed_scheme_and_subdomain];
@@ -418,12 +562,43 @@ static NSInteger autocomplete_suggestion_index(NSString* suggestion_text, Vector
         [attributed_url appendAttributedString:attributed_remainder];
     } else {
         attributed_url = [[NSMutableAttributedString alloc]
-            initWithString:Ladybird::string_to_ns_string(url)
+            initWithString:Ladybird::string_to_ns_string(display_url)
+                attributes:highlight_attributes];
+    }
+
+    if (display == LocationFieldDisplay::NotEditing && maybe_url.has_value() && ![[attributed_url string] isEqualToString:Ladybird::string_to_ns_string(display_url)]) {
+        attributed_url = [[NSMutableAttributedString alloc]
+            initWithString:Ladybird::string_to_ns_string(display_url)
                 attributes:highlight_attributes];
     }
 
     auto* location_search_field = (LocationSearchField*)[self.location_toolbar_item view];
     [location_search_field setAttributedStringValue:attributed_url];
+    [location_search_field setShowsPageIcon:url_parts.has_value()];
+}
+
+- (void)setLocationFieldText:(StringView)url
+{
+    [self setLocationFieldText:url display:LocationFieldDisplay::NotEditing];
+}
+
+- (void)restoreLocationFieldForEditing
+{
+    auto const& url = [[[self tab] web_view] view].url();
+    auto* location_search_field = (LocationSearchField*)[self.location_toolbar_item view];
+    if (![[location_search_field stringValue] isEqualToString:Ladybird::string_to_ns_string(WebView::url_for_display(url))])
+        return;
+
+    m_is_applying_inline_autocomplete = true;
+    [self setLocationFieldText:url.serialize() display:LocationFieldDisplay::Editing];
+
+    auto* editor = (NSTextView*)[location_search_field currentEditor];
+    if (editor != nil && [self.window firstResponder] == editor && ![editor hasMarkedText]) {
+        auto* serialized_url = Ladybird::string_to_ns_string(url.serialize());
+        [editor setString:serialized_url];
+        [editor setSelectedRange:NSMakeRange(0, serialized_url.length)];
+    }
+    m_is_applying_inline_autocomplete = false;
 }
 
 - (NSString*)currentLocationFieldQuery
@@ -616,7 +791,7 @@ static NSInteger autocomplete_suggestion_index(NSString* suggestion_text, Vector
     self.current_inline_autocomplete_suggestion = nil;
     self.suppressed_inline_autocomplete_query = nil;
     m_should_suppress_inline_autocomplete_on_next_change = false;
-    [self.window makeFirstResponder:nil];
+    [self focusWebView];
     [self.autocomplete close];
 
     return YES;
@@ -690,6 +865,10 @@ static NSInteger autocomplete_suggestion_index(NSString* suggestion_text, Vector
         [location_search_field setPlaceholderString:@"Enter web address"];
         [location_search_field setTextColor:[NSColor textColor]];
         [location_search_field setDelegate:self];
+        __weak TabController* weak_self = self;
+        [location_search_field setWillBeginEditing:^{
+            [weak_self restoreLocationFieldForEditing];
+        }];
 
         if (@available(macOS 26, *)) {
             [location_search_field setBordered:YES];
@@ -803,6 +982,11 @@ static NSInteger autocomplete_suggestion_index(NSString* suggestion_text, Vector
     [delegate setActiveTab:[self tab]];
 }
 
+- (void)windowDidChangeOcclusionState:(NSNotification*)notification
+{
+    [[[self tab] web_view] handleVisibility:([self.window occlusionState] & NSWindowOcclusionStateVisible) != 0];
+}
+
 - (void)windowDidResignKey:(NSNotification*)notification
 {
     [self.autocomplete close];
@@ -810,6 +994,11 @@ static NSInteger autocomplete_suggestion_index(NSString* suggestion_text, Vector
 
 - (BOOL)windowShouldClose:(NSWindow*)sender
 {
+    if (![[[self tab] web_view] needsBeforeUnloadCheck]) {
+        m_pending_immediate_close = [[[self tab] web_view] prepareForImmediateClose];
+        return true;
+    }
+
     // Prevent closing on first request so WebContent can cleanly shutdown (e.g. asking if the user is sure they want
     // to leave, closing WebSocket connections, etc.)
     if (!self.already_requested_close) {
@@ -827,6 +1016,10 @@ static NSInteger autocomplete_suggestion_index(NSString* suggestion_text, Vector
 {
     auto* delegate = (ApplicationDelegate*)[NSApp delegate];
     [delegate removeTab:self];
+
+    auto request_close = AK::move(m_pending_immediate_close);
+    if (request_close)
+        Core::deferred_invoke(AK::move(request_close));
 }
 
 - (void)windowDidMove:(NSNotification*)notification
@@ -963,6 +1156,11 @@ static NSInteger autocomplete_suggestion_index(NSString* suggestion_text, Vector
 
 #pragma mark - NSSearchFieldDelegate
 
+- (void)controlTextDidBeginEditing:(NSNotification*)notification
+{
+    [self restoreLocationFieldForEditing];
+}
+
 - (BOOL)control:(NSControl*)control
                textView:(NSTextView*)text_view
     doCommandBySelector:(SEL)selector
@@ -1006,20 +1204,32 @@ static NSInteger autocomplete_suggestion_index(NSString* suggestion_text, Vector
 - (void)controlTextDidEndEditing:(NSNotification*)notification
 {
     auto* location_search_field = (LocationSearchField*)[self.location_toolbar_item view];
+    NSString* url_string = [[location_search_field stringValue] copy];
 
-    auto url_string = Ladybird::ns_string_to_string([location_search_field stringValue]);
-    m_autocomplete->cancel_pending_query();
-    self.current_inline_autocomplete_suggestion = nil;
-    self.suppressed_inline_autocomplete_query = nil;
-    m_should_suppress_inline_autocomplete_on_next_change = false;
-    [self.autocomplete close];
-    [self setLocationFieldText:url_string];
+    // AppKit can send this while focus is still settling into the field
+    // editor. Wait until the next turn so transient notifications do not
+    // format the live editor contents as a non-editing URL.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        auto* location_search_field = (LocationSearchField*)[self.location_toolbar_item view];
+        auto* editor = (NSTextView*)[location_search_field currentEditor];
+        if (editor != nil && [self.window firstResponder] == editor)
+            return;
+
+        m_autocomplete->cancel_pending_query();
+        self.current_inline_autocomplete_suggestion = nil;
+        self.suppressed_inline_autocomplete_query = nil;
+        m_should_suppress_inline_autocomplete_on_next_change = false;
+        [self.autocomplete close];
+        [self setLocationFieldText:Ladybird::ns_string_to_string(url_string)];
+    });
 }
 
 - (void)controlTextDidChange:(NSNotification*)notification
 {
     if (m_is_applying_inline_autocomplete)
         return;
+
+    [(LocationSearchField*)[self.location_toolbar_item view] setShowsPageIcon:NO];
 
     auto* query = [self currentLocationFieldQuery];
     if (m_should_suppress_inline_autocomplete_on_next_change) {

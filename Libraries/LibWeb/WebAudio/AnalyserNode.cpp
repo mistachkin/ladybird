@@ -20,7 +20,7 @@ namespace Web::WebAudio {
 
 GC_DEFINE_ALLOCATOR(AnalyserNode);
 
-AnalyserNode::AnalyserNode(JS::Realm& realm, GC::Ref<BaseAudioContext> context, AnalyserOptions const& options)
+AnalyserNode::AnalyserNode(JS::Realm& realm, GC::Ref<BaseAudioContext> context, Bindings::AnalyserOptions const& options)
     : AudioNode(realm, context)
     , m_fft_size(options.fft_size)
     , m_max_decibels(options.max_decibels)
@@ -31,7 +31,7 @@ AnalyserNode::AnalyserNode(JS::Realm& realm, GC::Ref<BaseAudioContext> context, 
 
 AnalyserNode::~AnalyserNode() = default;
 
-WebIDL::ExceptionOr<GC::Ref<AnalyserNode>> AnalyserNode::create(JS::Realm& realm, GC::Ref<BaseAudioContext> context, AnalyserOptions const& options)
+WebIDL::ExceptionOr<GC::Ref<AnalyserNode>> AnalyserNode::create(JS::Realm& realm, GC::Ref<BaseAudioContext> context, Bindings::AnalyserOptions const& options)
 {
     return construct_impl(realm, context, options);
 }
@@ -135,7 +135,7 @@ Vector<f32> AnalyserNode::current_frequency_data()
 }
 
 // https://webaudio.github.io/web-audio-api/#dom-analysernode-getfloatfrequencydata
-WebIDL::ExceptionOr<void> AnalyserNode::get_float_frequency_data(GC::Root<JS::Float32Array> const& array)
+WebIDL::ExceptionOr<void> AnalyserNode::get_float_frequency_data(GC::Ref<JS::Float32Array> array)
 {
     // Write the current frequency data into array. If array has fewer elements than the frequencyBinCount,
     // the excess elements will be dropped. If array has more elements than the frequencyBinCount, the
@@ -156,7 +156,7 @@ WebIDL::ExceptionOr<void> AnalyserNode::get_float_frequency_data(GC::Root<JS::Fl
 }
 
 // https://webaudio.github.io/web-audio-api/#dom-analysernode-getbytefrequencydata
-WebIDL::ExceptionOr<void> AnalyserNode::get_byte_frequency_data(GC::Root<JS::Uint8Array> const& array)
+WebIDL::ExceptionOr<void> AnalyserNode::get_byte_frequency_data(GC::Ref<JS::Uint8Array> array)
 {
     // FIXME: If another call to getByteFrequencyData() or getFloatFrequencyData() occurs within the same render
     // quantum as a previous call, the current frequency data is not updated with the same data. Instead,
@@ -198,7 +198,7 @@ WebIDL::ExceptionOr<void> AnalyserNode::get_byte_frequency_data(GC::Root<JS::Uin
 }
 
 // https://webaudio.github.io/web-audio-api/#dom-analysernode-getfloattimedomaindata
-WebIDL::ExceptionOr<void> AnalyserNode::get_float_time_domain_data(GC::Root<JS::Float32Array> const& array)
+WebIDL::ExceptionOr<void> AnalyserNode::get_float_time_domain_data(GC::Ref<JS::Float32Array> array)
 {
     // Write the current time-domain data (waveform data) into array. If array has fewer elements than the
     // value of fftSize, the excess elements will be dropped. If array has more elements than the value of
@@ -216,7 +216,7 @@ WebIDL::ExceptionOr<void> AnalyserNode::get_float_time_domain_data(GC::Root<JS::
 }
 
 // https://webaudio.github.io/web-audio-api/#dom-analysernode-getbytetimedomaindata
-WebIDL::ExceptionOr<void> AnalyserNode::get_byte_time_domain_data(GC::Root<JS::Uint8Array> const& array)
+WebIDL::ExceptionOr<void> AnalyserNode::get_byte_time_domain_data(GC::Ref<JS::Uint8Array> array)
 {
     // Write the current time-domain data (waveform data) into array. If array’s byte length is less than
     // fftSize, the excess elements will be dropped. If array’s byte length is greater than the fftSize,
@@ -291,7 +291,7 @@ WebIDL::ExceptionOr<void> AnalyserNode::set_smoothing_time_constant(double smoot
     return {};
 }
 
-WebIDL::ExceptionOr<GC::Ref<AnalyserNode>> AnalyserNode::construct_impl(JS::Realm& realm, GC::Ref<BaseAudioContext> context, AnalyserOptions const& options)
+WebIDL::ExceptionOr<GC::Ref<AnalyserNode>> AnalyserNode::construct_impl(JS::Realm& realm, GC::Ref<BaseAudioContext> context, Bindings::AnalyserOptions const& options)
 {
     if (options.min_decibels >= options.max_decibels)
         return WebIDL::IndexSizeError::create(realm, "Analyser node minDecibels greater than maxDecibels"_utf16);

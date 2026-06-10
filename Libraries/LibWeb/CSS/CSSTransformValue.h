@@ -17,8 +17,8 @@ class CSSTransformValue final : public CSSStyleValue {
     GC_DECLARE_ALLOCATOR(CSSTransformValue);
 
 public:
-    [[nodiscard]] static GC::Ref<CSSTransformValue> create(JS::Realm&, Vector<GC::Ref<CSSTransformComponent>>);
-    static WebIDL::ExceptionOr<GC::Ref<CSSTransformValue>> construct_impl(JS::Realm&, GC::RootVector<GC::Root<CSSTransformComponent>>);
+    [[nodiscard]] static GC::Ref<CSSTransformValue> create(JS::Realm&, ReadonlySpan<GC::Ref<CSSTransformComponent>>);
+    static WebIDL::ExceptionOr<GC::Ref<CSSTransformValue>> construct_impl(JS::Realm&, ReadonlySpan<GC::Ref<CSSTransformComponent>> const&);
 
     virtual ~CSSTransformValue() override;
 

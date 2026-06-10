@@ -259,9 +259,9 @@ void BrowserWindow::setup_keyboard_shortcuts()
     set_accels("win.find-close", { "Escape" });
     set_accels("win.go-back", { "<Alt>Left" });
     set_accels("win.go-forward", { "<Alt>Right" });
-    set_accels("win.zoom-in", { "<Ctrl>equal", "<Ctrl>plus" });
-    set_accels("win.zoom-out", { "<Ctrl>minus" });
-    set_accels("win.zoom-reset", { "<Ctrl>0" });
+    set_accels("win.zoom-in", { "<Ctrl>equal", "<Ctrl>plus", "<Ctrl>KP_Add" });
+    set_accels("win.zoom-out", { "<Ctrl>minus", "<Ctrl>KP_Subtract" });
+    set_accels("win.zoom-reset", { "<Ctrl>0", "<Ctrl>KP_0" });
     set_accels("win.fullscreen", { "F11" });
     set_accels("win.quit", { "<Ctrl>q" });
     set_accels("win.new-window", { "<Ctrl>n" });
@@ -270,6 +270,12 @@ void BrowserWindow::setup_keyboard_shortcuts()
 void BrowserWindow::on_tab_switched()
 {
     auto* tab = current_tab();
+    for (auto& existing_tab : m_tabs) {
+        existing_tab->view().set_system_visibility_state(existing_tab.ptr() == tab
+                ? Web::HTML::VisibilityState::Visible
+                : Web::HTML::VisibilityState::Hidden);
+    }
+
     if (!tab)
         return;
 
@@ -282,6 +288,8 @@ void BrowserWindow::on_tab_switched()
     }
 
     bind_navigation_actions(tab->view());
+    update_location_favicon(tab->favicon());
+    update_location_loading(tab->is_loading());
     update_zoom_label();
 }
 
@@ -300,6 +308,7 @@ Tab& BrowserWindow::create_new_tab(URL::URL const& url, Web::HTML::ActivateTab a
     auto* page = adw_tab_view_append(m_tab_view, tab_ref.widget());
     adw_tab_page_set_title(page, "New Tab");
     tab_ref.set_tab_page(page);
+    m_tabs.append(move(tab));
 
     if (activate_tab == Web::HTML::ActivateTab::Yes) {
         adw_tab_view_set_selected_page(m_tab_view, page);
@@ -311,7 +320,6 @@ Tab& BrowserWindow::create_new_tab(URL::URL const& url, Web::HTML::ActivateTab a
         }
     }
 
-    m_tabs.append(move(tab));
     return tab_ref;
 }
 
@@ -323,11 +331,11 @@ Tab& BrowserWindow::create_child_tab(Web::HTML::ActivateTab activate_tab, Tab& p
     auto* page = adw_tab_view_append(m_tab_view, tab_ref.widget());
     adw_tab_page_set_title(page, "New Tab");
     tab_ref.set_tab_page(page);
+    m_tabs.append(move(tab));
 
     if (activate_tab == Web::HTML::ActivateTab::Yes)
         adw_tab_view_set_selected_page(m_tab_view, page);
 
-    m_tabs.append(move(tab));
     return tab_ref;
 }
 
@@ -427,6 +435,16 @@ void BrowserWindow::update_location_entry(StringView url)
     }
     auto byte_url = ByteString(url);
     ladybird_location_entry_set_url(m_location_entry, byte_url.characters());
+}
+
+void BrowserWindow::update_location_favicon(GdkPaintable* favicon)
+{
+    ladybird_location_entry_set_favicon(m_location_entry, favicon);
+}
+
+void BrowserWindow::update_location_loading(bool is_loading)
+{
+    ladybird_location_entry_set_loading(m_location_entry, is_loading);
 }
 
 void BrowserWindow::show_find_bar()

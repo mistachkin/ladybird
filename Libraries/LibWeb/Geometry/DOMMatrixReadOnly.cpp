@@ -85,7 +85,7 @@ WebIDL::ExceptionOr<GC::Ref<DOMMatrixReadOnly>> DOMMatrixReadOnly::construct_imp
 }
 
 // https://drafts.fxtf.org/geometry/#create-a-dommatrixreadonly-from-the-2d-dictionary
-WebIDL::ExceptionOr<GC::Ref<DOMMatrixReadOnly>> DOMMatrixReadOnly::create_from_dom_matrix_2d_init(JS::Realm& realm, DOMMatrix2DInit& init)
+WebIDL::ExceptionOr<GC::Ref<DOMMatrixReadOnly>> DOMMatrixReadOnly::create_from_dom_matrix_2d_init(JS::Realm& realm, Bindings::DOMMatrix2DInit& init)
 {
     // 1. Validate and fixup (2D) other.
     TRY(validate_and_fixup_dom_matrix_2d_init(init));
@@ -104,7 +104,7 @@ WebIDL::ExceptionOr<GC::Ref<DOMMatrixReadOnly>> DOMMatrixReadOnly::create_from_d
 }
 
 // https://drafts.fxtf.org/geometry/#create-a-dommatrixreadonly-from-the-dictionary
-WebIDL::ExceptionOr<GC::Ref<DOMMatrixReadOnly>> DOMMatrixReadOnly::create_from_dom_matrix_init(JS::Realm& realm, DOMMatrixInit& init)
+WebIDL::ExceptionOr<GC::Ref<DOMMatrixReadOnly>> DOMMatrixReadOnly::create_from_dom_matrix_init(JS::Realm& realm, Bindings::DOMMatrixInit& init)
 {
     // 1. Validate and fixup other.
     TRY(validate_and_fixup_dom_matrix_init(init));
@@ -224,13 +224,13 @@ void DOMMatrixReadOnly::initialize_from_create_3d_matrix(double m11, double m12,
 }
 
 // https://drafts.fxtf.org/geometry/#dom-dommatrixreadonly-frommatrix
-WebIDL::ExceptionOr<GC::Ref<DOMMatrixReadOnly>> DOMMatrixReadOnly::from_matrix(JS::VM& vm, DOMMatrixInit& other)
+WebIDL::ExceptionOr<GC::Ref<DOMMatrixReadOnly>> DOMMatrixReadOnly::from_matrix(JS::VM& vm, Bindings::DOMMatrixInit& other)
 {
     return create_from_dom_matrix_init(*vm.current_realm(), other);
 }
 
 // https://drafts.fxtf.org/geometry/#dom-dommatrixreadonly-fromfloat32array
-WebIDL::ExceptionOr<GC::Ref<DOMMatrixReadOnly>> DOMMatrixReadOnly::from_float32_array(JS::VM& vm, GC::Root<JS::Float32Array> const& array)
+WebIDL::ExceptionOr<GC::Ref<DOMMatrixReadOnly>> DOMMatrixReadOnly::from_float32_array(JS::VM& vm, GC::Ref<JS::Float32Array> array)
 {
     auto& realm = *vm.current_realm();
     ReadonlySpan<float> elements = array->data();
@@ -251,7 +251,7 @@ WebIDL::ExceptionOr<GC::Ref<DOMMatrixReadOnly>> DOMMatrixReadOnly::from_float32_
 }
 
 // https://drafts.fxtf.org/geometry/#dom-dommatrixreadonly-fromfloat64array
-WebIDL::ExceptionOr<GC::Ref<DOMMatrixReadOnly>> DOMMatrixReadOnly::from_float64_array(JS::VM& vm, GC::Root<JS::Float64Array> const& array)
+WebIDL::ExceptionOr<GC::Ref<DOMMatrixReadOnly>> DOMMatrixReadOnly::from_float64_array(JS::VM& vm, GC::Ref<JS::Float64Array> array)
 {
     auto& realm = *vm.current_realm();
     ReadonlySpan<double> elements = array->data();
@@ -425,7 +425,7 @@ GC::Ref<DOMMatrix> DOMMatrixReadOnly::skew_y(double sy) const
 }
 
 // https://drafts.fxtf.org/geometry/#dom-dommatrixreadonly-multiply
-WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> DOMMatrixReadOnly::multiply(DOMMatrixInit other)
+WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> DOMMatrixReadOnly::multiply(Bindings::DOMMatrixInit other)
 {
     // 1. Let result be the resulting matrix initialized to the values of the current matrix.
     auto result = DOMMatrix::create_from_dom_matrix_read_only(realm(), *this);
@@ -486,7 +486,7 @@ GC::Ref<DOMMatrix> DOMMatrixReadOnly::inverse() const
 }
 
 // https://drafts.fxtf.org/geometry/#dom-dommatrixreadonly-transformpoint
-GC::Ref<DOMPoint> DOMMatrixReadOnly::transform_point(DOMPointInit const& point) const
+GC::Ref<DOMPoint> DOMMatrixReadOnly::transform_point(Bindings::DOMPointInit const& point) const
 {
     // Let pointObject be the result of invoking create a DOMPoint from the dictionary point.
     auto point_object = DOMPoint::from_point(realm().vm(), point);
@@ -831,7 +831,7 @@ WebIDL::ExceptionOr<void> DOMMatrixReadOnly::deserialization_steps(HTML::Transfe
 }
 
 // https://drafts.fxtf.org/geometry/#matrix-validate-and-fixup-2d
-WebIDL::ExceptionOr<void> validate_and_fixup_dom_matrix_2d_init(DOMMatrix2DInit& init)
+WebIDL::ExceptionOr<void> validate_and_fixup_dom_matrix_2d_init(Bindings::DOMMatrix2DInit& init)
 {
     // 1. If at least one of the following conditions are true for dict, then throw a TypeError exception and abort these steps.
     // - a and m11 are both present and SameValueZero(a, m11) is false.
@@ -886,7 +886,7 @@ WebIDL::ExceptionOr<void> validate_and_fixup_dom_matrix_2d_init(DOMMatrix2DInit&
 }
 
 // https://drafts.fxtf.org/geometry/#matrix-validate-and-fixup
-WebIDL::ExceptionOr<void> validate_and_fixup_dom_matrix_init(DOMMatrixInit& init)
+WebIDL::ExceptionOr<void> validate_and_fixup_dom_matrix_init(Bindings::DOMMatrixInit& init)
 {
     // 1. Validate and fixup (2D) dict.
     TRY(validate_and_fixup_dom_matrix_2d_init(init));
@@ -950,6 +950,10 @@ WebIDL::ExceptionOr<ParsedMatrix> parse_dom_matrix_init_string(JS::Realm& realm,
         return WebIDL::SyntaxError::create(realm, "Failed to parse CSS transform string."_utf16);
     auto parsed_value = CSS::ComputedProperties::transformations_for_style_value(*transform_style_value);
 
+    // NB: Check that no <length> values with non-absolute length units were used
+    if (!all_of(parsed_value, [](auto& transform) { return transform->can_be_converted_to_matrix_without_reference_box(); }))
+        return WebIDL::SyntaxError::create(realm, "Failed to parse CSS transform string."_utf16);
+
     // 3. If parsedValue is none, set parsedValue to a <transform-list> containing a single identity matrix.
     // NOTE: parsed_value is empty on none so for loop in 6 won't modify matrix
     auto matrix = Gfx::FloatMatrix4x4::identity();
@@ -971,12 +975,8 @@ WebIDL::ExceptionOr<ParsedMatrix> parse_dom_matrix_init_string(JS::Realm& realm,
 
     // 5. Transform all <transform-function>s to 4x4 abstract matrices by following the “Mathematical Description of Transform Functions”. [CSS3-TRANSFORMS]
     // 6. Let matrix be a 4x4 abstract matrix as shown in the initial figure of this section. Post-multiply all matrices from left to right and set matrix to this product.
-    for (auto const& transform : parsed_value) {
-        auto const& transform_matrix = transform->as_transformation().to_matrix({});
-        if (transform_matrix.is_error())
-            return WebIDL::SyntaxError::create(realm, Utf16String::formatted("Failed to parse CSS transform string: {}", transform_matrix.error()));
-        matrix = matrix * transform_matrix.value();
-    }
+    for (auto const& transform : parsed_value)
+        matrix = matrix * transform->as_transformation().to_matrix({});
 
     // 7. Return matrix and 2dTransform.
     Gfx::DoubleMatrix4x4 double_matrix {

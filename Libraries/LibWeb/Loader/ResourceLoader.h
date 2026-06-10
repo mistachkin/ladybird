@@ -11,9 +11,11 @@
 #include <AK/Function.h>
 #include <AK/HashTable.h>
 #include <LibCore/EventReceiver.h>
+#include <LibCore/ImmutableBytes.h>
 #include <LibGC/Function.h>
 #include <LibHTTP/HeaderList.h>
 #include <LibRequests/Forward.h>
+#include <LibRequests/Request.h>
 #include <LibRequests/RequestTimingInfo.h>
 #include <LibURL/URL.h>
 #include <LibWeb/Forward.h>
@@ -31,20 +33,24 @@ public:
 
     void set_client(NonnullRefPtr<Requests::RequestClient>);
 
-    using OnHeadersReceived = GC::Function<void(HTTP::HeaderList const& response_headers, Optional<u32> status_code, Optional<String> const& reason_phrase)>;
-    using OnDataReceived = GC::Function<void(ReadonlyBytes data)>;
+    using OnHeadersReceived = GC::Function<void(HTTP::HeaderList const& response_headers, Optional<u32> status_code, Optional<String> const& reason_phrase, Optional<Core::ImmutableBytes> javascript_bytecode, Optional<u64> javascript_bytecode_cache_vary_key)>;
+    using OnDataReceived = GC::Function<void(Requests::ResponseData data)>;
+    using OnCachedBodyAvailable = GC::Function<void(Core::ImmutableBytes data)>;
     using OnComplete = GC::Function<void(bool success, Requests::RequestTimingInfo const& timing_info, Optional<StringView> error_message)>;
 
-    RefPtr<Requests::Request> load(LoadRequest&, GC::Root<OnHeadersReceived>, GC::Root<OnDataReceived>, GC::Root<OnComplete>);
+    RefPtr<Requests::Request> load(LoadRequest&, GC::Root<OnHeadersReceived>, GC::Root<OnDataReceived>, GC::Root<OnCachedBodyAvailable>, GC::Root<OnComplete>);
 
     RefPtr<Requests::RequestClient>& request_client() { return m_request_client; }
 
-    void prefetch_dns(URL::URL const&);
-    void preconnect(URL::URL const&);
+    void prefetch_dns(URL::URL const&, URL::URL const& source_url);
+    void preconnect(URL::URL const&, URL::URL const& source_url);
 
     Function<void()> on_load_counter_change;
 
     int pending_loads() const { return m_pending_loads; }
+
+    static void try_store_hsts_policy_for_url(Page&, URL::URL const&, StringView header_value);
+    static bool is_known_hsts_host(Page&, String const& host);
 
     String const& user_agent() const { return m_user_agent; }
     void set_user_agent(String user_agent) { m_user_agent = move(user_agent); }

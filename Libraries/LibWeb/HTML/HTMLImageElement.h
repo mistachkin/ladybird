@@ -49,8 +49,7 @@ public:
 
     String alt() const { return get_attribute_value(HTML::AttributeNames::alt); }
 
-    RefPtr<Gfx::ImmutableBitmap> immutable_bitmap() const;
-    virtual RefPtr<Gfx::ImmutableBitmap> default_image_bitmap_sized(Gfx::IntSize) const override;
+    virtual Optional<Gfx::DecodedImageFrame> default_image_frame_sized(Gfx::IntSize) const override;
 
     WebIDL::UnsignedLong width() const;
     void set_width(WebIDL::UnsignedLong);
@@ -112,7 +111,7 @@ public:
     virtual Optional<CSSPixels> intrinsic_width() const override;
     virtual Optional<CSSPixels> intrinsic_height() const override;
     virtual Optional<CSSPixelFraction> intrinsic_aspect_ratio() const override;
-    virtual RefPtr<Gfx::ImmutableBitmap> current_image_bitmap_sized(Gfx::IntSize) const override;
+    virtual Optional<Gfx::DecodedImageFrame> current_image_frame_sized(Gfx::IntSize) const override;
     virtual void set_visible_in_viewport(bool) override;
     virtual GC::Ptr<DOM::Element const> to_html_element() const override { return *this; }
     virtual GC::Ptr<DecodedImageData> decoded_image_data() const override;
@@ -137,7 +136,7 @@ private:
     // https://html.spec.whatwg.org/multipage/embedded-content.html#the-img-element:dimension-attributes
     virtual bool supports_dimension_attributes() const override { return true; }
 
-    virtual GC::Ptr<Layout::Node> create_layout_node(GC::Ref<CSS::ComputedProperties>) override;
+    virtual RefPtr<Layout::Node> create_layout_node(CSS::ComputedProperties const&) override;
     virtual void adjust_computed_style(CSS::ComputedProperties&) override;
 
     virtual void did_set_viewport_rect(CSSPixelRect const&) override;
@@ -146,11 +145,14 @@ private:
     void handle_failed_fetch();
     void add_callbacks_to_image_request(GC::Ref<ImageRequest>, bool maybe_omit_events, String const& url_string, String const& previous_url, u64 update_the_image_data_count);
 
+    bool current_request_has_running_animation() const;
+    void start_animation_timer_if_visible();
     void animate();
 
     RefPtr<Core::Timer> m_animation_timer;
     size_t m_current_frame_index { 0 };
     size_t m_loops_completed { 0 };
+    bool m_animation_paused_by_visibility { false };
 
     Optional<DOM::DocumentLoadEventDelayer> m_load_event_delayer;
 

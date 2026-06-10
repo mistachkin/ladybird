@@ -159,6 +159,15 @@ ErrorOr<void> mkdir(StringView path, mode_t)
     return {};
 }
 
+ErrorOr<void> rename(StringView old_path, StringView new_path)
+{
+    ByteString old_path_string = old_path;
+    ByteString new_path_string = new_path;
+    if (!MoveFileExA(old_path_string.characters(), new_path_string.characters(), MOVEFILE_REPLACE_EXISTING))
+        return Error::from_windows_error();
+    return {};
+}
+
 ErrorOr<int> openat(int, StringView, int, mode_t)
 {
     dbgln("Core::System::openat() is not implemented");
@@ -187,6 +196,30 @@ ErrorOr<void> munmap(void* address, size_t size)
 {
     if (::munmap(address, size) < 0)
         return Error::from_syscall("munmap"sv, errno);
+    return {};
+}
+
+ErrorOr<void*> reserve_address_space(size_t size)
+{
+    void* ptr = VirtualAlloc(nullptr, size, MEM_RESERVE, PAGE_NOACCESS);
+    if (!ptr)
+        return Error::from_windows_error();
+    return ptr;
+}
+
+ErrorOr<void> commit_memory(void* address, size_t size)
+{
+    if (!VirtualAlloc(address, size, MEM_COMMIT, PAGE_READWRITE))
+        return Error::from_windows_error();
+    return {};
+}
+
+ErrorOr<void> release_address_space(void* address, size_t size)
+{
+    // VirtualFree with MEM_RELEASE requires size == 0 and frees the entire reservation.
+    (void)size;
+    if (!VirtualFree(address, 0, MEM_RELEASE))
+        return Error::from_windows_error();
     return {};
 }
 

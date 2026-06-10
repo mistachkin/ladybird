@@ -4,23 +4,32 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibGfx/ImmutableBitmap.h>
+#include <LibWeb/Layout/ReplacedBox.h>
 #include <LibWeb/Painting/DisplayList.h>
 #include <LibWeb/Painting/DisplayListRecorder.h>
 #include <LibWeb/Painting/SVGSVGPaintable.h>
 
 namespace Web::Painting {
 
-GC_DEFINE_ALLOCATOR(SVGSVGPaintable);
-
-GC::Ref<SVGSVGPaintable> SVGSVGPaintable::create(Layout::SVGSVGBox const& layout_box)
+NonnullRefPtr<SVGSVGPaintable> SVGSVGPaintable::create(Layout::SVGSVGBox const& layout_box)
 {
-    return layout_box.heap().allocate<SVGSVGPaintable>(layout_box);
+    return adopt_ref(*new SVGSVGPaintable(layout_box));
 }
 
 SVGSVGPaintable::SVGSVGPaintable(Layout::SVGSVGBox const& layout_box)
     : PaintableBox(layout_box)
 {
+}
+
+static void record_foreign_object_descendant_hit_test_items(DisplayListRecordingContext& context, PaintableBox const& paintable)
+{
+    paintable.for_each_child_of_type<PaintableBox>([&](PaintableBox& child) {
+        child.record_hit_test_items(context, PaintPhase::Background);
+        record_foreign_object_descendant_hit_test_items(context, child);
+        child.record_hit_test_items(context, PaintPhase::Foreground);
+        child.record_hit_test_items(context, PaintPhase::Overlay);
+        return IterationDecision::Continue;
+    });
 }
 
 void SVGSVGPaintable::paint_svg_box(DisplayListRecordingContext& context, PaintableBox const& svg_box, PaintPhase phase)
@@ -43,10 +52,10 @@ void SVGSVGPaintable::paint_svg_box(DisplayListRecordingContext& context, Painta
     if (mask_area.has_value()) {
         if (mask_area->is_empty()) {
             skip_painting = true;
-        } else if (auto mask_display_list = svg_box.calculate_mask(context, *mask_area)) {
+        } else if (auto mask_display_list = svg_box.calculate_mask(context, *mask_area); mask_display_list.has_value()) {
             auto rect = context.enclosing_device_rect(*mask_area).to_type<int>();
             auto kind = svg_box.get_mask_type().value_or(Gfx::MaskKind::Alpha);
-            masks.append({ mask_display_list, rect, kind });
+            masks.append({ mask_display_list.release_value(), rect, kind });
         }
     }
 
@@ -54,15 +63,22 @@ void SVGSVGPaintable::paint_svg_box(DisplayListRecordingContext& context, Painta
     if (clip_area.has_value()) {
         if (clip_area->is_empty()) {
             skip_painting = true;
-        } else if (auto clip_display_list = svg_box.calculate_clip(context, *clip_area)) {
+        } else if (auto clip_display_list = svg_box.calculate_clip(context, *clip_area); clip_display_list.has_value()) {
             auto rect = context.enclosing_device_rect(*clip_area).to_type<int>();
-            masks.append({ clip_display_list, rect, Gfx::MaskKind::Alpha });
+            masks.append({ clip_display_list.release_value(), rect, Gfx::MaskKind::Alpha });
         }
     }
 
     context.display_list_recorder().begin_masks(masks);
 
     if (!skip_painting) {
+        svg_box.record_hit_test_items(context, phase);
+        if (svg_box.layout_node().is_svg_foreign_object_box())
+            record_foreign_object_descendant_hit_test_items(context, svg_box);
+        if (!svg_box.is_svg_paintable()
+            && !svg_box.is_svg_svg_paintable()
+            && is<Layout::ReplacedBox>(svg_box.layout_node()))
+            svg_box.paint(context, PaintPhase::Background);
         svg_box.paint(context, PaintPhase::Foreground);
         paint_descendants(context, svg_box, phase);
     }

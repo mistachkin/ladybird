@@ -47,6 +47,7 @@ namespace Web::CSS {
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(Color, color, ColorStyleValue)                                                            \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(ConicGradient, conic_gradient, ConicGradientStyleValue)                                   \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(Content, content, ContentStyleValue)                                                      \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(ContrastColor, contrast_color, ContrastColorStyleValue)                                   \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(Counter, counter, CounterStyleValue)                                                      \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(CounterStyle, counter_style, CounterStyleStyleValue)                                      \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(CounterDefinitions, counter_definitions, CounterDefinitionsStyleValue)                    \
@@ -56,6 +57,7 @@ namespace Web::CSS {
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(Display, display, DisplayStyleValue)                                                      \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(Easing, easing, EasingStyleValue)                                                         \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(Edge, edge, EdgeStyleValue)                                                               \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(EmptyOptional, empty_optional, EmptyOptionalStyleValue)                                   \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(FilterValueList, filter_value_list, FilterValueListStyleValue)                            \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(Function, function, FunctionStyleValue)                                                   \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(Flex, flex, FlexStyleValue)                                                               \
@@ -76,6 +78,7 @@ namespace Web::CSS {
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(Number, number, NumberStyleValue)                                                         \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(OpacityValue, opacity_value, OpacityValueStyleValue)                                      \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(OpenTypeTagged, open_type_tagged, OpenTypeTaggedStyleValue)                               \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(OverflowClipMargin, overflow_clip_margin, OverflowClipMarginStyleValue)                   \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(PendingSubstitution, pending_substitution, PendingSubstitutionStyleValue)                 \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(Percentage, percentage, PercentageStyleValue)                                             \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(Position, position, PositionStyleValue)                                                   \
@@ -106,8 +109,6 @@ namespace Web::CSS {
 struct ColorResolutionContext {
     Optional<PreferredColorScheme> color_scheme;
     Optional<Color> current_color;
-    Optional<Color> accent_color;
-    GC::Ptr<DOM::Document const> document;
     CalculationResolutionContext calculation_resolution_context;
 
     [[nodiscard]] static ColorResolutionContext for_element(DOM::AbstractElement const&);
@@ -169,11 +170,10 @@ public:
     String to_string(SerializationMode) const;
     virtual void serialize(StringBuilder&, SerializationMode) const = 0;
     virtual Vector<Parser::ComponentValue> tokenize() const;
-    virtual GC::Ref<CSSStyleValue> reify(JS::Realm&, FlyString const& associated_property) const;
+    virtual GC::Ref<CSSStyleValue> reify(JS::Realm&, Utf16FlyString const& associated_property) const;
     virtual StyleValueVector subdivide_into_iterations(PropertyNameAndID const&) const;
 
     virtual void set_style_sheet(GC::Ptr<CSSStyleSheet>) { }
-    virtual void visit_edges(JS::Cell::Visitor&) const { }
 
     virtual bool equals(StyleValue const& other) const = 0;
 

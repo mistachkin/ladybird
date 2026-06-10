@@ -16,6 +16,10 @@ struct RequiredInvalidationAfterStyleChange {
     bool relayout : 1 { false };
     bool rebuild_layout_tree : 1 { false };
     bool rebuild_accumulated_visual_contexts : 1 { false };
+    // The element's change affects rule matching for descendants, without necessarily changing inherited style.
+    bool recompute_descendant_styles : 1 { false };
+    // At least one inherited longhand changed, so shadow-tree descendants may need inherited style recomputation.
+    bool inherited_style_changed : 1 { false };
 
     void operator|=(RequiredInvalidationAfterStyleChange const& other)
     {
@@ -24,9 +28,11 @@ struct RequiredInvalidationAfterStyleChange {
         relayout |= other.relayout;
         rebuild_layout_tree |= other.rebuild_layout_tree;
         rebuild_accumulated_visual_contexts |= other.rebuild_accumulated_visual_contexts;
+        recompute_descendant_styles |= other.recompute_descendant_styles;
+        inherited_style_changed |= other.inherited_style_changed;
     }
 
-    [[nodiscard]] bool is_none() const { return !repaint && !rebuild_stacking_context_tree && !relayout && !rebuild_layout_tree && !rebuild_accumulated_visual_contexts; }
+    [[nodiscard]] bool is_none() const { return !repaint && !rebuild_stacking_context_tree && !relayout && !rebuild_layout_tree && !rebuild_accumulated_visual_contexts && !recompute_descendant_styles && !inherited_style_changed; }
     [[nodiscard]] bool is_full() const { return repaint && rebuild_stacking_context_tree && relayout && rebuild_layout_tree; }
     static RequiredInvalidationAfterStyleChange full() { return { true, true, true, true, false }; }
 };

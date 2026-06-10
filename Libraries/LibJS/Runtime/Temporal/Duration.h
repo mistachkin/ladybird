@@ -89,7 +89,7 @@ struct PartialDuration {
     Optional<double> nanoseconds;
 };
 
-extern TimeDuration const MAX_TIME_DURATION;
+extern TimeDuration const& MAX_TIME_DURATION;
 
 // 7.5.3 Internal Duration Records, https://tc39.es/proposal-temporal/#sec-temporal-internal-duration-records
 struct InternalDuration {
@@ -109,8 +109,8 @@ struct NudgeWindow {
     double r2 { 0 };
     Crypto::SignedBigInteger start_epoch_ns;
     Crypto::SignedBigInteger end_epoch_ns;
-    DateDuration start_duration;
-    DateDuration end_duration;
+    InternalDuration start_duration;
+    InternalDuration end_duration;
 };
 
 struct CalendarNudgeResult {
