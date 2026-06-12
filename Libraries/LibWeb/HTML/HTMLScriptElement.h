@@ -29,17 +29,13 @@ public:
     bool is_ready_to_be_parser_executed() const { return m_ready_to_be_parser_executed; }
     bool failed_to_load() const { return m_failed_to_load; }
 
-    template<OneOf<XMLDocumentBuilder, HTMLParser> T>
-    void set_parser_document(Badge<T>, DOM::Document& document) { m_parser_document = &document; }
+    void set_parser_document(Badge<XMLDocumentBuilder, HTMLParser>, DOM::Document& document) { m_parser_document = &document; }
 
-    template<OneOf<XMLDocumentBuilder, HTMLParser> T>
-    void set_force_async(Badge<T>, bool b) { m_force_async = b; }
+    void set_force_async(Badge<XMLDocumentBuilder, HTMLParser>, bool b) { m_force_async = b; }
 
-    template<OneOf<XMLDocumentBuilder, HTMLParser> T>
-    void set_already_started(Badge<T>, bool b) { m_already_started = b; }
+    void set_already_started(Badge<XMLDocumentBuilder, HTMLParser>, bool b) { m_already_started = b; }
 
-    template<OneOf<XMLDocumentBuilder, HTMLParser> T>
-    void prepare_script(Badge<T>) { prepare_script(); }
+    void prepare_script(Badge<XMLDocumentBuilder, HTMLParser>) { prepare_script(); }
 
     void execute_script();
 
@@ -89,6 +85,7 @@ private:
 
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Cell::Visitor&) override;
+    virtual void adopted_from(DOM::Document&) override;
 
     virtual void attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
 

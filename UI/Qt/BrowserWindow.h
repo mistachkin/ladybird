@@ -153,6 +153,7 @@ private:
     virtual void resizeEvent(QResizeEvent*) override;
     virtual void changeEvent(QEvent* event) override;
     virtual void moveEvent(QMoveEvent*) override;
+    virtual void paintEvent(QPaintEvent*) override;
     virtual void wheelEvent(QWheelEvent*) override;
     virtual void closeEvent(QCloseEvent*) override;
 
@@ -170,6 +171,8 @@ private:
     void update_resize_cursor(QPoint const&);
     void clear_resize_cursor();
     void update_window_corners();
+    bool should_draw_window_border() const;
+    void update_window_border();
 
     template<typename Callback>
     void for_each_tab(Callback&& callback)
@@ -209,6 +212,7 @@ private:
 
     QMenu* m_hamburger_menu { nullptr };
     QMenu* m_bookmarks_menu { nullptr };
+    QMenu* m_history_menu { nullptr };
     QWidget* m_menu_bar_window_controls { nullptr };
     QToolButton* m_menu_bar_minimize_window_button { nullptr };
     QToolButton* m_menu_bar_maximize_window_button { nullptr };

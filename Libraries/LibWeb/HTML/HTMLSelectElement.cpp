@@ -852,11 +852,11 @@ bool HTMLSelectElement::is_focusable() const
 // https://html.spec.whatwg.org/multipage/form-elements.html#placeholder-label-option
 HTMLOptionElement* HTMLSelectElement::placeholder_label_option() const
 {
-    // If a select element has a required attribute specified, does not have a multiple attribute specified, and has a display size of 1;
-    if (has_attribute(HTML::AttributeNames::required) && !has_attribute(HTML::AttributeNames::multiple) && display_size() == 1) {
-        // and if the value of the first option element in the
-        // select element's list of options (if any) is the empty string, and that option element's parent node is the select element (and not an optgroup element), then that option is the
-        // select element's placeholder label option.
+    // If a select element has a required attribute specified, and has a display size of 1;
+    if (has_attribute(HTML::AttributeNames::required) && display_size() == 1) {
+        // and if the value of the first option element in the select element's list of options (if any) is the empty
+        // string, and that option element's parent node is the select element (and not an optgroup element), then that
+        // option is the select element's placeholder label option.
         auto first_option_element = list_of_options()[0];
         if (first_option_element->value().is_empty() && first_option_element->parent() == this)
             return first_option_element;
@@ -961,6 +961,44 @@ bool HTMLSelectElement::is_mutable() const
 {
     // A select element that is not disabled is mutable.
     return enabled();
+}
+
+// https://html.spec.whatwg.org/multipage/form-elements.html#option-element-nearest-ancestor-select
+GC::Ptr<HTMLSelectElement> get_nearest_ancestor_select(DOM::Element& element)
+{
+    // 1. Let ancestorOptgroup be null.
+    GC::Ptr<HTMLOptGroupElement> ancestor_optgroup;
+
+    // 2. For each ancestor of element's ancestors, in reverse tree order:
+    for (auto* ancestor = element.parent(); ancestor; ancestor = ancestor->parent()) {
+        // 1. If ancestor is a datalist, hr, or option element, then return null.
+        if (is<HTMLDataListElement>(*ancestor)
+            || is<HTMLHRElement>(*ancestor)
+            || is<HTMLOptionElement>(*ancestor))
+            return nullptr;
+
+        // 2. If ancestor is an optgroup element:
+        if (auto* optgroup_element = as_if<HTMLOptGroupElement>(*ancestor)) {
+            // 1. If ancestorOptgroup is not null, then return null.
+            if (ancestor_optgroup)
+                return nullptr;
+
+            // 2. Set ancestorOptgroup to ancestor.
+            ancestor_optgroup = optgroup_element;
+        }
+
+        // 3. If ancestor is a select, then return ancestor.
+        if (auto* select_element = as_if<HTMLSelectElement>(*ancestor))
+            return select_element;
+    }
+
+    // 3. Return null.
+    return nullptr;
+}
+
+GC::Ptr<HTMLSelectElement const> get_nearest_ancestor_select(DOM::Element const& element)
+{
+    return get_nearest_ancestor_select(const_cast<DOM::Element&>(element));
 }
 
 }

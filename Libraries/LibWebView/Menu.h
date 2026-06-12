@@ -27,6 +27,7 @@ enum class ActionID {
     NavigateBack,
     NavigateForward,
     Reload,
+    ViewHistory,
 
     CopySelection,
     CutSelection,
@@ -101,6 +102,7 @@ enum class ActionID {
     DumpCSSErrors,
     DumpCookies,
     DumpLocalStorage,
+    DumpSessionStorage,
     DumpGCGraph,
     DumpWasmStats,
     ShowLineBoxBorders,
