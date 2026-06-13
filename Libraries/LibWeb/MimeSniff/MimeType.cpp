@@ -365,6 +365,15 @@ String minimise_a_supported_mime_type(MimeType const& mime_type)
     if (mime_type.is_javascript())
         return "text/javascript"_string;
 
+    // [Non-standard, audit M6] If mimeType is a TH8 MIME type, then
+    // return "text/th8".  Without this, blob-URL TH8 scripts would
+    // round-trip through the spec'd default and lose their classification
+    // when later re-extracted -- callers checking against `text/th8`
+    // (HTMLScriptElement::prepare_script, signed-only enforcement)
+    // would silently miss the script.
+    if (mime_type.is_th8())
+        return "text/th8"_string;
+
     // 2. If mimeType is a JSON MIME type, then return "application/json".
     if (mime_type.is_json())
         return "application/json"_string;

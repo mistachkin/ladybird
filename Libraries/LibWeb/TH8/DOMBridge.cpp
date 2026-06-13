@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibWeb/TH8/DOMBridge.h>
+
 #include <AK/ByteString.h>
 #include <AK/Utf16String.h>
 #include <LibJS/Runtime/NativeFunction.h>
@@ -22,12 +24,13 @@
 #include <LibWeb/HTML/HTMLHeadElement.h>
 #include <LibWeb/HTML/Scripting/ClassicScript.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
+#include <LibWeb/HTML/Scripting/TH8Context.h>
 #include <LibWeb/HTML/Window.h>
-#include <LibWeb/TrustedTypes/TrustedHTML.h>
-#include <LibWeb/WebIDL/CallbackType.h>
-#include <LibWeb/TH8/DOMBridge.h>
+#include <LibWeb/HTML/WindowOrWorkerGlobalScope.h>
 #include <LibWeb/TH8/HandleTable.h>
 #include <LibWeb/TH8/TypeConversion.h>
+#include <LibWeb/TrustedTypes/TrustedHTML.h>
+#include <LibWeb/WebIDL/CallbackType.h>
 
 namespace Web::TH8 {
 
@@ -120,43 +123,84 @@ static ByteString serialize_event_to_dict(DOM::Event const& event, HandleTable& 
 // Register a TH8 proc as a DOM event listener on an EventTarget.
 // Creates a JS NativeFunction wrapper that, when invoked by the DOM
 // event system, evaluates the TH8 proc with the event dict as its argument.
+//
+// [H2, audit follow-up] The lambda does NOT capture the Th8_Interp or
+// HandleTable directly.  Both live inside the per-document TH8Context,
+// which may be GC'd while the listener's EventTarget is still alive
+// (shadow-tree moves, adoption, navigation).  Instead we capture only
+// the proc name (a copyable ByteString) and look the interpreter +
+// handles up FRESH from the dispatched event's current_target -> node
+// -> document -> th8_context chain.  Every link in the chain is
+// null-checked so a stale invocation against a destroyed TH8Context
+// returns cleanly without dereferencing freed memory.
+//
+// vm.argument(0) is also guarded with is<DOM::Event> rather than the
+// previous unchecked as<>: if a TH8 listener is invoked via a non-
+// EventListener code path (e.g., as a plain JS callable), the cast
+// would crash; the guard returns undefined instead.
 static int add_th8_event_listener(
     DOM::EventTarget& target,
     FlyString const& event_type,
     ByteString proc_name,
-    Th8_Interp* interp,
-    HandleTable& handles,
+    Th8_Interp* /*interp_unused*/,
+    HandleTable& /*handles_unused*/,
     DOM::Document& document)
 {
     auto& realm = document.realm();
 
-    // Capture TH8 state for the closure.
     auto callback_function = JS::NativeFunction::create(
         realm,
-        [interp, proc_name, &handles](JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
+        [proc_name](JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
             if (vm.argument_count() < 1)
                 return JS::js_undefined();
 
-            auto& event = vm.argument(0).as<DOM::Event>();
+            auto argument = vm.argument(0);
+            if (!argument.is_object() || !is<DOM::Event>(argument.as_object()))
+                return JS::js_undefined();
+            auto& event = static_cast<DOM::Event&>(argument.as_object());
 
-            // Serialize event to TH8 dict.
-            auto event_dict = serialize_event_to_dict(event, handles);
+            // Look up the current TH8 interpreter via the dispatched
+            // event's current target -> document -> th8_context.  Any
+            // missing link short-circuits to undefined (fail-closed).
+            auto current_target = event.current_target();
+            if (!current_target)
+                return JS::js_undefined();
+            auto target_as_node = as_if<DOM::Node>(current_target.ptr());
+            if (!target_as_node)
+                return JS::js_undefined();
+            auto& live_document = target_as_node->document();
+            auto live_context = live_document.th8_context();
+            if (!live_context || !live_context->is_alive_for_dispatch())
+                return JS::js_undefined();
+            auto* live_interp = live_context->interpreter().raw();
+            auto& live_handles = live_context->handle_table();
+
+            // Serialize event to TH8 dict using the live handle table.
+            auto event_dict = serialize_event_to_dict(event, live_handles);
 
             // Build the TH8 command: procName {event_dict}
             auto script = ByteString::formatted("{} {{{}}}", proc_name, event_dict);
 
             // Evaluate in the TH8 interpreter.
-            int rc = Th8_Eval(interp, 0,
+            int rc = Th8_Eval(live_interp, 0,
                 script.characters(), script.length(),
                 "event", 5);
 
             if (rc != TH8_OK) {
                 size_t err_len = 0;
-                auto const* err = Th8_GetResult(interp, &err_len);
-                if (err && err_len > 0) {
-                    dbgln("[TH8 event error] {}: {}", proc_name,
-                        StringView { err, err_len });
-                }
+                auto const* err = Th8_GetResult(live_interp, &err_len);
+                StringView err_view { err ? err : "", err_len };
+                dbgln("[TH8 event error] {}: {}", proc_name, err_view);
+                // [M9] Surface event-handler failures through the
+                // canonical exception-reporting path so they appear
+                // in DevTools / the page's `window.onerror` /
+                // `window.report_an_exception` flow alongside JS
+                // errors -- a silent dbgln was easy to miss.
+                auto& realm = vm.current_realm() ? *vm.current_realm() : live_document.realm();
+                auto error = JS::Error::create(realm,
+                    String::from_utf8_with_replacement_character(err_view));
+                auto& window_or_worker = as<HTML::WindowOrWorkerGlobalScopeMixin>(realm.global_object());
+                window_or_worker.report_an_exception(error);
             }
 
             return JS::js_undefined();
@@ -564,6 +608,17 @@ static int eval_js_command(Th8_Interp* interp, void* ctx, int argc, char const**
 
     if (argc < 2)
         return set_error(interp, "wrong # args: should be \"dom::eval_js script\""sv);
+
+    // [H11] If JavaScript execution is disabled on this document (e.g.,
+    // a sandboxed iframe without `allow-scripts`, or a Content-Security-
+    // Policy that blocks inline JS), TH8 must not be able to launder a
+    // JS evaluation through dom::eval_js.  Reject before consulting the
+    // cross-eval policy so the diagnostic explains the underlying cause.
+    if (document.is_javascript_execution_disabled()) {
+        return set_error(interp,
+            "dom::eval_js: JavaScript execution is disabled on this "
+            "document"sv);
+    }
 
     // Check cross-eval policy gate.
     if (!document.th8_cross_eval_policy()) {

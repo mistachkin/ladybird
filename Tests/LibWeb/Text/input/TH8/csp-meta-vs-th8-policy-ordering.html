@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<!--
+    [M7d] Verifies that when both CSP and TH8-Script-Policy meta tags
+    are present in `<head>`, BOTH apply and neither bypasses the
+    other.  Here we set:
+        CSP: script-src 'self' 'unsafe-inline'  (TH8 inline allowed)
+        TH8: signed-only                        (unsigned TH8 forbidden)
+    The expected behavior is that the unsigned TH8 block is rejected
+    by the signed-only TH8 policy even though CSP would have allowed
+    it.  This pins that "TH8 policy AND CSP both gate" instead of
+    "first-checked wins".
+-->
+<meta http-equiv="Content-Security-Policy" content="script-src 'self' 'unsafe-inline'">
+<meta http-equiv="TH8-Script-Policy" content="signed-only">
+<body>
+<div id="result">blocked</div>
+<script type="text/th8">
+set doc [dom::document]
+# Unsigned -- the signed-only policy must reject this.
+[$doc getElementById result] textContent "FAIL"
+</script>
+<script>
+let r = document.getElementById('result').textContent;
+if (r === 'blocked') {
+    println("PASS: signed-only TH8 policy enforced under permissive CSP");
+} else {
+    println("FAIL: " + r);
+}
+</script>
+</body>

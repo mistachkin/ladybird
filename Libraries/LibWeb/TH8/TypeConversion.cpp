@@ -4,10 +4,11 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibWeb/TH8/TypeConversion.h>
+
 #include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/DOM/Node.h>
 #include <LibWeb/TH8/HandleTable.h>
-#include <LibWeb/TH8/TypeConversion.h>
 
 namespace Web::TH8 {
 

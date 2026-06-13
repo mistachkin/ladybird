@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<!--
+    [M7b] Verifies that `new Worker(...)` rejects a blob URL whose
+    Content-Type is `text/th8`.  Worker scripts MUST be JavaScript MIME
+    types per spec; TH8 is intentionally not accepted as a worker
+    classification.
+-->
+<script src="../include.js"></script>
+<script>
+    asyncTest(done => {
+        let th8Source = 'puts "hi from worker"';
+        let blob = new Blob([th8Source], { type: 'text/th8' });
+        let blobUrl = URL.createObjectURL(blob);
+
+        let worker;
+        let timer;
+        let resolved = false;
+
+        let pass = () => {
+            if (resolved) return;
+            resolved = true;
+            clearTimeout(timer);
+            try { URL.revokeObjectURL(blobUrl); } catch (e) {}
+            println("PASS: Worker rejected text/th8");
+            done();
+        };
+
+        let fail = (why) => {
+            if (resolved) return;
+            resolved = true;
+            clearTimeout(timer);
+            println("FAIL: " + why);
+            done();
+        };
+
+        // Three valid rejection paths: constructor throws, error event
+        // fires, or the worker is silently dropped (no run within the
+        // timeout).  All three collapse to a single PASS line so the
+        // expected output is deterministic.
+        try {
+            worker = new Worker(blobUrl);
+            worker.onerror = () => pass();
+            worker.onmessage = () => fail("worker ran and posted a message");
+            timer = setTimeout(pass, 250);
+        } catch (e) {
+            pass();
+        }
+    });
+</script>

@@ -92,6 +92,13 @@ static WebIDL::ExceptionOr<GC::Ref<DOM::Document>> load_html_document(HTML::Navi
     // 1. Let document be the result of creating and initializing a Document object given "html", "text/html", and navigationParams.
     auto document = TRY(DOM::Document::create_and_initialize(DOM::Document::Type::HTML, "text/html"_string, navigation_params));
 
+    // [Non-standard, B3.f] Apply the TH8-Script-Policy HTTP response header
+    // before HTML parsing begins so any inline <script> that appears before
+    // a `<meta http-equiv="TH8-Script-Policy">` tag is also subject to the
+    // policy.  FIXME: load_xml_document / load_text_document should also
+    // call this; for now wired only for the common HTML path.
+    document->apply_th8_script_policy_from_response_headers(*navigation_params.response->header_list());
+
     // 2. If document's URL is about:blank, then populate with html/head/body given document.
     // FIXME: The additional check for a non-empty body fixes issues with loading javascript urls in iframes, which
     //        default to an "about:blank" url. Is this a spec bug?

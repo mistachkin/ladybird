@@ -24,6 +24,9 @@
 #include <LibWeb/Bindings/MessageEvent.h>
 #include <LibWeb/Bindings/Window.h>
 #include <LibWeb/Bindings/WindowExposedInterfaces.h>
+#if LADYBIRD_ENABLE_TH8
+#    include <LibWeb/TH8/WindowTH8Namespace.h>
+#endif
 #include <LibWeb/CSS/CSSStyleProperties.h>
 #include <LibWeb/CSS/MediaQueryList.h>
 #include <LibWeb/CSS/Parser/Parser.h>
@@ -813,6 +816,19 @@ WebIDL::ExceptionOr<void> Window::initialize_web_interfaces(Badge<WindowEnvironm
 
     if (s_internals_object_exposed)
         define_direct_property("internals"_utf16_fly_string, realm.create<Internals::Internals>(realm), JS::default_attributes);
+
+#if LADYBIRD_ENABLE_TH8
+    // [H10-followup] Expose `window.th8` for JS->TH8 cross-eval.  The
+    // property is always present; the eval() method itself throws when
+    // the document has not opted into `cross-eval` via the
+    // TH8-Script-Policy meta / header.
+    if (m_associated_document) {
+        define_direct_property(
+            "th8"_utf16_fly_string,
+            Web::TH8::create_window_th8_namespace(realm, *m_associated_document),
+            JS::default_attributes);
+    }
+#endif
 
     return {};
 }

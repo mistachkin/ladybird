@@ -4,17 +4,27 @@ set(SOURCES
     Vendor/th8.c
 )
 
-ladybird_lib(LibTH8 th8)
+ladybird_lib(LibTH8 th8 EXPLICIT_SYMBOL_EXPORT)
 
 # The amalgamation is C99; ensure it compiles as C.
 set_source_files_properties(Vendor/th8.c PROPERTIES LANGUAGE C)
 
-# Suppress warnings in vendored code.
-set_source_files_properties(Vendor/th8.c PROPERTIES COMPILE_FLAGS "-w")
+# [L18] Suppress warnings in vendored code.  Use a generator expression
+# so the right flag fires for both GCC/Clang (-w) and MSVC (/w).
+# ENABLE_TH8 is forced OFF on Windows today (see cmake_options.cmake),
+# but this keeps the LibTH8 CMakeLists.txt portable for the day the
+# Win32 WebPlatform arm lands.
+set_source_files_properties(Vendor/th8.c PROPERTIES COMPILE_OPTIONS
+    "$<$<C_COMPILER_ID:GNU,Clang,AppleClang>:-w>;$<$<C_COMPILER_ID:MSVC>:/w>")
 
-target_include_directories(LibTH8 PUBLIC
+# [L19] Vendor/th8.h is now PRIVATE: only LibTH8's own translation units
+# (Interpreter.cpp, WebPlatform.cpp) get the full vendored upstream
+# surface.  Consumers reach only the hand-curated Libraries/LibTH8/CAPI.h
+# subset, which mirrors the small set of Th8_*/TH8_* symbols the bridge
+# layer actually calls.  Adding a new consumer-side direct call requires
+# mirroring its prototype in CAPI.h first.
+target_include_directories(LibTH8 PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/Vendor>
-    $<INSTALL_INTERFACE:include>
 )
 find_package(OpenSSL REQUIRED)
 target_link_libraries(LibTH8 PRIVATE LibCore OpenSSL::SSL OpenSSL::Crypto)

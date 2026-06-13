@@ -1,0 +1,1 @@
+PASS: signed-only TH8 policy enforced under permissive CSP

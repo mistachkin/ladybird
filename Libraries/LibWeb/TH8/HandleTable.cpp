@@ -13,12 +13,11 @@ HandleTable::HandleTable(GC::Heap& heap)
 {
 }
 
-ByteString HandleTable::make_handle_string(Bindings::PlatformObject& object, u64 id)
+ByteString HandleTable::make_handle_string([[maybe_unused]] Bindings::PlatformObject& object, u64 id)
 {
-    (void)object;
     // Simple numeric handle — the prefix is determined by the object type
     // but for simplicity we use a uniform "obj" prefix.
-    return ByteString::formatted("obj{}", id);
+    return ByteString::formatted("{}{}", handle_prefix, id);
 }
 
 ByteString HandleTable::register_handle(Bindings::PlatformObject& object)
@@ -47,19 +46,22 @@ ByteString HandleTable::register_handle(Bindings::PlatformObject& object)
 
 Bindings::PlatformObject* HandleTable::resolve(StringView handle) const
 {
-    // Parse the numeric ID from the handle string.
-    // Handle format: <prefix><id>
-    size_t digit_start = 0;
-    for (size_t i = 0; i < handle.length(); ++i) {
-        if (handle[i] >= '0' && handle[i] <= '9') {
-            digit_start = i;
-            break;
-        }
-    }
-    if (digit_start == 0 && (handle.is_empty() || handle[0] < '0' || handle[0] > '9'))
+    // [M10] Strict ^obj([0-9]+)$ parse.  The previous "skip to first
+    // digit" parse let `myobj42` resolve the same as `obj42`, which
+    // gave script code a way to fabricate handles by prefixing junk
+    // before the prefix.  Now: handle MUST start with the exact
+    // `handle_prefix` literal, followed by one-or-more ASCII digits
+    // and nothing else.
+    if (!handle.starts_with(handle_prefix))
         return nullptr;
+    auto id_part = handle.substring_view(handle_prefix.length());
+    if (id_part.is_empty())
+        return nullptr;
+    for (size_t i = 0; i < id_part.length(); ++i) {
+        if (id_part[i] < '0' || id_part[i] > '9')
+            return nullptr;
+    }
 
-    auto id_part = handle.substring_view(digit_start);
     auto maybe_id = id_part.to_number<u64>();
     if (!maybe_id.has_value())
         return nullptr;

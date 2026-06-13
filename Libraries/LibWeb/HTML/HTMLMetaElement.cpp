@@ -225,22 +225,60 @@ void HTMLMetaElement::inserted()
             // <meta http-equiv="TH8-Script-Policy" content="signed-only; no-javascript; cross-eval">
             //
             // Directives (semicolon-separated):
-            //   signed-only   -- only signed TH8 scripts may execute
+            //   signed-only   -- only TH8 scripts whose signature verifies against the
+            //                    embedded keyring may execute (unsigned text/th8 is rejected;
+            //                    only text/th8+signed is accepted)
             //   no-javascript -- JavaScript (Classic and Module scripts) is blocked
             //   cross-eval    -- TH8 and JavaScript may call each other
             //
             // no-javascript and cross-eval are mutually exclusive.
+            //
+            // Per the CSP precedent and per audit item M3, accept the policy only when
+            // the <meta> is a child of <head>; otherwise an injected mid-body meta could
+            // flip policy after scripts have already executed.
+            if (!is<HTMLHeadElement>(parent()))
+                break;
+
             auto content = get_attribute_value(AttributeNames::content);
             if (content.is_empty())
                 break;
 
-            bool has_no_js = content.contains("no-javascript"sv);
-            bool has_cross_eval = content.contains("cross-eval"sv);
+            // Tokenize on ';' and ASCII whitespace and compare each token exactly,
+            // so a value like `please-do-not-set-no-javascript` does not silently
+            // activate the flag (audit item M4).
+            bool has_signed_only = false;
+            bool has_no_js = false;
+            bool has_cross_eval = false;
+
+            auto is_ws = [](char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'; };
+            size_t i = 0;
+            auto const view = content.bytes_as_string_view();
+            while (i < view.length()) {
+                while (i < view.length() && (is_ws(view[i]) || view[i] == ';'))
+                    ++i;
+                size_t start = i;
+                while (i < view.length() && !is_ws(view[i]) && view[i] != ';')
+                    ++i;
+                if (i == start)
+                    break;
+                auto token = view.substring_view(start, i - start);
+                if (token.equals_ignoring_ascii_case("signed-only"sv))
+                    has_signed_only = true;
+                else if (token.equals_ignoring_ascii_case("no-javascript"sv))
+                    has_no_js = true;
+                else if (token.equals_ignoring_ascii_case("cross-eval"sv))
+                    has_cross_eval = true;
+            }
 
             if (has_no_js && has_cross_eval) {
                 dbgln("HTMLMetaElement: TH8-Script-Policy: 'no-javascript' and 'cross-eval' "
                       "are mutually exclusive; ignoring 'cross-eval'.");
                 has_cross_eval = false;
+            }
+
+            if (has_signed_only) {
+                document().set_th8_signed_only_policy(true);
+                dbgln("HTMLMetaElement: TH8 signed-only policy activated for document.");
             }
 
             if (has_no_js) {

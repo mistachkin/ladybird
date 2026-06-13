@@ -19,8 +19,10 @@
 #include <LibWeb/HTML/HTMLScriptElement.h>
 #include <LibWeb/HTML/Scripting/ClassicScript.h>
 #include <LibWeb/HTML/Scripting/Fetching.h>
-#include <LibWeb/HTML/Scripting/TH8Script.h>
 #include <LibWeb/HTML/Scripting/ImportMapParseResult.h>
+#if LADYBIRD_ENABLE_TH8
+#    include <LibWeb/HTML/Scripting/TH8Script.h>
+#endif
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/Infra/CharacterTypes.h>
@@ -148,14 +150,46 @@ void HTMLScriptElement::execute_script()
         return;
     }
 
-    // [Non-standard] TH8 signed-only policy enforcement.
-    // When a document has opted into "th8-signed-only; no-javascript" policy,
-    // Classic and Module scripts are blocked to prevent JavaScript from
-    // subverting the TH8 sandbox.
-    if (document->th8_no_javascript_policy()
+    // [Non-standard] JavaScript-disabled policy enforcement (B3).  When
+    // any policy source has disabled JS for this document, refuse to
+    // run Classic and Module scripts.  Uses the centralized
+    // Document::is_javascript_execution_disabled() so any future
+    // policy source plugs in once.
+    if (document->is_javascript_execution_disabled()
         && (m_script_type == ScriptType::Classic || m_script_type == ScriptType::Module)) {
         dbgln("HTMLScriptElement: Refusing to run JavaScript/module script: "
-              "document has TH8 signed-only no-JavaScript policy active.");
+              "JavaScript execution is disabled for this document.");
+        dispatch_event(DOM::Event::create(realm(), HTML::EventNames::error));
+        return;
+    }
+
+    // [Non-standard, M15-followup] Per-document runtime TH8 kill switch.
+    // Embedders that need to disable TH8 for a specific document
+    // without rebuilding can set Document::set_th8_disabled(true).
+    // Catch this before the signed-only / cross-eval policy checks so
+    // the error path is unambiguously "TH8 disabled" rather than a
+    // policy violation.
+    if (m_script_type == ScriptType::TH8 && document->th8_disabled()) {
+        dbgln("HTMLScriptElement: Refusing to run TH8 script: "
+              "Document::th8_disabled() is set (runtime kill switch).");
+        dispatch_event(DOM::Event::create(realm(), HTML::EventNames::error));
+        return;
+    }
+
+    // [Non-standard] TH8 signed-only policy enforcement.
+    // When a document has opted into "signed-only" via the same meta
+    // directive, only TH8 scripts declared with the explicit
+    // `text/th8+signed` MIME may execute.  Bare `text/th8`,
+    // `text/tcl`, and `th8` are rejected.  Signature verification
+    // proper happens inside the TH8 interpreter, which is configured
+    // with Th8_InstallSignedPolicy + Th8_EnableSignedOnly + the
+    // embedded keyring (see TH8Context::initialize_interpreter).
+    if (document->th8_signed_only_policy()
+        && m_script_type == ScriptType::TH8
+        && !m_th8_declared_signed) {
+        dbgln("HTMLScriptElement: Refusing to run TH8 script: "
+              "document has TH8 signed-only policy active and this script was "
+              "not declared with `text/th8+signed`.");
         dispatch_event(DOM::Event::create(realm(), HTML::EventNames::error));
         return;
     }
@@ -204,6 +238,7 @@ void HTMLScriptElement::execute_script()
         // 1. Register an import map given el's relevant global object and el's result.
         m_result.get<GC::Ref<ImportMapParseResult>>()->register_import_map(as<Window>(relevant_global_object(*this)));
     }
+#if LADYBIRD_ENABLE_TH8
     // [Non-standard] -> "th8"
     else if (m_script_type == ScriptType::TH8) {
         auto old_current_script = document->current_script();
@@ -223,6 +258,7 @@ void HTMLScriptElement::execute_script()
 
         document->set_current_script({}, old_current_script);
     }
+#endif
 
     // 7. Decrement the ignore-destructive-writes counter of document, if it was incremented in the earlier step.
     if (incremented_destructive_writes_counter)
@@ -313,11 +349,21 @@ void HTMLScriptElement::prepare_script()
     // text/th8+signed  -- cryptographically signed TH8 script
     // text/tcl         -- legacy Tcl content type (treated as TH8)
     // th8              -- bare type shorthand
+    // th8+signed       -- bare signed shorthand (audit L21: kept symmetric
+    //                     with HTMLScriptElement::supports() in the .h, so
+    //                     `script.supports("th8+signed")` returning true
+    //                     actually corresponds to an accepted prepare_script
+    //                     classification).
     else if (script_block_type.equals_ignoring_ascii_case("text/th8"sv)
         || script_block_type.equals_ignoring_ascii_case("text/th8+signed"sv)
         || script_block_type.equals_ignoring_ascii_case("text/tcl"sv)
-        || script_block_type.equals_ignoring_ascii_case("th8"sv)) {
+        || script_block_type.equals_ignoring_ascii_case("th8"sv)
+        || script_block_type.equals_ignoring_ascii_case("th8+signed"sv)) {
         m_script_type = ScriptType::TH8;
+        // Record whether the script declared a signed MIME so the
+        // signed-only document policy can reject unsigned variants.
+        m_th8_declared_signed = script_block_type.equals_ignoring_ascii_case("text/th8+signed"sv)
+            || script_block_type.equals_ignoring_ascii_case("th8+signed"sv);
     }
     // FIXME: 13. Otherwise, if the script block's type string is an ASCII case-insensitive match for the string "speculationrules", then set el's type to "speculationrules".
     // 14. Otherwise, return. (No script is executed, and el's type is left as null.)
@@ -515,12 +561,14 @@ void HTMLScriptElement::prepare_script()
             // Fetch a classic script given url, settings object, options, classic script CORS setting, encoding, and onComplete.
             fetch_classic_script(*this, *url, settings_object, move(options), classic_script_cors_setting, encoding.release_value(), on_complete);
         }
+#if LADYBIRD_ENABLE_TH8
         // [Non-standard] -> "th8"
         // Fetch the TH8 script source. Uses the same transport as classic scripts but creates
         // a TH8Script instead of a ClassicScript from the fetched body.
         else if (m_script_type == ScriptType::TH8) {
             fetch_th8_script(*this, *url, settings_object, move(options), classic_script_cors_setting, encoding.release_value(), on_complete);
         }
+#endif
         // -> "module"
         else if (m_script_type == ScriptType::Module) {
             // If el does not have an integrity attribute, then set options's integrity metadata to the result of resolving a module integrity metadata with url and settings object.
@@ -588,11 +636,13 @@ void HTMLScriptElement::prepare_script()
             // 2. Mark as ready el given result.
             mark_as_ready(Result(move(result)));
         }
+#if LADYBIRD_ENABLE_TH8
         // [Non-standard] -> "th8"
         else if (m_script_type == ScriptType::TH8) {
             auto script = TH8Script::create(m_document->url().to_byte_string(), source_text_utf8, settings_object, base_url);
             mark_as_ready(Result(move(script)));
         }
+#endif
         // FIXME: -> "speculationrules"
     }
 

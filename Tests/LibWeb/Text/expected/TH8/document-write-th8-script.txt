@@ -1,0 +1,1 @@
+PASS: document.write of TH8 script executes

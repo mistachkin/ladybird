@@ -4,15 +4,15 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibWeb/HTML/Scripting/TH8Script.h>
+
 #include <AK/Debug.h>
 #include <LibJS/Runtime/VM.h>
 #include <LibTH8/Interpreter.h>
 #include <LibWeb/DOM/Document.h>
-#include <LibWeb/HTML/EventLoop/EventLoop.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Scripting/ExceptionReporter.h>
 #include <LibWeb/HTML/Scripting/TH8Context.h>
-#include <LibWeb/HTML/Scripting/TH8Script.h>
 #include <LibWeb/HTML/WindowOrWorkerGlobalScope.h>
 
 namespace Web::HTML {
@@ -53,31 +53,59 @@ JS::Completion TH8Script::run(RethrowErrors rethrow_errors)
     // Register source for DevTools visibility.
     th8_context.register_source(filename(), m_source);
 
+    // If a signature sidecar was attached during fetch (text/th8+signed),
+    // hand it to the TH8Context's WebPlatform so the signed-only policy
+    // chain can fetch it when verifying.  This must happen BEFORE
+    // evaluate() so the policy's xGetData lookup succeeds.
+    if (m_signature_sidecar.has_value()) {
+        // Copy the bytes; the buffer may be consumed by the policy
+        // chain and we want the script to remain re-runnable.
+        auto bytes = MUST(ByteBuffer::copy(m_signature_sidecar->bytes()));
+        th8_context.register_signature_sidecar(filename(), move(bytes));
+    }
+
+    // [H4] Push the canonical script execution context BEFORE invoking
+    // TH8.  DOM operations triggered from TH8 (set_inner_html, fetch,
+    // TrustedTypes lookups, ...) consult `vm.running_execution_context()`
+    // to resolve incumbent/current realm; without prepare_to_run_script
+    // they would see whatever frame happened to be on top, which is
+    // undefined for a cold TH8 entry and is what makes the cross-eval
+    // JS->TH8->DOM path work only by accident.  clean_up_after_running_script
+    // additionally drains microtasks when the JS stack returns to empty,
+    // replacing the prior hand-rolled perform_a_microtask_checkpoint() call.
+    prepare_to_run_script(settings);
+
     // Evaluate the TH8 source in the shared per-document interpreter.
     int rc = th8_context.evaluate(m_source, filename());
+
+    JS::Completion result = JS::normal_completion(JS::js_undefined());
 
     if (rc != TH8_OK) {
         auto error_message = th8_context.result_string();
         dbgln_if(HTML_SCRIPT_DEBUG, "TH8Script: Error in {}: {}", filename(), error_message);
 
-        if (rethrow_errors == RethrowErrors::Yes) {
-            auto& realm = settings.realm();
-            return JS::throw_completion(JS::Error::create(realm, MUST(String::from_utf8(error_message))));
-        }
-
-        // Report the error through the global object's error reporting mechanism.
-        auto& window_or_worker = as<WindowOrWorkerGlobalScopeMixin>(settings.global_object());
+        // [M5] TH8 strings are 8-bit-clean; binary bytes can reach
+        // here via e.g. `[format "%c" 0xFF]`.  MUST(String::from_utf8(...))
+        // aborts the process on invalid UTF-8 -- replace decode errors
+        // with U+FFFD instead.
         auto& realm = settings.realm();
-        auto error = JS::Error::create(realm, MUST(String::from_utf8(error_message)));
-        window_or_worker.report_an_exception(error);
+        auto error = JS::Error::create(realm, String::from_utf8_with_replacement_character(error_message));
+
+        if (rethrow_errors == RethrowErrors::Yes) {
+            result = JS::throw_completion(error);
+        } else {
+            // Report the error through the global object's error reporting mechanism.
+            auto& window_or_worker = as<WindowOrWorkerGlobalScopeMixin>(settings.global_object());
+            window_or_worker.report_an_exception(error);
+        }
     }
 
-    // Drain microtasks that may have been created by DOM operations during TH8 execution.
-    // TH8 does not push/pop JS execution contexts, so microtasks are not automatically
-    // drained via clean_up_after_running_script().
-    main_thread_event_loop().perform_a_microtask_checkpoint();
+    // [H4] Symmetric clean-up.  Pops the execution context we pushed
+    // above and runs the microtask checkpoint when the JS stack is
+    // empty.  Must happen on every return path (success and failure).
+    clean_up_after_running_script(settings);
 
-    return JS::normal_completion(JS::js_undefined());
+    return result;
 }
 
 TH8Script::TH8Script(URL::URL base_url, ByteString filename, EnvironmentSettingsObject& settings)

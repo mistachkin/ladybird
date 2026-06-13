@@ -4,8 +4,15 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <AK/ByteString.h>
 #include <LibTH8/Interpreter.h>
+
+#include <AK/ByteString.h>
+
+// [L19] Interpreter.h now reaches the vendored TH8 C API through the
+// curated CAPI.h header.  The implementation file still needs the full
+// upstream surface, so pull <th8.h> in here (resolved via LibTH8's
+// PRIVATE include of Vendor/).
+#include <th8.h>
 
 namespace TH8 {
 
@@ -168,6 +175,39 @@ int Interpreter::preload_signing_key(StringView snk_key_blob)
         return TH8_ERROR;
 
     return Th8_PolicyPreloadKey(m_interp, m_policy_ctx, key);
+}
+
+int Interpreter::install_signed_only_policy_with_embedded_keyring()
+{
+    if (install_signed_only_policy() != TH8_OK)
+        return -1;
+
+    size_t entry_count = 0;
+    auto const* entries = Th8_GetEmbeddedKeyring(&entry_count);
+
+    int preloaded = 0;
+    if (entries && entry_count > 0) {
+        for (size_t i = 0; i < entry_count; ++i) {
+            if (!entries[i].zData || entries[i].nData == 0)
+                continue;
+            Th8_RsaKey* key = nullptr;
+            int rc = Th8_RsaKeyLoad(m_interp, entries[i].zData, entries[i].nData, &key);
+            if (rc != TH8_OK || !key)
+                continue;
+            if (Th8_PolicyPreloadKey(m_interp, m_policy_ctx, key) == TH8_OK)
+                ++preloaded;
+        }
+    }
+
+    // Turn on signed-only enforcement so every Th8_Eval after this point
+    // routes through the policy chain (signature check + verified-script
+    // re-entrancy bookkeeping).  Even with zero preloaded keys, enabling
+    // this is the right thing: an attacker-controlled unsigned script
+    // cannot run, which is the conservative default for the empty-stub
+    // keyring case.
+    Th8_EnableSignedOnly(m_interp, 1);
+
+    return preloaded;
 }
 
 bool Interpreter::is_signed_only() const

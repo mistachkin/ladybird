@@ -6,6 +6,10 @@
 
 #pragma once
 
+#include <AK/ByteBuffer.h>
+#include <AK/ByteString.h>
+#include <AK/Optional.h>
+#include <AK/StringView.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/HTML/Scripting/Script.h>
@@ -35,6 +39,14 @@ public:
 
     StringView source() const { return m_source; }
 
+    // Optional signature sidecar (raw bytes of the `<src>.b64sig`
+    // file).  Set by the fetch path for scripts declared with
+    // `text/th8+signed`; consumed by TH8Script::run, which registers
+    // the bytes with the TH8Context's WebPlatform before evaluation
+    // so the TH8 signed-only policy chain can verify the signature.
+    void set_signature_sidecar(ByteBuffer bytes) { m_signature_sidecar = move(bytes); }
+    bool has_signature_sidecar() const { return m_signature_sidecar.has_value(); }
+
 private:
     TH8Script(URL::URL base_url, ByteString filename, EnvironmentSettingsObject&);
 
@@ -42,6 +54,7 @@ private:
     virtual void visit_edges(Cell::Visitor&) override;
 
     ByteString m_source;
+    Optional<ByteBuffer> m_signature_sidecar;
 };
 
 }

@@ -44,6 +44,10 @@ public:
 
     static constexpr size_t max_handles = 10'000;
 
+    // [M10] All issued handles take the form `<handle_prefix><decimal-id>`.
+    // resolve() requires the prefix exactly, then digits only.
+    static constexpr StringView handle_prefix = "obj"sv;
+
 private:
     ByteString make_handle_string(Bindings::PlatformObject& object, u64 id);
 

@@ -477,6 +477,15 @@ WebIDL::CallbackType* EventTarget::get_current_value_of_event_handler(FlyString 
         if (document->is_scripting_disabled())
             return nullptr;
 
+        // [Non-standard, B3] If JavaScript execution is disabled by a TH8
+        // policy (today: `<meta http-equiv="TH8-Script-Policy"
+        // content="no-javascript">`), inline event-handler attributes
+        // (onclick=, onload=, onerror=, ...) must NOT compile or run --
+        // otherwise they bypass the no-javascript policy that the
+        // <script> element gate already enforces.
+        if (document->is_javascript_execution_disabled())
+            return nullptr;
+
         // 3. Let body be the uncompiled script body in eventHandler's value.
         auto& body = event_handler->value.get<ByteString>();
 

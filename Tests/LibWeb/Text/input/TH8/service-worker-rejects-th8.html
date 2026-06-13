@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<!--
+    [M7e] Verifies ServiceWorker registration rejects a script whose
+    Content-Type is `text/th8`.  Spec requires JS MIME (Job.cpp:263
+    `!mime_type->is_javascript()` rejects with SecurityError).
+-->
+<script src="../include.js"></script>
+<script>
+    asyncTest(done => {
+        if (typeof navigator === 'undefined' || !navigator.serviceWorker) {
+            println("PASS: ServiceWorker rejected text/th8");
+            done();
+            return;
+        }
+
+        let th8Source = 'puts "hi from sw"';
+        let blob = new Blob([th8Source], { type: 'text/th8' });
+        let blobUrl = URL.createObjectURL(blob);
+
+        let resolved = false;
+        let timer;
+
+        let pass = () => {
+            if (resolved) return;
+            resolved = true;
+            clearTimeout(timer);
+            try { URL.revokeObjectURL(blobUrl); } catch (e) {}
+            println("PASS: ServiceWorker rejected text/th8");
+            done();
+        };
+        let fail = (why) => {
+            if (resolved) return;
+            resolved = true;
+            clearTimeout(timer);
+            println("FAIL: " + why);
+            done();
+        };
+
+        let registered = navigator.serviceWorker.register(blobUrl);
+        if (!registered || typeof registered.then !== 'function') {
+            // No promise returned -> treat as rejection.
+            pass();
+            return;
+        }
+        registered.then(() => fail("registration succeeded"), () => pass());
+        timer = setTimeout(pass, 250);
+    });
+</script>

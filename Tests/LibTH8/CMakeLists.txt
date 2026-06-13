@@ -24,4 +24,10 @@ if (ENABLE_FUZZERS)
     target_link_libraries(fuzz_th8_eval PRIVATE LibTH8)
     target_compile_options(fuzz_th8_eval PRIVATE -fsanitize=fuzzer)
     target_link_options(fuzz_th8_eval PRIVATE -fsanitize=fuzzer)
+    # [L19] The fuzz target drives the raw C API (Th8_GetLibcPlatform,
+    # Th8_CreateInterp, etc.) directly so it can mirror the smallest
+    # possible host setup.  Grant it private access to the vendored
+    # header that the public LibTH8 surface no longer exposes.
+    target_include_directories(fuzz_th8_eval PRIVATE
+        ${CMAKE_SOURCE_DIR}/Libraries/LibTH8/Vendor)
 endif()

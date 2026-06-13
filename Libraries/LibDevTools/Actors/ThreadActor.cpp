@@ -9,7 +9,9 @@
 #include <AK/JsonObject.h>
 #include <LibDevTools/Actors/ThreadActor.h>
 #include <LibDevTools/DevToolsServer.h>
-#include <LibTH8/Interpreter.h>
+#if LADYBIRD_ENABLE_TH8
+#    include <LibTH8/Interpreter.h>
+#endif
 
 namespace DevTools {
 
@@ -51,6 +53,7 @@ void ThreadActor::handle_attach(Message const& message)
 {
     m_attached = true;
 
+#if LADYBIRD_ENABLE_TH8
     // Install the debug callback so breakpoints and stepping work.
     if (m_interpreter) {
         m_interpreter->set_debug_callback([](Th8_Interp*, int event, char const*,
@@ -61,6 +64,7 @@ void ThreadActor::handle_attach(Message const& message)
         },
             nullptr);
     }
+#endif
 
     JsonObject response;
     response.set("type"sv, "paused"_string);
@@ -72,12 +76,14 @@ void ThreadActor::handle_detach(Message const& message)
 {
     m_attached = false;
 
+#if LADYBIRD_ENABLE_TH8
     // Remove the debug callback and clear all breakpoints.
     if (m_interpreter) {
         m_interpreter->set_debug_callback(nullptr, nullptr);
         m_interpreter->clear_all_breakpoints();
         m_interpreter->set_step_mode(TH8_STEP_NONE);
     }
+#endif
 
     JsonObject response;
     response.set("type"sv, "detached"_string);
@@ -86,10 +92,12 @@ void ThreadActor::handle_detach(Message const& message)
 
 void ThreadActor::handle_resume(Message const& message)
 {
+#if LADYBIRD_ENABLE_TH8
     if (m_interpreter) {
         m_interpreter->set_step_mode(TH8_STEP_NONE);
         m_interpreter->thaw();
     }
+#endif
 
     JsonObject response;
     response.set("type"sv, "resumed"_string);
@@ -98,8 +106,10 @@ void ThreadActor::handle_resume(Message const& message)
 
 void ThreadActor::handle_interrupt(Message const& message)
 {
+#if LADYBIRD_ENABLE_TH8
     if (m_interpreter)
         m_interpreter->freeze();
+#endif
 
     JsonObject response;
     response.set("type"sv, "paused"_string);
@@ -122,6 +132,7 @@ void ThreadActor::handle_frames(Message const& message)
 {
     JsonArray frames;
 
+#if LADYBIRD_ENABLE_TH8
     if (m_interpreter && m_interpreter->is_suspended()) {
         int count = m_interpreter->frame_count();
 
@@ -148,6 +159,7 @@ void ThreadActor::handle_frames(Message const& message)
             frames.must_append(move(frame));
         }
     }
+#endif
 
     JsonObject response;
     response.set("frames"sv, move(frames));
@@ -166,6 +178,7 @@ void ThreadActor::handle_set_breakpoint(Message const& message)
 
     JsonObject response;
 
+#if LADYBIRD_ENABLE_TH8
     if (m_interpreter) {
         int breakpoint_id = m_interpreter->set_breakpoint(script->bytes_as_string_view(),
             static_cast<int>(*line));
@@ -178,6 +191,10 @@ void ThreadActor::handle_set_breakpoint(Message const& message)
     } else {
         response.set("error"sv, "no interpreter"_string);
     }
+#else
+    (void)line;
+    response.set("error"sv, "TH8 disabled"_string);
+#endif
 
     send_response(message, move(response));
 }
@@ -190,12 +207,17 @@ void ThreadActor::handle_remove_breakpoint(Message const& message)
 
     JsonObject response;
 
+#if LADYBIRD_ENABLE_TH8
     if (m_interpreter) {
         int rc = m_interpreter->clear_breakpoint(static_cast<int>(*breakpoint_id));
         response.set("removed"sv, JsonValue { rc == TH8_OK });
     } else {
         response.set("error"sv, "no interpreter"_string);
     }
+#else
+    (void)breakpoint_id;
+    response.set("error"sv, "TH8 disabled"_string);
+#endif
 
     send_response(message, move(response));
 }

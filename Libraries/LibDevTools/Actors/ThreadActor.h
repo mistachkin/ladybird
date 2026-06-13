@@ -10,10 +10,15 @@
 #include <AK/NonnullRefPtr.h>
 #include <LibDevTools/Actor.h>
 #include <LibDevTools/Forward.h>
-
+#if LADYBIRD_ENABLE_TH8
+#    include <LibTH8/Forward.h>
+#else
+// Build with ENABLE_TH8=OFF still needs the forward decl so the
+// m_interpreter / set_interpreter member signatures parse cleanly.
 namespace TH8 {
 class Interpreter;
 }
+#endif
 
 namespace DevTools {
 

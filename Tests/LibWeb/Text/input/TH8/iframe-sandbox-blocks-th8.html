@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<!--
+    [M7a] Verifies a sandboxed iframe WITHOUT `allow-scripts` blocks
+    TH8 just like it blocks JS.  The inner script must not change the
+    inner div from its initial value.
+-->
+<body>
+<iframe sandbox srcdoc="
+    <body>
+    <div id='inner'>blocked</div>
+    <script type='text/th8'>
+    set doc [dom::document]
+    [$doc getElementById inner] textContent 'FAIL'
+    </script>
+    </body>
+"></iframe>
+<script>
+let f = document.querySelector('iframe');
+f.addEventListener('load', () => {
+    let inner = f.contentDocument.getElementById('inner').textContent;
+    if (inner === 'blocked') {
+        println("PASS: sandbox without allow-scripts blocks TH8");
+    } else {
+        println("FAIL: TH8 ran in sandboxed iframe (" + inner + ")");
+    }
+});
+</script>
+</body>

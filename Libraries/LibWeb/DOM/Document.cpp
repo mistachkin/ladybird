@@ -26,6 +26,7 @@
 #include <LibGC/Timer.h>
 #include <LibHTTP/Cookie/Cookie.h>
 #include <LibHTTP/Cookie/ParsedCookie.h>
+#include <LibHTTP/HeaderList.h>
 #include <LibJS/Console.h>
 #include <LibJS/Runtime/Array.h>
 #include <LibJS/Runtime/FunctionObject.h>
@@ -166,7 +167,9 @@
 #include <LibWeb/HTML/Scripting/ClassicScript.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Scripting/ExceptionReporter.h>
-#include <LibWeb/HTML/Scripting/TH8Context.h>
+#if LADYBIRD_ENABLE_TH8
+#    include <LibWeb/HTML/Scripting/TH8Context.h>
+#endif
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/HTML/Scripting/WindowEnvironmentSettingsObject.h>
 #include <LibWeb/HTML/SharedResourceRequest.h>
@@ -4732,11 +4735,71 @@ DOMImplementation* Document::implementation()
     return m_implementation;
 }
 
+#if LADYBIRD_ENABLE_TH8
 HTML::TH8Context& Document::ensure_th8_context()
 {
     if (!m_th8_context)
         m_th8_context = HTML::TH8Context::create(heap(), *this);
     return *m_th8_context;
+}
+#endif
+
+void Document::apply_th8_script_policy_from_response_headers(::HTTP::HeaderList const& headers)
+{
+    // [Non-standard, B3.f] Look up the `TH8-Script-Policy` response
+    // header.  Tokenization mirrors the `<meta http-equiv>` form in
+    // HTMLMetaElement.cpp: split on ';' and ASCII whitespace, compare
+    // each token case-insensitively against the directive names.
+    // If the header is absent the document keeps its default policy
+    // (no flags set).
+    auto header_value_or_error = headers.get("TH8-Script-Policy"sv);
+    if (!header_value_or_error.has_value())
+        return;
+
+    auto const& value = header_value_or_error.value();
+
+    bool has_signed_only = false;
+    bool has_no_js = false;
+    bool has_cross_eval = false;
+
+    auto is_ws = [](char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'; };
+    StringView view { value.characters(), value.length() };
+    size_t i = 0;
+    while (i < view.length()) {
+        while (i < view.length() && (is_ws(view[i]) || view[i] == ';'))
+            ++i;
+        size_t start = i;
+        while (i < view.length() && !is_ws(view[i]) && view[i] != ';')
+            ++i;
+        if (i == start)
+            break;
+        auto token = view.substring_view(start, i - start);
+        if (token.equals_ignoring_ascii_case("signed-only"sv))
+            has_signed_only = true;
+        else if (token.equals_ignoring_ascii_case("no-javascript"sv))
+            has_no_js = true;
+        else if (token.equals_ignoring_ascii_case("cross-eval"sv))
+            has_cross_eval = true;
+    }
+
+    if (has_no_js && has_cross_eval) {
+        dbgln("Document: TH8-Script-Policy header: 'no-javascript' and 'cross-eval' are "
+              "mutually exclusive; ignoring 'cross-eval'.");
+        has_cross_eval = false;
+    }
+
+    if (has_signed_only) {
+        set_th8_signed_only_policy(true);
+        dbgln("Document: TH8 signed-only policy activated via response header.");
+    }
+    if (has_no_js) {
+        set_th8_no_javascript_policy(true);
+        dbgln("Document: TH8 no-JavaScript policy activated via response header.");
+    }
+    if (has_cross_eval) {
+        set_th8_cross_eval_policy(true);
+        dbgln("Document: TH8 cross-eval policy activated via response header.");
+    }
 }
 
 // https://html.spec.whatwg.org/multipage/interaction.html#dom-document-hasfocus

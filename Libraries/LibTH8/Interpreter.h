@@ -10,7 +10,8 @@
 #include <AK/Noncopyable.h>
 #include <AK/NonnullOwnPtr.h>
 #include <AK/StringView.h>
-#include <th8.h>
+#include <AK/Types.h>
+#include <LibTH8/CAPI.h>
 
 namespace TH8 {
 
@@ -61,6 +62,14 @@ public:
     int install_signed_only_policy();
     void remove_signed_only_policy();
     int preload_signing_key(StringView snk_key_blob);
+
+    // Install the signed-only policy and preload every key in the
+    // build-time embedded keyring (see Th8_GetEmbeddedKeyring in
+    // th8.h).  Returns the number of keys actually preloaded; zero
+    // is a valid result if the canonical empty stub keyring is
+    // linked.  Returns -1 if the policy could not be installed.
+    int install_signed_only_policy_with_embedded_keyring();
+
     bool is_signed_only() const;
 
     // Script debugging.

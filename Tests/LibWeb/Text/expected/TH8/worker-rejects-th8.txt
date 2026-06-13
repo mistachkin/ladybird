@@ -1,0 +1,1 @@
+PASS: Worker rejected text/th8

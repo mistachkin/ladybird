@@ -1,0 +1,1 @@
+PASS: TH8 wall-clock or step limit halts long-running loop

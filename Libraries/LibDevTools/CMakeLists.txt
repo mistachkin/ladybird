@@ -34,4 +34,7 @@ set(SOURCES
 )
 
 ladybird_lib(LibDevTools devtools EXPLICIT_SYMBOL_EXPORT)
-target_link_libraries(LibDevTools PRIVATE LibCore LibHTTP LibWeb LibURL LibTH8)
+target_link_libraries(LibDevTools PRIVATE LibCore LibHTTP LibWeb LibURL)
+if (ENABLE_TH8)
+    target_link_libraries(LibDevTools PRIVATE LibTH8)
+endif()
