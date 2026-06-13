@@ -63,6 +63,7 @@ set(LAGOM_USE_LINKER "" CACHE STRING "The linker to use (e.g. lld, mold) instead
 set(LAGOM_LINK_POOL_SIZE "" CACHE STRING "The maximum number of parallel jobs to use for linking")
 option(ENABLE_LTO_FOR_RELEASE "Enable link-time optimization for release builds" ${RELEASE_LTO_DEFAULT})
 option(ENABLE_LAGOM_COVERAGE_COLLECTION "Enable code coverage instrumentation for lagom binaries in clang" OFF)
+option(ENABLE_INTEGRATION_TESTS "Build and register WebDriver-driven integration tests under Tests/LibWeb/Integration/" OFF)
 
 if (ENABLE_FUZZERS_LIBFUZZER)
     # With libfuzzer, we need to avoid a duplicate main() linker error giving false negatives

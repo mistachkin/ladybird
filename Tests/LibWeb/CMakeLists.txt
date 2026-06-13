@@ -45,3 +45,4 @@ if (NOT WIN32)
 endif()
 
 add_subdirectory("test-web")
+add_subdirectory("Integration")

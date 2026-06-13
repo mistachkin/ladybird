@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<!--
+    Integration PoC -- page C.
+
+    Registers a TH8 click handler on the trigger button.  When the
+    handler fires it uses cross-eval to set window.location to page B.
+    Tests that the TH8 stack unwinds cleanly when the JS side mutates
+    location -- the renderer must finish the TH8 event-dispatch frame
+    before the navigation processes.
+-->
+<meta http-equiv="TH8-Script-Policy" content="cross-eval">
+<title>page_c</title>
+<body>
+<button id="trigger">go</button>
+<div id="status">armed</div>
+<script type="text/th8">
+set doc [dom::document]
+set btn [$doc getElementById trigger]
+
+proc on_trigger_click {evt} {
+    # From the TH8 event-handler frame, ask JS to navigate.  The
+    # current TH8 evaluate() must unwind cleanly before the
+    # navigation processes -- M4 prepare_to_run_script /
+    # clean_up_after_running_script around evaluate() makes the
+    # incumbent / current realm well-defined for this case.
+    dom::eval_js {
+        document.getElementById('status').textContent = 'navigating';
+        window.location = 'page_b_lands.html';
+        null
+    }
+}
+
+$btn addEventListener click on_trigger_click
+</script>
+</body>

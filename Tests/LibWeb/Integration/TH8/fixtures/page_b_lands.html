@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<!--
+    Integration PoC -- page B.
+
+    Trivial landing page.  The driver asserts that #landed reads
+    "yes" after navigating from page A; the assertion would fail
+    on a hung navigation (driver page-load timeout) or a renderer
+    crash (WebDriver session error).
+-->
+<title>page_b</title>
+<body>
+<div id="landed">yes</div>
+</body>

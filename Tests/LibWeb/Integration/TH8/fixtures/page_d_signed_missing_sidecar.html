@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<!--
+    Integration PoC -- page D.
+
+    Loads an external TH8 script declared `text/th8+signed`.  The
+    fetch path issues a SECOND fetch for `<src>.b64sig` (the sidecar
+    signature); since `nonexistent.th8.b64sig` does not exist, the
+    sidecar fetch fails.  The script element's verification then
+    fails closed.
+
+    The race the audit was concerned about -- sidecar fetch resolving
+    AFTER the document has been navigated away from -- requires a
+    delayed-response HTTP fixture server to reproduce reliably; this
+    file:// version exercises the same code path under fast failure
+    and asserts no crash.  See ../README.md for the deferred HTTP-
+    fixture follow-up.
+-->
+<title>page_d</title>
+<body>
+<div id="status">loading</div>
+<script type="text/th8+signed" src="nonexistent.th8"></script>
+<script>
+// Note: we cannot reliably observe the signed-eval failure from JS
+// without exposing additional diagnostics; the assertion is just
+// "page loaded cleanly, no renderer crash".
+document.getElementById('status').textContent = 'loaded';
+</script>
+</body>
