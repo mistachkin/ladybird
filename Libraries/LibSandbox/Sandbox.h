@@ -25,6 +25,7 @@ struct LandlockPath {
 
     ByteString path;
     Access access { Access::ReadOnly };
+    bool is_directory { false };
 };
 #endif
 
@@ -52,13 +53,12 @@ enum class NetworkAccess {
 
 #if defined(AK_OS_LINUX)
 [[nodiscard]] ErrorOr<void> add_landlock_path_if_exists(Vector<LandlockPath>& paths, StringView path, LandlockPath::Access);
-[[nodiscard]] ErrorOr<void> restrict_filesystem_with_landlock(ReadonlySpan<LandlockPath>);
-[[nodiscard]] ErrorOr<void> restrict_filesystem_with_landlock(ReadonlySpan<StringView> readable_paths = {});
+[[nodiscard]] ErrorOr<void> restrict_filesystem_with_landlock(ReadonlySpan<LandlockPath> = {});
 #endif
 
 #if defined(AK_OS_MACOS)
 [[nodiscard]] ErrorOr<void> add_seatbelt_path_if_exists(Vector<SeatbeltPath>& paths, StringView path, SeatbeltPath::Access);
-[[nodiscard]] ErrorOr<void> apply_macos_sandbox(ReadonlySpan<SeatbeltPath>, NetworkAccess, ReadonlySpan<ByteString> executable_paths = {});
+[[nodiscard]] ErrorOr<void> apply_macos_sandbox(ReadonlySpan<SeatbeltPath>, NetworkAccess, ReadonlySpan<ByteString> executable_paths = {}, ReadonlySpan<StringView> iokit_user_client_classes = {});
 #endif
 
 }

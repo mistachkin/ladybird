@@ -16,6 +16,7 @@
 #include <LibWeb/HTML/ErrorEvent.h>
 #include <LibWeb/HTML/ErrorInformation.h>
 #include <LibWeb/HTML/History.h>
+#include <LibWeb/HTML/LocalTraversableNavigable.h>
 #include <LibWeb/HTML/NavigateEvent.h>
 #include <LibWeb/HTML/Navigation.h>
 #include <LibWeb/HTML/NavigationCurrentEntryChangeEvent.h>
@@ -26,7 +27,6 @@
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/HTML/SessionHistoryEntry.h>
 #include <LibWeb/HTML/StructuredSerialize.h>
-#include <LibWeb/HTML/TraversableNavigable.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/WebIDL/AbstractOperations.h>
 #include <LibWeb/XHR/FormData.h>
@@ -37,6 +37,20 @@ GC_DEFINE_ALLOCATOR(Navigation);
 GC_DEFINE_ALLOCATOR(NavigationAPIMethodTracker);
 
 static Bindings::NavigationResult navigation_api_method_tracker_derived_result(GC::Ref<NavigationAPIMethodTracker> api_method_tracker);
+
+static void report_session_history_update_for_navigation_api_state_change(DOM::Document& document)
+{
+    auto navigable = document.navigable();
+    if (!navigable)
+        return;
+
+    auto traversable = navigable->traversable_navigable();
+    if (!traversable->page().client().should_report_session_history_updates())
+        return;
+
+    auto session_history_snapshot = traversable->create_session_history_snapshot();
+    traversable->page().client().page_did_update_session_history(session_history_snapshot.top_level_session_history_entries, session_history_snapshot.used_session_history_steps, session_history_snapshot.current_used_step_index);
+}
 
 NavigationAPIMethodTracker::NavigationAPIMethodTracker(GC::Ref<Navigation> navigation,
     Optional<String> key,
@@ -143,6 +157,11 @@ WebIDL::ExceptionOr<void> Navigation::update_current_entry(Bindings::NavigationU
 
     // 4. Set current's session history entry's navigation API state to serializedState.
     current->session_history_entry().set_navigation_api_state(serialized_state);
+
+    // NB: The UI-process session history mirror needs to observe updateCurrentEntry() state changes so restored
+    //     WebContent processes can reconstruct Navigation API state from the authoritative UI-owned history.
+    auto& document = as<HTML::Window>(relevant_global_object(*this)).associated_document();
+    report_session_history_update_for_navigation_api_state_change(document);
 
     // 5. Fire an event named currententrychange at this using NavigationCurrentEntryChangeEvent,
     //    with its navigationType attribute initialized to null and its from initialized to current.
@@ -758,7 +777,7 @@ void Navigation::abort_the_ongoing_navigation(GC::Ptr<WebIDL::DOMException> erro
     m_focus_changed_during_ongoing_navigation = false;
 
     // 4. Set navigation's suppress normal scroll restoration during ongoing navigation to false.
-    m_suppress_scroll_restoration_during_ongoing_navigation = false;
+    m_suppress_normal_scroll_restoration_during_ongoing_navigation = false;
 
     // 5. If error was not given, then let error be a new "AbortError" DOMException created in navigation's relevant realm.
     if (!error)
@@ -1193,7 +1212,7 @@ bool Navigation::inner_navigate_event_firing_algorithm(
     m_focus_changed_during_ongoing_navigation = false;
 
     // 28. Set navigation's suppress normal scroll restoration during ongoing navigation to false.
-    m_suppress_scroll_restoration_during_ongoing_navigation = false;
+    m_suppress_normal_scroll_restoration_during_ongoing_navigation = false;
 
     // 29. Let dispatchResult be the result of dispatching event at navigation.
     auto dispatch_result = dispatch_event(*event);
@@ -1254,7 +1273,7 @@ bool Navigation::inner_navigate_event_firing_algorithm(
             //       the relevant NavigateEvent. Otherwise, there will be no scroll restoration. That is, no navigation which is intercepted
             //       by intercept() goes through the normal scroll restoration process; scroll restoration for such navigations
             //       is either done manually, by the web developer, or is done after the transition.
-            m_suppress_scroll_restoration_during_ongoing_navigation = true;
+            m_suppress_normal_scroll_restoration_during_ongoing_navigation = true;
 
             // 2. Let userInvolvement be "none".
             auto user_involvement_for_resume = UserNavigationInvolvement::None;
@@ -1305,13 +1324,21 @@ bool Navigation::inner_navigate_event_firing_algorithm(
         }
     }
 
-    auto const defer_traverse_commit_handler_steps = navigation_type == Bindings::NavigationType::Traverse && end_result_is_same_document;
+    auto const event_was_intercepted = event->interception_state() != NavigateEvent::InterceptionState::None;
+    auto const same_document_entry_update_will_run_commit_handler_steps = end_result_is_same_document
+        && (navigation_type == Bindings::NavigationType::Traverse
+            || (!event_was_intercepted
+                && (navigation_type == Bindings::NavigationType::Push
+                    || navigation_type == Bindings::NavigationType::Replace)));
 
     if (end_result_is_same_document) {
         // NB: Same-document Navigation API entry updates run these steps after currententrychange.
-        //     If those steps have not started here, run them as a fallback for same-document paths
-        //     that did not update entries.
-        if (!defer_traverse_commit_handler_steps && !event->has_started_navigate_event_intercept_commit_handler_steps())
+        //     If those steps have not started here, run them as a fallback for same-document paths that did not update
+        //     entries. Intercepted push/replace navigations have already attempted their same-document entry update
+        //     above, so keep this fallback enabled in case the navigate event handler detached its document and caused
+        //     that update to return early due to entries and events being disabled.
+        if (!same_document_entry_update_will_run_commit_handler_steps
+            && !event->has_started_navigate_event_intercept_commit_handler_steps())
             run_the_navigate_event_intercept_commit_handler_steps(event, api_method_tracker);
     }
 
@@ -1493,6 +1520,13 @@ void Navigation::initialize_the_navigation_api_entries_for_a_new_document(Vector
 
     // 5. Set navigation's current entry index to the result of getting the navigation API entry index of initialSHE within navigation.
     m_current_entry_index = get_the_navigation_api_entry_index(*initial_she);
+}
+
+void Navigation::initialize_the_navigation_api_entries_for_reconstructed_session_history(Vector<NonnullRefPtr<SessionHistoryEntry>> const& new_shes, NonnullRefPtr<SessionHistoryEntry> initial_she)
+{
+    m_entry_list.clear();
+    m_current_entry_index = -1;
+    initialize_the_navigation_api_entries_for_a_new_document(new_shes, move(initial_she));
 }
 
 // https://html.spec.whatwg.org/multipage/nav-history-apis.html#update-the-navigation-api-entries-for-a-same-document-navigation

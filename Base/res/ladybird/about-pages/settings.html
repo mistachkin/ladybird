@@ -392,6 +392,13 @@
                         <label for="vertical-tabs-expand-on-hover">Expand vertical tabs on hover when collapsed</label>
                         <input id="vertical-tabs-expand-on-hover" type="checkbox" switch />
                     </div>
+                    <div class="card-group inline-container hidden">
+                        <label for="vertical-tabs-position">Vertical tabs side</label>
+                        <select id="vertical-tabs-position">
+                            <option value="left">Left</option>
+                            <option value="right">Right</option>
+                        </select>
+                    </div>
                 </div>
             </div>
 
@@ -642,8 +649,8 @@
             </div>
             <div class="dialog-body">
                 <div class="inline-container">
-                    <label for="site-settings-global">Enable on all sites</label>
-                    <input id="site-settings-global" type="checkbox" switch />
+                    <label for="site-settings-policy">Default for all sites</label>
+                    <select id="site-settings-policy"></select>
                 </div>
                 <hr />
                 <label>Allowlist</label>
@@ -725,6 +732,8 @@
         <script src="resource://ladybird/about-pages/settings/tabs.js" type="module"></script>
 
         <script type="module">
+            import { tabForDeepLink } from "resource://ladybird/about-pages/settings/dialog-deep-link.js";
+
             function switchTab(name) {
                 const button = document.querySelector(`.tab-button[data-tab="${name}"]`);
                 const panel = document.getElementById(`tab-${name}`);
@@ -748,7 +757,7 @@
 
             const hash = location.hash.slice(1);
             if (hash) {
-                switchTab(hash);
+                switchTab(tabForDeepLink(hash));
             }
 
             // FIXME: Remove this once closedby="any" triggers for Esc key.

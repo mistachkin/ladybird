@@ -64,7 +64,7 @@ private:
     virtual void apply_presentational_hints(Vector<CSS::StyleProperty>&) const override;
 
     virtual RefPtr<Layout::Node> create_layout_node(CSS::ComputedProperties const&) override;
-    virtual void adjust_computed_style(CSS::ComputedProperties&) override;
+    virtual void adjust_computed_style(CSS::ComputedProperties::Builder&) override;
 
     bool has_ancestor_media_element_or_object_element_not_showing_fallback_content() const;
 
@@ -83,14 +83,6 @@ private:
     virtual i32 default_tab_index_value() const override;
 
     // ^Layout::ImageProvider
-    virtual bool is_image_available() const override;
-    virtual Optional<CSSPixels> intrinsic_width() const override;
-    virtual Optional<CSSPixels> intrinsic_height() const override;
-    virtual Optional<CSSPixelFraction> intrinsic_aspect_ratio() const override;
-    virtual Optional<Gfx::DecodedImageFrame> current_image_frame_sized(Gfx::IntSize) const override;
-    virtual void set_visible_in_viewport(bool) override;
-    virtual GC::Ptr<DOM::Element const> to_html_element() const override { return *this; }
-    virtual size_t current_frame_index() const override { return 0; }
     virtual GC::Ptr<DecodedImageData> decoded_image_data() const override { return image_data(); }
 
     GC::Ptr<DecodedImageData> image_data() const;

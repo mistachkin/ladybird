@@ -97,6 +97,7 @@ set(SOURCES
     CSS/CountersSet.cpp
     CSS/CounterStyle.cpp
     CSS/CounterStyleDefinition.cpp
+    CSS/CustomPropertyRegistration.cpp
     CSS/CSS.cpp
     CSS/CSSAnimation.cpp
     CSS/CSSConditionRule.cpp
@@ -283,6 +284,7 @@ set(SOURCES
     CSS/StyleValues/FunctionStyleValue.cpp
     CSS/StyleValues/FontSourceStyleValue.cpp
     CSS/StyleValues/FontStyleStyleValue.cpp
+    CSS/StyleValues/FrequencyStyleValue.cpp
     CSS/StyleValues/GridAutoFlowStyleValue.cpp
     CSS/StyleValues/GridTemplateAreaStyleValue.cpp
     CSS/StyleValues/GridTrackPlacementStyleValue.cpp
@@ -305,6 +307,7 @@ set(SOURCES
     CSS/StyleValues/RatioStyleValue.cpp
     CSS/StyleValues/RectStyleValue.cpp
     CSS/StyleValues/RepeatStyleStyleValue.cpp
+    CSS/StyleValues/ResolutionStyleValue.cpp
     CSS/StyleValues/ScrollbarColorStyleValue.cpp
     CSS/StyleValues/ShadowStyleValue.cpp
     CSS/StyleValues/ShorthandStyleValue.cpp
@@ -313,6 +316,7 @@ set(SOURCES
     CSS/StyleValues/SuperellipseStyleValue.cpp
     CSS/StyleValues/TextIndentStyleValue.cpp
     CSS/StyleValues/TextUnderlinePositionStyleValue.cpp
+    CSS/StyleValues/TimeStyleValue.cpp
     CSS/StyleValues/TransformationStyleValue.cpp
     CSS/StyleValues/TreeCountingFunctionStyleValue.cpp
     CSS/StyleValues/TupleStyleValue.cpp
@@ -474,6 +478,7 @@ set(SOURCES
     HTML/AudioTrack.cpp
     HTML/AudioTrackList.cpp
     HTML/AutocompleteElement.cpp
+    HTML/AutoplaySettings.cpp
     HTML/BarProp.cpp
     HTML/BeforeUnloadEvent.cpp
     HTML/BroadcastChannel.cpp
@@ -614,10 +619,13 @@ set(SOURCES
     HTML/HTMLUListElement.cpp
     HTML/HTMLUnknownElement.cpp
     HTML/HTMLVideoElement.cpp
+    HTML/HyperlinkElementUtils.cpp
     HTML/ImageBitmap.cpp
     HTML/ImageData.cpp
     HTML/ImageRequest.cpp
     HTML/ListOfAvailableImages.cpp
+    HTML/LocalNavigable.cpp
+    HTML/LocalTraversableNavigable.cpp
     HTML/Location.cpp
     HTML/MediaError.cpp
     HTML/MediaTrackBase.cpp
@@ -656,6 +664,7 @@ set(SOURCES
     HTML/Plugin.cpp
     HTML/PluginArray.cpp
     HTML/PolicyContainers.cpp
+    HTML/POSTResource.cpp
     HTML/PopoverTargetAttributes.cpp
     HTML/PopStateEvent.cpp
     HTML/PotentialCORSRequest.cpp
@@ -674,6 +683,7 @@ set(SOURCES
     HTML/Scripting/ModuleMap.cpp
     HTML/Scripting/ModuleScript.cpp
     HTML/Scripting/Script.cpp
+    HTML/Scripting/ScriptRegistry.cpp
     HTML/Scripting/SerializedEnvironmentSettingsObject.cpp
     HTML/Scripting/SimilarOriginWindowAgent.cpp
     HTML/Scripting/TemporaryExecutionContext.cpp
@@ -686,6 +696,7 @@ set(SOURCES
     HTML/SessionHistoryEntry.cpp
     HTML/SessionHistoryTraversalQueue.cpp
     HTML/SharedResourceRequest.cpp
+    HTML/AnimatedBitmapDecodedImageData.cpp
     HTML/AnimatedDecodedImageData.cpp
     HTML/SharedWorker.cpp
     HTML/SharedWorkerGlobalScope.cpp
@@ -709,7 +720,6 @@ set(SOURCES
     HTML/ToggleEvent.cpp
     HTML/TokenizedFeatures.cpp
     HTML/TrackEvent.cpp
-    HTML/TraversableNavigable.cpp
     HTML/UniversalGlobalScope.cpp
     HTML/UserActivation.cpp
     HTML/UserNavigationInvolvement.cpp
@@ -730,6 +740,7 @@ set(SOURCES
     HTML/WorkerNavigator.cpp
     HTML/WorkletGlobalScope.cpp
     HTML/XMLSerializer.cpp
+    IndexedDB/Inspection.cpp
     IndexedDB/IDBCursor.cpp
     IndexedDB/IDBDatabase.cpp
     IndexedDB/IDBFactory.cpp
@@ -818,6 +829,7 @@ set(SOURCES
     Loader/ProxyMappings.cpp
     Loader/ResourceLoader.cpp
     MathML/AttributeNames.cpp
+    MathML/MathMLAnchorElement.cpp
     MathML/MathMLElement.cpp
     MathML/MathMLMiElement.cpp
     MathML/MathMLMspaceElement.cpp
@@ -902,7 +914,6 @@ set(SOURCES
     Painting/SVGPathPaintable.cpp
     Painting/SVGSVGPaintable.cpp
     Painting/TableBordersPainting.cpp
-    Painting/TextPaintable.cpp
     Painting/VideoPaintable.cpp
     Painting/ViewportPaintable.cpp
     PerformanceTimeline/EntryTypes.cpp
@@ -910,7 +921,6 @@ set(SOURCES
     PerformanceTimeline/PerformanceEntry.cpp
     PerformanceTimeline/PerformanceObserver.cpp
     PerformanceTimeline/PerformanceObserverEntryList.cpp
-    PermissionsPolicy/AutoplayAllowlist.cpp
     PermissionsAPI/Permissions.cpp
     PermissionsAPI/PermissionStore.cpp
     PermissionsAPI/PermissionStatus.cpp
@@ -1084,6 +1094,11 @@ set(SOURCES
     UserTiming/PerformanceMark.cpp
     UserTiming/PerformanceMeasure.cpp
     ViewTransition/ViewTransition.cpp
+    WebLocks/AbstractOperations.cpp
+    WebLocks/Lock.cpp
+    WebLocks/LockManager.cpp
+    WebLocks/LockRequest.cpp
+    WebLocks/NavigatorLocks.cpp
     WebAssembly/Global.cpp
     WebAssembly/Instance.cpp
     WebAssembly/Memory.cpp
@@ -1148,13 +1163,15 @@ set(SOURCES
     WebGL/Extensions/WebGLDebugRendererInfo.cpp
     WebGL/Extensions/WebGLDrawBuffers.cpp
     WebGL/Extensions/WebGLVertexArrayObjectOES.cpp
-    WebGL/OpenGLContext.cpp
+    WebGL/TextureUpload.cpp
     WebGL/WebGL2RenderingContext.cpp
     WebGL/WebGL2RenderingContextImpl.cpp
     WebGL/WebGL2RenderingContextOverloads.cpp
     WebGL/WebGLActiveInfo.cpp
     WebGL/WebGLBuffer.cpp
+    WebGL/WebGLCommandList.cpp
     WebGL/WebGLContextAttributes.cpp
+    WebGL/WebGLContextProxyBase.cpp
     WebGL/WebGLContextEvent.cpp
     WebGL/WebGLFramebuffer.cpp
     WebGL/WebGLObject.cpp
@@ -1226,6 +1243,8 @@ generate_css_implementation()
 
 generate_html_implementation()
 
+generate_webgl_implementation()
+
 set(GENERATED_SOURCES
     ARIA/AriaRoles.cpp
     CSS/DefaultStyleSheetSource.cpp
@@ -1252,6 +1271,8 @@ set(GENERATED_SOURCES
     Worker/WebWorkerServerEndpoint.h
     HTML/MediaControlsDOM.cpp
     HTML/Parser/NamedCharacterReferences.cpp
+    WebGL/WebGLCommands.cpp
+    WebGL/WebGLContextProxy.cpp
 )
 
 if (ENABLE_TH8)
@@ -1266,11 +1287,23 @@ if (ENABLE_TH8)
 endif()
 
 ladybird_lib(LibWeb web EXPLICIT_SYMBOL_EXPORT)
+add_dependencies(LibWeb generate_GLFunctions.cpp)
 
-target_link_libraries(LibWeb PRIVATE LibCore LibCompress LibCrypto LibJS LibHTTP LibGfx LibIPC LibRegex LibSyntax LibTextCodec LibUnicode LibMedia LibWasm LibXML LibURL LibTLS LibRequests LibGC LibSync LibThreading skia ${ANGLE_TARGETS} SDL3::SDL3 LibXml2::LibXml2)
+target_link_libraries(LibWeb PRIVATE LibCore LibCompress LibCrypto LibJS LibHTTP LibGfx LibIPC LibRegex LibSyntax LibTextCodec LibUnicode LibMedia LibWasm LibXML LibURL LibTLS LibRequests LibGC LibSync LibThreading skia SDL3::SDL3 LibXml2::LibXml2)
 if (ENABLE_TH8)
     target_link_libraries(LibWeb PRIVATE LibTH8)
 endif()
+
+# LibWeb still includes ANGLE's GLES headers for WebGL constants and types, but
+# the actual GL entry points live in the Compositor. Copy only ANGLE's compile
+# interface here so LibWeb can include those headers without linking ANGLE into
+# WebContent.
+foreach(angle_target IN LISTS ANGLE_TARGETS)
+    target_include_directories(LibWeb PRIVATE $<TARGET_PROPERTY:${angle_target},INTERFACE_INCLUDE_DIRECTORIES>)
+    target_include_directories(LibWeb SYSTEM PRIVATE $<TARGET_PROPERTY:${angle_target},INTERFACE_SYSTEM_INCLUDE_DIRECTORIES>)
+    target_compile_definitions(LibWeb PRIVATE $<TARGET_PROPERTY:${angle_target},INTERFACE_COMPILE_DEFINITIONS>)
+    target_compile_options(LibWeb PRIVATE $<TARGET_PROPERTY:${angle_target},INTERFACE_COMPILE_OPTIONS>)
+endforeach()
 
 import_rust_crate(MANIFEST_PATH Rust/Cargo.toml CRATE_NAME libweb_rust FFI_HEADER RustFFI.h)
 

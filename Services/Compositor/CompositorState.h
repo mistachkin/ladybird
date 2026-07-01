@@ -25,6 +25,7 @@
 #include <LibWeb/Compositor/Types.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/Painting/AccumulatedVisualContext.h>
+#include <LibWeb/Painting/CanvasSurfaceRegistry.h>
 #include <LibWeb/Painting/DisplayList.h>
 #include <LibWeb/Painting/DisplayListPlayerSkia.h>
 #include <LibWeb/Painting/ScrollState.h>
@@ -32,6 +33,7 @@
 namespace Web {
 
 struct MouseEvent;
+struct PinchEvent;
 
 }
 
@@ -68,21 +70,24 @@ public:
     ContextOwnerCheckResult check_context_owner(Web::Compositor::CompositorContextId, CompositorStateWebContentClient&);
     void destroy_contexts_for_web_content_client(CompositorStateWebContentClient&);
 
+    RefPtr<Gfx::SkiaBackendContext> skia_backend_context() const { return m_skia_backend_context; }
+    Web::Painting::CanvasSurfaceRegistry& canvas_surface_registry() { return m_canvas_surface_registry; }
+    Web::Painting::CanvasSurfaceRegistry const& canvas_surface_registry() const { return m_canvas_surface_registry; }
+
     void create_context(Web::Compositor::CompositorContextId, Optional<u64> page_id, CompositorStateWebContentClient&);
     void destroy_context(Web::Compositor::CompositorContextId);
 
-    void set_presentation_mode(Web::Compositor::CompositorContextId, Web::Compositor::PresentationMode);
+    void set_parent_context(Web::Compositor::CompositorContextId, Optional<Web::Compositor::CompositorContextId> parent_context_id);
     void stop_presenting_to_client(Web::Compositor::CompositorContextId);
     void update_display_list(Web::Compositor::CompositorContextId, NonnullRefPtr<Web::Painting::DisplayList>, Web::Painting::AccumulatedVisualContextTree, Web::Painting::DisplayListResourceTransaction&&, Web::Painting::ScrollStateSnapshot&&);
     void update_visual_context_tree(Web::Compositor::CompositorContextId, Web::Painting::AccumulatedVisualContextTree);
     void update_scroll_state(Web::Compositor::CompositorContextId, Web::Painting::ScrollStateSnapshot&&);
     void update_video_frame(Web::Compositor::CompositorContextId, Web::Painting::VideoFrameResourceId, NonnullRefPtr<Media::VideoFrame const>);
     void clear_video_frame(Web::Compositor::CompositorContextId, Web::Painting::VideoFrameResourceId);
-    void update_compositor_surface(Web::Compositor::CompositorContextId, Web::Painting::CompositorSurfaceId, Gfx::SharedImage&&);
-    void clear_compositor_surface(Web::Compositor::CompositorContextId, Web::Painting::CompositorSurfaceId);
     void invalidate_wheel_event_listener_state(Web::Compositor::CompositorContextId, u64 generation);
     bool handle_mouse_event(Web::Compositor::CompositorContextId, Web::MouseEvent const&);
     bool dispatch_mouse_event_to_web_content(Web::Compositor::CompositorContextId, Web::MouseEvent const&);
+    bool handle_pinch_event(Web::Compositor::CompositorContextId, Web::PinchEvent const&);
     Web::Compositor::AsyncScrollEnqueueResult async_scroll_by(Web::Compositor::CompositorContextId, Web::UniqueNodeID document_id, Gfx::FloatPoint position, Gfx::FloatPoint delta, Gfx::IntRect viewport_rect, Web::Compositor::AsyncScrollOperationTracking);
     bool async_scroll_by(Web::Compositor::CompositorContextId, Gfx::FloatPoint position, Gfx::FloatPoint delta);
     bool should_defer_main_thread_present_for_async_scroll(Web::Compositor::CompositorContextId) const;
@@ -112,26 +117,25 @@ private:
 
     ContextState* context_if_present(Web::Compositor::CompositorContextId);
     ContextState const* context_if_present(Web::Compositor::CompositorContextId) const;
-    void detach_from_parent_surface(Web::Compositor::CompositorContextId, ContextState&);
-    void remove_child_surface(ContextState&, Web::Compositor::CompositorContextId parent_context_id, Web::Painting::CompositorSurfaceId);
+    void clear_parent_context(ContextState&);
+    CompositedContextResolver resolver_for(Web::Compositor::CompositorContextId parent_context_id);
+    RefPtr<Gfx::PaintingSurface> resolve_composited_context(Web::Compositor::CompositorContextId parent_context_id, Web::Compositor::CompositorContextId child_context_id);
     void schedule_backing_store_shrink(Web::Compositor::CompositorContextId, ContextState&);
     void shrink_backing_stores_after_resize(Web::Compositor::CompositorContextId);
     void resize_backing_stores_if_needed(Web::Compositor::CompositorContextId, ContextState&);
     void present_current_frame(Web::Compositor::CompositorContextId, ContextState&);
-    void publish_to_parent_surface(ContextState&, Web::Compositor::PublishToCompositorSurface const&);
     bool apply_context_update_result(
         Web::Compositor::CompositorContextId,
         ContextState&,
         ContextState::ContextUpdateResult const&);
     void present_frame(Web::Compositor::CompositorContextId, ContextState&, Gfx::IntRect);
     void schedule_present_frame(Web::Compositor::CompositorContextId, ContextState&, Gfx::IntRect);
+    void schedule_pending_present_frame(Web::Compositor::CompositorContextId, ContextState&);
     void schedule_pending_present_frame_on_vsync(Web::Compositor::CompositorContextId, ContextState&);
+    void schedule_containing_context_present(ContextState&);
     void schedule_pending_present_frame_if_unblocked(Web::Compositor::CompositorContextId, ContextState&);
     VSyncScheduler& vsync_scheduler_for_display(Optional<u64> display_id);
     void present_pending_frames_on_vsync(Optional<u64> display_id);
-    void flush_descendant_surfaces_for_screenshot(Web::Compositor::CompositorContextId);
-    bool present_subtree_for_screenshot(Web::Compositor::CompositorContextId);
-    void present_context_synchronously(ContextState&);
     void publish_backing_stores(Web::Compositor::CompositorContextId, ContextState&, BackingStoreManager::Publication&&);
     void did_finish_async_present(PendingAsyncPresent&);
     void cancel_pending_async_presents_for_context(Web::Compositor::CompositorContextId);
@@ -141,6 +145,7 @@ private:
     HashMap<Web::Compositor::CompositorContextId, OwnPtr<ContextState>> m_contexts;
     DoublyLinkedList<PendingAsyncPresent> m_pending_async_presents;
     RefPtr<Gfx::SkiaBackendContext> m_skia_backend_context;
+    Web::Painting::CanvasSurfaceRegistry m_canvas_surface_registry;
     OwnPtr<Web::Painting::DisplayListPlayerSkia> m_display_list_player;
     HashMap<Optional<u64>, OwnPtr<VSyncScheduler>> m_vsync_schedulers_by_display;
     RefPtr<Core::Timer> m_gpu_completion_timer;

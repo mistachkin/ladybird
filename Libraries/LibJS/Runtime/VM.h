@@ -112,7 +112,6 @@ public:
         m_running_execution_context->registers_and_constants_and_locals_and_arguments_span().data()[op.raw()] = value;
     }
 
-    Value do_yield(Value value, Optional<Bytecode::Label> continuation, bool value_is_iterator_result = false);
     void do_return(Value value)
     {
         if (value.is_special_empty_value())
@@ -120,8 +119,6 @@ public:
         reg(Bytecode::Register::return_value()) = value;
         reg(Bytecode::Register::exception()) = js_special_empty_value();
     }
-
-    void catch_exception(Bytecode::Operand dst);
 
     Bytecode::Executable& current_executable() { return *m_running_execution_context->executable; }
     Bytecode::Executable const& current_executable() const { return *m_running_execution_context->executable; }
@@ -142,7 +139,6 @@ public:
     };
     [[nodiscard]] COLD HandleExceptionResponse handle_exception(u32 program_counter, Value exception);
 
-    NEVER_INLINE void pop_inline_frame(Value return_value);
     NEVER_INLINE void unwind_inline_frame_for_exception();
 
     ExecutionContext* push_inline_frame(
@@ -166,11 +162,6 @@ public:
     }
     JS_ENUMERATE_WELL_KNOWN_SYMBOLS
 #undef __JS_ENUMERATE
-
-    HashMap<String, GC::Ptr<PrimitiveString>>& string_cache()
-    {
-        return m_string_cache;
-    }
 
     HashMap<Utf16String, GC::Ptr<PrimitiveString>>& utf16_string_cache()
     {
@@ -372,7 +363,11 @@ public:
     template<typename T>
     COLD Completion throw_completion(ErrorType const& type)
     {
-        return throw_completion<T>(type.message());
+        auto& realm = *current_realm();
+        if constexpr (requires { T::create(realm, type.message()); })
+            return throw_completion<T>(type.message());
+        else
+            return throw_completion<T>(Utf16String::from_utf16(type.message()));
     }
 
     template<typename T, typename... Args>
@@ -444,11 +439,11 @@ public:
     Function<void(GC::Ref<GC::Function<ThrowCompletionOr<Value>()>>, Realm*)> host_enqueue_promise_job;
     Function<GC::Ref<JobCallback>(FunctionObject&)> host_make_job_callback;
     Function<GC::Ptr<PrimitiveString>(Object const&)> host_get_code_for_eval;
-    Function<ThrowCompletionOr<void>(Realm&, ReadonlySpan<String>, StringView, StringView, CompilationType, ReadonlySpan<Value>, Value)> host_ensure_can_compile_strings;
+    Function<ThrowCompletionOr<void>(Realm&, ReadonlySpan<Utf16String>, Utf16View, Utf16View, CompilationType, ReadonlySpan<Value>, Value)> host_ensure_can_compile_strings;
     Function<ThrowCompletionOr<void>(Object&)> host_ensure_can_add_private_element;
     Function<ThrowCompletionOr<HandledByHost>(ArrayBuffer&, size_t)> host_resize_array_buffer;
     Function<ThrowCompletionOr<HandledByHost>(ArrayBuffer&, size_t)> host_grow_shared_array_buffer;
-    Function<void(StringView)> host_unrecognized_date_string;
+    Function<void(Utf16View)> host_unrecognized_date_string;
     Function<Crypto::SignedBigInteger(Object const& global)> host_system_utc_epoch_nanoseconds;
     Function<bool()> host_promise_job_queue_is_empty;
 
@@ -517,14 +512,9 @@ private:
     void set_well_known_symbols(WellKnownSymbols well_known_symbols) { m_well_known_symbols = move(well_known_symbols); }
 
     void run_queued_promise_jobs_impl();
-    void run_bytecode(size_t entry_point);
-
-    [[nodiscard]] NEVER_INLINE bool try_inline_call(Bytecode::Instruction const&, u32 current_pc);
-    [[nodiscard]] NEVER_INLINE bool try_inline_call_construct(Bytecode::Instruction const&, u32 current_pc);
 
     static VM* s_the;
 
-    HashMap<String, GC::Ptr<PrimitiveString>> m_string_cache;
     HashMap<Utf16String, GC::Ptr<PrimitiveString>> m_utf16_string_cache;
 
     static constexpr size_t numeric_string_cache_size = 1000;

@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <AK/ByteBuffer.h>
 #include <AK/JsonValue.h>
 #include <AK/Queue.h>
 #include <AK/Variant.h>
@@ -31,6 +32,7 @@
 #include <LibRequests/RequestTimingInfo.h>
 #include <LibURL/URL.h>
 #include <LibWeb/Bindings/AgentType.h>
+#include <LibWeb/Bindings/Navigation.h>
 #include <LibWeb/CSS/PreferredColorScheme.h>
 #include <LibWeb/CSS/PreferredContrast.h>
 #include <LibWeb/CSS/PreferredMotion.h>
@@ -42,10 +44,14 @@
 #include <LibWeb/HTML/AudioPlayState.h>
 #include <LibWeb/HTML/ColorPickerUpdateState.h>
 #include <LibWeb/HTML/FileFilter.h>
+#include <LibWeb/HTML/POSTResource.h>
+#include <LibWeb/HTML/Scripting/ScriptRegistry.h>
 #include <LibWeb/HTML/SelectItem.h>
+#include <LibWeb/HTML/SessionHistoryEntry.h>
 #include <LibWeb/HTML/TokenizedFeatures.h>
 #include <LibWeb/HTML/WebViewHints.h>
 #include <LibWeb/HTML/WorkerAgentForward.h>
+#include <LibWeb/IndexedDB/TransactionChanges.h>
 #include <LibWeb/Loader/FileRequest.h>
 #include <LibWeb/Page/EventResult.h>
 #include <LibWeb/Page/InputEvent.h>
@@ -81,7 +87,7 @@ public:
     Compositor::CompositorHost& compositor_host();
     Compositor::CompositorHost const& compositor_host() const;
 
-    void set_top_level_traversable(GC::Ref<HTML::TraversableNavigable>);
+    void set_top_level_traversable(GC::Ref<HTML::LocalTraversableNavigable>);
 
     // FIXME: This is a hack.
     bool top_level_traversable_is_initialized() const;
@@ -89,15 +95,17 @@ public:
     HTML::BrowsingContext& top_level_browsing_context();
     HTML::BrowsingContext const& top_level_browsing_context() const;
 
-    GC::Ref<HTML::TraversableNavigable> top_level_traversable() const;
+    GC::Ref<HTML::LocalTraversableNavigable> top_level_traversable() const;
 
-    HTML::Navigable& focused_navigable();
-    HTML::Navigable const& focused_navigable() const { return const_cast<Page*>(this)->focused_navigable(); }
+    HTML::LocalNavigable& focused_navigable();
+    HTML::LocalNavigable const& focused_navigable() const { return const_cast<Page*>(this)->focused_navigable(); }
 
-    void set_focused_navigable(Badge<EventHandler>, HTML::Navigable&);
-    void navigable_document_destroyed(Badge<DOM::Document>, HTML::Navigable&);
+    void set_focused_navigable(Badge<EventHandler>, HTML::LocalNavigable&);
+    void navigable_document_destroyed(Badge<DOM::Document>, HTML::LocalNavigable&);
 
-    void load(URL::URL const&);
+    void load(URL::URL const&, Bindings::NavigationHistoryBehavior = Bindings::NavigationHistoryBehavior::Auto);
+    void load(URL::URL const&, Variant<Empty, String, HTML::POSTResource>,
+        Bindings::NavigationHistoryBehavior = Bindings::NavigationHistoryBehavior::Auto);
 
     void load_html(StringView);
     void load_html(StringView, URL::URL const&);
@@ -105,6 +113,7 @@ public:
     void reload();
 
     void traverse_the_history_by_delta(int delta);
+    void traverse_the_history_by_delta_from_ui_process(int delta);
 
     CSSPixelPoint device_to_css_point(DevicePixelPoint) const;
     DevicePixelPoint css_to_device_point(CSSPixelPoint) const;
@@ -227,8 +236,9 @@ public:
     void register_canvas_element(Badge<HTML::HTMLCanvasElement>, UniqueNodeID canvas_id);
     void unregister_canvas_element(Badge<HTML::HTMLCanvasElement>, UniqueNodeID canvas_id);
 
-    void present_all_canvas_element_surfaces();
-    void republish_all_canvas_element_surfaces();
+    void prepare_canvas_contexts_for_compositing();
+    void notify_all_canvas_elements_of_lost_backing_storage();
+    void notify_all_webgl_contexts_lost();
 
     struct MediaContextMenu {
         URL::URL media_url;
@@ -316,9 +326,9 @@ private:
 
     GC::Ref<PageClient> m_client;
 
-    GC::Weak<HTML::Navigable> m_focused_navigable;
+    GC::Weak<HTML::LocalNavigable> m_focused_navigable;
 
-    GC::Ptr<HTML::TraversableNavigable> m_top_level_traversable;
+    GC::Ptr<HTML::LocalTraversableNavigable> m_top_level_traversable;
 
     bool m_is_scripting_enabled { true };
     bool m_should_block_pop_ups { true };
@@ -396,14 +406,25 @@ private:
     bool m_processing_fullscreen_operations { false };
 };
 
-enum class DisplayListPlayerType {
-    SkiaGPUIfAvailable,
-    SkiaCPU,
-};
-
 enum class ContextMenuForInputEventsTarget : u8 {
     No,
     Yes,
+};
+
+enum class HistoryTraversalPrecheck : u8 {
+    Needed,
+    AlreadyDone,
+    SourceDocumentSandboxingAlreadyDone,
+};
+
+enum class NavigationTarget : u8 {
+    TopLevel,
+    IFrame,
+};
+
+enum class NavigationProcessDecision : u8 {
+    Local,
+    Remote,
 };
 
 class PageClient : public JS::Cell {
@@ -416,8 +437,23 @@ public:
     virtual bool is_connection_open() const = 0;
     virtual bool has_focus() const { return true; }
     virtual bool has_active_devtools_client() const { return false; }
-    virtual bool is_url_suitable_for_same_process_navigation([[maybe_unused]] URL::URL const& current_url, [[maybe_unused]] URL::URL const& target_url) const { return true; }
-    virtual void request_new_process_for_navigation(URL::URL const&) { }
+    // In Ladybird, Remote currently implies replacing the WebContent process.
+    virtual NavigationProcessDecision decide_navigation_process(
+        [[maybe_unused]] URL::URL const& current_url,
+        [[maybe_unused]] URL::URL const& target_url,
+        [[maybe_unused]] NavigationTarget target = NavigationTarget::TopLevel,
+        [[maybe_unused]] Optional<String> frame_id = {}) const
+    {
+        return NavigationProcessDecision::Local;
+    }
+    virtual void request_new_process_for_navigation(URL::URL const&, Variant<Empty, String, HTML::POSTResource>, Bindings::NavigationHistoryBehavior) { }
+    virtual void request_new_process_for_child_frame_navigation(String const&, URL::URL const&, Variant<Empty, String, HTML::POSTResource>, Bindings::NavigationHistoryBehavior) { }
+    virtual void page_did_create_child_frame(String const&, String const&) { }
+    virtual void page_did_update_child_frame_viewport(String const&, CSSPixelRect) { }
+    virtual void page_did_commit_child_frame_navigation(String const&, URL::URL const&) { }
+    virtual void page_did_destroy_child_frame(String const&) { }
+    virtual Optional<Compositor::CompositorContextId> compositor_context_id_for_remote_child_frame(String const&) const { return {}; }
+    virtual String dump_site_isolation_process_tree_for_testing() { return {}; }
     virtual Gfx::Palette palette() const = 0;
     virtual DevicePixelRect screen_rect() const = 0;
     virtual double zoom_level() const = 0;
@@ -446,10 +482,38 @@ public:
     virtual void page_did_request_minimize_window() { }
     virtual void page_did_request_fullscreen_window() { }
     virtual void page_did_request_exit_fullscreen() { }
-    virtual void page_did_start_loading(URL::URL const&, bool is_redirect) { (void)is_redirect; }
+    virtual void page_did_start_loading(URL::URL const&, Variant<Empty, String, HTML::POSTResource> document_resource, bool is_redirect, Bindings::NavigationHistoryBehavior history_handling = Bindings::NavigationHistoryBehavior::Auto)
+    {
+        (void)document_resource;
+        (void)is_redirect;
+        (void)history_handling;
+    }
+    virtual void page_did_cancel_loading(URL::URL const&) { }
     virtual void page_did_create_new_document(Web::DOM::Document&) { }
     virtual void page_did_change_active_document_in_top_level_browsing_context(Web::DOM::Document&) { }
     virtual void page_did_finish_loading(URL::URL const&) { }
+    virtual Optional<u64> page_did_start_download(URL::URL const&, ByteString const& suggested_filename, Optional<u64> total_size, int request_server_client_id, u64 request_server_request_id, ByteBuffer initial_data)
+    {
+        (void)suggested_filename;
+        (void)total_size;
+        (void)request_server_client_id;
+        (void)request_server_request_id;
+        (void)initial_data;
+        return {};
+    }
+    virtual Optional<u64> page_did_start_download(URL::URL const&, ByteString const& suggested_filename, Optional<u64> total_size)
+    {
+        (void)suggested_filename;
+        (void)total_size;
+        return {};
+    }
+    virtual void page_did_receive_download_data([[maybe_unused]] u64 download_id, [[maybe_unused]] ByteBuffer data) { }
+    virtual void page_did_finish_download([[maybe_unused]] u64 download_id) { }
+    virtual void page_did_fail_download([[maybe_unused]] u64 download_id, [[maybe_unused]] String const& error) { }
+    virtual void page_did_register_download_controller([[maybe_unused]] u64 download_id, [[maybe_unused]] GC::Ref<Fetch::Infrastructure::FetchController>) { }
+    virtual void page_did_register_download_reader([[maybe_unused]] u64 download_id, [[maybe_unused]] GC::Ref<Streams::ReadableStreamDefaultReader>) { }
+    virtual void page_did_unregister_download([[maybe_unused]] u64 download_id) { }
+    virtual bool page_is_download_canceled([[maybe_unused]] u64 download_id) const { return false; }
     virtual void page_did_request_cursor_change(Gfx::Cursor const&) { }
     virtual void page_did_request_context_menu(CSSPixelPoint, ContextMenuForInputEventsTarget) { }
     virtual void page_did_request_link_context_menu(CSSPixelPoint, URL::URL const&, [[maybe_unused]] ByteString const& target, [[maybe_unused]] unsigned modifiers) { }
@@ -481,6 +545,7 @@ public:
     virtual void page_did_set_cookie(URL::URL const&, HTTP::Cookie::ParsedCookie const&, HTTP::Cookie::Source) { }
     virtual void page_did_update_cookie(HTTP::Cookie::Cookie const&) { }
     virtual void page_did_expire_cookies_with_time_offset(AK::Duration) { }
+    virtual void page_did_delete_all_cookies(URL::URL const&, GC::Ref<WebIDL::Promise>) { }
     virtual void page_did_store_hsts_policy(String const&, HTTP::HSTS::ParsedHSTSPolicy const&) { }
     virtual bool page_did_is_known_hsts_host(String const&) { return false; }
     virtual Optional<String> page_did_request_storage_item([[maybe_unused]] Web::StorageAPI::StorageEndpointType storage_endpoint, [[maybe_unused]] String const& storage_key, [[maybe_unused]] String const& bottle_key) { return {}; }
@@ -489,6 +554,7 @@ public:
     virtual Vector<String> page_did_request_storage_keys([[maybe_unused]] Web::StorageAPI::StorageEndpointType storage_endpoint, [[maybe_unused]] String const& storage_key) { return {}; }
     virtual void page_did_clear_storage([[maybe_unused]] Web::StorageAPI::StorageEndpointType storage_endpoint, [[maybe_unused]] String const& storage_key) { }
     virtual void page_did_broadcast_storage_change([[maybe_unused]] Web::StorageAPI::StorageEndpointType storage_endpoint, [[maybe_unused]] String const& url, [[maybe_unused]] Optional<String> const& key, [[maybe_unused]] Optional<String> const& old_value, [[maybe_unused]] Optional<String> const& new_value) { }
+    virtual void page_did_update_indexed_database([[maybe_unused]] String const& url, [[maybe_unused]] IndexedDB::TransactionChanges const&) { }
     virtual void page_did_update_resource_count(i32) { }
     struct NewWebViewResult {
         GC::Ptr<Page> page;
@@ -498,6 +564,11 @@ public:
     virtual void page_did_request_activate_tab() { }
     virtual void page_did_close_top_level_traversable() { }
     virtual void page_did_update_navigation_buttons_state([[maybe_unused]] bool back_enabled, [[maybe_unused]] bool forward_enabled) { }
+    virtual bool should_report_session_history_updates() const { return true; }
+    virtual void page_did_update_session_history([[maybe_unused]] Vector<HTML::SessionHistoryEntryDescriptor> const& entries, [[maybe_unused]] Vector<i32> const& used_steps, [[maybe_unused]] size_t current_used_step_index) { }
+    virtual String page_did_request_ui_process_session_history_for_testing() { return "{}"_string; }
+    virtual String page_did_update_session_history_and_request_ui_process_session_history_for_testing([[maybe_unused]] Vector<HTML::SessionHistoryEntryDescriptor> const& entries, [[maybe_unused]] Vector<i32> const& used_steps, [[maybe_unused]] size_t current_used_step_index) { return "{}"_string; }
+    virtual bool page_did_request_traverse_the_history_by_delta([[maybe_unused]] int delta, [[maybe_unused]] HistoryTraversalPrecheck history_traversal_precheck) { return false; }
     virtual void page_did_change_needs_beforeunload_check([[maybe_unused]] bool needs_beforeunload_check) { }
 
     virtual void request_file(FileRequest) = 0;
@@ -529,6 +600,7 @@ public:
     virtual void page_did_receive_network_response_body([[maybe_unused]] u64 request_id, [[maybe_unused]] ReadonlyBytes data) { }
     virtual void page_did_finish_network_request([[maybe_unused]] u64 request_id, [[maybe_unused]] u64 body_size, [[maybe_unused]] Requests::RequestTimingInfo const& timing_info, [[maybe_unused]] Optional<Requests::NetworkError> const& network_error) { }
     virtual void page_did_report_worker_exception([[maybe_unused]] String const& message, [[maybe_unused]] String const& filename, [[maybe_unused]] u32 lineno, [[maybe_unused]] u32 colno) { }
+    virtual void page_did_register_javascript_source([[maybe_unused]] DOM::Document&, [[maybe_unused]] HTML::ScriptRegistry::Description const&) { }
     virtual void page_did_post_broadcast_channel_message([[maybe_unused]] HTML::BroadcastChannelMessage const& message) { }
 
     virtual HTML::WorkerAgentId start_worker_agent([[maybe_unused]] HTML::WorkerAgentStartRequest&& request) { return {}; }
@@ -540,8 +612,6 @@ public:
     virtual void page_did_take_screenshot(Gfx::ShareableBitmap const&) { }
 
     virtual void received_message_from_web_ui([[maybe_unused]] String const& name, [[maybe_unused]] JS::Value data) { }
-
-    virtual DisplayListPlayerType display_list_player_type() const = 0;
 
     virtual bool is_headless() const = 0;
 

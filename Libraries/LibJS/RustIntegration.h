@@ -12,7 +12,9 @@
 #include <AK/Optional.h>
 #include <AK/Result.h>
 #include <AK/Span.h>
+#include <AK/StringBuilder.h>
 #include <AK/Utf16FlyString.h>
+#include <AK/Utf16View.h>
 #include <LibCore/Forward.h>
 #include <LibCore/ImmutableBytes.h>
 #include <LibGC/Ptr.h>
@@ -156,11 +158,11 @@ Optional<Result<ScriptResult, Vector<ParserError>>> compile_parsed_script(FFI::P
 Optional<Result<ScriptResult, Vector<ParserError>>> materialize_compiled_script(FFI::CompiledProgram* compiled, NonnullRefPtr<SourceCode const> source_code, Realm& realm);
 
 // Compile a script. Returns nullopt if Rust is not available.
-Optional<Result<ScriptResult, Vector<ParserError>>> compile_script(StringView source_text, Realm& realm, StringView filename, size_t line_number_offset);
+Optional<Result<ScriptResult, Vector<ParserError>>> compile_script(Utf16View source_text, Realm& realm, Utf16View display_filename, size_t line_number_offset);
 
 // Compile eval code. Returns nullopt if Rust is not available.
 // On success, the executable's name is set to "eval".
-Optional<Result<EvalResult, String>> compile_eval(
+Optional<Result<EvalResult, Utf16String>> compile_eval(
     PrimitiveString& code_string, VM& vm,
     CallerMode strict_caller, bool in_function, bool in_method,
     bool in_derived_constructor, bool in_class_field_initializer);
@@ -175,21 +177,25 @@ Optional<Result<ModuleResult, Vector<ParserError>>> compile_parsed_module(FFI::P
 Optional<Result<ModuleResult, Vector<ParserError>>> materialize_compiled_module(FFI::CompiledProgram* compiled, NonnullRefPtr<SourceCode const> source_code, Realm& realm);
 
 // Compile a module. Returns nullopt if Rust is not available.
-Optional<Result<ModuleResult, Vector<ParserError>>> compile_module(StringView source_text, Realm& realm, StringView filename);
+Optional<Result<ModuleResult, Vector<ParserError>>> compile_module(Utf16View source_text, Realm& realm, Utf16View display_filename);
+Optional<Result<ModuleResult, Vector<ParserError>>> compile_module(NonnullRefPtr<SourceCode const>, Realm& realm);
 
 // Compile a dynamic function (new Function()).
 // On success, returns a SharedFunctionInstanceData with source_text set.
-JS_API Optional<Result<GC::Ref<SharedFunctionInstanceData>, String>> compile_dynamic_function(
-    VM& vm, StringView source_text, StringView parameters_string, StringView body_parse_string,
+JS_API Optional<Result<GC::Ref<SharedFunctionInstanceData>, Utf16String>> compile_dynamic_function(
+    VM& vm, Utf16View source_text, Utf16View parameters_string, Utf16View body_parse_string,
     FunctionKind kind);
 
 // Compile a builtin JS file. Returns nullopt if Rust is not available.
 Optional<Vector<GC::Root<SharedFunctionInstanceData>>> compile_builtin_file(
-    unsigned char const* script_text, VM& vm);
+    Utf16View script_text, VM& vm);
 
 // Compile a function body for lazy compilation.
 // Returns nullptr if Rust is not available or the SFD doesn't use Rust compilation.
 GC::Ptr<Bytecode::Executable> compile_function(VM& vm, SharedFunctionInstanceData& shared_data, bool builtin_abstract_operations_enabled);
+
+JS_API void dump_bytecode(StringBuilder&, Bytecode::Executable const&);
+JS_API size_t count_bytecode_basic_blocks(Bytecode::Executable const&);
 
 JS_API void* clone_function_ast(void const*);
 JS_API FFI::CompiledFunction* compile_function_off_thread(void* function_ast, size_t length_in_code_units, bool builtin_abstract_operations_enabled);

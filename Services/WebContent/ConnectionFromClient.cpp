@@ -16,6 +16,7 @@
 #include <AK/QuickSort.h>
 #include <LibCore/Process.h>
 #include <LibCore/System.h>
+#include <LibDevTools/IndexedDBSerialization.h>
 #include <LibGC/Heap.h>
 #include <LibGfx/Bitmap.h>
 #include <LibGfx/Color.h>
@@ -40,19 +41,22 @@
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Element.h>
 #include <LibWeb/DOM/ElementFactory.h>
+#include <LibWeb/DOM/Node.h>
 #include <LibWeb/DOM/ShadowRoot.h>
 #include <LibWeb/DOM/Text.h>
 #include <LibWeb/Dump.h>
 #include <LibWeb/Fetch/Fetching/Fetching.h>
+#include <LibWeb/HTML/AutoplaySettings.h>
 #include <LibWeb/HTML/BroadcastChannel.h>
 #include <LibWeb/HTML/BrowsingContext.h>
+#include <LibWeb/HTML/EventLoop/EventLoop.h>
 #include <LibWeb/HTML/HTMLInputElement.h>
-#include <LibWeb/HTML/Navigable.h>
+#include <LibWeb/HTML/LocalNavigable.h>
+#include <LibWeb/HTML/LocalTraversableNavigable.h>
 #include <LibWeb/HTML/NavigableContainer.h>
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/HTML/SelectedFile.h>
 #include <LibWeb/HTML/Storage.h>
-#include <LibWeb/HTML/TraversableNavigable.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/HTML/WorkerAgentParent.h>
 #include <LibWeb/Infra/Strings.h>
@@ -67,7 +71,6 @@
 #include <LibWeb/Painting/FlexboxInspectorOverlay.h>
 #include <LibWeb/Painting/StackingContext.h>
 #include <LibWeb/Painting/ViewportPaintable.h>
-#include <LibWeb/PermissionsPolicy/AutoplayAllowlist.h>
 #include <LibWeb/Platform/EventLoopPlugin.h>
 #include <LibWebView/Attribute.h>
 #include <LibWebView/ViewImplementation.h>
@@ -119,6 +122,30 @@ void ConnectionFromClient::initialize(u64 initial_page_id)
     m_page_host->initialize(initial_page_id);
 }
 
+void ConnectionFromClient::set_page_parent_context(u64 page_id, Optional<Web::Compositor::CompositorContextId> parent_context_id)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    auto& compositor_context = page->page().top_level_traversable()->compositor_context();
+    if (parent_context_id.has_value())
+        compositor_context.stop_presenting_to_client();
+    compositor_context.set_parent_context(parent_context_id);
+}
+
+void ConnectionFromClient::set_remote_child_frame_compositor_context(u64 page_id, String frame_id, Optional<Web::Compositor::CompositorContextId> context_id)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->set_remote_child_frame_compositor_context(move(frame_id), context_id);
+}
+
+void ConnectionFromClient::run_iframe_load_event_steps(u64 page_id, String frame_id)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->run_iframe_load_event_steps(frame_id);
+}
+
 Optional<PageClient&> ConnectionFromClient::page(u64 index, SourceLocation location)
 {
     if (auto page = m_page_host->page(index); page.has_value())
@@ -152,7 +179,7 @@ Messages::WebContentServer::GetWindowHandleResponse ConnectionFromClient::get_wi
 void ConnectionFromClient::set_window_handle(u64 page_id, String handle)
 {
     if (auto page = this->page(page_id); page.has_value()) {
-        page->page().top_level_traversable()->set_window_handle(move(handle));
+        page->set_window_handle(move(handle));
         page->send_current_needs_beforeunload_check();
     }
 }
@@ -164,6 +191,18 @@ void ConnectionFromClient::connect_to_webdriver(u64 page_id, ByteString webdrive
         if (auto result = page->connect_to_webdriver(webdriver_endpoint); result.is_error())
             dbgln("Unable to connect to the WebDriver process: {}", result.error());
     }
+}
+
+void ConnectionFromClient::complete_webdriver_navigation_completion(u64 page_id, u64 request_id, Web::WebDriver::Response response)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->did_complete_webdriver_navigation_completion(request_id, move(response));
+}
+
+void ConnectionFromClient::complete_webdriver_history_traversal(u64 page_id, u64 request_id, bool accepted, bool will_replace_web_content_process, bool will_change_top_level_entry)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->did_complete_webdriver_history_traversal(request_id, accepted, will_replace_web_content_process, will_change_top_level_entry);
 }
 
 void ConnectionFromClient::connect_to_web_ui(u64 page_id, IPC::TransportHandle handle)
@@ -188,6 +227,17 @@ void ConnectionFromClient::connect_to_compositor_process(IPC::TransportHandle ha
     m_compositor_connection->on_mouse_event = [this](u64 page_id, Web::MouseEvent event) {
         mouse_event(page_id, move(event));
     };
+    m_compositor_connection->on_compositor_lost = [this] {
+        m_page_host->compositor_process_lost();
+    };
+
+#ifdef AK_OS_WINDOWS
+    // Perform Windows peer PID handshake before any other IPC
+    if constexpr (requires { m_compositor_connection->transport().set_peer_pid(0); }) {
+        auto response = m_compositor_connection->send_sync<Messages::CompositorWebContentServer::InitTransport>(Core::System::getpid());
+        m_compositor_connection->transport().set_peer_pid(response->compositor_pid());
+    }
+#endif
 }
 
 void ConnectionFromClient::compositor_process_reconnected()
@@ -218,13 +268,24 @@ void ConnectionFromClient::update_screen_rects(u64 page_id, Vector<Web::DevicePi
         page->set_screen_rects(rects, main_screen);
 }
 
-void ConnectionFromClient::load_url(u64 page_id, URL::URL url)
+void ConnectionFromClient::load_url(u64 page_id, URL::URL url, Web::Bindings::NavigationHistoryBehavior history_handling)
 {
     auto page = this->page(page_id);
     if (!page.has_value())
         return;
 
-    page->page().load(url);
+    page->page().load(url, history_handling);
+}
+
+void ConnectionFromClient::load_url_with_document_resource(u64 page_id, URL::URL url,
+    Variant<Empty, String, Web::HTML::POSTResource> document_resource,
+    Web::Bindings::NavigationHistoryBehavior history_handling)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    page->page().load(url, move(document_resource), history_handling);
 }
 
 void ConnectionFromClient::load_html(u64 page_id, ByteString html)
@@ -245,10 +306,70 @@ void ConnectionFromClient::reload(u64 page_id)
         page->page().reload();
 }
 
+void ConnectionFromClient::cancel_download(u64 page_id, u64 download_id)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->cancel_download(download_id);
+}
+
 void ConnectionFromClient::traverse_the_history_by_delta(u64 page_id, i32 delta)
 {
     if (auto page = this->page(page_id); page.has_value())
-        page->page().traverse_the_history_by_delta(delta);
+        page->page().traverse_the_history_by_delta_from_ui_process(delta);
+}
+
+void ConnectionFromClient::traverse_the_history_to_step(u64 page_id, i32 step)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value()) {
+        async_did_traverse_the_history_to_step(page_id, step, false, Web::HTML::HistoryStepResult::Applied);
+        return;
+    }
+
+    page->page().top_level_traversable()->traverse_the_history_to_step(step,
+        GC::create_function(Web::HTML::main_thread_event_loop().heap(), [this, page_id, step](bool step_was_available, Web::HTML::HistoryStepResult result) {
+            async_did_traverse_the_history_to_step(page_id, step, step_was_available, result);
+        }));
+}
+
+void ConnectionFromClient::check_if_traverse_history_step_is_canceled(u64 page_id, u64 request_id, i32 step)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value()) {
+        async_did_check_if_traverse_history_step_is_canceled(page_id, request_id, step, true);
+        return;
+    }
+
+    auto& heap = Web::HTML::main_thread_event_loop().heap();
+    page->page().top_level_traversable()->check_if_traverse_history_step_is_canceled(step,
+        GC::create_function(heap, [this, page_id, request_id, step](Web::HTML::HistoryStepResult result) {
+            async_did_check_if_traverse_history_step_is_canceled(
+                page_id, request_id, step, result != Web::HTML::HistoryStepResult::Applied);
+        }));
+}
+
+void ConnectionFromClient::set_top_level_session_history(u64 page_id, Vector<Web::HTML::SessionHistoryEntryDescriptor> entries, size_t current_top_level_entry_index, bool allow_reconstructing_current_entry)
+{
+    if (auto page = this->page(page_id); page.has_value()) {
+        auto accepted = page->page().top_level_traversable()->replace_top_level_session_history_entries_from_ui_process(move(entries), current_top_level_entry_index, allow_reconstructing_current_entry);
+        auto session_history_snapshot = page->page().top_level_traversable()->create_session_history_snapshot();
+        async_did_set_top_level_session_history(page_id, accepted, move(session_history_snapshot.top_level_session_history_entries), move(session_history_snapshot.used_session_history_steps), session_history_snapshot.current_used_step_index);
+    } else {
+        async_did_set_top_level_session_history(page_id, false, {}, {}, 0);
+    }
+}
+
+void ConnectionFromClient::reset_session_history_for_testing(u64 page_id)
+{
+    if (auto page = this->page(page_id); page.has_value()) {
+        auto& event_loop = Web::HTML::main_thread_event_loop();
+        page->page().top_level_traversable()->reset_session_history_for_testing(
+            GC::create_function(event_loop.heap(), [this, page_id] {
+                async_did_reset_session_history_for_testing(page_id);
+            }));
+    } else {
+        async_did_reset_session_history_for_testing(page_id);
+    }
 }
 
 void ConnectionFromClient::set_viewport(u64 page_id, Web::DevicePixelSize size, double device_pixel_ratio, Web::ViewportIsFullscreen is_fullscreen)
@@ -283,8 +404,12 @@ void ConnectionFromClient::mouse_event(u64 page_id, Web::MouseEvent event)
             return nullptr;
 
         if (auto const* mouse_event = m_input_event_queue.tail().event.get_pointer<Web::MouseEvent>()) {
-            if (mouse_event->type == event.type)
-                return mouse_event;
+            if (mouse_event->type != event.type)
+                return nullptr;
+            if (event.type == Web::MouseEvent::Type::MouseWheel
+                && mouse_event->async_scroll_performed_default_action != event.async_scroll_performed_default_action)
+                return nullptr;
+            return mouse_event;
         }
 
         return nullptr;
@@ -311,6 +436,31 @@ void ConnectionFromClient::drag_event(u64 page_id, Web::DragEvent event)
 
 void ConnectionFromClient::pinch_event(u64 page_id, Web::PinchEvent event)
 {
+    auto page = m_page_host->page(page_id);
+    if (!page.has_value()) {
+        async_did_finish_handling_input_event(page_id, Web::EventResult::Dropped);
+        return;
+    }
+
+    // OPTIMIZATION: Coalesce consecutive unprocessed pinch events. Pinch scale
+    //               deltas are multiplicative, so preserve the combined scale change.
+    //               Only coalesce events with the same focal point, as applying
+    //               one combined zoom around a different point is not equivalent
+    //               to applying each zoom in sequence.
+    if (!m_input_event_queue.is_empty() && m_input_event_queue.tail().page_id == page_id) {
+        if (auto const* pinch_event = m_input_event_queue.tail().event.get_pointer<Web::PinchEvent>()) {
+            if (pinch_event->position != event.position || pinch_event->modifiers != event.modifiers)
+                return enqueue_input_event({ page_id, move(event), 0 });
+
+            event.scale_delta = (1.0 + pinch_event->scale_delta) * (1.0 + event.scale_delta) - 1.0;
+            m_input_event_queue.tail().event = move(event);
+            ++m_input_event_queue.tail().coalesced_event_count;
+
+            page->page().client().request_frame();
+            return;
+        }
+    }
+
     enqueue_input_event({ page_id, move(event), 0 });
 }
 
@@ -706,7 +856,7 @@ void ConnectionFromClient::inspect_dom_node(u64 page_id, WebView::DOMNodePropert
 
         properties->for_each_property([&](auto property_id, auto& value) {
             serialized.set(
-                Web::CSS::string_from_property_id(property_id),
+                Web::CSS::string_from_property_id(property_id).to_utf16_string().to_utf8_but_should_be_ported_to_utf16(),
                 value.to_string(Web::CSS::SerializationMode::Normal));
         });
 
@@ -1118,13 +1268,100 @@ void ConnectionFromClient::inspect_current_flexbox(u64 page_id, Web::UniqueNodeI
     async_did_inspect_current_flexbox(page_id, "null"_string);
 }
 
+void ConnectionFromClient::inspect_indexed_database_storage(u64 page_id, u64 request_id)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    auto* document = page->page().top_level_browsing_context().active_document();
+    if (!document) {
+        async_did_inspect_indexed_database(page_id, request_id, "{}"_string);
+        return;
+    }
+
+    async_did_inspect_indexed_database(page_id, request_id, DevTools::IndexedDB::serialize_storage(*document).serialized());
+}
+
+void ConnectionFromClient::inspect_indexed_database_objects(u64 page_id, u64 request_id, String host, JsonValue names, JsonValue options)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    auto* document = page->page().top_level_browsing_context().active_document();
+    if (!document) {
+        async_did_inspect_indexed_database(page_id, request_id, "{}"_string);
+        return;
+    }
+
+    async_did_inspect_indexed_database(page_id, request_id, DevTools::IndexedDB::serialize_objects(*document, host, names, options).serialized());
+}
+
+static void send_indexed_database_operation_result(ConnectionFromClient& connection, u64 page_id, u64 request_id, ErrorOr<JsonObject> result)
+{
+    if (result.is_error()) {
+        JsonObject error;
+        error.set("error"sv, result.error().string_literal());
+        connection.async_did_inspect_indexed_database(page_id, request_id, error.serialized());
+        return;
+    }
+
+    connection.async_did_inspect_indexed_database(page_id, request_id, result.release_value().serialized());
+}
+
+void ConnectionFromClient::delete_indexed_database(u64 page_id, u64 request_id, String host, String name)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    auto* document = page->page().top_level_browsing_context().active_document();
+    if (!document) {
+        async_did_inspect_indexed_database(page_id, request_id, "{}"_string);
+        return;
+    }
+
+    send_indexed_database_operation_result(*this, page_id, request_id, DevTools::IndexedDB::delete_database(*document, host, name));
+}
+
+void ConnectionFromClient::clear_indexed_database_object_store(u64 page_id, u64 request_id, String host, String name)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    auto* document = page->page().top_level_browsing_context().active_document();
+    if (!document) {
+        async_did_inspect_indexed_database(page_id, request_id, "{}"_string);
+        return;
+    }
+
+    send_indexed_database_operation_result(*this, page_id, request_id, DevTools::IndexedDB::clear_object_store(*document, host, name));
+}
+
+void ConnectionFromClient::delete_indexed_database_record(u64 page_id, u64 request_id, String host, String name)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    auto* document = page->page().top_level_browsing_context().active_document();
+    if (!document) {
+        async_did_inspect_indexed_database(page_id, request_id, "{}"_string);
+        return;
+    }
+
+    send_indexed_database_operation_result(*this, page_id, request_id, DevTools::IndexedDB::delete_record(*document, host, name));
+}
+
 void ConnectionFromClient::clear_inspected_dom_node(u64 page_id)
 {
     auto page = this->page(page_id);
     if (!page.has_value())
         return;
 
-    for (auto& navigable : Web::HTML::all_navigables()) {
+    for (auto& navigable : Web::HTML::all_local_navigables()) {
         if (navigable->active_document() != nullptr) {
             navigable->active_document()->set_inspected_node(nullptr);
         }
@@ -1137,7 +1374,7 @@ void ConnectionFromClient::highlight_dom_node(u64 page_id, Web::UniqueNodeID nod
     if (!page.has_value())
         return;
 
-    for (auto& navigable : Web::HTML::all_navigables()) {
+    for (auto& navigable : Web::HTML::all_local_navigables()) {
         if (navigable->active_document() != nullptr) {
             navigable->active_document()->set_highlighted_node(nullptr, {});
         }
@@ -1228,7 +1465,7 @@ void ConnectionFromClient::clear_flexbox_highlight(u64 page_id, Web::UniqueNodeI
         return;
     }
 
-    for (auto& navigable : Web::HTML::all_navigables()) {
+    for (auto& navigable : Web::HTML::all_local_navigables()) {
         if (navigable->active_document())
             navigable->active_document()->clear_flexbox_highlighted_node(nullptr);
     }
@@ -1265,7 +1502,7 @@ void ConnectionFromClient::clear_grid_highlight(u64 page_id, Web::UniqueNodeID n
         return;
     }
 
-    for (auto& navigable : Web::HTML::all_navigables()) {
+    for (auto& navigable : Web::HTML::all_local_navigables()) {
         if (navigable->active_document())
             navigable->active_document()->clear_grid_highlighted_node(nullptr);
     }
@@ -1325,6 +1562,53 @@ void ConnectionFromClient::request_style_sheet_source(u64 page_id, Web::CSS::Sty
         if (auto stylesheet = document->get_style_sheet_source(identifier); stylesheet.has_value())
             async_did_get_style_sheet_source(page_id, identifier, document->base_url(), stylesheet.value());
     }
+}
+
+void ConnectionFromClient::list_devtools_sources(u64 page_id, u64 request_id)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    async_did_list_devtools_sources(page_id, request_id, page->list_devtools_sources());
+}
+
+void ConnectionFromClient::request_devtools_source(u64 page_id, Web::HTML::ScriptRegistry::Identifier source_id)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    async_did_get_devtools_source(page_id, source_id, page->devtools_source_content(source_id));
+}
+
+void ConnectionFromClient::resolve_dom_node_url(u64 page_id, u64 request_id, Optional<Web::UniqueNodeID> node_id, String url)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value()) {
+        async_did_resolve_dom_node_url(page_id, request_id, move(url));
+        return;
+    }
+
+    auto* document = [&]() -> Web::DOM::Document* {
+        if (node_id.has_value()) {
+            if (auto* node = Web::DOM::Node::from_unique_id(*node_id))
+                return &node->document();
+            return nullptr;
+        }
+
+        return page->page().top_level_browsing_context().active_document();
+    }();
+
+    auto resolved_url = document
+        ? document->encoding_parse_url(url)
+              .map([](auto const& parsed_url) {
+                  return parsed_url.serialize();
+              })
+              .value_or(url)
+        : url;
+
+    async_did_resolve_dom_node_url(page_id, request_id, move(resolved_url));
 }
 
 void ConnectionFromClient::set_listen_for_dom_mutations(u64 page_id, bool listen_for_dom_mutations)
@@ -1854,16 +2138,9 @@ void ConnectionFromClient::set_content_blockers(u64 page_id, Core::AnonymousBuff
     }
 }
 
-void ConnectionFromClient::set_autoplay_allowed_on_all_websites(u64)
+void ConnectionFromClient::set_autoplay_settings(u64, Web::HTML::AutoplayPolicy policy, Vector<String> allowlist)
 {
-    auto& autoplay_allowlist = Web::PermissionsPolicy::AutoplayAllowlist::the();
-    autoplay_allowlist.enable_globally();
-}
-
-void ConnectionFromClient::set_autoplay_allowlist(u64, Vector<String> allowlist)
-{
-    auto& autoplay_allowlist = Web::PermissionsPolicy::AutoplayAllowlist::the();
-    autoplay_allowlist.enable_for_origins(allowlist);
+    Web::HTML::AutoplaySettings::the().set_policy(policy, allowlist);
 }
 
 void ConnectionFromClient::set_proxy_mappings(u64, Vector<ByteString> proxies, HashMap<ByteString, size_t> mappings)
@@ -2051,6 +2328,12 @@ void ConnectionFromClient::retrieved_clipboard_entries(u64 page_id, u64 request_
 {
     if (auto page = this->page(page_id); page.has_value())
         page->page().retrieved_clipboard_entries(request_id, move(items));
+}
+
+void ConnectionFromClient::did_delete_all_cookies(u64 page_id, u64 request_id)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->did_delete_all_cookies(request_id);
 }
 
 void ConnectionFromClient::toggle_media_play_state(u64 page_id)

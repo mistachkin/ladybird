@@ -65,7 +65,7 @@ public:
     virtual ~HTMLInputElement() override;
 
     virtual RefPtr<Layout::Node> create_layout_node(CSS::ComputedProperties const&) override;
-    virtual void adjust_computed_style(CSS::ComputedProperties&) override;
+    virtual void adjust_computed_style(CSS::ComputedProperties::Builder&) override;
     virtual void set_being_activated(bool) override;
 
     enum class TypeAttributeState {
@@ -107,7 +107,7 @@ public:
     bool checked_binding() const { return checked(); }
     void set_checked_binding(bool);
 
-    bool indeterminate() const { return m_indeterminate; }
+    bool indeterminate() const;
     void set_indeterminate(bool);
 
     bool can_have_text_editing_cursor() const;
@@ -287,14 +287,6 @@ private:
     virtual bool supports_dimension_attributes() const override { return type_state() == TypeAttributeState::ImageButton; }
 
     // ^Layout::ImageProvider
-    virtual bool is_image_available() const override;
-    virtual Optional<CSSPixels> intrinsic_width() const override;
-    virtual Optional<CSSPixels> intrinsic_height() const override;
-    virtual Optional<CSSPixelFraction> intrinsic_aspect_ratio() const override;
-    virtual Optional<Gfx::DecodedImageFrame> current_image_frame_sized(Gfx::IntSize) const override;
-    virtual void set_visible_in_viewport(bool) override;
-    virtual GC::Ptr<DOM::Element const> to_html_element() const override { return *this; }
-    virtual size_t current_frame_index() const override { return 0; }
     virtual GC::Ptr<HTML::DecodedImageData> decoded_image_data() const override { return image_data(); }
 
     virtual void initialize(JS::Realm&) override;
@@ -384,8 +376,8 @@ private:
 
     Optional<DOM::DocumentLoadEventDelayer> m_load_event_delayer;
 
-    // https://html.spec.whatwg.org/multipage/input.html#dom-input-indeterminate
-    bool m_indeterminate { false };
+    // https://html.spec.whatwg.org/multipage/input.html#concept-input-indeterminate
+    bool m_indeterminateness { false };
 
     // https://html.spec.whatwg.org/multipage/input.html#concept-input-checked-dirty-flag
     bool m_dirty_checkedness { false };

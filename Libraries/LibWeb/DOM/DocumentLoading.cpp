@@ -23,7 +23,7 @@
 #include <LibWeb/Fetch/Infrastructure/HTTP/MIME.h>
 #include <LibWeb/Fetch/Response.h>
 #include <LibWeb/HTML/HTMLHeadElement.h>
-#include <LibWeb/HTML/Navigable.h>
+#include <LibWeb/HTML/LocalNavigable.h>
 #include <LibWeb/HTML/NavigationParams.h>
 #include <LibWeb/HTML/Parser/HTMLEncodingDetection.h>
 #include <LibWeb/HTML/Parser/HTMLParser.h>
@@ -73,11 +73,12 @@ bool build_xml_document(DOM::Document& document, ByteBuffer const& data, Optiona
     }
     VERIFY(decoder.has_value());
     // Well-formed XML documents contain only properly encoded characters
-    if (!decoder->validate(data)) {
+    auto source_or_error = decoder->to_utf8(data, TextCodec::IgnoreBOM::No, TextCodec::ErrorMode::Fatal);
+    if (source_or_error.is_error()) {
         convert_to_xml_error_document(document, "XML Document contains improperly-encoded characters"_utf16);
         return false;
     }
-    auto source = decoder->to_utf8(data).release_value_but_fixme_should_propagate_errors();
+    auto source = source_or_error.release_value();
     XML::Parser parser(source, { .resolve_named_html_entity = resolve_named_html_entity });
     XMLDocumentBuilder builder { document };
     auto result = parser.parse_with_listener(builder);
@@ -205,13 +206,7 @@ static WebIDL::ExceptionOr<GC::Ref<DOM::Document>> load_xml_document(HTML::Navig
         }
         VERIFY(decoder.has_value());
         // Well-formed XML documents contain only properly encoded characters
-        if (!decoder->validate(data)) {
-            // FIXME: Insert error message into the document.
-            dbgln("XML Document contains improperly-encoded characters");
-            convert_to_xml_error_document(document, "XML Document contains improperly-encoded characters"_utf16);
-            return;
-        }
-        auto source = decoder->to_utf8(data);
+        auto source = decoder->to_utf8(data, TextCodec::IgnoreBOM::No, TextCodec::ErrorMode::Fatal);
         if (source.is_error()) {
             // FIXME: Insert error message into the document.
             dbgln("Failed to decode XML document: {}", source.error());

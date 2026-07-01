@@ -7,13 +7,10 @@
 #include <AK/BinarySearch.h>
 #include <AK/NeverDestroyed.h>
 #include <AK/NumericLimits.h>
-#include <AK/QuickSort.h>
 #include <AK/StdLibExtras.h>
 #include <LibGC/Heap.h>
 #include <LibGC/HeapBlock.h>
-#include <LibJS/Bytecode/BasicBlock.h>
 #include <LibJS/Bytecode/Executable.h>
-#include <LibJS/Bytecode/FormatOperand.h>
 #include <LibJS/Bytecode/Instruction.h>
 #include <LibJS/Bytecode/Op.h>
 #include <LibJS/Bytecode/RegexTable.h>
@@ -21,6 +18,7 @@
 #include <LibJS/Runtime/ExternalMemory.h>
 #include <LibJS/Runtime/SharedFunctionInstanceData.h>
 #include <LibJS/Runtime/Value.h>
+#include <LibJS/RustIntegration.h>
 #include <LibJS/SourceCode.h>
 
 namespace JS::Bytecode {
@@ -324,10 +322,10 @@ static SourceMapEntry const* first_real_source_map_entry(Executable const& execu
     return first_entry;
 }
 
-static void dump_header(StringBuilder& output, Executable const& executable, bool use_color)
+static void dump_header(StringBuilder& output, Executable const& executable)
 {
-    auto const white_bold = use_color ? "\033[37;1m"sv : ""sv;
-    auto const reset = use_color ? "\033[0m"sv : ""sv;
+    auto constexpr white_bold = "\033[37;1m"sv;
+    auto constexpr reset = "\033[0m"sv;
     auto const* first_source_map_entry = first_real_source_map_entry(executable);
 
     u32 hash = 2166136261u; // FNV-1a offset basis
@@ -360,12 +358,16 @@ static void dump_header(StringBuilder& output, Executable const& executable, boo
 
     // Show source location if available.
     if (first_source_map_entry) {
-        auto filename = executable.source_code->filename();
+        auto filename = executable.source_code->filename().utf16_view();
         if (!filename.is_empty()) {
             // Show just the basename to keep output portable across machines.
-            auto last_slash = filename.bytes_as_string_view().find_last('/');
+            Optional<size_t> last_slash;
+            for (size_t i = 0; i < filename.length_in_code_units(); ++i) {
+                if (filename.code_unit_at(i) == '/')
+                    last_slash = i;
+            }
             if (last_slash.has_value())
-                filename = MUST(filename.substring_from_byte_offset(last_slash.value() + 1));
+                filename = filename.substring_view(last_slash.value() + 1);
             output.appendff(" {}:{}:{}", filename, first_source_map_entry->line, first_source_map_entry->column);
         } else {
             output.appendff(" line {}, column {}", first_source_map_entry->line, first_source_map_entry->column);
@@ -374,88 +376,23 @@ static void dump_header(StringBuilder& output, Executable const& executable, boo
     output.append('\n');
 }
 
-static bool instruction_is_terminator(Instruction const& instruction)
+static void dump_metadata(StringBuilder& output, Executable const& executable)
 {
-#define __BYTECODE_OP(op)       \
-    case Instruction::Type::op: \
-        return Op::op::IsTerminator;
-
-    switch (instruction.type()) {
-        ENUMERATE_BYTECODE_OPS(__BYTECODE_OP)
-    default:
-        VERIFY_NOT_REACHED();
-    }
-
-#undef __BYTECODE_OP
-}
-
-static Vector<u32> collect_basic_block_start_offsets(Executable const& executable)
-{
-    Vector<u32> offsets;
-
-    auto append_offset = [&](size_t offset) {
-        VERIFY(offset <= NumericLimits<u32>::max());
-        auto offset32 = static_cast<u32>(offset);
-        if (!offsets.contains_slow(offset32))
-            offsets.append(offset32);
-    };
-    auto append_instruction_offset = [&](size_t offset) {
-        if (offset < executable.bytecode.size())
-            append_offset(offset);
-    };
-
-    append_offset(0);
-
-    for (InstructionStreamIterator it(executable.bytecode, &executable); !it.at_end(); ++it) {
-        auto const& instruction = *it;
-        auto next_offset = it.offset() + instruction.length();
-
-        const_cast<Instruction&>(instruction).visit_labels([&](Label& label) {
-            append_offset(label.address());
-        });
-
-        if (instruction_is_terminator(instruction) && next_offset < executable.bytecode.size())
-            append_offset(next_offset);
-    }
-
-    for (auto const& handler : executable.exception_handlers) {
-        append_instruction_offset(handler.start_offset);
-        append_instruction_offset(handler.end_offset);
-        append_instruction_offset(handler.handler_offset);
-    }
-
-    quick_sort(offsets);
-    return offsets;
-}
-
-Optional<size_t> Executable::basic_block_index_for_offset(size_t offset) const
-{
-    VERIFY(offset <= NumericLimits<u32>::max());
-    auto basic_block_start_offsets = collect_basic_block_start_offsets(*this);
-
-    size_t index = 0;
-    if (binary_search(basic_block_start_offsets, static_cast<u32>(offset), &index))
-        return index;
-    return {};
-}
-
-static void dump_metadata(StringBuilder& output, Executable const& executable, bool use_color)
-{
-    auto const green = use_color ? "\033[32m"sv : ""sv;
-    auto const yellow = use_color ? "\033[33m"sv : ""sv;
-    auto const blue = use_color ? "\033[34m"sv : ""sv;
-    auto const cyan = use_color ? "\033[36m"sv : ""sv;
-    auto const reset = use_color ? "\033[0m"sv : ""sv;
+    auto constexpr green = "\033[32m"sv;
+    auto constexpr yellow = "\033[33m"sv;
+    auto constexpr blue = "\033[34m"sv;
+    auto constexpr cyan = "\033[36m"sv;
+    auto constexpr reset = "\033[0m"sv;
 
     output.appendff("  {}Registers{}: {}\n", green, reset, executable.number_of_registers);
-    output.appendff("  {}Blocks{}:    {}\n", green, reset, collect_basic_block_start_offsets(executable).size());
+    output.appendff("  {}Blocks{}:    {}\n", green, reset, RustIntegration::count_bytecode_basic_blocks(executable));
 
     if (!executable.local_variable_names.is_empty()) {
         output.appendff("  {}Locals{}:    ", green, reset);
         for (size_t i = 0; i < executable.local_variable_names.size(); ++i) {
             if (i != 0)
                 output.append(", "sv);
-            output.appendff("{}{}~{}{}", blue, executable.local_variable_names[i].name, i, reset);
+            output.appendff("{}{}~{}{}", blue, executable.local_variable_names[i], i, reset);
         }
         output.append('\n');
     }
@@ -476,9 +413,9 @@ static void dump_metadata(StringBuilder& output, Executable const& executable, b
             else if (value.is_double())
                 output.appendff("Double({})", value.as_double());
             else if (value.is_bigint())
-                output.appendff("BigInt({})", MUST(value.as_bigint().to_string()));
+                output.appendff("BigInt({})", value.as_bigint().to_utf16_string());
             else if (value.is_string())
-                output.appendff("String(\"{}\")", value.as_string().utf8_string_view());
+                output.appendff("String(\"{}\")", value.as_string().utf16_string_view());
             else if (value.is_undefined())
                 output.append("Undefined"sv);
             else if (value.is_null())
@@ -491,71 +428,17 @@ static void dump_metadata(StringBuilder& output, Executable const& executable, b
     }
 }
 
-static void dump_bytecode(StringBuilder& output, Executable const& executable, bool use_color)
-{
-    auto const magenta = use_color ? "\033[35;1m"sv : ""sv;
-    auto const reset = use_color ? "\033[0m"sv : ""sv;
-
-    InstructionStreamIterator it(executable.bytecode, &executable);
-    auto basic_block_start_offsets = collect_basic_block_start_offsets(executable);
-
-    size_t basic_block_offset_index = 0;
-
-    while (!it.at_end()) {
-        if (basic_block_offset_index < basic_block_start_offsets.size()
-            && it.offset() == basic_block_start_offsets[basic_block_offset_index]) {
-            if (basic_block_offset_index > 0)
-                output.append('\n');
-            output.appendff("{}block{}{}:\n", magenta, basic_block_offset_index, reset);
-            ++basic_block_offset_index;
-        }
-
-        output.appendff("  [{:4x}] {}\n", it.offset(), (*it).to_byte_string(executable));
-
-        ++it;
-    }
-}
-
 void Executable::dump() const
 {
     StringBuilder output;
 
-    dump_header(output, *this, true);
-    dump_metadata(output, *this, true);
+    dump_header(output, *this);
+    dump_metadata(output, *this);
     output.append('\n');
-    dump_bytecode(output, *this, true);
-
-    if (!exception_handlers.is_empty()) {
-        output.append("\nException handlers:\n"sv);
-        for (auto const& handler : exception_handlers) {
-            output.appendff("  [{:4x} .. {:4x}] => handler ", handler.start_offset, handler.end_offset);
-            Label handler_label(static_cast<u32>(handler.handler_offset));
-            output.appendff("{}\n", format_label(""sv, handler_label, *this));
-        }
-    }
+    RustIntegration::dump_bytecode(output, *this);
 
     output.append('\n');
     warnln("{}", output.string_view());
-}
-
-String Executable::dump_to_string() const
-{
-    StringBuilder output;
-    dump_header(output, *this, false);
-    dump_metadata(output, *this, false);
-    output.append('\n');
-    dump_bytecode(output, *this, false);
-
-    if (!exception_handlers.is_empty()) {
-        output.append("\nException handlers:\n"sv);
-        for (auto const& handler : exception_handlers) {
-            output.appendff("  [{:4x} .. {:4x}] => handler ", handler.start_offset, handler.end_offset);
-            Label handler_label(static_cast<u32>(handler.handler_offset));
-            output.appendff("{}\n", format_label(""sv, handler_label, *this));
-        }
-    }
-
-    return output.to_string_without_validation();
 }
 
 void Executable::visit_edges(Visitor& visitor)
@@ -736,18 +619,6 @@ SourceRange const& Executable::get_source_range(u32 program_counter)
         static NeverDestroyed<SourceRange> dummy { SourceRange { SourceCode::create({}, Utf16String {}), {} } };
         return *dummy;
     });
-}
-
-Operand Executable::original_operand_from_raw(u32 raw) const
-{
-    // NB: Layout is [registers | locals | constants | arguments]
-    if (raw < number_of_registers)
-        return Operand { Operand::Type::Register, raw };
-    if (raw < registers_and_locals_count)
-        return Operand { Operand::Type::Local, raw - local_index_base };
-    if (raw < argument_index_base)
-        return Operand { Operand::Type::Constant, raw - registers_and_locals_count };
-    return Operand { Operand::Type::Argument, raw - argument_index_base };
 }
 
 }

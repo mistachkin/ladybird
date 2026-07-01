@@ -41,11 +41,19 @@ AK_TYPEDEF_DISTINCT_NUMERIC_GENERAL(i64, UniqueNodeID, Comparison, Increment, Ca
 
 }
 
+namespace Web::Compositor {
+
+class CompositorContextHandle;
+class CompositorHost;
+
+}
+
 namespace Web::Painting {
 
 class AccumulatedVisualContextTree;
 class BackingStore;
 class ChromeWidget;
+class CanvasSurfaceRegistry;
 class DevicePixelConverter;
 class DisplayList;
 class DisplayListPlayerSkia;
@@ -94,6 +102,7 @@ enum class DOMParserSupportedType : u8;
 enum class EndingType : u8;
 enum class HdrMetadataType : u8;
 enum class ImageSmoothingQuality : u8;
+enum class LockMode : u8;
 enum class MediaDecodingType : u8;
 enum class MediaEncodingType : u8;
 enum class MediaStreamTrackState : u8;
@@ -685,12 +694,14 @@ namespace Web::HTML {
 class AnimationFrameCallbackDriver;
 class AudioTrack;
 class AudioTrackList;
+class AutoplaySettings;
 class BarProp;
 class BeforeUnloadEvent;
 class BroadcastChannel;
 class BrowsingContext;
 class BrowsingContextGroup;
 class CanvasRenderingContext2D;
+class RemoteCanvas2DTransport;
 class ClassicScript;
 class CloseEvent;
 class CloseWatcher;
@@ -800,6 +811,8 @@ class ImageBitmap;
 class ImageData;
 class ImageRequest;
 class ListOfAvailableImages;
+class LocalNavigable;
+class LocalTraversableNavigable;
 class Location;
 class MediaError;
 class MessageChannel;
@@ -829,6 +842,7 @@ class PreloadEntry;
 struct PreloadKey;
 class PromiseRejectionEvent;
 class RadioNodeList;
+class ScriptRegistry;
 class SelectedFile;
 class SessionHistoryEntry;
 class SharedResourceRequest;
@@ -850,7 +864,6 @@ class ToggleEvent;
 class TrackEvent;
 class TransferDataDecoder;
 class TransferDataEncoder;
-class TraversableNavigable;
 class UserActivation;
 class ValidityState;
 class VideoTrack;
@@ -913,6 +926,7 @@ class IDBRequest;
 class IDBTransaction;
 class IDBVersionChangeEvent;
 class Index;
+class Key;
 class ObjectStore;
 class RequestList;
 
@@ -976,6 +990,7 @@ struct LayoutState;
 
 namespace Web::MathML {
 
+class MathMLAnchorElement;
 class MathMLElement;
 class MathMLMiElement;
 class MathMLMspaceElement;
@@ -1030,7 +1045,6 @@ class PaintableBox;
 class PaintableWithLines;
 class ScrollStateSnapshot;
 class StackingContext;
-class TextPaintable;
 class VideoPaintable;
 class ViewportPaintable;
 
@@ -1046,12 +1060,6 @@ namespace Web::PerformanceTimeline {
 class PerformanceEntry;
 class PerformanceObserver;
 class PerformanceObserverEntryList;
-
-}
-
-namespace Web::PermissionsPolicy {
-
-class AutoplayAllowlist;
 
 }
 
@@ -1304,7 +1312,8 @@ enum class AudioContextState;
 
 namespace Web::WebGL {
 
-class OpenGLContext;
+class RemoteWebGLTransport;
+class WebGLContextProxy;
 class WebGL2RenderingContext;
 class WebGLActiveInfo;
 class WebGLBuffer;
@@ -1360,7 +1369,17 @@ namespace Web::WebDriver {
 struct ActionObject;
 struct InputState;
 
-};
+}
+
+namespace Web::WebLocks {
+
+class Lock;
+class LockData;
+class LockManager;
+class LockRequest;
+class NavigatorLocks;
+
+}
 
 namespace Web::WebSockets {
 

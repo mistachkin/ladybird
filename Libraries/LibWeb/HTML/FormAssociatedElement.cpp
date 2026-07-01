@@ -6,6 +6,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Utf16StringBuilder.h>
 #include <LibUnicode/CharacterTypes.h>
 #include <LibUnicode/Segmenter.h>
 #include <LibWeb/CSS/Invalidation/FormControlInvalidator.h>
@@ -26,10 +27,11 @@
 #include <LibWeb/HTML/HTMLLegendElement.h>
 #include <LibWeb/HTML/HTMLSelectElement.h>
 #include <LibWeb/HTML/HTMLTextAreaElement.h>
-#include <LibWeb/HTML/Navigable.h>
+#include <LibWeb/HTML/LocalNavigable.h>
 #include <LibWeb/HTML/Parser/HTMLParser.h>
 #include <LibWeb/HTML/ValidityState.h>
 #include <LibWeb/Infra/Strings.h>
+#include <LibWeb/Layout/TextNode.h>
 #include <LibWeb/Page/EventHandler.h>
 #include <LibWeb/Painting/Paintable.h>
 #include <LibWeb/UIEvents/InputTypes.h>
@@ -887,20 +889,20 @@ WebIDL::ExceptionOr<void> FormAssociatedTextControlElement::set_range_text(Utf16
     // 9. If start is less than end, delete the sequence of code units within the element's relevant value starting with
     //    the code unit at the startth position and ending with the code unit at the (end-1)th position.
     if (start < end) {
-        StringBuilder builder(StringBuilder::Mode::UTF16, the_relevant_value.length_in_code_units() - (end - start));
+        Utf16StringBuilder builder(the_relevant_value.length_in_code_units() - (end - start));
         builder.append(the_relevant_value.substring_view(0, start));
         builder.append(the_relevant_value.substring_view(end));
 
-        the_relevant_value = builder.to_utf16_string();
+        the_relevant_value = builder.to_string();
     }
 
     // 10. Insert the value of the first argument into the text of the relevant value of the text control, immediately before the startth code unit.
-    StringBuilder builder(StringBuilder::Mode::UTF16, the_relevant_value.length_in_code_units() + replacement.length_in_code_units());
+    Utf16StringBuilder builder(the_relevant_value.length_in_code_units() + replacement.length_in_code_units());
     builder.append(the_relevant_value.substring_view(0, start));
     builder.append(replacement);
     builder.append(the_relevant_value.substring_view(start));
 
-    the_relevant_value = builder.to_utf16_string();
+    the_relevant_value = builder.to_string();
     TRY(set_relevant_value(the_relevant_value));
 
     // 11. Let new length be the length of the value of the first argument.
@@ -1121,11 +1123,7 @@ void FormAssociatedTextControlElement::scroll_cursor_into_view()
     if (!text_node)
         return;
 
-    auto paintable = text_node->paintable();
-    if (!paintable)
-        return;
-
-    paintable->scroll_ancestor_to_offset_into_view(m_selection_end);
+    Painting::Paintable::scroll_text_offset_into_view(*text_node, m_selection_end);
 }
 
 void FormAssociatedTextControlElement::selection_was_changed(SelectionSource source)
@@ -1143,17 +1141,13 @@ void FormAssociatedTextControlElement::selection_was_changed(SelectionSource sou
     if (!text_node)
         return;
     // NB: Called during selection change handling, layout may be stale.
-    auto text_paintable = text_node->unsafe_paintable();
-    if (!text_paintable)
+    auto* layout_text_node = as_if<Layout::TextNode>(text_node->unsafe_layout_node());
+    if (!layout_text_node)
         return;
 
-    if (m_selection_start == m_selection_end) {
-        text_paintable->set_selection_state(Painting::Paintable::SelectionState::None);
+    if (m_selection_start == m_selection_end)
         text_node->document().reset_cursor_blink_cycle();
-    } else {
-        text_paintable->set_selection_state(Painting::Paintable::SelectionState::StartAndEnd);
-    }
-    text_paintable->set_needs_repaint();
+    layout_text_node->set_needs_repaint();
 
     // AD-HOC: Only scroll the cursor into view for UI-driven selection changes (like keyboard input). Programmatic
     //         changes (input.value, setSelectionRange) do not cause the cursor to scroll into view. This matches the

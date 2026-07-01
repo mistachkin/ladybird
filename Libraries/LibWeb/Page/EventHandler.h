@@ -30,7 +30,7 @@
 namespace Web {
 
 struct AsyncScrollOperation {
-    GC::Ptr<HTML::Navigable> navigable;
+    GC::Ptr<HTML::LocalNavigable> navigable;
     Compositor::AsyncScrollOperationID operation_id { 0 };
 };
 
@@ -38,7 +38,7 @@ class WEB_API EventHandler {
     friend class AutoScrollHandler;
 
 public:
-    EventHandler(Badge<HTML::Navigable>, HTML::Navigable&);
+    EventHandler(Badge<HTML::LocalNavigable>, HTML::LocalNavigable&);
     ~EventHandler();
 
     void visit_edges(JS::Cell::Visitor& visitor) const;
@@ -81,8 +81,8 @@ public:
 private:
     bool should_ignore_device_input_event() const;
 
-    EventResult fire_keyboard_event(FlyString const& event_name, HTML::Navigable&, UIEvents::KeyCode, unsigned modifiers, u32 code_point, bool repeat);
-    [[nodiscard]] EventResult input_event(FlyString const& event_name, FlyString const& input_type, HTML::Navigable&, Variant<u32, Utf16String> code_point_or_string);
+    EventResult fire_keyboard_event(FlyString const& event_name, HTML::LocalNavigable&, UIEvents::KeyCode, unsigned modifiers, u32 code_point, bool repeat);
+    [[nodiscard]] EventResult input_event(FlyString const& event_name, FlyString const& input_type, HTML::LocalNavigable&, Variant<u32, Utf16String> code_point_or_string);
 
     EventResult focus_next_element();
     EventResult focus_previous_element();
@@ -102,6 +102,7 @@ private:
     struct Target {
         RefPtr<Painting::Paintable> paintable;
         RefPtr<Painting::ChromeWidget> chrome_widget;
+        GC::Ptr<DOM::Node> dom_node;
         Optional<int> index_in_node;
     };
     Optional<Target> target_for_mouse_position(CSSPixelPoint position);
@@ -139,7 +140,7 @@ private:
     bool dispatch_chrome_widget_pointer_event(RefPtr<Painting::ChromeWidget>, FlyString const& type, unsigned button, CSSPixelPoint visual_viewport_position);
     void update_hovered_chrome_widget(RefPtr<Painting::ChromeWidget>);
 
-    void update_cursor(RefPtr<Painting::Paintable> paintable, GC::Ptr<DOM::Node> host_element, RefPtr<Painting::ChromeWidget> chrome_widget);
+    void update_cursor(RefPtr<Painting::Paintable>, GC::Ptr<DOM::Node> host_element, RefPtr<Painting::ChromeWidget>, bool hit_text_node = false);
     void record_last_known_mouse_position(CSSPixelPoint visual_viewport_position, CSSPixelPoint screen_position, unsigned buttons, unsigned modifiers);
     EventResult cancel_drag_and_drop_event(CSSPixelPoint, CSSPixelPoint screen_position, unsigned button, unsigned buttons, unsigned modifiers);
 
@@ -151,7 +152,7 @@ private:
     RefPtr<Painting::PaintableBox const> paint_root() const;
     Unicode::Segmenter& word_segmenter();
 
-    GC::Ref<HTML::Navigable> m_navigable;
+    GC::Ref<HTML::LocalNavigable> m_navigable;
 
     SelectionMode m_selection_mode { SelectionMode::None };
     InputEventsTarget* m_mouse_selection_target { nullptr };

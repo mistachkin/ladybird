@@ -70,7 +70,7 @@ void CompositorState::create_context(Web::Compositor::CompositorContextId contex
         VERIFY(context_id == Web::Compositor::compositor_context_id_for_page(*page_id));
 
     auto& context = *m_contexts.ensure(context_id, [&] {
-        return make<ContextState>(page_id, web_content_client, m_async_scrolling_enabled);
+        return make<ContextState>(page_id, web_content_client, m_canvas_surface_registry, m_async_scrolling_enabled);
     });
     resize_backing_stores_if_needed(context_id, context);
 }
@@ -81,39 +81,53 @@ void CompositorState::destroy_context(Web::Compositor::CompositorContextId conte
     VERIFY(context);
 
     cancel_pending_async_presents_for_context(context_id);
-    detach_from_parent_surface(context_id, *context);
-    for (auto& child_context_entry : context->child_contexts()) {
-        auto* child_context = context_if_present(child_context_entry.child_context_id);
-        VERIFY(child_context);
-        child_context->did_detach_from_parent_surface(context_id, child_context_entry.surface_id);
+    clear_parent_context(*context);
+    for (auto& context_entry : m_contexts) {
+        if (context_entry.key == context_id)
+            continue;
+        auto& possible_child_context = *context_entry.value;
+        auto parent_context_id = possible_child_context.parent_context_id();
+        if (parent_context_id.has_value() && *parent_context_id == context_id)
+            possible_child_context.set_parent_context({});
     }
     m_contexts.remove(context_id);
 }
 
-void CompositorState::set_presentation_mode(Web::Compositor::CompositorContextId context_id, Web::Compositor::PresentationMode presentation_mode)
+void CompositorState::set_parent_context(Web::Compositor::CompositorContextId context_id, Optional<Web::Compositor::CompositorContextId> parent_context_id)
 {
     auto* context = context_if_present(context_id);
     VERIFY(context);
 
-    auto& context_state = *context;
-    auto was_presenting_to_client = context_state.presents_to_client();
-    auto will_present_to_client = ContextState::presentation_mode_presents_to_client(presentation_mode);
-    detach_from_parent_surface(context_id, context_state);
+    if (parent_context_id.has_value()) {
+        VERIFY(!context->presents_to_client());
+        VERIFY(*parent_context_id != context_id);
+        VERIFY(context_if_present(*parent_context_id));
+    }
 
-    presentation_mode.visit(
-        [](Empty const&) {},
-        [](Web::Compositor::PresentToClient const&) {},
-        [&](Web::Compositor::PublishToCompositorSurface const& mode) {
-            auto* parent_context = context_if_present(mode.target_context_id);
-            VERIFY(parent_context);
-            parent_context->attach_child_surface(mode.surface_id, context_id);
-            context_state.set_published_surface({
-                .parent_context_id = mode.target_context_id,
-                .surface_id = mode.surface_id,
-            });
-        });
-    context_state.set_presentation_mode(move(presentation_mode));
-    context_state.did_stop_presenting_to_client_if_needed(was_presenting_to_client, will_present_to_client);
+    auto current_parent_context_id = context->parent_context_id();
+    if (current_parent_context_id.has_value() == parent_context_id.has_value()
+        && (!current_parent_context_id.has_value() || *current_parent_context_id == *parent_context_id))
+        return;
+
+    clear_parent_context(*context);
+    context->set_parent_context(parent_context_id);
+
+    if (!parent_context_id.has_value())
+        return;
+
+    if (!context->latest_rendered_surface() && !context->needs_rasterization())
+        return;
+
+    auto* parent_context = context_if_present(*parent_context_id);
+    VERIFY(parent_context);
+    present_current_frame(*parent_context_id, *parent_context);
+}
+
+void CompositorState::stop_presenting_to_client(Web::Compositor::CompositorContextId context_id)
+{
+    auto* context = context_if_present(context_id);
+    VERIFY(context);
+    context->stop_presenting_to_client();
 }
 
 void CompositorState::update_display_list(Web::Compositor::CompositorContextId context_id, NonnullRefPtr<Web::Painting::DisplayList> display_list, Web::Painting::AccumulatedVisualContextTree visual_context_tree, Web::Painting::DisplayListResourceTransaction&& resource_transaction, Web::Painting::ScrollStateSnapshot&& scroll_state_snapshot)
@@ -157,23 +171,6 @@ void CompositorState::clear_video_frame(Web::Compositor::CompositorContextId con
     present_current_frame(context_id, *context);
 }
 
-void CompositorState::update_compositor_surface(Web::Compositor::CompositorContextId context_id, Web::Painting::CompositorSurfaceId surface_id, Gfx::SharedImage&& shared_image)
-{
-    auto* context = context_if_present(context_id);
-    VERIFY(context);
-    context->update_compositor_surface(surface_id, move(shared_image));
-    present_current_frame(context_id, *context);
-}
-
-void CompositorState::clear_compositor_surface(Web::Compositor::CompositorContextId context_id, Web::Painting::CompositorSurfaceId surface_id)
-{
-    auto* context = context_if_present(context_id);
-    VERIFY(context);
-    context->clear_compositor_surface(surface_id);
-    remove_child_surface(*context, context_id, surface_id);
-    present_current_frame(context_id, *context);
-}
-
 void CompositorState::invalidate_wheel_event_listener_state(Web::Compositor::CompositorContextId context_id, u64 generation)
 {
     auto* context = context_if_present(context_id);
@@ -198,6 +195,15 @@ bool CompositorState::dispatch_mouse_event_to_web_content(Web::Compositor::Compo
 
     context->dispatch_mouse_event_to_web_content(event);
     return true;
+}
+
+bool CompositorState::handle_pinch_event(Web::Compositor::CompositorContextId context_id, Web::PinchEvent const& event)
+{
+    auto* context = context_if_present(context_id);
+    if (!context)
+        return false;
+
+    return apply_context_update_result(context_id, *context, context->handle_pinch_event(event));
 }
 
 Web::Compositor::AsyncScrollEnqueueResult CompositorState::async_scroll_by(Web::Compositor::CompositorContextId context_id, Web::UniqueNodeID expected_document_id, Gfx::FloatPoint position, Gfx::FloatPoint delta, Gfx::IntRect viewport_rect, Web::Compositor::AsyncScrollOperationTracking operation_tracking)
@@ -265,7 +271,7 @@ void CompositorState::set_display_metadata(Web::Compositor::CompositorContextId 
     VERIFY(refresh_rate < AK::Infinity<double>);
 
     if (context->set_display_metadata(display_id, refresh_rate))
-        schedule_pending_present_frame_on_vsync(context_id, *context);
+        schedule_pending_present_frame(context_id, *context);
 }
 
 void CompositorState::present_frame(Web::Compositor::CompositorContextId context_id, Gfx::IntRect viewport_rect)
@@ -277,7 +283,8 @@ void CompositorState::present_frame(Web::Compositor::CompositorContextId context
 
 void CompositorState::present_frame(Web::Compositor::CompositorContextId context_id, ContextState& context, Gfx::IntRect viewport_rect)
 {
-    auto prepared_frame = context.prepare_frame(*m_display_list_player, viewport_rect);
+    auto composited_context_resolver = resolver_for(context_id);
+    auto prepared_frame = context.prepare_frame(*m_display_list_player, viewport_rect, &composited_context_resolver);
     if (!prepared_frame.has_value())
         return;
 
@@ -298,6 +305,16 @@ void CompositorState::present_frame(Web::Compositor::CompositorContextId context
 void CompositorState::schedule_present_frame(Web::Compositor::CompositorContextId context_id, ContextState& context, Gfx::IntRect viewport_rect)
 {
     context.queue_present_frame(viewport_rect);
+    schedule_pending_present_frame(context_id, context);
+}
+
+void CompositorState::schedule_pending_present_frame(Web::Compositor::CompositorContextId context_id, ContextState& context)
+{
+    if (!context.presents_to_client()) {
+        schedule_containing_context_present(context);
+        return;
+    }
+
     schedule_pending_present_frame_on_vsync(context_id, context);
 }
 
@@ -307,12 +324,23 @@ void CompositorState::schedule_pending_present_frame_on_vsync(Web::Compositor::C
     vsync_scheduler_for_display(context.display_id()).schedule(context.display_refresh_rate());
 }
 
+void CompositorState::schedule_containing_context_present(ContextState& context)
+{
+    auto parent_context_id = context.parent_context_id();
+    if (!parent_context_id.has_value())
+        return;
+
+    auto* parent_context = context_if_present(*parent_context_id);
+    VERIFY(parent_context);
+    present_current_frame(*parent_context_id, *parent_context);
+}
+
 void CompositorState::schedule_pending_present_frame_if_unblocked(Web::Compositor::CompositorContextId context_id, ContextState& context)
 {
     if (!context.can_schedule_pending_present_frame_if_unblocked())
         return;
 
-    schedule_pending_present_frame_on_vsync(context_id, context);
+    schedule_pending_present_frame(context_id, context);
 }
 
 VSyncScheduler& CompositorState::vsync_scheduler_for_display(Optional<u64> display_id)
@@ -339,43 +367,6 @@ void CompositorState::present_pending_frames_on_vsync(Optional<u64> display_id)
     }
 }
 
-void CompositorState::flush_descendant_surfaces_for_screenshot(Web::Compositor::CompositorContextId context_id)
-{
-    // Presents are scheduled on a vsync timer rather than performed synchronously — so a nested navigable's latest
-    // paint may not yet be published to its parent's compositor surface. A screenshot re-executes the top-level display
-    // list, whose embedded-content commands read those child surfaces. So, flush any descendant with a deferred
-    // present synchronously (deepest-first) — to capture a complete frame instead of a stale/blank iframe.
-    auto* context = context_if_present(context_id);
-    VERIFY(context);
-    for (auto& child : context->child_contexts())
-        present_subtree_for_screenshot(child.child_context_id);
-}
-
-bool CompositorState::present_subtree_for_screenshot(Web::Compositor::CompositorContextId context_id)
-{
-    auto* context = context_if_present(context_id);
-    VERIFY(context);
-
-    bool needs_present = context->needs_synchronous_present_for_screenshot();
-    for (auto& child : context->child_contexts()) {
-        if (present_subtree_for_screenshot(child.child_context_id))
-            needs_present = true;
-    }
-
-    if (!needs_present || !context->publishes_to_parent_surface())
-        return false;
-
-    present_context_synchronously(*context);
-    return true;
-}
-
-void CompositorState::present_context_synchronously(ContextState& context)
-{
-    auto publish_mode = context.present_synchronously(*m_display_list_player);
-    if (publish_mode.has_value())
-        publish_to_parent_surface(context, *publish_mode);
-}
-
 bool CompositorState::request_screenshot(Web::Compositor::CompositorContextId context_id, Gfx::ShareableBitmap& target_bitmap)
 {
     auto* context = context_if_present(context_id);
@@ -384,8 +375,8 @@ bool CompositorState::request_screenshot(Web::Compositor::CompositorContextId co
     if (!context->can_paint_screenshot(target_bitmap))
         return false;
 
-    flush_descendant_surfaces_for_screenshot(context_id);
-    context->paint_screenshot(*m_display_list_player, target_bitmap);
+    auto composited_context_resolver = resolver_for(context_id);
+    context->paint_screenshot(*m_display_list_player, target_bitmap, &composited_context_resolver);
     return true;
 }
 
@@ -425,15 +416,15 @@ void CompositorState::did_finish_async_present(PendingAsyncPresent& pending_pres
     VERIFY(context);
 
     context->did_finish_gpu_present(bitmap_id);
-    context->presentation_mode().visit(
-        [](Empty const&) {},
-        [&](Web::Compositor::PresentToClient const&) {
-            VERIFY(m_client);
-            m_client->did_present_frame(context_id, viewport_rect, bitmap_id);
-        },
-        [&](Web::Compositor::PublishToCompositorSurface const& mode) {
-            publish_to_parent_surface(*context, mode);
-        });
+    if (context->presents_to_client()) {
+        VERIFY(m_client);
+        m_client->did_present_frame(context_id, viewport_rect, bitmap_id);
+    }
+    if (auto parent_context_id = context->parent_context_id(); parent_context_id.has_value()) {
+        auto* parent_context = context_if_present(*parent_context_id);
+        VERIFY(parent_context);
+        present_current_frame(*parent_context_id, *parent_context);
+    }
 
     schedule_pending_present_frame_if_unblocked(context_id, *context);
 }
@@ -492,30 +483,42 @@ ContextState const* CompositorState::context_if_present(Web::Compositor::Composi
     return it->value.ptr();
 }
 
-void CompositorState::detach_from_parent_surface(Web::Compositor::CompositorContextId context_id, ContextState& context)
+void CompositorState::clear_parent_context(ContextState& context)
 {
-    auto published_surface = context.take_published_surface();
-    if (!published_surface.has_value())
+    auto parent_context_id = context.parent_context_id();
+    if (!parent_context_id.has_value())
         return;
 
-    auto* parent_context = context_if_present(published_surface->parent_context_id);
-    VERIFY(parent_context);
-    auto removed_child_context_id = parent_context->take_child_context_for_surface(published_surface->surface_id);
-    VERIFY(removed_child_context_id.has_value());
-    VERIFY(*removed_child_context_id == context_id);
-    parent_context->clear_compositor_surface(published_surface->surface_id);
-    present_current_frame(published_surface->parent_context_id, *parent_context);
+    context.set_parent_context({});
+    auto* parent_context = context_if_present(*parent_context_id);
+    if (!parent_context)
+        return;
+    present_current_frame(*parent_context_id, *parent_context);
 }
 
-void CompositorState::remove_child_surface(ContextState& context, Web::Compositor::CompositorContextId parent_context_id, Web::Painting::CompositorSurfaceId surface_id)
+CompositedContextResolver CompositorState::resolver_for(Web::Compositor::CompositorContextId parent_context_id)
 {
-    auto child_context_id = context.take_child_context_for_surface(surface_id);
-    if (!child_context_id.has_value())
-        return;
+    return [this, parent_context_id](Web::Compositor::CompositorContextId child_context_id) {
+        return resolve_composited_context(parent_context_id, child_context_id);
+    };
+}
 
-    auto* child_context = context_if_present(*child_context_id);
-    VERIFY(child_context);
-    child_context->did_detach_from_parent_surface(parent_context_id, surface_id);
+RefPtr<Gfx::PaintingSurface> CompositorState::resolve_composited_context(Web::Compositor::CompositorContextId parent_context_id, Web::Compositor::CompositorContextId child_context_id)
+{
+    auto* child_context = context_if_present(child_context_id);
+    if (!child_context)
+        return nullptr;
+    auto child_parent_context_id = child_context->parent_context_id();
+    if (!child_parent_context_id.has_value() || *child_parent_context_id != parent_context_id)
+        return nullptr;
+
+    if (child_context->needs_rasterization()) {
+        auto composited_context_resolver = resolver_for(child_context_id);
+        Web::Painting::DisplayListPlayerSkia display_list_player { m_skia_backend_context };
+        child_context->present_synchronously(display_list_player, &composited_context_resolver);
+    }
+
+    return child_context->latest_rendered_surface();
 }
 
 void CompositorState::resize_backing_stores_if_needed(Web::Compositor::CompositorContextId context_id, ContextState& context)
@@ -550,15 +553,6 @@ void CompositorState::present_current_frame(Web::Compositor::CompositorContextId
     auto frame_to_present = context.current_frame_rect_to_present();
     if (frame_to_present.has_value())
         schedule_present_frame(context_id, context, *frame_to_present);
-}
-
-void CompositorState::publish_to_parent_surface(ContextState& context, Web::Compositor::PublishToCompositorSurface const& mode)
-{
-    auto* parent_context = context_if_present(mode.target_context_id);
-    VERIFY(parent_context);
-
-    parent_context->update_compositor_surface(mode.surface_id, context.snapshot_front_store());
-    present_current_frame(mode.target_context_id, *parent_context);
 }
 
 bool CompositorState::apply_context_update_result(

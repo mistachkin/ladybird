@@ -21,6 +21,19 @@
 
 namespace IPC {
 
+Atomic<u32> TransportSocket::s_eof_drain_window_for_test_ms { 0 };
+Atomic<bool> TransportSocket::s_skip_inloop_read_for_test { false };
+
+void TransportSocket::set_eof_drain_window_for_test(u32 milliseconds)
+{
+    s_eof_drain_window_for_test_ms.store(milliseconds, AK::MemoryOrder::memory_order_relaxed);
+}
+
+void TransportSocket::set_skip_inloop_read_for_test(bool skip)
+{
+    s_skip_inloop_read_for_test.store(skip, AK::MemoryOrder::memory_order_relaxed);
+}
+
 ErrorOr<NonnullOwnPtr<TransportSocket>> TransportSocket::from_socket(NonnullOwnPtr<Core::LocalSocket> socket)
 {
     return make<TransportSocket>(move(socket));
@@ -49,11 +62,11 @@ ErrorOr<TransportSocket::Paired> TransportSocket::create_paired()
     };
 }
 
-void SendQueue::enqueue_message(ReadonlyBytes header, ReadonlyBytes payload, Vector<int>&& fds)
+void SendQueue::enqueue_message(SocketMessageHeader header, MessageDataType payload, Vector<int>&& fds)
 {
     Sync::MutexLocker locker(m_mutex);
-    VERIFY(MUST(m_stream.write_some(header)) == header.size());
-    VERIFY(MUST(m_stream.write_some(payload)) == payload.size());
+    m_queued_byte_count += sizeof(SocketMessageHeader) + payload.size();
+    m_queued_messages.append(QueuedMessage { header, move(payload) });
     m_fds.append(fds.data(), fds.size());
 }
 
@@ -61,9 +74,28 @@ SendQueue::BytesAndFds SendQueue::peek(size_t max_bytes)
 {
     Sync::MutexLocker locker(m_mutex);
     BytesAndFds result;
-    auto bytes_to_send = min(max_bytes, m_stream.used_buffer_size());
+    auto bytes_to_send = min(max_bytes, m_queued_byte_count);
     result.bytes.resize(bytes_to_send);
-    m_stream.peek_some(result.bytes);
+    size_t copied_bytes = 0;
+    for (auto const& queued_message : m_queued_messages) {
+        if (copied_bytes == bytes_to_send)
+            break;
+
+        auto start_offset = queued_message.start_offset;
+        if (start_offset < sizeof(SocketMessageHeader)) {
+            ReadonlyBytes header { reinterpret_cast<u8 const*>(&queued_message.header), sizeof(SocketMessageHeader) };
+            copied_bytes += header.slice(start_offset).copy_trimmed_to(result.bytes.span().slice(copied_bytes));
+            if (copied_bytes == bytes_to_send)
+                break;
+            start_offset = sizeof(SocketMessageHeader);
+        }
+
+        auto payload_offset = start_offset - sizeof(SocketMessageHeader);
+        if (payload_offset < queued_message.payload.size()) {
+            ReadonlyBytes payload { queued_message.payload.data() + payload_offset, queued_message.payload.size() - payload_offset };
+            copied_bytes += payload.copy_trimmed_to(result.bytes.span().slice(copied_bytes));
+        }
+    }
 
     if (m_fds.size() > 0) {
         auto fds_to_send = min(m_fds.size(), Core::LocalSocket::MAX_TRANSFER_FDS);
@@ -76,7 +108,17 @@ SendQueue::BytesAndFds SendQueue::peek(size_t max_bytes)
 void SendQueue::discard(size_t bytes_count, size_t fds_count)
 {
     Sync::MutexLocker locker(m_mutex);
-    MUST(m_stream.discard(bytes_count));
+    VERIFY(bytes_count <= m_queued_byte_count);
+    m_queued_byte_count -= bytes_count;
+    while (bytes_count > 0) {
+        auto& queued_message = m_queued_messages.first();
+        auto available_bytes = queued_message.size() - queued_message.start_offset;
+        auto consumed_bytes = min(available_bytes, bytes_count);
+        queued_message.start_offset += consumed_bytes;
+        bytes_count -= consumed_bytes;
+        if (queued_message.start_offset == queued_message.size())
+            (void)m_queued_messages.remove(m_queued_messages.begin());
+    }
     m_fds.remove(0, fds_count);
 }
 
@@ -147,7 +189,7 @@ intptr_t TransportSocket::io_thread_loop()
             (void)Core::System::read(m_wakeup_io_thread_read_fd->value(), { buf, sizeof(buf) });
         }
 
-        if (pollfds[0].revents & POLLIN)
+        if ((pollfds[0].revents & POLLIN) && !s_skip_inloop_read_for_test.load(AK::MemoryOrder::memory_order_relaxed))
             read_incoming_messages();
 
         if (pollfds[0].revents & POLLHUP) {
@@ -174,7 +216,15 @@ intptr_t TransportSocket::io_thread_loop()
 
     VERIFY(m_io_thread_state == IOThreadState::Stopped);
     if (!m_is_being_transferred.load(AK::MemoryOrder::memory_order_acquire)) {
+        // The loop may have stopped on a send-side failure (the peer closed its end while we still had data queued to
+        // send — so transfer_data() returned SocketClosed) without reading a final inbound message left buffered on the
+        // socket. Drain it before publishing EOF — so a message that arrived just before teardown (e.g., a cross-realm
+        // transform stream's "error") is actually delivered — rather than discarded.
+        read_incoming_messages();
+
+        Sync::MutexLocker locker(m_incoming_mutex);
         m_peer_eof = true;
+        m_incoming_eof = true;
         m_incoming_cv.broadcast();
         notify_read_available();
     }
@@ -262,22 +312,12 @@ static constexpr size_t MAX_UNPROCESSED_BUFFER_SIZE = 128 * MiB;
 // Maximum number of accumulated unprocessed file descriptors before we disconnect the peer
 static constexpr size_t MAX_UNPROCESSED_FDS = 512;
 
-struct MessageHeader {
-    enum class Type : u8 {
-        Payload = 0,
-        FileDescriptorAcknowledgement = 1,
-    };
-    Type type { Type::Payload };
-    u32 payload_size { 0 };
-    u32 fd_count { 0 };
-};
-
-void TransportSocket::post_message(Vector<u8> const& bytes_to_write, Vector<Attachment>& attachments)
+void TransportSocket::post_message(MessageDataType bytes_to_write, Vector<Attachment>& attachments)
 {
     auto num_fds_to_transfer = attachments.size();
 
-    MessageHeader header {
-        .type = MessageHeader::Type::Payload,
+    SocketMessageHeader header {
+        .type = SocketMessageHeader::Type::Payload,
         .payload_size = static_cast<u32>(bytes_to_write.size()),
         .fd_count = static_cast<u32>(num_fds_to_transfer),
     };
@@ -294,7 +334,7 @@ void TransportSocket::post_message(Vector<u8> const& bytes_to_write, Vector<Atta
         }
     }
 
-    m_send_queue->enqueue_message({ reinterpret_cast<u8 const*>(&header), sizeof(header) }, bytes_to_write, move(raw_fds));
+    m_send_queue->enqueue_message(header, move(bytes_to_write), move(raw_fds));
     wake_io_thread();
 }
 
@@ -397,13 +437,20 @@ void TransportSocket::read_incoming_messages()
         }
     }
 
+    if (m_peer_eof) {
+        if (auto window_ms = s_eof_drain_window_for_test_ms.load(AK::MemoryOrder::memory_order_relaxed); window_ms != 0) {
+            notify_read_available();
+            (void)Core::System::sleep_ms(window_ms);
+        }
+    }
+
     Checked<u32> received_fd_count = 0;
     Checked<u32> acknowledged_fd_count = 0;
     size_t index = 0;
-    while (index + sizeof(MessageHeader) <= m_unprocessed_bytes.size()) {
-        MessageHeader header;
-        memcpy(&header, m_unprocessed_bytes.data() + index, sizeof(MessageHeader));
-        if (header.type == MessageHeader::Type::Payload) {
+    while (index + sizeof(SocketMessageHeader) <= m_unprocessed_bytes.size()) {
+        SocketMessageHeader header;
+        memcpy(&header, m_unprocessed_bytes.data() + index, sizeof(SocketMessageHeader));
+        if (header.type == SocketMessageHeader::Type::Payload) {
             if (header.payload_size > MAX_MESSAGE_PAYLOAD_SIZE) {
                 dbgln("TransportSocket: Rejecting message with payload_size {} exceeding limit {}", header.payload_size, MAX_MESSAGE_PAYLOAD_SIZE);
                 m_peer_eof = true;
@@ -415,7 +462,7 @@ void TransportSocket::read_incoming_messages()
                 break;
             }
             Checked<size_t> message_size = header.payload_size;
-            message_size += sizeof(MessageHeader);
+            message_size += sizeof(SocketMessageHeader);
             if (message_size.has_overflow() || message_size.value() > m_unprocessed_bytes.size() - index)
                 break;
             if (header.fd_count > m_unprocessed_attachments.size())
@@ -429,13 +476,15 @@ void TransportSocket::read_incoming_messages()
             }
             for (size_t i = 0; i < header.fd_count; ++i)
                 message->attachments.enqueue(m_unprocessed_attachments.dequeue());
-            if (message->bytes.try_append(m_unprocessed_bytes.data() + index + sizeof(MessageHeader), header.payload_size).is_error()) {
+            Vector<u8> payload_bytes;
+            if (payload_bytes.try_append(m_unprocessed_bytes.data() + index + sizeof(SocketMessageHeader), header.payload_size).is_error()) {
                 dbgln("TransportSocket: Failed to allocate message buffer for payload_size {}", header.payload_size);
                 m_peer_eof = true;
                 break;
             }
+            message->bytes = ReceivedMessageBytes::from_vector(move(payload_bytes));
             batch.append(move(message));
-        } else if (header.type == MessageHeader::Type::FileDescriptorAcknowledgement) {
+        } else if (header.type == SocketMessageHeader::Type::FileDescriptorAcknowledgement) {
             if (header.payload_size != 0) {
                 dbgln("TransportSocket: FileDescriptorAcknowledgement with non-zero payload_size {}", header.payload_size);
                 m_peer_eof = true;
@@ -454,7 +503,7 @@ void TransportSocket::read_incoming_messages()
         }
         Checked<size_t> new_index = index;
         new_index += header.payload_size;
-        new_index += sizeof(MessageHeader);
+        new_index += sizeof(SocketMessageHeader);
         if (new_index.has_overflow()) {
             dbgln("TransportSocket: index would overflow");
             m_peer_eof = true;
@@ -477,12 +526,12 @@ void TransportSocket::read_incoming_messages()
     }
 
     if (received_fd_count > 0u) {
-        MessageHeader header {
-            .type = MessageHeader::Type::FileDescriptorAcknowledgement,
+        SocketMessageHeader header {
+            .type = SocketMessageHeader::Type::FileDescriptorAcknowledgement,
             .payload_size = 0,
             .fd_count = received_fd_count.value(),
         };
-        m_send_queue->enqueue_message({ reinterpret_cast<u8 const*>(&header), sizeof(header) }, {}, {});
+        m_send_queue->enqueue_message(header, {}, {});
         wake_io_thread();
     }
 
@@ -494,14 +543,15 @@ void TransportSocket::read_incoming_messages()
         m_unprocessed_bytes.clear();
     }
 
-    if (!batch.is_empty()) {
+    bool const peer_eof = m_peer_eof;
+    if (!batch.is_empty() || peer_eof) {
         Sync::MutexLocker locker(m_incoming_mutex);
-        m_incoming_messages.extend(move(batch));
-        m_incoming_cv.broadcast();
-        notify_read_available();
-    }
-
-    if (m_peer_eof) {
+        if (!batch.is_empty())
+            m_incoming_messages.extend(move(batch));
+        // Publish EOF only after the final batch is appended — under the same lock the consumer drains with — so that a
+        // consumer which observes EOF has also taken every message that arrived before it.
+        if (peer_eof)
+            m_incoming_eof = true;
         m_incoming_cv.broadcast();
         notify_read_available();
     }
@@ -510,13 +560,15 @@ void TransportSocket::read_incoming_messages()
 TransportSocket::ShouldShutdown TransportSocket::read_as_many_messages_as_possible_without_blocking(Function<void(Message&&)>&& callback)
 {
     Vector<NonnullOwnPtr<Message>> messages;
+    bool eof;
     {
         Sync::MutexLocker locker(m_incoming_mutex);
         messages = move(m_incoming_messages);
+        eof = m_incoming_eof;
     }
     for (auto& message : messages)
         callback(move(*message));
-    return m_peer_eof ? ShouldShutdown::Yes : ShouldShutdown::No;
+    return eof ? ShouldShutdown::Yes : ShouldShutdown::No;
 }
 
 ErrorOr<TransportHandle> TransportSocket::release_for_transfer()

@@ -299,7 +299,15 @@ WebIDL::ExceptionOr<void> MessagePort::message_port_post_message_steps(GC::Ptr<M
     }
 
     // 7. Add a task that runs the following steps to the port message queue of targetPort:
-    post_port_message(serialize_with_transfer_result);
+    if (m_remote_port && !m_has_been_shipped) {
+        m_remote_port->m_pending_incoming_messages.append(move(serialize_with_transfer_result));
+        queue_global_task(Task::Source::PostedMessage, relevant_global_object(*m_remote_port), GC::create_function(heap(), [target = GC::make_root(m_remote_port)] {
+            if (target->m_enabled)
+                target->dispatch_pending_messages();
+        }));
+    } else {
+        post_port_message(serialize_with_transfer_result);
+    }
 
     return {};
 }
@@ -351,7 +359,7 @@ void MessagePort::drain_transport()
         return;
 
     auto schedule_shutdown = m_transport->read_as_many_messages_as_possible_without_blocking([this](auto&& raw_message) {
-        FixedMemoryStream stream { raw_message.bytes.span(), FixedMemoryStream::Mode::ReadOnly };
+        FixedMemoryStream stream { raw_message.bytes.bytes() };
         IPC::Decoder decoder { stream, raw_message.attachments };
 
         m_pending_incoming_messages.append(MUST(decoder.decode<SerializedTransferRecord>()));

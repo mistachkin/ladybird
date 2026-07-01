@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Base64.h>
 #include <LibCore/Resource.h>
 #include <UI/Qt/ChromeStyle.h>
 #include <UI/Qt/Icon.h>
@@ -17,6 +18,7 @@
 #include <QPixmap>
 #include <QPointF>
 #include <QRectF>
+#include <QTransform>
 
 namespace Ladybird {
 
@@ -26,6 +28,26 @@ QIcon load_icon_from_uri(StringView uri)
     auto path = qstring_from_ak_string(resource->filesystem_path());
 
     return QIcon { path };
+}
+
+QIcon icon_from_base64_png(StringView favicon_base64_png, int logical_size)
+{
+    auto decoded = decode_base64(favicon_base64_png);
+    if (decoded.is_error())
+        return {};
+
+    QPixmap pixmap;
+    if (!pixmap.loadFromData(decoded.value().data(), static_cast<uint>(decoded.value().size()), "PNG"))
+        return {};
+
+    QIcon icon;
+    for (auto device_pixel_ratio : ICON_DEVICE_PIXEL_RATIOS) {
+        auto size = logical_size * device_pixel_ratio;
+        auto scaled_pixmap = pixmap.scaled(size, size, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        scaled_pixmap.setDevicePixelRatio(device_pixel_ratio);
+        icon.addPixmap(scaled_pixmap);
+    }
+    return icon;
 }
 
 static QPen chrome_icon_pen(QColor const& color, qreal width)
@@ -109,12 +131,20 @@ static void draw_star_icon(QPainter& painter, QColor const& color, bool filled)
     painter.drawPath(path);
 }
 
-static void draw_vertical_tab_bar_icon(QPainter& painter, QColor const& color, bool expanded)
+static QPainterPath horizontally_flipped_path(QPainterPath const& path)
 {
-    painter.setPen(chrome_icon_pen(color, 1.55));
-    painter.setBrush(Qt::NoBrush);
-    painter.drawRoundedRect(QRectF(3.8, 3.2, 12.4, 11.6), 1.6, 1.6);
-    painter.drawLine(QPointF(7.8, 3.6), QPointF(7.8, 14.4));
+    QTransform transform;
+    transform.translate(20.0, 0.0);
+    transform.scale(-1.0, 1.0);
+    return transform.map(path);
+}
+
+static void draw_vertical_tab_bar_icon(QPainter& painter, QColor const& color, bool expanded, bool right_side)
+{
+    QPainterPath tab_bar;
+    tab_bar.addRoundedRect(QRectF(3.8, 3.2, 12.4, 11.6), 1.6, 1.6);
+    tab_bar.moveTo(7.8, 3.6);
+    tab_bar.lineTo(7.8, 14.4);
 
     QPainterPath arrow;
     if (expanded) {
@@ -126,6 +156,13 @@ static void draw_vertical_tab_bar_icon(QPainter& painter, QColor const& color, b
         arrow.lineTo(13.5, 9.0);
         arrow.lineTo(10.7, 11.2);
     }
+
+    if (right_side) {
+        tab_bar = horizontally_flipped_path(tab_bar);
+        arrow = horizontally_flipped_path(arrow);
+    }
+
+    draw_stroked_icon_path(painter, tab_bar, color, 1.55);
     draw_stroked_icon_path(painter, arrow, color, 1.85);
 }
 
@@ -262,6 +299,23 @@ static QPixmap create_chrome_icon_pixmap(ChromeIcon icon, QColor color, qreal de
         painter.drawPath(path);
         break;
     }
+    case ChromeIcon::Download:
+    case ChromeIcon::DownloadActive: {
+        painter.setPen(chrome_icon_pen(color, 1.75));
+        painter.drawLine(QPointF(10.0, 3.4), QPointF(10.0, 12.0));
+        painter.drawLine(QPointF(6.6, 8.7), QPointF(10.0, 12.1));
+        painter.drawLine(QPointF(13.4, 8.7), QPointF(10.0, 12.1));
+
+        QPainterPath tray;
+        tray.moveTo(4.0, 13.4);
+        tray.lineTo(4.0, 15.7);
+        tray.quadTo(4.0, 16.6, 4.9, 16.6);
+        tray.lineTo(15.1, 16.6);
+        tray.quadTo(16.0, 16.6, 16.0, 15.7);
+        tray.lineTo(16.0, 13.4);
+        painter.drawPath(tray);
+        break;
+    }
     case ChromeIcon::Volume:
         draw_volume_icon(painter, color, false);
         break;
@@ -279,10 +333,16 @@ static QPixmap create_chrome_icon_pixmap(ChromeIcon icon, QColor color, qreal de
         painter.drawLine(QPointF(10.0, 12.6), QPointF(15.0, 7.6));
         break;
     case ChromeIcon::VerticalTabBarCollapse:
-        draw_vertical_tab_bar_icon(painter, color, true);
+        draw_vertical_tab_bar_icon(painter, color, true, false);
+        break;
+    case ChromeIcon::VerticalTabBarCollapseRight:
+        draw_vertical_tab_bar_icon(painter, color, true, true);
         break;
     case ChromeIcon::VerticalTabBarExpand:
-        draw_vertical_tab_bar_icon(painter, color, false);
+        draw_vertical_tab_bar_icon(painter, color, false, false);
+        break;
+    case ChromeIcon::VerticalTabBarExpandRight:
+        draw_vertical_tab_bar_icon(painter, color, false, true);
         break;
     case ChromeIcon::WindowMinimize:
         painter.setPen(chrome_icon_pen(color, 1.65));
@@ -336,7 +396,10 @@ QIcon create_chrome_icon(ChromeIcon icon, QPalette const& palette)
 {
     auto normal = ChromeStyle::chrome_button_text(palette);
     auto normal_alpha = 216;
-    if (icon == ChromeIcon::Close || icon == ChromeIcon::TabClose)
+    if (icon == ChromeIcon::DownloadActive) {
+        normal = ChromeStyle::chrome_accent(palette);
+        normal_alpha = 244;
+    } else if (icon == ChromeIcon::Close || icon == ChromeIcon::TabClose)
         normal_alpha = 172;
     else if (icon == ChromeIcon::Star)
         normal_alpha = 204;

@@ -7,6 +7,7 @@
 #include <AK/Platform.h>
 #include <LibCore/ArgsParser.h>
 #include <LibCore/Directory.h>
+#include <LibCore/Environment.h>
 #include <LibCore/EventLoop.h>
 #include <LibCore/Process.h>
 #include <LibCore/StandardPaths.h>
@@ -16,6 +17,7 @@
 #include <LibWeb/WebDriver/Capabilities.h>
 #include <LibWebView/Utilities.h>
 #include <WebDriver/Client.h>
+#include <WebDriver/Session.h>
 
 static Vector<ByteString> certificates;
 
@@ -33,7 +35,7 @@ static ErrorOr<Core::Process> launch_process(StringView application, ReadonlySpa
     return result;
 }
 
-static Vector<ByteString> create_arguments(ByteString const& webdriver_endpoint, bool headless, bool expose_experimental_interfaces, bool force_cpu_painting, Optional<StringView> debug_process, Optional<StringView> default_time_zone)
+static Vector<ByteString> create_arguments(ByteString const& webdriver_endpoint, bool headless, bool expose_experimental_interfaces, bool force_cpu_painting, bool disable_sandbox, Optional<StringView> debug_process, Optional<StringView> default_time_zone)
 {
     Vector<ByteString> arguments;
 #if defined(AK_OS_MACOS)
@@ -60,6 +62,8 @@ static Vector<ByteString> create_arguments(ByteString const& webdriver_endpoint,
         arguments.append("--expose-experimental-interfaces"sv);
     if (force_cpu_painting)
         arguments.append("--force-cpu-painting"sv);
+    if (disable_sandbox)
+        arguments.append("--disable-sandbox"sv);
 
     if (debug_process.has_value())
         arguments.append(ByteString::formatted("--debug-process={}", debug_process.value()));
@@ -68,10 +72,17 @@ static Vector<ByteString> create_arguments(ByteString const& webdriver_endpoint,
         arguments.append(ByteString::formatted("--default-time-zone={}", default_time_zone.value()));
 
     // FIXME: WebDriver does not yet handle the WebContent process switch brought by site isolation.
-    arguments.append("--disable-site-isolation"sv);
+    if (!Core::Environment::has("LADYBIRD_WEBDRIVER_ENABLE_SITE_ISOLATION"sv))
+        arguments.append("--site-isolation=disable"sv);
 
     arguments.append("about:blank"sv);
     return arguments;
+}
+
+static void handle_signal(int signal)
+{
+    VERIFY(signal == SIGINT || signal == SIGTERM);
+    Core::EventLoop::current().quit(0);
 }
 
 ErrorOr<int> ladybird_main(Main::Arguments arguments)
@@ -82,6 +93,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
     int port = 8000;
     bool expose_experimental_interfaces = false;
     bool force_cpu_painting = false;
+    bool disable_sandbox = false;
     bool headless = false;
     Optional<StringView> debug_process;
     Optional<StringView> default_time_zone;
@@ -92,6 +104,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
     args_parser.add_option(certificates, "Path to a certificate file", "certificate", 'C', "certificate");
     args_parser.add_option(expose_experimental_interfaces, "Expose experimental IDL interfaces", "expose-experimental-interfaces");
     args_parser.add_option(force_cpu_painting, "Launch browser with GPU painting disabled", "force-cpu-painting");
+    args_parser.add_option(disable_sandbox, "Launch browser with helper process sandboxing disabled", "disable-sandbox");
     args_parser.add_option(debug_process, "Wait for a debugger to attach to the given process name (WebContent, RequestServer, etc.)", "debug-process", 0, "process-name");
     args_parser.add_option(headless, "Launch browser without a graphical interface", "headless");
     args_parser.add_option(default_time_zone, "Default time zone", "default-time-zone", 0, "time-zone-id");
@@ -116,6 +129,8 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
     TRY(Core::Directory::create(webdriver_socket_path, Core::Directory::CreateDirectories::Yes));
 
     auto& loop = Core::EventLoop::initialize_for_current_thread();
+    Core::EventLoop::register_signal(SIGINT, handle_signal);
+    Core::EventLoop::register_signal(SIGTERM, handle_signal);
     auto server = TRY(Core::TCPServer::try_create());
 
     HashTable<NonnullRefPtr<WebDriver::Client>> clients;
@@ -135,7 +150,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         }
 
         auto launch_browser_callback = [&](ByteString const& webdriver_endpoint, bool headless) {
-            auto arguments = create_arguments(webdriver_endpoint, headless, expose_experimental_interfaces, force_cpu_painting, debug_process, default_time_zone);
+            auto arguments = create_arguments(webdriver_endpoint, headless, expose_experimental_interfaces, force_cpu_painting, disable_sandbox, debug_process, default_time_zone);
             return launch_process("Ladybird"sv, arguments.span());
         };
 
@@ -146,8 +161,10 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         }
 
         auto client = maybe_client.release_value();
-        client->on_death = [&clients, client] {
-            clients.remove(client);
+        // Capture a raw pointer here; a NonnullRefPtr would form a reference cycle through on_death,
+        // keeping the client (and its socket) alive forever after the connection is closed.
+        client->on_death = [&clients, client = client.ptr()] {
+            clients.remove_all_matching([client](auto& other) { return other == client; });
         };
         clients.set(client);
     };
@@ -155,5 +172,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
     TRY(server->listen(ipv4_address.value(), port, Core::TCPServer::AllowAddressReuse::Yes));
     outln("Listening on {}:{}", ipv4_address.value(), port);
 
-    return loop.exec();
+    auto result = loop.exec();
+    WebDriver::Session::close_all();
+    return result;
 }

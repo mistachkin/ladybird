@@ -49,7 +49,12 @@ struct CompiledWebAssemblyModule : public RefCounted<CompiledWebAssemblyModule> 
 };
 
 class WebAssemblyCache {
+    AK_MAKE_NONCOPYABLE(WebAssemblyCache);
+    AK_MAKE_NONMOVABLE(WebAssemblyCache);
+
 public:
+    WebAssemblyCache() = default;
+
     void add_compiled_module(NonnullRefPtr<CompiledWebAssemblyModule> module) { m_compiled_modules.append(module); }
     void add_function_instance(Wasm::FunctionAddress address, GC::Ptr<JS::NativeFunction> function) { m_function_instances.set(address, function); }
     void add_imported_object(GC::Ptr<JS::Object> object) { m_imported_objects.set(object); }
@@ -96,7 +101,7 @@ class ExportedWasmFunction final : public JS::NativeFunction {
     GC_DECLARE_ALLOCATOR(ExportedWasmFunction);
 
 public:
-    static GC::Ref<ExportedWasmFunction> create(JS::Realm&, Utf16FlyString name, ESCAPING Function<JS::ThrowCompletionOr<JS::Value>(JS::VM&)>, Wasm::FunctionAddress);
+    static GC::Ref<ExportedWasmFunction> create(JS::Realm&, Utf16FlyString name, size_t length, ESCAPING Function<JS::ThrowCompletionOr<JS::Value>(JS::VM&)>, Wasm::FunctionAddress);
     virtual ~ExportedWasmFunction() override = default;
 
     Wasm::FunctionAddress exported_address() const { return m_exported_address; }
@@ -117,7 +122,7 @@ WebAssemblyCache& get_cache(JS::Realm&);
 
 JS::ThrowCompletionOr<NonnullRefPtr<Wasm::ModuleInstance>> instantiate_module(JS::VM&, Wasm::Module const&, GC::Ptr<JS::Object> import_object);
 JS::ThrowCompletionOr<NonnullRefPtr<CompiledWebAssemblyModule>> compile_a_webassembly_module(JS::VM&, ByteBuffer);
-JS::NativeFunction* create_native_function(JS::VM&, Wasm::FunctionAddress address, Utf16FlyString name, Instance* instance = nullptr);
+JS::NativeFunction* create_native_function(JS::VM&, Wasm::FunctionAddress address, Instance* instance = nullptr);
 JS::ThrowCompletionOr<Wasm::Value> to_webassembly_value(JS::VM&, JS::Value value, Wasm::ValueType const& type);
 Wasm::Value default_webassembly_value(JS::VM&, Wasm::ValueType type);
 JS::Value to_js_value(JS::VM&, Wasm::Value& wasm_value, Wasm::ValueType type);

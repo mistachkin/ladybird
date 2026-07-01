@@ -55,7 +55,6 @@ StringView UnresolvedStyleValue::comparison_text() const
 ValueComparingNonnullRefPtr<UnresolvedStyleValue const> UnresolvedStyleValue::create(Vector<Parser::ComponentValue>&& values, Parser::SubstitutionFunctionsPresence substitution_presence, Optional<String> original_source_text, SourceTextMode source_text_mode, bool contains_attr_tainted_values)
 {
     auto has_original_source_text = original_source_text.has_value();
-    auto serialized_values = serialize_a_series_of_component_values(values);
     auto source_text = [&] {
         if (has_original_source_text)
             return MUST(original_source_text.release_value().trim_ascii_whitespace());
@@ -65,7 +64,9 @@ ValueComparingNonnullRefPtr<UnresolvedStyleValue const> UnresolvedStyleValue::cr
 
         return source_text_from_component_values(values, source_text_mode);
     }();
-    auto value_comparison_text = has_original_source_text ? MUST(serialized_values.trim_ascii_whitespace()) : String {};
+    // NB: The comparison text is a normalized serialization, only used when we have separate original source text.
+    //     Don't pay for serializing it otherwise.
+    auto value_comparison_text = has_original_source_text ? MUST(serialize_a_series_of_component_values(values).trim_ascii_whitespace()) : String {};
     return adopt_ref(*new (nothrow) UnresolvedStyleValue(move(source_text), move(value_comparison_text), substitution_presence, contains_attr_tainted_values));
 }
 
@@ -176,17 +177,17 @@ private:
 
             if (component_value.is_function()) {
                 auto& function = component_value.function();
-                m_unserialized_values.append(function.name_token);
+                m_unserialized_values.append(Parser::Token::create_function(function.name, function.name_token.original_source_text()));
                 process_values(realm, function.value);
-                m_unserialized_values.append(function.end_token);
+                m_unserialized_values.append(Parser::Token::create(function.end_token.type(), function.end_token.original_source_text()));
                 continue;
             }
 
             if (component_value.is_block()) {
                 auto& block = component_value.block();
-                m_unserialized_values.append(block.token);
+                m_unserialized_values.append(Parser::Token::create(block.token.type(), block.token.original_source_text()));
                 process_values(realm, block.value);
-                m_unserialized_values.append(block.end_token);
+                m_unserialized_values.append(Parser::Token::create(block.end_token.type(), block.end_token.original_source_text()));
                 continue;
             }
 
@@ -196,7 +197,7 @@ private:
 
     void serialize_unserialized_values()
     {
-        m_reified_values.append(serialize_a_series_of_component_values(m_unserialized_values));
+        m_reified_values.append(Utf16String::from_utf8(serialize_a_series_of_component_values(m_unserialized_values)));
         m_unserialized_values.clear_with_capacity();
     }
 

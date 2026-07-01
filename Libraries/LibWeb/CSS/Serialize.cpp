@@ -79,6 +79,10 @@ void serialize_an_identifier(StringBuilder& builder, StringView ident)
         escape_a_character(builder, character);
     }
 }
+void serialize_an_identifier(StringBuilder& builder, Utf16View ident)
+{
+    serialize_an_identifier(builder, ident.to_utf8_but_should_be_ported_to_utf16());
+}
 
 // https://www.w3.org/TR/cssom-1/#serialize-a-string
 void serialize_a_string(StringBuilder& builder, StringView string)
@@ -149,6 +153,24 @@ void serialize_a_number(StringBuilder& builder, double value)
     builder.appendff("{:.6}", value);
 }
 
+void serialize_a_number(Utf16StringBuilder& builder, double value)
+{
+    // -> <number>
+    //    A base-ten number using digits 0-9 (U+0030 to U+0039) in the shortest form possible, using "." to separate
+    //    decimals (if any), rounding the value if necessary to not produce more than 6 decimals, preceded by "-"
+    //    (U+002D) if it is negative.
+    // NOTE: scientific notation is not used.
+
+    // AD-HOC: If the number is small enough that it would not print any digits when rounded, serialize it as 0.
+    if (AK::abs(value) < 0.0000005) {
+        builder.append_ascii('0');
+        return;
+    }
+
+    // FIXME: Prevent scientific notation for large values.
+    builder.appendff("{:.6}", value);
+}
+
 String serialize_an_identifier(StringView ident)
 {
     StringBuilder builder;
@@ -178,7 +200,7 @@ String serialize_a_number(double value)
 }
 
 // https://drafts.csswg.org/cssom/#serialize-a-css-declaration
-String serialize_a_css_declaration(StringView property, StringView value, Important important)
+String serialize_a_css_declaration(Utf16View property, StringView value, Important important)
 {
     // 1. Let s be the empty string.
     StringBuilder builder;

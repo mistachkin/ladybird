@@ -10,6 +10,7 @@
 #include <AK/Array.h>
 #include <AK/GenericShorthands.h>
 #include <AK/StdLibExtras.h>
+#include <AK/Utf16StringBuilder.h>
 #include <LibGfx/Font/Font.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/ComputedValues.h>
@@ -21,7 +22,7 @@
 #include <LibWeb/DOM/ShadowRoot.h>
 #include <LibWeb/HTML/HTMLBodyElement.h>
 #include <LibWeb/HTML/HTMLHtmlElement.h>
-#include <LibWeb/HTML/Navigable.h>
+#include <LibWeb/HTML/LocalNavigable.h>
 #include <LibWeb/HTML/NavigableContainer.h>
 #include <LibWeb/Layout/InlineNode.h>
 #include <LibWeb/Page/EventHandler.h>
@@ -37,6 +38,7 @@
 #include <LibWeb/Painting/HitTestDisplayList.h>
 #include <LibWeb/Painting/PaintableBox.h>
 #include <LibWeb/Painting/ResizeHandle.h>
+#include <LibWeb/Painting/SVGGraphicsPaintable.h>
 #include <LibWeb/Painting/SVGPaintable.h>
 #include <LibWeb/Painting/SVGSVGPaintable.h>
 #include <LibWeb/Painting/Scrollbar.h>
@@ -429,7 +431,16 @@ ResolvedCSSFilter resolve_css_filter(CSS::Filter const& computed_filter, Paintab
                 if (!maybe_filter)
                     return;
                 if (auto* filter_element = as_if<SVG::SVGFilterElement>(*maybe_filter)) {
-                    result.svg_filter = filter_element->gfx_filter(layout_node);
+                    // Filter primitive lengths are specified in the filtered element's user coordinate system, but the
+                    // resulting filter operates in device pixels. Compute the user-unit-to-device-pixel scale so the
+                    // filter can convert its lengths accordingly.
+                    auto device_pixels_per_css_pixel = paintable_box.document().page().client().device_pixels_per_css_pixel();
+                    auto filter_scale = Gfx::FloatPoint { device_pixels_per_css_pixel, device_pixels_per_css_pixel };
+                    if (auto const* svg_graphics_paintable = as_if<SVGGraphicsPaintable>(paintable_box)) {
+                        auto svg_to_css_pixels = svg_graphics_paintable->computed_transforms().svg_to_css_pixels_transform();
+                        filter_scale.scale_by(svg_to_css_pixels.x_scale(), svg_to_css_pixels.y_scale());
+                    }
+                    result.svg_filter = filter_element->gfx_filter(layout_node, filter_scale);
                     auto bounds = paintable_box.absolute_border_box_rect();
                     if (bounds.is_empty()) {
                         if (auto svg_ancestor = paintable_box.first_ancestor_of_type<SVGSVGPaintable>())
@@ -541,9 +552,7 @@ void PaintableBox::reset_for_relayout()
     m_containing_line_box_data.clear();
     m_sticky_insets = nullptr;
 
-    m_absolute_rect.clear();
-    m_absolute_padding_box_rect.clear();
-    m_absolute_border_box_rect.clear();
+    invalidate_absolute_geometry_cache(InvalidateDescendantGeometry::No);
 
     m_enclosing_scroll_frame_index = {};
     m_own_scroll_frame_index = {};
@@ -684,16 +693,36 @@ void PaintableBox::scroll_into_view(CSSPixelRect rect)
 
 void PaintableBox::set_offset(CSSPixelPoint offset)
 {
+    if (m_offset == offset)
+        return;
+
     m_offset = offset;
+    invalidate_absolute_geometry_cache(InvalidateDescendantGeometry::Yes);
 }
 
 void PaintableBox::set_content_size(CSSPixelSize size)
 {
     auto old_size = m_content_size;
     m_content_size = size;
+    invalidate_absolute_geometry_cache(InvalidateDescendantGeometry::No);
     if (auto layout_box = as_if<Layout::Box>(layout_node()))
         layout_box->did_set_content_size();
     invalidate_descendant_styles_for_container_query_size_change(*this, old_size, size);
+}
+
+void PaintableBox::invalidate_absolute_geometry_cache(InvalidateDescendantGeometry invalidate_descendants)
+{
+    m_absolute_rect.clear();
+    m_absolute_padding_box_rect.clear();
+    m_absolute_border_box_rect.clear();
+
+    if (invalidate_descendants == InvalidateDescendantGeometry::No)
+        return;
+
+    for_each_child_of_type<PaintableBox>([](auto& child) {
+        child.invalidate_absolute_geometry_cache(InvalidateDescendantGeometry::Yes);
+        return IterationDecision::Continue;
+    });
 }
 
 void PaintableBox::set_fragmentation_state(FragmentationState fragmentation_state)
@@ -828,10 +857,10 @@ CSSPixelRect PaintableBox::overflow_clip_edge_rect() const
     //     The specified offset dictates how much the overflow clip edge is expanded from the specified box edge
     //     Negative values are invalid. Defaults to zero if omitted.
     overflow_clip_edge.inflate(
-        overflow_clip_margin.top.offset.absolute_length_to_px(),
-        overflow_clip_margin.right.offset.absolute_length_to_px(),
-        overflow_clip_margin.bottom.offset.absolute_length_to_px(),
-        overflow_clip_margin.left.offset.absolute_length_to_px());
+        overflow_clip_margin.top.offset,
+        overflow_clip_margin.right.offset,
+        overflow_clip_margin.bottom.offset,
+        overflow_clip_margin.left.offset);
     return overflow_clip_edge;
 }
 
@@ -1371,10 +1400,10 @@ void PaintableBox::paint_inspector_overlay_internal(DisplayListRecordingContext&
 
     auto font = Platform::FontPlugin::the().default_font(12);
 
-    StringBuilder builder(StringBuilder::Mode::UTF16);
-    builder.append(debug_description());
+    Utf16StringBuilder builder;
+    builder.appendff("{}", debug_description());
     builder.appendff(" {}x{} @ {},{}", border_rect.width(), border_rect.height(), border_rect.x(), border_rect.y());
-    auto size_text = builder.to_utf16_string();
+    auto size_text = builder.to_string();
     auto size_text_rect = border_rect;
     size_text_rect.set_y(border_rect.y() + border_rect.height());
     size_text_rect.set_top(size_text_rect.top());
@@ -1716,7 +1745,7 @@ void PaintableBox::paint_box_shadow(DisplayListRecordingContext& context) const
     Vector<Painting::ShadowData> resolved_box_shadow_data;
     resolved_box_shadow_data.ensure_capacity(box_shadow_layers.size());
     for (auto const& layer : box_shadow_layers)
-        resolved_box_shadow_data.unchecked_append(ShadowData::from_css(layer, layout_node()));
+        resolved_box_shadow_data.unchecked_append(ShadowData::from_css(layer));
     auto borders_data = BordersData {
         .top = computed_values().border_top(),
         .right = computed_values().border_right(),
@@ -1768,7 +1797,7 @@ Optional<CSSPixelPoint> PaintableBox::transform_point_to_local_for_descendants(C
     return (*result / pixel_ratio).to_type<CSSPixels>();
 }
 
-CSSPixelRect PaintableBox::transform_rect_to_viewport(CSSPixelRect const& rect) const
+CSSPixelRect PaintableBox::transform_rect_to_viewport(CSSPixelRect const& rect, AccumulatedVisualContextTree::IncludeVisualViewportTransform include_visual_viewport_transform) const
 {
     auto viewport_paintable = document().paintable();
     if (!viewport_paintable || !viewport_paintable->has_visual_context_tree())
@@ -1776,7 +1805,7 @@ CSSPixelRect PaintableBox::transform_rect_to_viewport(CSSPixelRect const& rect) 
     auto pixel_ratio = static_cast<float>(document().page().client().device_pixels_per_css_pixel());
     auto const& scroll_state = viewport_paintable->scroll_state_snapshot();
     auto const& visual_context_tree = viewport_paintable->visual_context_tree();
-    auto result = visual_context_tree.transform_rect_to_viewport(m_accumulated_visual_context_index, rect.to_type<float>() * pixel_ratio, scroll_state);
+    auto result = visual_context_tree.transform_rect_to_viewport(m_accumulated_visual_context_index, rect.to_type<float>() * pixel_ratio, scroll_state, include_visual_viewport_transform);
     return (result * (1.f / pixel_ratio)).to_type<CSSPixels>();
 }
 
@@ -1951,7 +1980,7 @@ BorderRadiiData PaintableBox::border_radii_data() const
     auto border_top_right_radius = m_fragment_top_edge_away || m_fragment_right_edge_away ? CSS::BorderRadiusData {} : computed_values.border_top_right_radius();
     auto border_bottom_right_radius = m_fragment_bottom_edge_away || m_fragment_right_edge_away ? CSS::BorderRadiusData {} : computed_values.border_bottom_right_radius();
     auto border_bottom_left_radius = m_fragment_bottom_edge_away || m_fragment_left_edge_away ? CSS::BorderRadiusData {} : computed_values.border_bottom_left_radius();
-    return normalize_border_radii_data(layout_node(), border_rect, border_rect,
+    return normalize_border_radii_data(border_rect, border_rect,
         border_top_left_radius, border_top_right_radius,
         border_bottom_right_radius, border_bottom_left_radius);
 }
@@ -1964,7 +1993,7 @@ Optional<BordersData> PaintableBox::outline_data() const
 
 CSSPixels PaintableBox::outline_offset() const
 {
-    return computed_values().outline_offset().to_px(layout_node());
+    return computed_values().outline_offset();
 }
 
 ScrollFrameIndex PaintableBox::nearest_scroll_frame_index() const

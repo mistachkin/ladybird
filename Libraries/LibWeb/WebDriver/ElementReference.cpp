@@ -18,7 +18,7 @@
 #include <LibWeb/HTML/HTMLBodyElement.h>
 #include <LibWeb/HTML/HTMLInputElement.h>
 #include <LibWeb/HTML/HTMLTextAreaElement.h>
-#include <LibWeb/HTML/TraversableNavigable.h>
+#include <LibWeb/HTML/LocalTraversableNavigable.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/Painting/PaintableBox.h>
 #include <LibWeb/WebDriver/ElementReference.h>
@@ -41,9 +41,9 @@ static HashMap<GC::RawPtr<HTML::BrowsingContextGroup const>, HashTable<String>>&
 }
 
 // https://w3c.github.io/webdriver/#dfn-navigable-seen-nodes-map
-static HashMap<GC::RawPtr<HTML::Navigable>, HashTable<String>>& navigable_seen_nodes_map()
+static HashMap<GC::RawPtr<HTML::LocalNavigable>, HashTable<String>>& navigable_seen_nodes_map()
 {
-    static NeverDestroyed<HashMap<GC::RawPtr<HTML::Navigable>, HashTable<String>>> map;
+    static NeverDestroyed<HashMap<GC::RawPtr<HTML::LocalNavigable>, HashTable<String>>> map;
     return *map;
 }
 
@@ -194,7 +194,7 @@ ErrorOr<GC::Ref<Web::DOM::Element>, WebDriver::Error> deserialize_web_element(We
         return WebDriver::Error::from_code(WebDriver::ErrorCode::InvalidArgument, "Object is not a web element"sv);
 
     // 2. Let reference be the result of getting the web element identifier property from object.
-    auto reference = property.value().as_string().utf8_string();
+    auto reference = property.value().as_string().utf16_string_view().to_utf8_but_should_be_ported_to_utf16();
 
     // 3. Let element be the result of trying to get a known element with session and reference.
     auto element = TRY(get_known_element(browsing_context, reference));
@@ -490,7 +490,7 @@ ErrorOr<GC::Ref<Web::DOM::ShadowRoot>, WebDriver::Error> deserialize_shadow_root
         return WebDriver::Error::from_code(WebDriver::ErrorCode::InvalidArgument, "Object is not a Shadow Root"sv);
 
     // 2. Let reference be the result of getting the shadow root identifier property from object.
-    auto reference = property.value().as_string().utf8_string();
+    auto reference = property.value().as_string().utf16_string_view().to_utf8_but_should_be_ported_to_utf16();
 
     // 3. Let shadow be the result of trying to get a known shadow root with session and reference.
     auto shadow = TRY(get_known_shadow_root(browsing_context, reference));

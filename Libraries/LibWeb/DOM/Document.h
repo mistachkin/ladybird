@@ -45,6 +45,7 @@
 #include <LibWeb/HTML/PaintConfig.h>
 #include <LibWeb/HTML/PreloadEntry.h>
 #include <LibWeb/HTML/SandboxingFlagSet.h>
+#include <LibWeb/HTML/Scripting/ScriptRegistry.h>
 #include <LibWeb/HTML/SessionHistoryEntry.h>
 #include <LibWeb/HTML/VisibilityState.h>
 #include <LibWeb/InvalidateDisplayList.h>
@@ -218,15 +219,9 @@ public:
         HTML
     };
 
-    enum class TemporaryDocumentForFragmentParsing {
-        No,
-        Yes,
-    };
-
     static WebIDL::ExceptionOr<GC::Ref<Document>> create_and_initialize(Type, String content_type, HTML::NavigationParams const&);
 
     [[nodiscard]] static GC::Ref<Document> create(JS::Realm&, URL::URL const& url = URL::about_blank());
-    [[nodiscard]] static GC::Ref<Document> create_for_fragment_parsing(JS::Realm&);
     static GC::Ref<Document> construct_impl(JS::Realm&);
     virtual ~Document() override;
 
@@ -486,6 +481,9 @@ public:
 
     Vector<GC::Ref<HTML::HTMLScriptElement>>& scripts_to_execute_in_order_as_soon_as_possible() { return m_scripts_to_execute_in_order_as_soon_as_possible; }
 
+    HTML::ScriptRegistry& script_registry() { return m_script_registry; }
+    HTML::ScriptRegistry const& script_registry() const { return m_script_registry; }
+
     QuirksMode mode() const { return m_quirks_mode; }
     bool in_quirks_mode() const { return m_quirks_mode == QuirksMode::Yes; }
     bool in_limited_quirks_mode() const { return m_quirks_mode == QuirksMode::Limited; }
@@ -699,7 +697,11 @@ public:
     void run_the_scroll_steps();
 
     void evaluate_media_queries_and_report_changes();
-    void set_needs_media_query_evaluation() { m_needs_media_query_evaluation = true; }
+    void set_needs_media_query_evaluation()
+    {
+        m_needs_media_query_list_evaluation = true;
+        m_needs_media_rule_evaluation = true;
+    }
     void add_media_query_list(GC::Ref<CSS::MediaQueryList>);
 
     GC::Ref<CSS::VisualViewport> visual_viewport();
@@ -718,7 +720,8 @@ public:
     void detach_parser();
     GC::Ptr<HTML::HTMLParser> parser() const { return m_parser; }
 
-    [[nodiscard]] bool is_temporary_document_for_fragment_parsing() const { return m_temporary_document_for_fragment_parsing == TemporaryDocumentForFragmentParsing::Yes; }
+    void set_temporary_document_for_fragment_parsing(Badge<HTML::HTMLParser>);
+    [[nodiscard]] bool is_temporary_document_for_fragment_parsing() const { return m_temporary_document_for_fragment_parsing; }
 
     static bool is_valid_name(String const&);
 
@@ -788,13 +791,13 @@ public:
     GC::Ref<HTML::PolicyContainer> policy_container() const;
     void set_policy_container(GC::Ref<HTML::PolicyContainer>);
 
-    Vector<GC::Root<HTML::Navigable>> descendant_navigables();
-    Vector<GC::Root<HTML::Navigable>> const descendant_navigables() const;
-    Vector<GC::Root<HTML::Navigable>> inclusive_descendant_navigables();
-    Vector<GC::Root<HTML::Navigable>> ancestor_navigables();
-    Vector<GC::Root<HTML::Navigable>> const ancestor_navigables() const;
-    Vector<GC::Root<HTML::Navigable>> inclusive_ancestor_navigables();
-    Vector<GC::Root<HTML::Navigable>> document_tree_child_navigables();
+    Vector<GC::Root<HTML::LocalNavigable>> descendant_navigables();
+    Vector<GC::Root<HTML::LocalNavigable>> const descendant_navigables() const;
+    Vector<GC::Root<HTML::LocalNavigable>> inclusive_descendant_navigables();
+    GC::RootVector<GC::Ref<HTML::Navigable>> ancestor_navigables();
+    GC::RootVector<GC::Ref<HTML::Navigable>> const ancestor_navigables() const;
+    GC::RootVector<GC::Ref<HTML::Navigable>> inclusive_ancestor_navigables();
+    Vector<GC::Root<HTML::LocalNavigable>> document_tree_child_navigables();
 
     [[nodiscard]] bool has_been_destroyed() const { return m_has_been_destroyed; }
 
@@ -895,10 +898,8 @@ public:
     HashMap<URL::URL, GC::Ptr<HTML::SharedResourceRequest>> const& shared_resource_requests() const;
     CSS::ImageStyleValueResource* css_image_resource(URL::URL const&);
     CSS::ImageStyleValueResource const* css_image_resource(URL::URL const&) const;
-    CSS::ImageStyleValueResource& ensure_css_image_resource(URL::URL const&);
+    CSS::ImageStyleValueResource& create_css_image_resource(GC::Ref<HTML::SharedResourceRequest>);
     void remove_css_image_resource_if_unused(URL::URL const&);
-    void animate_css_image_resource(URL::URL const&);
-    u64 active_css_image_animation_timer_count() const;
     void prune_image_resource_caches();
 
     void restore_the_history_object_state(NonnullRefPtr<HTML::SessionHistoryEntry> entry);
@@ -930,6 +931,7 @@ public:
     void set_deferred_parser_start(GC::Ref<GC::Function<void()>>);
     bool has_deferred_parser_start() const { return m_deferred_parser_start; }
 
+    RefPtr<HTML::SessionHistoryEntry> latest_entry() const { return m_latest_entry; }
     void set_latest_entry(RefPtr<HTML::SessionHistoryEntry>);
 
     void element_id_changed(Badge<DOM::Element>, GC::Ref<DOM::Element> element, Optional<FlyString> old_id);
@@ -977,6 +979,7 @@ public:
         u64 element_inherited_style_noop_recomputations { 0 };
         u64 previous_sibling_invalidation_walk_visits { 0 };
         u64 descendant_slot_invalidation_subtree_scans { 0 };
+        u64 media_rule_evaluations { 0 };
     };
     StyleInvalidationCounters& style_invalidation_counters() const { return m_style_invalidation_counters; }
     void reset_style_invalidation_counters() const;
@@ -984,7 +987,7 @@ public:
     void record_full_style_invalidation() const;
     static void set_style_invalidation_counter_dump_interval(Optional<u64>);
 
-    void set_needs_accumulated_visual_contexts_update(bool value) { m_needs_accumulated_visual_contexts_update = value; }
+    void set_needs_accumulated_visual_contexts_update(bool);
     bool needs_accumulated_visual_contexts_update() const { return m_needs_accumulated_visual_contexts_update; }
 
     virtual JS::Value named_item_value(FlyString const& name) const override;
@@ -1060,11 +1063,11 @@ public:
     bool cursor_blink_state() const { return m_cursor_blink_state; }
 
     // Back-pointer to the navigable whose active document is this document.
-    // Maintained by Navigable when it sets/clears its active document.
-    GC::Ptr<HTML::Navigable> navigable() const;
-    void set_navigable(GC::Ptr<HTML::Navigable>);
+    // Maintained by LocalNavigable when it sets/clears its active document.
+    GC::Ptr<HTML::LocalNavigable> navigable() const;
+    void set_navigable(GC::Ptr<HTML::LocalNavigable>);
 
-    void set_needs_repaint(Badge<Node, Painting::Paintable, HTML::Navigable, CSS::VisualViewport, Web::EventHandler>, InvalidateDisplayList should_invalidate_display_list = InvalidateDisplayList::Yes)
+    void set_needs_repaint(Badge<Node, Painting::Paintable, HTML::LocalNavigable, CSS::VisualViewport, Web::EventHandler>, InvalidateDisplayList should_invalidate_display_list = InvalidateDisplayList::Yes)
     {
         set_needs_repaint(should_invalidate_display_list);
     }
@@ -1230,7 +1233,7 @@ protected:
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Cell::Visitor&) override;
 
-    Document(JS::Realm&, URL::URL const&, TemporaryDocumentForFragmentParsing = TemporaryDocumentForFragmentParsing::No);
+    Document(JS::Realm&, URL::URL const&);
 
 private:
     void set_needs_repaint(InvalidateDisplayList = InvalidateDisplayList::Yes);
@@ -1351,6 +1354,8 @@ private:
     // https://html.spec.whatwg.org/multipage/scripting.html#set-of-scripts-that-will-execute-as-soon-as-possible
     Vector<GC::Ref<HTML::HTMLScriptElement>> m_scripts_to_execute_as_soon_as_possible;
 
+    HTML::ScriptRegistry m_script_registry;
+
     QuirksMode m_quirks_mode { QuirksMode::No };
 
     bool m_parser_cannot_change_the_mode { false };
@@ -1442,7 +1447,8 @@ private:
     Vector<PendingScrollEvent> m_pending_scroll_events;
 
     // Used by evaluate_media_queries_and_report_changes().
-    bool m_needs_media_query_evaluation { false };
+    bool m_needs_media_query_list_evaluation { false };
+    bool m_needs_media_rule_evaluation { false };
     Vector<GC::Weak<CSS::MediaQueryList>> m_media_query_lists;
 
     bool m_needs_full_style_update { false };
@@ -1556,7 +1562,7 @@ private:
 
     RefPtr<Core::Timer> m_active_refresh_timer;
 
-    TemporaryDocumentForFragmentParsing m_temporary_document_for_fragment_parsing { TemporaryDocumentForFragmentParsing::No };
+    bool m_temporary_document_for_fragment_parsing { false };
 
     // https://html.spec.whatwg.org/multipage/browsing-the-web.html#latest-entry
     RefPtr<HTML::SessionHistoryEntry> m_latest_entry;
@@ -1646,7 +1652,7 @@ private:
     bool m_cursor_blink_state { false };
 
     // NOTE: This is GC::Weak, not GC::Ptr, on purpose. We don't want the document to keep some old detached navigable alive.
-    GC::Weak<HTML::Navigable> m_navigable;
+    GC::Weak<HTML::LocalNavigable> m_navigable;
 
     Core::SharedVersion m_cookie_version { Core::INVALID_SHARED_VERSION };
     Optional<Core::SharedVersionIndex> m_cookie_version_index;

@@ -7,7 +7,7 @@
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/DocumentFragment.h>
 #include <LibWeb/DOM/Element.h>
-#include <LibWeb/HTML/Navigable.h>
+#include <LibWeb/HTML/LocalNavigable.h>
 #include <LibWeb/Page/AutoScrollHandler.h>
 #include <LibWeb/Page/EventHandler.h>
 #include <LibWeb/Page/Page.h>
@@ -70,7 +70,7 @@ static CSSPixelPoint compute_auto_scroll_speed(CSSPixelPoint mouse, CSSPixelRect
     };
 }
 
-AutoScrollHandler::AutoScrollHandler(HTML::Navigable& navigable, DOM::Element& container)
+AutoScrollHandler::AutoScrollHandler(HTML::LocalNavigable& navigable, DOM::Element& container)
     : m_navigable(navigable)
     , m_container_element(container)
 {
@@ -109,7 +109,11 @@ CSSPixelPoint AutoScrollHandler::process(CSSPixelPoint mouse_position)
 
 GC::Ptr<DOM::Element> AutoScrollHandler::find_scrollable_ancestor(Painting::Paintable const& paintable)
 {
-    auto paintable_box = paintable.containing_block();
+    auto paintable_box = [&]() -> RefPtr<Painting::PaintableBox> {
+        if (auto const* box = as_if<Painting::PaintableBox>(paintable))
+            return const_cast<Painting::PaintableBox&>(*box);
+        return paintable.containing_block();
+    }();
     while (paintable_box) {
         if (paintable_box->could_be_scrolled_by_wheel_event()) {
             if (auto* element = as_if<DOM::Element>(paintable_box->dom_node().ptr()))

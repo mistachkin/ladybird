@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Atomic.h>
 #include <AK/ByteBuffer.h>
 #include <AK/JsonArray.h>
 #include <AK/JsonObject.h>
@@ -17,10 +18,12 @@
 #include <LibDevTools/Connection.h>
 #include <LibDevTools/DevToolsDelegate.h>
 #include <LibDevTools/DevToolsServer.h>
+#include <LibDevTools/IndexedDBSerialization.h>
 #include <LibHTTP/Cookie/ParsedCookie.h>
 #include <LibHTTP/Header.h>
 #include <LibRequests/RequestTimingInfo.h>
 #include <LibTest/TestCase.h>
+#include <LibThreading/Thread.h>
 #include <LibWeb/CSS/StyleSheetIdentifier.h>
 #include <LibWebView/Attribute.h>
 #include <LibWebView/ConsoleOutput.h>
@@ -543,6 +546,91 @@ static bool cookie_matches(HTTP::Cookie::Cookie const& cookie, StringView name, 
         && cookie.path == path;
 }
 
+static String indexed_database_path(StringView database, Optional<StringView> object_store = {})
+{
+    JsonArray path;
+    path.must_append(database);
+    if (object_store.has_value())
+        path.must_append(*object_store);
+    return path.serialized();
+}
+
+static JsonObject make_indexed_database_storage_hosts()
+{
+    JsonArray names;
+    names.must_append(indexed_database_path("fixtures (default)"sv, "people"sv));
+    names.must_append(indexed_database_path("empty (default)"sv));
+
+    JsonObject hosts;
+    hosts.set("https://example.test"sv, move(names));
+    return hosts;
+}
+
+static JsonObject make_indexed_database_store_objects(Optional<JsonArray> const& names)
+{
+    JsonArray data;
+
+    bool should_return_databases = !names.has_value() || names->is_empty();
+    Vector<JsonArray> paths;
+    if (names.has_value()) {
+        for (auto const& name : names->values()) {
+            if (!name.is_string())
+                continue;
+            auto parsed = JsonValue::from_string(name.as_string());
+            if (parsed.is_error() || !parsed.value().is_array())
+                continue;
+            auto path = parsed.release_value().as_array();
+            if (path.is_empty())
+                continue;
+            paths.append(move(path));
+        }
+        if (paths.is_empty())
+            should_return_databases = true;
+    }
+
+    if (should_return_databases) {
+        JsonObject fixtures;
+        fixtures.set("uniqueKey"sv, "fixtures (default)"sv);
+        fixtures.set("db"sv, "fixtures"sv);
+        fixtures.set("storage"sv, "default"sv);
+        fixtures.set("origin"sv, "https://example.test"sv);
+        fixtures.set("version"sv, 1);
+        fixtures.set("objectStores"sv, 1);
+        data.must_append(move(fixtures));
+
+        JsonObject empty;
+        empty.set("uniqueKey"sv, "empty (default)"sv);
+        empty.set("db"sv, "empty"sv);
+        empty.set("storage"sv, "default"sv);
+        empty.set("origin"sv, "https://example.test"sv);
+        empty.set("version"sv, 2);
+        empty.set("objectStores"sv, 0);
+        data.must_append(move(empty));
+    } else {
+        for (auto const& path : paths) {
+            if (path.size() == 1) {
+                JsonObject store;
+                store.set("objectStore"sv, "people"sv);
+                store.set("keyPath"sv, "id"sv);
+                store.set("autoIncrement"sv, true);
+                store.set("indexes"sv, "[]"_string);
+                data.must_append(move(store));
+            } else if (path.size() >= 2) {
+                JsonObject record;
+                record.set("name"sv, 1);
+                record.set("value"sv, "{\"name\":\"Ada\"}"sv);
+                data.must_append(move(record));
+            }
+        }
+    }
+
+    JsonObject response;
+    response.set("offset"sv, 0);
+    response.set("total"sv, data.size());
+    response.set("data"sv, move(data));
+    return response;
+}
+
 class TestDevToolsDelegate final : public DevTools::DevToolsDelegate {
 public:
     virtual Vector<DevTools::TabDescription> tab_list() const override
@@ -729,6 +817,69 @@ public:
     {
         storage_change_listeners.remove(listener_id);
         ++remove_storage_change_listener_call_count;
+    }
+
+    virtual void inspect_indexed_database_storage(DevTools::TabDescription const&, OnIndexedDBInspectionComplete callback) const override
+    {
+        ++inspect_indexed_database_storage_call_count;
+        callback(make_indexed_database_storage_hosts());
+    }
+
+    virtual void inspect_indexed_database_objects(DevTools::TabDescription const&, String const& host, Optional<JsonArray> names, JsonObject, OnIndexedDBInspectionComplete callback) const override
+    {
+        ++inspect_indexed_database_objects_call_count;
+        last_indexed_database_host = host;
+        callback(make_indexed_database_store_objects(names));
+    }
+
+    virtual void delete_indexed_database(DevTools::TabDescription const&, String const& host, String const& name, OnIndexedDBInspectionComplete callback) const override
+    {
+        ++delete_indexed_database_call_count;
+        last_indexed_database_host = host;
+        last_indexed_database_name = name;
+        if (fail_delete_indexed_database) {
+            callback(Error::from_string_literal("IndexedDB operation failed"));
+            return;
+        }
+        callback(JsonObject {});
+    }
+
+    virtual void clear_indexed_database_object_store(DevTools::TabDescription const&, String const& host, String const& name, OnIndexedDBInspectionComplete callback) const override
+    {
+        ++clear_indexed_database_object_store_call_count;
+        last_indexed_database_host = host;
+        last_indexed_database_name = name;
+        if (fail_clear_indexed_database_object_store) {
+            callback(Error::from_string_literal("IndexedDB operation failed"));
+            return;
+        }
+        callback(JsonObject {});
+    }
+
+    virtual void delete_indexed_database_record(DevTools::TabDescription const&, String const& host, String const& name, OnIndexedDBInspectionComplete callback) const override
+    {
+        ++delete_indexed_database_record_call_count;
+        last_indexed_database_host = host;
+        last_indexed_database_name = name;
+        if (fail_delete_indexed_database_record) {
+            callback(Error::from_string_literal("IndexedDB operation failed"));
+            return;
+        }
+        callback(JsonObject {});
+    }
+
+    virtual u64 add_indexed_database_change_listener(DevTools::TabDescription const&, OnIndexedDatabaseChange callback) const override
+    {
+        auto listener_id = next_indexed_database_change_listener_id++;
+        indexed_database_change_listeners.set(listener_id, move(callback));
+        ++add_indexed_database_change_listener_call_count;
+        return listener_id;
+    }
+
+    virtual void remove_indexed_database_change_listener(DevTools::TabDescription const&, u64 listener_id) const override
+    {
+        indexed_database_change_listeners.remove(listener_id);
+        ++remove_indexed_database_change_listener_call_count;
     }
 
     virtual void inspect_tab(DevTools::TabDescription const&, OnTabInspectionComplete callback) const override
@@ -981,6 +1132,54 @@ public:
 
     virtual void stop_listening_for_style_sheet_sources(DevTools::TabDescription const&) const override { ++stop_listening_for_style_sheet_sources_call_count; }
 
+    virtual void retrieve_sources(DevTools::TabDescription const&, OnSourcesReceived callback) const override
+    {
+        ++retrieve_sources_call_count;
+        callback(Vector<Web::HTML::ScriptRegistry::Description> { fixture_source });
+    }
+
+    virtual void retrieve_source(DevTools::TabDescription const&, Web::HTML::ScriptRegistry::Identifier source_id, OnSourceReceived callback) const override
+    {
+        ++retrieve_source_call_count;
+        if (source_id == fixture_live_source.id) {
+            callback(Web::HTML::ScriptRegistry::Content {
+                .content_type = fixture_live_source.content_type,
+                .text = "console.log('live source');"_string,
+            });
+            return;
+        }
+
+        if (source_id != fixture_source.id) {
+            callback(Error::from_string_literal("Source not found"));
+            return;
+        }
+
+        callback(Web::HTML::ScriptRegistry::Content {
+            .content_type = fixture_source.content_type,
+            .text = "console.log('hello from source');"_string,
+        });
+    }
+
+    virtual void listen_for_sources(DevTools::TabDescription const&, OnSourceAvailable callback) const override
+    {
+        ++listen_for_sources_call_count;
+        on_source_available = move(callback);
+    }
+
+    virtual void stop_listening_for_sources(DevTools::TabDescription const&) const override
+    {
+        ++stop_listening_for_sources_call_count;
+        on_source_available = nullptr;
+    }
+
+    virtual void resolve_dom_node_url(DevTools::TabDescription const&, Optional<Web::UniqueNodeID> node_id, String const& url, OnResolvedURLReceived callback) const override
+    {
+        ++resolve_dom_node_url_call_count;
+        last_resolved_url_node = node_id;
+        last_url_to_resolve = url;
+        callback(resolved_dom_node_url);
+    }
+
     virtual void listen_for_console_messages(DevTools::TabDescription const&, OnConsoleMessage callback) const override
     {
         ++listen_for_console_messages_call_count;
@@ -1145,6 +1344,13 @@ public:
         return fixture_session_storage_items;
     }
 
+    void emit_indexed_database_change(JsonObject update) const
+    {
+        VERIFY(!indexed_database_change_listeners.is_empty());
+        for (auto& listener : indexed_database_change_listeners)
+            listener.value(update);
+    }
+
     mutable Function<void(WebView::DOMNodeProperties)> on_dom_node_properties;
     mutable Function<void(WebView::Mutation)> on_dom_mutation;
     mutable Function<void(Web::CSS::StyleSheetIdentifier const&, String)> on_style_sheet_source;
@@ -1157,6 +1363,7 @@ public:
     mutable Function<void(Vector<HTTP::Cookie::Cookie>)> on_host_cookie_change;
     mutable HashMap<u64, Function<void(DevToolsDelegate::StorageChange)>> storage_change_listeners;
     String tab_url { "https://example.test/"_string };
+    mutable HashMap<u64, Function<void(JsonObject)>> indexed_database_change_listeners;
 
     struct NavigationListener {
         Function<void(String)> on_navigation_started;
@@ -1168,6 +1375,28 @@ public:
     mutable Vector<HTTP::Cookie::Cookie> fixture_cookies;
     mutable Vector<DevTools::DevToolsDelegate::StorageItem> fixture_local_storage_items;
     mutable Vector<DevTools::DevToolsDelegate::StorageItem> fixture_session_storage_items;
+    mutable Web::HTML::ScriptRegistry::Description fixture_source {
+        .id = { .document_id = 1, .script_id = 1 },
+        .url = {},
+        .display_url = "https://example.test/app.js"_string,
+        .introduction_type = "scriptElement"_string,
+        .content_type = "text/javascript"_string,
+        .is_inline_source = false,
+        .source_start_line = 1,
+        .source_start_column = 0,
+        .source_length = 33,
+    };
+    mutable Web::HTML::ScriptRegistry::Description fixture_live_source {
+        .id = { .document_id = 1, .script_id = 2 },
+        .url = {},
+        .display_url = "https://example.test/live.js"_string,
+        .introduction_type = "scriptElement"_string,
+        .content_type = "text/javascript"_string,
+        .is_inline_source = false,
+        .source_start_line = 1,
+        .source_start_column = 0,
+        .source_length = 31,
+    };
 
     mutable size_t inspect_tab_call_count { 0 };
     mutable size_t cookies_call_count { 0 };
@@ -1185,6 +1414,17 @@ public:
     mutable bool fail_set_storage_item { false };
     mutable bool fail_remove_storage_item { false };
     mutable bool fail_clear_storage { false };
+    mutable size_t inspect_indexed_database_storage_call_count { 0 };
+    mutable size_t inspect_indexed_database_objects_call_count { 0 };
+    mutable size_t delete_indexed_database_call_count { 0 };
+    mutable size_t clear_indexed_database_object_store_call_count { 0 };
+    mutable size_t delete_indexed_database_record_call_count { 0 };
+    mutable size_t add_indexed_database_change_listener_call_count { 0 };
+    mutable size_t remove_indexed_database_change_listener_call_count { 0 };
+    mutable u64 next_indexed_database_change_listener_id { 1 };
+    mutable bool fail_delete_indexed_database { false };
+    mutable bool fail_clear_indexed_database_object_store { false };
+    mutable bool fail_delete_indexed_database_record { false };
     mutable size_t inspect_accessibility_tree_call_count { 0 };
     mutable size_t listen_for_dom_properties_call_count { 0 };
     mutable size_t stop_listening_for_dom_properties_call_count { 0 };
@@ -1219,6 +1459,12 @@ public:
     mutable size_t retrieve_style_sheet_source_call_count { 0 };
     mutable size_t listen_for_style_sheet_sources_call_count { 0 };
     mutable size_t stop_listening_for_style_sheet_sources_call_count { 0 };
+    mutable size_t retrieve_sources_call_count { 0 };
+    mutable size_t retrieve_source_call_count { 0 };
+    mutable size_t listen_for_sources_call_count { 0 };
+    mutable size_t stop_listening_for_sources_call_count { 0 };
+    mutable DevTools::DevToolsDelegate::OnSourceAvailable on_source_available;
+    mutable size_t resolve_dom_node_url_call_count { 0 };
     mutable size_t listen_for_console_messages_call_count { 0 };
     mutable size_t stop_listening_for_console_messages_call_count { 0 };
     mutable size_t listen_for_network_events_call_count { 0 };
@@ -1254,9 +1500,14 @@ public:
     mutable Optional<String> last_tag;
     mutable Optional<String> last_attribute;
     mutable size_t last_attribute_count { 0 };
+    mutable Optional<Web::UniqueNodeID> last_resolved_url_node;
+    mutable Optional<String> last_url_to_resolve;
+    mutable String resolved_dom_node_url { "https://example.test/scripts/app.js"_string };
     mutable Optional<String> last_navigated_url;
     mutable Optional<bool> last_reload_bypass_cache;
     mutable Optional<int> last_history_delta;
+    mutable Optional<String> last_indexed_database_host;
+    mutable Optional<String> last_indexed_database_name;
 };
 
 class ProtocolClient {
@@ -1283,13 +1534,46 @@ public:
         return read_message_from_socket();
     }
 
+    bool has_pending_message(AK::Duration timeout = 50_ms)
+    {
+        if (!m_pending_messages.is_empty())
+            return true;
+
+        for (i64 elapsed_ms = 0; elapsed_ms < timeout.to_milliseconds(); elapsed_ms += 5) {
+            pump(m_loop);
+            if (MUST(m_socket->can_read_without_blocking())) {
+                m_pending_messages.append(read_message_now());
+                return true;
+            }
+            MUST(Core::System::sleep_ms(5));
+        }
+
+        return false;
+    }
+
     void send(JsonObject message)
     {
         auto serialized = message.serialized();
         auto packet = MUST(String::formatted("{}:{}", serialized.byte_count(), serialized));
-        MUST(m_socket->set_blocking(true));
-        auto restore_nonblocking = ScopeGuard([&] { MUST(m_socket->set_blocking(false)); });
-        MUST(m_socket->write_until_depleted(packet.bytes()));
+        send_packet_bytes(packet.bytes());
+    }
+
+    NonnullRefPtr<Threading::Thread> send_in_two_fragments(JsonObject message, size_t first_fragment_size, Atomic<bool>& may_send_second_fragment, Atomic<bool>& sent_second_fragment)
+    {
+        auto serialized = message.serialized();
+        auto packet = MUST(String::formatted("{}:{}", serialized.byte_count(), serialized));
+        VERIFY(first_fragment_size < packet.byte_count());
+
+        send_packet_bytes(packet.bytes().slice(0, first_fragment_size));
+
+        return Threading::Thread::construct("DevToolsFragmentSender"sv, [this, packet = move(packet), first_fragment_size, &may_send_second_fragment, &sent_second_fragment]() -> intptr_t {
+            for (auto i = 0; i < 5000 && !may_send_second_fragment; ++i)
+                MUST(Core::System::sleep_ms(1));
+
+            sent_second_fragment = true;
+            send_packet_bytes(packet.bytes().slice(first_fragment_size));
+            return 0;
+        });
     }
 
     JsonObject request(StringView to, StringView type)
@@ -1307,6 +1591,13 @@ public:
     }
 
 private:
+    void send_packet_bytes(ReadonlyBytes bytes)
+    {
+        MUST(m_socket->set_blocking(true));
+        auto restore_nonblocking = ScopeGuard([&] { MUST(m_socket->set_blocking(false)); });
+        MUST(m_socket->write_until_depleted(bytes));
+    }
+
     ProtocolClient(Core::EventLoop& loop, NonnullOwnPtr<Core::TCPSocket> socket)
         : m_loop(loop)
         , m_socket(move(socket))
@@ -1426,6 +1717,16 @@ static size_t style_rule_actor_count(DevTools::DevToolsServer const& server)
     return count;
 }
 
+static size_t source_actor_count(DevTools::DevToolsServer const& server)
+{
+    size_t count = 0;
+    for (auto const& actor : server.actor_registry()) {
+        if (actor.key.bytes_as_string_view().contains("-source"sv))
+            ++count;
+    }
+    return count;
+}
+
 static JsonObject get_frame_target(ProtocolClient& client, StringView tab_actor)
 {
     auto watcher_actor = actor_from(client.request(tab_actor, "getWatcher"sv), "actor"sv);
@@ -1459,7 +1760,7 @@ static String query_selector(ProtocolClient& client, StringView walker_actor, St
     return client.request(move(request)).get_object("node"sv)->get_string("actor"sv).release_value();
 }
 
-static JsonObject read_resource(ProtocolClient& client, StringView resource_type, StringView packet_type = "resources-available-array"sv)
+static JsonObject read_resource(ProtocolClient& client, StringView resource_type, StringView packet_type = "resources-available-array"sv, StringView expected_sender = {})
 {
     while (true) {
         auto message = client.read_message();
@@ -1475,6 +1776,8 @@ static JsonObject read_resource(ProtocolClient& client, StringView resource_type
                 continue;
             if (!entry.as_array().at(0).is_string() || entry.as_array().at(0).as_string() != resource_type)
                 continue;
+            if (!expected_sender.is_empty())
+                EXPECT_EQ(message.get_string("from"sv).value(), expected_sender);
             auto const& resources = entry.as_array().at(1).as_array();
             VERIFY(!resources.is_empty());
             return resources.at(0).as_object();
@@ -1619,6 +1922,68 @@ static JsonObject remove_all_storage_items(ProtocolClient& client, StringView st
     request.set("type"sv, "removeAll"sv);
     request.set("host"sv, "https://example.test"sv);
     return client.request(move(request));
+}
+
+static String get_indexed_database_actor(ProtocolClient& client)
+{
+    auto tab_actor = actor_from(get_tab(client), "actor"sv);
+    auto watcher_actor = actor_from(client.request(tab_actor, "getWatcher"sv), "actor"sv);
+
+    JsonObject watch_resources;
+    watch_resources.set("to"sv, watcher_actor);
+    watch_resources.set("type"sv, "watchResources"sv);
+    JsonArray resource_types;
+    resource_types.must_append("indexed-db"sv);
+    watch_resources.set("resourceTypes"sv, move(resource_types));
+    EXPECT_EQ(client.request(move(watch_resources)).get_string("from"sv).value(), watcher_actor);
+
+    auto indexed_database_resource = read_resource(client, "indexed-db"sv);
+    return actor_from(indexed_database_resource, "actor"sv);
+}
+
+static JsonObject get_indexed_database_store_objects(ProtocolClient& client, StringView indexed_database_actor, Optional<String> name = {})
+{
+    JsonObject get_store_objects;
+    get_store_objects.set("to"sv, indexed_database_actor);
+    get_store_objects.set("type"sv, "getStoreObjects"sv);
+    get_store_objects.set("host"sv, "https://example.test"sv);
+    if (name.has_value()) {
+        JsonArray names;
+        names.must_append(*name);
+        get_store_objects.set("names"sv, move(names));
+    } else {
+        get_store_objects.set("names"sv, JsonValue {});
+    }
+    get_store_objects.set("options"sv, JsonObject {});
+    return client.request(move(get_store_objects));
+}
+
+static JsonObject get_indexed_database_store_objects(ProtocolClient& client, StringView indexed_database_actor, JsonArray names)
+{
+    JsonObject get_store_objects;
+    get_store_objects.set("to"sv, indexed_database_actor);
+    get_store_objects.set("type"sv, "getStoreObjects"sv);
+    get_store_objects.set("host"sv, "https://example.test"sv);
+    get_store_objects.set("names"sv, move(names));
+    get_store_objects.set("options"sv, JsonObject {});
+    return client.request(move(get_store_objects));
+}
+
+static JsonArray get_indexed_database_update_paths(JsonObject const& stores_update, StringView update_type, StringView host = "https://example.test"sv)
+{
+    return stores_update.get_object("data"sv)
+        ->get_object(update_type)
+        ->get_object("indexedDB"sv)
+        ->get_array(host)
+        .release_value();
+}
+
+static JsonArray get_indexed_database_cleared_paths(JsonObject const& stores_cleared, StringView host = "https://example.test"sv)
+{
+    return stores_cleared.get_object("data"sv)
+        ->get_object("clearedHostsOrPaths"sv)
+        ->get_array(host)
+        .release_value();
 }
 
 static JsonObject make_cookie_edit_items(HTTP::Cookie::Cookie const& cookie)
@@ -1768,6 +2133,34 @@ TEST_CASE(root_actor_and_connection_errors)
     EXPECT(client.read_message().has_array("addons"sv));
 }
 
+TEST_CASE(connection_accepts_fragmented_packets)
+{
+    auto session = create_session();
+    auto& client = *session->client;
+
+    (void)client.read_message();
+    EXPECT_EQ(client.request("root"sv, "connect"sv).get_string("from"sv).value(), "root"sv);
+
+    JsonObject request;
+    request.set("to"sv, "root"sv);
+    request.set("type"sv, "getRoot"sv);
+
+    IGNORE_USE_IN_ESCAPING_LAMBDA Atomic<bool> may_send_second_fragment { false };
+    IGNORE_USE_IN_ESCAPING_LAMBDA Atomic<bool> sent_second_fragment { false };
+    auto thread = client.send_in_two_fragments(move(request), 2, may_send_second_fragment, sent_second_fragment);
+    thread->start();
+
+    pump(session->loop);
+    EXPECT(!sent_second_fragment);
+
+    may_send_second_fragment = true;
+    MUST(thread->join());
+
+    auto root = client.read_message();
+    EXPECT_EQ(root.get_string("from"sv).value(), "root"sv);
+    EXPECT(root.has_string("deviceActor"sv));
+}
+
 TEST_CASE(history_navigation_requests)
 {
     auto session = create_session();
@@ -1840,7 +2233,14 @@ TEST_CASE(target_bootstrap_and_lifetime)
     EXPECT_EQ(session->delegate.listen_for_network_events_call_count, 1u);
     EXPECT_EQ(session->delegate.retrieve_style_sheets_call_count, 1u);
 
-    EXPECT_EQ(client.request(actor_from(target, "actor"sv), "detach"sv).get_string("from"sv).value(), actor_from(target, "actor"sv));
+    auto target_actor = actor_from(target, "actor"sv);
+    auto frames = client.request(target_actor, "listFrames"sv).get_array("frames"sv).release_value();
+    EXPECT_EQ(frames.size(), 1u);
+    EXPECT_EQ(frames.at(0).as_object().get_string("title"sv).value(), "Fixture page"sv);
+    EXPECT_EQ(frames.at(0).as_object().get_string("url"sv).value(), "https://example.test/"sv);
+    EXPECT(client.request(target_actor, "listWorkers"sv).get_array("workers"sv)->is_empty());
+
+    EXPECT_EQ(client.request(target_actor, "detach"sv).get_string("from"sv).value(), target_actor);
     EXPECT_EQ(session->delegate.stop_listening_for_console_messages_call_count, 1u);
     EXPECT_EQ(session->delegate.stop_listening_for_dom_mutations_call_count, 1u);
     EXPECT_EQ(session->delegate.clear_highlighted_dom_node_call_count, 1u);
@@ -1900,6 +2300,111 @@ TEST_CASE(storage_cookie_resource)
     EXPECT_EQ(objects.get_integer<size_t>("offset"sv).value(), 0u);
     EXPECT_EQ(objects.get_integer<size_t>("total"sv).value(), 0u);
     EXPECT(objects.get_array("data"sv)->is_empty());
+}
+
+TEST_CASE(source_resources)
+{
+    auto session = create_session();
+    auto& client = *session->client;
+    (void)client.read_message();
+
+    auto tab_actor = actor_from(get_tab(client), "actor"sv);
+    auto watcher_response = client.request(tab_actor, "getWatcher"sv);
+    auto watcher_actor = actor_from(watcher_response, "actor"sv);
+    auto resources = watcher_response.get_object("traits"sv)->get_object("resources"sv).release_value();
+    EXPECT(resources.get_bool("source"sv).value());
+    EXPECT(resources.get_bool("document-event"sv).value());
+    EXPECT(resources.get_bool("error-message"sv).value());
+    EXPECT(resources.get_bool("jstracer-state"sv).value());
+    EXPECT(resources.get_bool("jstracer-trace"sv).value());
+    EXPECT(resources.get_bool("thread-state"sv).value());
+
+    JsonObject watch_targets;
+    watch_targets.set("to"sv, watcher_actor);
+    watch_targets.set("type"sv, "watchTargets"sv);
+    watch_targets.set("targetType"sv, "frame"sv);
+    EXPECT_EQ(client.request(move(watch_targets)).get_string("from"sv).value(), watcher_actor);
+
+    auto target = read_packet_with_type(client, "target-available-form"sv).get_object("target"sv).release_value();
+    auto target_actor = actor_from(target, "actor"sv);
+    auto thread_actor = actor_from(target, "threadActor"sv);
+
+    JsonObject attach;
+    attach.set("to"sv, thread_actor);
+    attach.set("type"sv, "attach"sv);
+    JsonObject options;
+    attach.set("options"sv, move(options));
+    EXPECT_EQ(client.request(move(attach)).get_string("from"sv).value(), thread_actor);
+
+    auto watch_resource_type = [&](StringView resource_type) {
+        JsonObject watch_resources;
+        watch_resources.set("to"sv, watcher_actor);
+        watch_resources.set("type"sv, "watchResources"sv);
+        JsonArray resource_types;
+        resource_types.must_append(resource_type);
+        watch_resources.set("resourceTypes"sv, move(resource_types));
+        EXPECT_EQ(client.request(move(watch_resources)).get_string("from"sv).value(), watcher_actor);
+    };
+
+    watch_resource_type("thread-state"sv);
+    watch_resource_type("error-message"sv);
+    watch_resource_type("document-event"sv);
+    watch_resource_type("jstracer-state"sv);
+    watch_resource_type("jstracer-trace"sv);
+
+    JsonObject watch_resources;
+    watch_resources.set("to"sv, watcher_actor);
+    watch_resources.set("type"sv, "watchResources"sv);
+    JsonArray resource_types;
+    resource_types.must_append("source"sv);
+    watch_resources.set("resourceTypes"sv, move(resource_types));
+    EXPECT_EQ(client.request(move(watch_resources)).get_string("from"sv).value(), watcher_actor);
+
+    auto source_resource = read_resource(client, "source"sv, "resources-available-array"sv, target_actor);
+    EXPECT_EQ(source_resource.get_string("url"sv).value(), "https://example.test/app.js"sv);
+    EXPECT_EQ(source_resource.get_bool("isBlackBoxed"sv).value(), false);
+    EXPECT_EQ(source_resource.get_integer<u64>("browsingContextID"sv).value(), 1u);
+    EXPECT_EQ(source_resource.get_integer<u64>("innerWindowId"sv).value(), 1u);
+    EXPECT_EQ(source_resource.get_string("resourceId"sv).value(), "source-1-1-1"sv);
+    EXPECT_EQ(source_resource.get_string("introductionType"sv).value(), "scriptElement"sv);
+    EXPECT_EQ(source_resource.get_bool("isInlineSource"sv).value(), false);
+    EXPECT_EQ(source_resource.get_integer<u32>("sourceStartLine"sv).value(), 1u);
+    EXPECT_EQ(source_resource.get_integer<u32>("sourceStartColumn"sv).value(), 0u);
+    auto source_actor = actor_from(source_resource, "actor"sv);
+
+    auto sources = client.request(thread_actor, "sources"sv).get_array("sources"sv).release_value();
+    EXPECT_EQ(sources.size(), 1u);
+    EXPECT_EQ(sources.at(0).as_object().get_string("actor"sv).value(), source_actor);
+    EXPECT_EQ(source_actor_count(*session->server), 1u);
+
+    auto source = client.request(source_actor, "source"sv);
+    EXPECT_EQ(source.get_string("contentType"sv).value(), "text/javascript"sv);
+    EXPECT_EQ(source.get_string("source"sv).value(), "console.log('hello from source');"sv);
+    EXPECT_EQ(session->delegate.retrieve_sources_call_count, 2u);
+    EXPECT_EQ(session->delegate.retrieve_source_call_count, 1u);
+    EXPECT_EQ(session->delegate.listen_for_sources_call_count, 1u);
+    VERIFY(session->delegate.on_source_available);
+
+    session->delegate.on_source_available(session->delegate.fixture_live_source);
+    auto live_source_resource = read_resource(client, "source"sv, "resources-available-array"sv, target_actor);
+    EXPECT_EQ(live_source_resource.get_string("url"sv).value(), "https://example.test/live.js"sv);
+    EXPECT_EQ(live_source_resource.get_integer<u64>("browsingContextID"sv).value(), 1u);
+    EXPECT_EQ(live_source_resource.get_integer<u64>("innerWindowId"sv).value(), 1u);
+    EXPECT_EQ(live_source_resource.get_string("resourceId"sv).value(), "source-1-1-2"sv);
+    auto live_source_actor = actor_from(live_source_resource, "actor"sv);
+    EXPECT_EQ(source_actor_count(*session->server), 2u);
+
+    auto live_source = client.request(live_source_actor, "source"sv);
+    EXPECT_EQ(live_source.get_string("contentType"sv).value(), "text/javascript"sv);
+    EXPECT_EQ(live_source.get_string("source"sv).value(), "console.log('live source');"sv);
+    EXPECT_EQ(session->delegate.retrieve_source_call_count, 2u);
+
+    sources = client.request(thread_actor, "sources"sv).get_array("sources"sv).release_value();
+    EXPECT_EQ(sources.size(), 1u);
+    spin_until(session->loop, [&] {
+        return source_actor_count(*session->server) == 1u
+            && !session->server->actor_registry().contains(live_source_actor);
+    });
 }
 
 TEST_CASE(storage_web_storage_resources)
@@ -2220,6 +2725,357 @@ TEST_CASE(storage_web_storage_mutation_errors)
     EXPECT_EQ(response.get_string("errorString"sv).value(), "Unable to clear storage"sv);
     EXPECT_EQ(session->delegate.clear_storage_call_count, 1u);
     EXPECT_EQ(session->delegate.fixture_local_storage_items.size(), 1u);
+}
+
+TEST_CASE(storage_indexed_database_resource)
+{
+    auto session = create_session();
+    auto& client = *session->client;
+    (void)client.read_message();
+
+    auto tab_actor = actor_from(get_tab(client), "actor"sv);
+    auto watcher_response = client.request(tab_actor, "getWatcher"sv);
+    auto watcher_actor = actor_from(watcher_response, "actor"sv);
+    auto resources = watcher_response.get_object("traits"sv)->get_object("resources"sv).release_value();
+    EXPECT(resources.get_bool("indexed-db"sv).value());
+
+    JsonObject watch_resources;
+    watch_resources.set("to"sv, watcher_actor);
+    watch_resources.set("type"sv, "watchResources"sv);
+    JsonArray resource_types;
+    resource_types.must_append("indexed-db"sv);
+    watch_resources.set("resourceTypes"sv, move(resource_types));
+    EXPECT_EQ(client.request(move(watch_resources)).get_string("from"sv).value(), watcher_actor);
+
+    auto indexed_database_resource = read_resource(client, "indexed-db"sv);
+    EXPECT_EQ(indexed_database_resource.get_string("resourceKey"sv).value(), "indexedDB"sv);
+    EXPECT_EQ(indexed_database_resource.get_integer<u64>("browsingContextID"sv).value(), 1u);
+    EXPECT_EQ(indexed_database_resource.get_integer<u64>("innerWindowId"sv).value(), 1u);
+    EXPECT_EQ(indexed_database_resource.get_string("resourceId"sv).value(), "indexed-db-1"sv);
+
+    auto hosts = indexed_database_resource.get_object("hosts"sv).release_value();
+    auto names = hosts.get_array("https://example.test"sv).release_value();
+    EXPECT_EQ(names.size(), 2u);
+    EXPECT_EQ(names.at(0).as_string(), "[\"fixtures (default)\",\"people\"]"sv);
+    EXPECT_EQ(names.at(1).as_string(), "[\"empty (default)\"]"sv);
+
+    auto traits = indexed_database_resource.get_object("traits"sv).release_value();
+    EXPECT(!traits.get_bool("supportsAddItem"sv).value());
+    EXPECT(traits.get_bool("supportsRemoveAll"sv).value());
+    EXPECT(!traits.get_bool("supportsRemoveAllSessionCookies"sv).value());
+    EXPECT(traits.get_bool("supportsRemoveItem"sv).value());
+
+    auto indexed_database_actor = actor_from(indexed_database_resource, "actor"sv);
+    auto fields = client.request(indexed_database_actor, "getFields"sv).get_array("value"sv).release_value();
+    EXPECT_EQ(fields.at(0).as_object().get_string("name"sv).value(), "uniqueKey"sv);
+    EXPECT(fields.at(0).as_object().get_bool("private"sv).value());
+    EXPECT_EQ(fields.at(1).as_object().get_string("name"sv).value(), "db"sv);
+
+    JsonObject database_fields_request;
+    database_fields_request.set("to"sv, indexed_database_actor);
+    database_fields_request.set("type"sv, "getFields"sv);
+    database_fields_request.set("subType"sv, "database"sv);
+    auto database_fields = client.request(move(database_fields_request)).get_array("value"sv).release_value();
+    EXPECT_EQ(database_fields.at(0).as_object().get_string("name"sv).value(), "objectStore"sv);
+
+    JsonObject object_store_fields_request;
+    object_store_fields_request.set("to"sv, indexed_database_actor);
+    object_store_fields_request.set("type"sv, "getFields"sv);
+    object_store_fields_request.set("subType"sv, "object store"sv);
+    auto object_store_fields = client.request(move(object_store_fields_request)).get_array("value"sv).release_value();
+    EXPECT_EQ(object_store_fields.at(0).as_object().get_string("name"sv).value(), "name"sv);
+    EXPECT_EQ(object_store_fields.at(1).as_object().get_string("name"sv).value(), "value"sv);
+
+    EXPECT_EQ(session->delegate.inspect_indexed_database_storage_call_count, 1u);
+}
+
+TEST_CASE(storage_indexed_database_store_objects)
+{
+    auto session = create_session();
+    auto& client = *session->client;
+    (void)client.read_message();
+
+    auto indexed_database_actor = get_indexed_database_actor(client);
+
+    auto databases = get_indexed_database_store_objects(client, indexed_database_actor);
+    EXPECT_EQ(session->delegate.inspect_indexed_database_objects_call_count, 1u);
+    EXPECT_EQ(session->delegate.last_indexed_database_host.value(), "https://example.test"sv);
+    EXPECT_EQ(databases.get_integer<size_t>("offset"sv).value(), 0u);
+    EXPECT_EQ(databases.get_integer<size_t>("total"sv).value(), 2u);
+
+    auto database_rows = databases.get_array("data"sv).release_value();
+    EXPECT_EQ(database_rows.size(), 2u);
+    auto fixtures_database = database_rows.at(0).as_object();
+    EXPECT_EQ(fixtures_database.get_string("uniqueKey"sv).value(), "fixtures (default)"sv);
+    EXPECT_EQ(fixtures_database.get_string("db"sv).value(), "fixtures"sv);
+    EXPECT_EQ(fixtures_database.get_string("storage"sv).value(), "default"sv);
+    EXPECT_EQ(fixtures_database.get_string("origin"sv).value(), "https://example.test"sv);
+    EXPECT_EQ(fixtures_database.get_integer<int>("version"sv).value(), 1);
+    EXPECT_EQ(fixtures_database.get_integer<int>("objectStores"sv).value(), 1);
+
+    auto databases_from_empty_names = get_indexed_database_store_objects(client, indexed_database_actor, JsonArray {});
+    EXPECT_EQ(databases_from_empty_names.get_integer<size_t>("total"sv).value(), 2u);
+
+    JsonArray empty_path_names;
+    empty_path_names.must_append("[]"sv);
+    auto databases_from_empty_path = get_indexed_database_store_objects(client, indexed_database_actor, move(empty_path_names));
+    EXPECT_EQ(databases_from_empty_path.get_integer<size_t>("total"sv).value(), 2u);
+
+    auto object_stores = get_indexed_database_store_objects(client, indexed_database_actor, indexed_database_path("fixtures (default)"sv));
+    EXPECT_EQ(object_stores.get_integer<size_t>("total"sv).value(), 1u);
+    auto object_store_rows = object_stores.get_array("data"sv).release_value();
+    auto people_store = object_store_rows.at(0).as_object();
+    EXPECT_EQ(people_store.get_string("objectStore"sv).value(), "people"sv);
+    EXPECT_EQ(people_store.get_string("keyPath"sv).value(), "id"sv);
+    EXPECT(people_store.get_bool("autoIncrement"sv).value());
+    EXPECT_EQ(people_store.get_string("indexes"sv).value(), "[]"sv);
+
+    auto records = get_indexed_database_store_objects(client, indexed_database_actor, indexed_database_path("fixtures (default)"sv, "people"sv));
+    EXPECT_EQ(records.get_integer<size_t>("total"sv).value(), 1u);
+    auto record_rows = records.get_array("data"sv).release_value();
+    auto record = record_rows.at(0).as_object();
+    EXPECT_EQ(record.get_integer<int>("name"sv).value(), 1);
+    EXPECT_EQ(record.get_string("value"sv).value(), "{\"name\":\"Ada\"}"sv);
+}
+
+TEST_CASE(storage_indexed_database_change_events)
+{
+    auto session = create_session();
+    auto& client = *session->client;
+    (void)client.read_message();
+
+    auto indexed_database_actor = get_indexed_database_actor(client);
+    EXPECT_EQ(session->delegate.add_indexed_database_change_listener_call_count, 1u);
+
+    JsonArray added;
+    added.must_append(indexed_database_path("fixtures (default)"sv, "people"sv));
+
+    JsonArray record_path;
+    record_path.must_append("fixtures (default)"sv);
+    record_path.must_append("people"sv);
+    record_path.must_append(1);
+    JsonArray changed;
+    changed.must_append(record_path.serialized());
+
+    JsonArray deleted;
+    deleted.must_append(indexed_database_path("empty (default)"sv));
+
+    JsonObject added_hosts;
+    added_hosts.set("https://example.test"sv, move(added));
+    JsonObject added_types;
+    added_types.set("indexedDB"sv, move(added_hosts));
+
+    JsonObject changed_hosts;
+    changed_hosts.set("https://example.test"sv, move(changed));
+    JsonObject changed_types;
+    changed_types.set("indexedDB"sv, move(changed_hosts));
+
+    JsonObject deleted_hosts;
+    deleted_hosts.set("https://example.test"sv, move(deleted));
+    JsonObject deleted_types;
+    deleted_types.set("indexedDB"sv, move(deleted_hosts));
+
+    JsonObject update;
+    update.set("added"sv, move(added_types));
+    update.set("changed"sv, move(changed_types));
+    update.set("deleted"sv, move(deleted_types));
+    session->delegate.emit_indexed_database_change(move(update));
+
+    auto stores_update = read_packet_with_type(client, "storesUpdate"sv);
+    EXPECT_EQ(stores_update.get_string("from"sv).value(), indexed_database_actor);
+
+    auto added_paths = get_indexed_database_update_paths(stores_update, "added"sv);
+    EXPECT_EQ(added_paths.size(), 1u);
+    EXPECT_EQ(added_paths.at(0).as_string(), indexed_database_path("fixtures (default)"sv, "people"sv));
+
+    auto changed_paths = get_indexed_database_update_paths(stores_update, "changed"sv);
+    EXPECT_EQ(changed_paths.size(), 1u);
+    EXPECT_EQ(changed_paths.at(0).as_string(), record_path.serialized());
+
+    auto deleted_paths = get_indexed_database_update_paths(stores_update, "deleted"sv);
+    EXPECT_EQ(deleted_paths.size(), 1u);
+    EXPECT_EQ(deleted_paths.at(0).as_string(), indexed_database_path("empty (default)"sv));
+}
+
+TEST_CASE(storage_indexed_database_serializes_live_tree_updates)
+{
+    Web::IndexedDB::TransactionChanges changes;
+    changes.added.append({ "fixtures"_string, "people"_string });
+    changes.added.append({ "fixtures"_string, "people"_string, JsonValue { 1 } });
+    changes.changed.append({ "fixtures"_string, "people"_string, JsonValue { 2 } });
+    changes.deleted.append({ "fixtures"_string, "people"_string, JsonValue { 3 } });
+
+    auto update = DevTools::IndexedDB::serialize_update("https://example.test/page"_string, changes);
+
+    auto added_paths = update.get_object("added"sv)
+                           ->get_object("indexedDB"sv)
+                           ->get_array("https://example.test"sv)
+                           .release_value();
+    EXPECT_EQ(added_paths.size(), 1u);
+    EXPECT_EQ(added_paths.at(0).as_string(), indexed_database_path("fixtures (default)"sv, "people"sv));
+    EXPECT(!update.get_object("changed"sv).has_value());
+    EXPECT(!update.get_object("deleted"sv).has_value());
+}
+
+TEST_CASE(storage_indexed_database_remove_database)
+{
+    auto session = create_session();
+    auto& client = *session->client;
+    (void)client.read_message();
+
+    auto indexed_database_actor = get_indexed_database_actor(client);
+
+    JsonObject remove_database;
+    remove_database.set("to"sv, indexed_database_actor);
+    remove_database.set("type"sv, "removeDatabase"sv);
+    remove_database.set("host"sv, "https://example.test"sv);
+    remove_database.set("name"sv, "fixtures (default)"sv);
+    EXPECT_EQ(client.request(move(remove_database)).get_string("from"sv).value(), indexed_database_actor);
+
+    EXPECT_EQ(session->delegate.delete_indexed_database_call_count, 1u);
+    EXPECT_EQ(session->delegate.last_indexed_database_host.value(), "https://example.test"sv);
+    EXPECT_EQ(session->delegate.last_indexed_database_name.value(), "fixtures (default)"sv);
+
+    auto stores_update = read_packet_with_type(client, "storesUpdate"sv);
+    EXPECT_EQ(stores_update.get_string("from"sv).value(), indexed_database_actor);
+
+    auto deleted_paths = get_indexed_database_update_paths(stores_update, "deleted"sv);
+    EXPECT_EQ(deleted_paths.size(), 1u);
+    EXPECT_EQ(deleted_paths.at(0).as_string(), indexed_database_path("fixtures (default)"sv));
+}
+
+TEST_CASE(storage_indexed_database_remove_database_error)
+{
+    auto session = create_session();
+    auto& client = *session->client;
+    (void)client.read_message();
+    session->delegate.fail_delete_indexed_database = true;
+
+    auto indexed_database_actor = get_indexed_database_actor(client);
+
+    JsonObject remove_database;
+    remove_database.set("to"sv, indexed_database_actor);
+    remove_database.set("type"sv, "removeDatabase"sv);
+    remove_database.set("host"sv, "https://example.test"sv);
+    remove_database.set("name"sv, "fixtures (default)"sv);
+    auto response = client.request(move(remove_database));
+    EXPECT_EQ(response.get_string("error"sv).value(), "indexedDBInspectionFailed"sv);
+    EXPECT_EQ(response.get_string("message"sv).value(), "IndexedDB operation failed"sv);
+
+    EXPECT_EQ(session->delegate.delete_indexed_database_call_count, 1u);
+    EXPECT(!client.has_pending_message());
+}
+
+TEST_CASE(storage_indexed_database_remove_all)
+{
+    auto session = create_session();
+    auto& client = *session->client;
+    (void)client.read_message();
+
+    auto indexed_database_actor = get_indexed_database_actor(client);
+    auto store_path = indexed_database_path("fixtures (default)"sv, "people"sv);
+
+    JsonObject remove_all;
+    remove_all.set("to"sv, indexed_database_actor);
+    remove_all.set("type"sv, "removeAll"sv);
+    remove_all.set("host"sv, "https://example.test"sv);
+    remove_all.set("name"sv, store_path);
+    EXPECT_EQ(client.request(move(remove_all)).get_string("from"sv).value(), indexed_database_actor);
+
+    EXPECT_EQ(session->delegate.clear_indexed_database_object_store_call_count, 1u);
+    EXPECT_EQ(session->delegate.last_indexed_database_host.value(), "https://example.test"sv);
+    EXPECT_EQ(session->delegate.last_indexed_database_name.value(), store_path);
+
+    auto stores_cleared = read_packet_with_type(client, "storesCleared"sv);
+    EXPECT_EQ(stores_cleared.get_string("from"sv).value(), indexed_database_actor);
+
+    auto cleared_paths = get_indexed_database_cleared_paths(stores_cleared);
+    EXPECT_EQ(cleared_paths.size(), 1u);
+    EXPECT_EQ(cleared_paths.at(0).as_string(), store_path);
+}
+
+TEST_CASE(storage_indexed_database_remove_all_error)
+{
+    auto session = create_session();
+    auto& client = *session->client;
+    (void)client.read_message();
+    session->delegate.fail_clear_indexed_database_object_store = true;
+
+    auto indexed_database_actor = get_indexed_database_actor(client);
+    auto store_path = indexed_database_path("fixtures (default)"sv, "people"sv);
+
+    JsonObject remove_all;
+    remove_all.set("to"sv, indexed_database_actor);
+    remove_all.set("type"sv, "removeAll"sv);
+    remove_all.set("host"sv, "https://example.test"sv);
+    remove_all.set("name"sv, store_path);
+    auto response = client.request(move(remove_all));
+    EXPECT_EQ(response.get_string("error"sv).value(), "indexedDBInspectionFailed"sv);
+    EXPECT_EQ(response.get_string("message"sv).value(), "IndexedDB operation failed"sv);
+
+    EXPECT_EQ(session->delegate.clear_indexed_database_object_store_call_count, 1u);
+    EXPECT(!client.has_pending_message());
+}
+
+TEST_CASE(storage_indexed_database_remove_item)
+{
+    auto session = create_session();
+    auto& client = *session->client;
+    (void)client.read_message();
+
+    auto indexed_database_actor = get_indexed_database_actor(client);
+
+    JsonArray record_path_array;
+    record_path_array.must_append("fixtures (default)"sv);
+    record_path_array.must_append("people"sv);
+    record_path_array.must_append(1);
+    auto record_path = record_path_array.serialized();
+
+    JsonObject remove_item;
+    remove_item.set("to"sv, indexed_database_actor);
+    remove_item.set("type"sv, "removeItem"sv);
+    remove_item.set("host"sv, "https://example.test"sv);
+    remove_item.set("name"sv, record_path);
+    EXPECT_EQ(client.request(move(remove_item)).get_string("from"sv).value(), indexed_database_actor);
+
+    EXPECT_EQ(session->delegate.delete_indexed_database_record_call_count, 1u);
+    EXPECT_EQ(session->delegate.last_indexed_database_host.value(), "https://example.test"sv);
+    EXPECT_EQ(session->delegate.last_indexed_database_name.value(), record_path);
+
+    auto stores_update = read_packet_with_type(client, "storesUpdate"sv);
+    EXPECT_EQ(stores_update.get_string("from"sv).value(), indexed_database_actor);
+
+    auto deleted_paths = get_indexed_database_update_paths(stores_update, "deleted"sv);
+    EXPECT_EQ(deleted_paths.size(), 1u);
+    EXPECT_EQ(deleted_paths.at(0).as_string(), record_path);
+}
+
+TEST_CASE(storage_indexed_database_remove_item_error)
+{
+    auto session = create_session();
+    auto& client = *session->client;
+    (void)client.read_message();
+    session->delegate.fail_delete_indexed_database_record = true;
+
+    auto indexed_database_actor = get_indexed_database_actor(client);
+
+    JsonArray record_path_array;
+    record_path_array.must_append("fixtures (default)"sv);
+    record_path_array.must_append("people"sv);
+    record_path_array.must_append(1);
+    auto record_path = record_path_array.serialized();
+
+    JsonObject remove_item;
+    remove_item.set("to"sv, indexed_database_actor);
+    remove_item.set("type"sv, "removeItem"sv);
+    remove_item.set("host"sv, "https://example.test"sv);
+    remove_item.set("name"sv, record_path);
+    auto response = client.request(move(remove_item));
+    EXPECT_EQ(response.get_string("error"sv).value(), "indexedDBInspectionFailed"sv);
+    EXPECT_EQ(response.get_string("message"sv).value(), "IndexedDB operation failed"sv);
+
+    EXPECT_EQ(session->delegate.delete_indexed_database_record_call_count, 1u);
+    EXPECT(!client.has_pending_message());
 }
 
 TEST_CASE(storage_cookie_store_objects)
@@ -2727,6 +3583,43 @@ TEST_CASE(inspector_walker_navigation_reloads_root)
     EXPECT_EQ(session->delegate.stop_listening_for_navigation_events_call_count, 2u);
     EXPECT_EQ(session->delegate.did_connect_devtools_client_call_count, 1u);
     EXPECT_EQ(session->delegate.did_disconnect_devtools_client_call_count, 0u);
+}
+
+TEST_CASE(inspector_resolves_relative_urls)
+{
+    auto session = create_session();
+    auto& client = *session->client;
+    (void)client.read_message();
+
+    auto target = get_frame_target(client, actor_from(get_tab(client), "actor"sv));
+    auto inspector_actor = actor_from(target, "inspectorActor"sv);
+    auto walker = get_walker(client, inspector_actor);
+    auto walker_actor = actor_from(walker, "actor"sv);
+    auto root_node_actor = walker.get_object("root"sv)->get_string("actor"sv).release_value();
+    auto div_actor = query_selector(client, walker_actor, root_node_actor, "div"sv);
+
+    JsonObject resolve_with_node;
+    resolve_with_node.set("to"sv, inspector_actor);
+    resolve_with_node.set("type"sv, "resolveRelativeURL"sv);
+    resolve_with_node.set("url"sv, "scripts/app.js"sv);
+    resolve_with_node.set("node"sv, div_actor);
+
+    EXPECT_EQ(client.request(move(resolve_with_node)).get_string("value"sv).value(), "https://example.test/scripts/app.js"sv);
+    EXPECT_EQ(session->delegate.resolve_dom_node_url_call_count, 1u);
+    EXPECT_EQ(session->delegate.last_resolved_url_node.value(), 4u);
+    EXPECT_EQ(session->delegate.last_url_to_resolve.value(), "scripts/app.js"sv);
+
+    session->delegate.resolved_dom_node_url = "https://example.test/fallback.js"_string;
+
+    JsonObject resolve_without_node;
+    resolve_without_node.set("to"sv, inspector_actor);
+    resolve_without_node.set("type"sv, "resolveRelativeURL"sv);
+    resolve_without_node.set("url"sv, "fallback.js"sv);
+
+    EXPECT_EQ(client.request(move(resolve_without_node)).get_string("value"sv).value(), "https://example.test/fallback.js"sv);
+    EXPECT_EQ(session->delegate.resolve_dom_node_url_call_count, 2u);
+    EXPECT(!session->delegate.last_resolved_url_node.has_value());
+    EXPECT_EQ(session->delegate.last_url_to_resolve.value(), "fallback.js"sv);
 }
 
 TEST_CASE(inspector_walker_highlighter_layout_and_editing)

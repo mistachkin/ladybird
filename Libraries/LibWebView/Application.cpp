@@ -10,6 +10,7 @@
 #include <AK/JsonObject.h>
 #include <AK/Math.h>
 #include <AK/ScopeGuard.h>
+#include <AK/StringBuilder.h>
 #include <AK/Time.h>
 #include <LibCore/AnonymousBuffer.h>
 #include <LibCore/ArgsParser.h>
@@ -36,6 +37,7 @@
 #include <LibWebView/HistoryStore.h>
 #include <LibWebView/Menu.h>
 #include <LibWebView/ProcessType.h>
+#include <LibWebView/SiteIsolation.h>
 #include <LibWebView/URL.h>
 #include <LibWebView/UserAgent.h>
 #include <LibWebView/Utilities.h>
@@ -126,6 +128,9 @@ Application::~Application()
     if (m_compositor_client)
         m_compositor_client->on_death = nullptr;
 
+    m_spare_web_content_process = nullptr;
+    m_process_manager = nullptr;
+
     s_the = nullptr;
 }
 
@@ -188,12 +193,12 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     bool enable_test_mode = false;
     bool validate_dnssec_locally = false;
     bool log_all_js_exceptions = false;
-    bool disable_site_isolation = false;
+    auto site_isolation_mode = SiteIsolationMode::TopLevel;
     bool enable_idl_tracing = false;
     bool disable_http_memory_cache = false;
     bool disable_http_disk_cache = false;
     bool disable_content_blocker = false;
-    bool enable_sandbox = false;
+    bool disable_sandbox = false;
     Vector<StringView> content_blocker_list_paths;
     Optional<StringView> resource_substitution_map_path;
     bool enable_autoplay = false;
@@ -264,12 +269,25 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
 #endif
     args_parser.add_option(enable_test_mode, "Enable test mode", "test-mode");
     args_parser.add_option(log_all_js_exceptions, "Log all JavaScript exceptions", "log-all-js-exceptions");
-    args_parser.add_option(disable_site_isolation, "Disable site isolation", "disable-site-isolation");
+    args_parser.add_option(Core::ArgsParser::Option {
+        .argument_mode = Core::ArgsParser::OptionArgumentMode::Required,
+        .help_string = "Set site isolation mode. Mode may be 'disable', 'top-level' (default), or 'iframe'.",
+        .long_name = "site-isolation",
+        .value_name = "mode",
+        .accept_value = [&](StringView value) {
+            auto parsed_mode = site_isolation_mode_from_string(value);
+            if (!parsed_mode.has_value())
+                return false;
+
+            site_isolation_mode = *parsed_mode;
+            return true;
+        },
+    });
     args_parser.add_option(enable_idl_tracing, "Enable IDL tracing", "enable-idl-tracing");
     args_parser.add_option(disable_http_memory_cache, "Disable HTTP memory cache", "disable-http-memory-cache");
     args_parser.add_option(disable_http_disk_cache, "Disable HTTP disk cache", "disable-http-disk-cache");
     args_parser.add_option(disable_content_blocker, "Disable content blocker", "disable-content-blocker");
-    args_parser.add_option(enable_sandbox, "Enable helper process sandboxing", "enable-sandbox");
+    args_parser.add_option(disable_sandbox, "Disable helper process sandboxing", "disable-sandbox");
     args_parser.add_option(Core::ArgsParser::Option {
         .argument_mode = Core::ArgsParser::OptionArgumentMode::Required,
         .help_string = "Path to a content blocker list. May be specified multiple times.",
@@ -373,7 +391,7 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
 
     // Disable site isolation when debugging WebContent. Otherwise, the process swap may interfere with the gdb session.
     if (debug_process_types.contains_slow(ProcessType::WebContent))
-        disable_site_isolation = true;
+        site_isolation_mode = SiteIsolationMode::Disabled;
 
     m_browser_options = {
         .urls = sanitize_urls(raw_urls),
@@ -393,7 +411,7 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
                 : OptionalNone()),
         .devtools_port = devtools_port,
         .enable_content_blocker = disable_content_blocker ? EnableContentBlocker::No : EnableContentBlocker::Yes,
-        .enable_sandbox = enable_sandbox ? EnableSandbox::Yes : EnableSandbox::No,
+        .disable_sandbox = disable_sandbox ? DisableSandbox::Yes : DisableSandbox::No,
         .content_blocker_list_paths = move(content_blocker_list_paths_as_byte_strings),
     };
 
@@ -425,7 +443,7 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
         .user_agent_preset = move(user_agent_preset),
         .is_test_mode = enable_test_mode ? IsTestMode::Yes : IsTestMode::No,
         .log_all_js_exceptions = log_all_js_exceptions ? LogAllJSExceptions::Yes : LogAllJSExceptions::No,
-        .disable_site_isolation = disable_site_isolation ? DisableSiteIsolation::Yes : DisableSiteIsolation::No,
+        .site_isolation_mode = site_isolation_mode,
         .enable_idl_tracing = enable_idl_tracing ? EnableIDLTracing::Yes : EnableIDLTracing::No,
         .enable_http_memory_cache = disable_http_memory_cache ? EnableMemoryHTTPCache::No : EnableMemoryHTTPCache::Yes,
         .expose_experimental_interfaces = expose_experimental_interfaces ? ExposeExperimentalInterfaces::Yes : ExposeExperimentalInterfaces::No,
@@ -452,6 +470,8 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
 
     if (m_web_content_options.file_scheme_urls_have_tuple_origins == FileSchemeUrlsHaveTupleOrigins::Yes)
         URL::set_file_scheme_urls_have_tuple_origins();
+
+    set_site_isolation_mode(m_web_content_options.site_isolation_mode);
 
     if (auto result = load_content_blocker_lists(); result.is_error()) {
         warnln("\033[31;1mUnable to load all content blocker lists:\033[0m {}", result.error());
@@ -645,6 +665,17 @@ bool Application::handle_mouse_event_in_compositor(Web::Compositor::CompositorCo
     return result.release_value();
 }
 
+bool Application::handle_pinch_event_in_compositor(Web::Compositor::CompositorContextId context_id, Web::PinchEvent const& event)
+{
+    if (!can_send_compositor_process_ipc(m_compositor_client))
+        return false;
+
+    auto result = m_compositor_client->try_handle_pinch_event(context_id, event);
+    if (result.is_error())
+        return false;
+    return result.release_value();
+}
+
 bool Application::dispatch_mouse_event_to_web_content(Web::Compositor::CompositorContextId context_id, Web::MouseEvent const& event)
 {
     if (!can_send_compositor_process_ipc(m_compositor_client))
@@ -689,6 +720,16 @@ ErrorOr<NonnullRefPtr<WebContentClient>> Application::launch_web_content_process
 
     launch_spare_web_content_process();
     return create_web_content_client(view, allocate_page_id());
+}
+
+ErrorOr<Application::ChildFrameWebContentProcess> Application::launch_child_frame_web_content_process()
+{
+    auto page_id = allocate_page_id();
+    auto client = TRY(create_web_content_client({}, page_id));
+    return ChildFrameWebContentProcess {
+        .client = move(client),
+        .page_id = page_id,
+    };
 }
 
 void Application::launch_spare_web_content_process()
@@ -745,10 +786,57 @@ ErrorOr<void> Application::launch_services()
         if (auto history_database_path = m_history_database->database_path(); history_database_path.has_value())
             dbgln_if(WEBVIEW_HISTORY_DEBUG, "[History] SQL history is enabled, using {}", history_database_path->string());
 
-        m_cookie_jar = TRY(CookieJar::create(*m_database));
-        m_history_store = TRY(HistoryStore::create(*m_history_database));
-        m_hsts_store = TRY(HSTSStore::create(*m_database));
-        m_storage_jar = TRY(StorageJar::create(*m_database));
+        // The browsing database is shared by several stores, so the decision to fall back is
+        // made for the file as a whole: if any store's schema is too new, none of them may
+        // modify the file. The check-only preflight never writes, so the file is untouched
+        // if any store then has to veto.
+        auto cookies_outcome = TRY(CookieJar::migrate_schema(*m_database, Database::MigrationMode::CheckOnly));
+        auto hsts_outcome = TRY(HSTSStore::migrate_schema(*m_database, Database::MigrationMode::CheckOnly));
+        auto storage_outcome = TRY(StorageJar::migrate_schema(*m_database, Database::MigrationMode::CheckOnly));
+
+        if (cookies_outcome == Database::MigrationOutcome::Success && hsts_outcome == Database::MigrationOutcome::Success && storage_outcome == Database::MigrationOutcome::Success) {
+            // Apply in order, stopping at the first store that finds the database too new
+            // (a concurrent process may have migrated it since the preflight).
+            cookies_outcome = TRY(CookieJar::migrate_schema(*m_database));
+            hsts_outcome = cookies_outcome == Database::MigrationOutcome::Success
+                ? TRY(HSTSStore::migrate_schema(*m_database))
+                : Database::MigrationOutcome::DatabaseTooNew;
+            storage_outcome = hsts_outcome == Database::MigrationOutcome::Success
+                ? TRY(StorageJar::migrate_schema(*m_database))
+                : Database::MigrationOutcome::DatabaseTooNew;
+        }
+
+        // If any store finds the shared file too new, including a concurrent process migrating it
+        // between the preflight and an apply above, none of them may persist this session, even if
+        // an earlier store already migrated. Otherwise, we would keep writing to a vetoed database.
+        if (cookies_outcome != Database::MigrationOutcome::Success || hsts_outcome != Database::MigrationOutcome::Success || storage_outcome != Database::MigrationOutcome::Success) {
+            warnln("Browsing database was created by a newer Ladybird version; cookies, web storage and HSTS policies will not be persisted this session");
+            cookies_outcome = Database::MigrationOutcome::DatabaseTooNew;
+            hsts_outcome = Database::MigrationOutcome::DatabaseTooNew;
+            storage_outcome = Database::MigrationOutcome::DatabaseTooNew;
+        }
+
+        if (cookies_outcome == Database::MigrationOutcome::Success)
+            m_cookie_jar = TRY(CookieJar::create(*m_database));
+        else
+            m_cookie_jar = CookieJar::create();
+
+        if (hsts_outcome == Database::MigrationOutcome::Success)
+            m_hsts_store = TRY(HSTSStore::create(*m_database));
+        else
+            m_hsts_store = HSTSStore::create();
+
+        if (storage_outcome == Database::MigrationOutcome::Success)
+            m_storage_jar = TRY(StorageJar::create(*m_database));
+        else
+            m_storage_jar = StorageJar::create();
+
+        if (TRY(HistoryStore::migrate_schema(*m_history_database)) == Database::MigrationOutcome::Success) {
+            m_history_store = TRY(HistoryStore::create(*m_history_database));
+        } else {
+            dbgln("History database was created by a newer Ladybird version; history will not be persisted this session");
+            m_history_store = HistoryStore::create();
+        }
     } else {
         dbgln_if(WEBVIEW_HISTORY_DEBUG, "[History] SQL history is disabled, disabling browsing history");
 
@@ -1125,20 +1213,74 @@ void Application::process_did_exit(Process&& process, Optional<int> exit_status)
     }
 }
 
-ErrorOr<LexicalPath> Application::path_for_downloaded_file(StringView file) const
+static bool download_path_is_available(LexicalPath const& path)
 {
-    if (browser_options().headless_mode.has_value()) {
-        auto downloads_directory = Core::StandardPaths::downloads_directory();
+    if (FileSystem::exists(path.string()))
+        return false;
 
-        if (!FileSystem::is_directory(downloads_directory)) {
-            dbgln("Unable to ask user for download folder in headless mode, please ensure {} is a directory or use the XDG_DOWNLOAD_DIR environment variable to set a new download directory", downloads_directory);
-            return Error::from_errno(ENOENT);
-        }
-
-        return LexicalPath::join(downloads_directory, file);
+    for (auto const& download : Application::the().file_downloader().downloads()) {
+        if (download.status == FileDownloader::DownloadStatus::InProgress && download.destination.string() == path.string())
+            return false;
     }
 
-    auto download_path = ask_user_for_download_path(file);
+    return true;
+}
+
+static LexicalPath unique_download_path(ByteString const& downloads_directory, ByteString const& file)
+{
+    auto destination = LexicalPath::join(downloads_directory, file.view());
+    if (download_path_is_available(destination))
+        return destination;
+
+    auto lexical_file = LexicalPath { file };
+    auto title = lexical_file.title();
+    auto extension = lexical_file.extension();
+    for (u64 index = 1;; ++index) {
+        auto candidate_filename = extension.is_empty()
+            ? ByteString::formatted("{} ({})", title, index)
+            : ByteString::formatted("{} ({}).{}", title, index, extension);
+        auto candidate = LexicalPath::join(downloads_directory, candidate_filename.view());
+        if (download_path_is_available(candidate))
+            return candidate;
+    }
+}
+
+static ByteString sanitize_suggested_download_filename(ByteString filename)
+{
+    filename = LexicalPath::basename(move(filename));
+
+    StringBuilder builder;
+    for (auto byte : filename.bytes()) {
+        if (byte == '\0' || byte == '/' || byte == '\\')
+            builder.append('_');
+        else
+            builder.append(static_cast<char>(byte));
+    }
+
+    auto sanitized = builder.to_byte_string();
+    if (sanitized.is_empty() || sanitized == "."sv || sanitized == ".."sv)
+        return "download";
+    return sanitized;
+}
+
+ErrorOr<LexicalPath> Application::default_path_for_downloaded_file(ByteString const& file) const
+{
+    auto downloads_directory = Core::StandardPaths::downloads_directory();
+
+    if (!FileSystem::is_directory(downloads_directory)) {
+        dbgln("Unable to find download folder, please ensure {} is a directory or use the XDG_DOWNLOAD_DIR environment variable to set a new download directory", downloads_directory);
+        return Error::from_errno(ENOENT);
+    }
+
+    return unique_download_path(downloads_directory, sanitize_suggested_download_filename(file));
+}
+
+ErrorOr<LexicalPath> Application::path_for_downloaded_file(ByteString const& file) const
+{
+    if (browser_options().headless_mode.has_value())
+        return default_path_for_downloaded_file(file);
+
+    auto download_path = ask_user_for_download_path(sanitize_suggested_download_filename(file));
     if (!download_path.has_value())
         return Error::from_errno(ECANCELED);
 
@@ -1153,6 +1295,31 @@ void Application::display_download_confirmation_dialog(StringView download_name,
 void Application::display_error_dialog(StringView error_message) const
 {
     warnln("{}", error_message);
+}
+
+static ErrorOr<String> download_path_for_frontend_action(LexicalPath const& path)
+{
+    return String::from_utf8(path.string().view());
+}
+
+ErrorOr<String> Application::download_file_path_for_frontend_action(FileDownloader::Download const& download) const
+{
+    return download_path_for_frontend_action(download.destination);
+}
+
+ErrorOr<String> Application::download_directory_path_for_frontend_action(FileDownloader::Download const& download) const
+{
+    return download_path_for_frontend_action(LexicalPath { download.destination.dirname() });
+}
+
+void Application::open_download(FileDownloader::Download const& download) const
+{
+    outln("Open downloaded file: {}", download.destination);
+}
+
+void Application::show_download_in_folder(FileDownloader::Download const& download) const
+{
+    outln("Show downloaded file in folder: {}", download.destination);
 }
 
 bool Application::supports_clipboard_type(ClipboardType type) const
@@ -1307,6 +1474,10 @@ void Application::initialize_actions()
 
     m_open_about_page_action = Action::create("About Ladybird"sv, ActionID::OpenAboutPage, [this]() {
         open_url_in_new_tab(URL::about_version(), Web::HTML::ActivateTab::Yes);
+    });
+    m_open_downloads_page_action = Action::create("Downloads"sv, ActionID::ViewDownloads, [this]() {
+        if (!activate_tab_with_url(URL::about_downloads()))
+            open_url_in_new_tab(URL::about_downloads(), Web::HTML::ActivateTab::Yes);
     });
     m_open_settings_page_action = Action::create("Settings"sv, ActionID::OpenSettingsPage, [this]() {
         open_url_in_new_tab(URL::about_settings(), Web::HTML::ActivateTab::Yes);
@@ -1513,7 +1684,16 @@ void Application::initialize_actions()
 
     m_history_menu = Menu::create("History"sv);
     m_history_menu->add_action(Action::create("View History"sv, ActionID::ViewHistory, [this]() {
-        open_url_in_new_tab(URL::about_history(), Web::HTML::ActivateTab::Yes);
+        if (!activate_tab_with_url(URL::about_history()))
+            open_url_in_new_tab(URL::about_history(), Web::HTML::ActivateTab::Yes);
+    }));
+    m_history_menu->add_separator();
+    m_history_menu->add_action(Action::create("Clear Browsing Data"sv, ActionID::ClearBrowsingData, [this]() {
+        auto url = URL::about_settings();
+        url.set_fragment("clearBrowsingData"_string);
+
+        if (!activate_tab_with_url(url))
+            open_url_in_new_tab(url, Web::HTML::ActivateTab::Yes);
     }));
 
     m_inspect_menu = Menu::create("Inspect"sv);
@@ -1541,6 +1721,7 @@ void Application::initialize_actions()
     m_debug_menu->add_action(Action::create("Dump Layout Tree"sv, ActionID::DumpLayoutTree, debug_request("dump-layout-tree"sv)));
     m_debug_menu->add_action(Action::create("Dump Paint Tree"sv, ActionID::DumpPaintTree, debug_request("dump-paint-tree"sv)));
     m_debug_menu->add_action(Action::create("Dump Stacking Context Tree"sv, ActionID::DumpStackingContextTree, debug_request("dump-stacking-context-tree"sv)));
+    m_debug_menu->add_action(Action::create("Dump Site Isolation Process Tree"sv, ActionID::DumpSiteIsolationProcessTree, debug_request("dump-site-isolation-process-tree"sv)));
     m_debug_menu->add_action(Action::create("Dump Display List"sv, ActionID::DumpDisplayList, debug_request("dump-display-list"sv)));
     m_debug_menu->add_action(Action::create("Dump Style Sheets"sv, ActionID::DumpStyleSheets, debug_request("dump-style-sheets"sv)));
     m_debug_menu->add_action(Action::create("Dump All Resolved Styles"sv, ActionID::DumpStyles, debug_request("dump-all-resolved-styles"sv)));
@@ -1671,6 +1852,8 @@ void Application::create_bookmark_menu_items(Optional<MenuData> data)
                 auto action = Action::create(bookmark.title.value_or({}), ActionID::BookmarkItem, [this, url = bookmark.url]() {
                     if (auto view = active_web_view(); view.has_value())
                         view->load(url);
+                    else
+                        open_url_in_new_tab(url, Web::HTML::ActivateTab::Yes);
                 });
 
                 action->set_base64_png_icon(bookmark.favicon_base64_png);
@@ -1788,7 +1971,7 @@ Vector<DevTools::CSSProperty> Application::css_property_list() const
         auto property_id = static_cast<Web::CSS::PropertyID>(i);
 
         DevTools::CSSProperty property;
-        property.name = Web::CSS::string_from_property_id(property_id).to_string();
+        property.name = Web::CSS::string_from_property_id(property_id).to_utf16_string().to_utf8_but_should_be_ported_to_utf16();
         property.is_inherited = Web::CSS::is_inherited_property(property_id);
         property_list.append(move(property));
     }
@@ -1818,7 +2001,7 @@ void Application::navigate_tab(DevTools::TabDescription const& description, Stri
 void Application::traverse_the_history_by_delta(DevTools::TabDescription const& description, int delta) const
 {
     if (auto view = ViewImplementation::find_view_by_id(description.id); view.has_value())
-        view->traverse_the_history_by_delta(delta);
+        (void)view->traverse_the_history_by_delta(delta);
 }
 
 Vector<HTTP::Cookie::Cookie> Application::cookies(DevTools::TabDescription const& description) const
@@ -1962,6 +2145,74 @@ void Application::remove_storage_change_listener(DevTools::TabDescription const&
 {
     if (auto view = ViewImplementation::find_view_by_id(description.id); view.has_value())
         view->remove_storage_change_listener(listener_id);
+}
+
+void Application::inspect_indexed_database_storage(DevTools::TabDescription const& description, OnIndexedDBInspectionComplete on_complete) const
+{
+    auto view = ViewImplementation::find_view_by_id(description.id);
+    if (!view.has_value()) {
+        on_complete(Error::from_string_literal("Unable to locate tab"));
+        return;
+    }
+
+    view->inspect_indexed_database_storage(move(on_complete));
+}
+
+void Application::inspect_indexed_database_objects(DevTools::TabDescription const& description, String const& host, Optional<JsonArray> names, JsonObject options, OnIndexedDBInspectionComplete on_complete) const
+{
+    auto view = ViewImplementation::find_view_by_id(description.id);
+    if (!view.has_value()) {
+        on_complete(Error::from_string_literal("Unable to locate tab"));
+        return;
+    }
+
+    view->inspect_indexed_database_objects(host, move(names), move(options), move(on_complete));
+}
+
+void Application::delete_indexed_database(DevTools::TabDescription const& description, String const& host, String const& name, OnIndexedDBInspectionComplete on_complete) const
+{
+    auto view = ViewImplementation::find_view_by_id(description.id);
+    if (!view.has_value()) {
+        on_complete(Error::from_string_literal("Unable to locate tab"));
+        return;
+    }
+
+    view->delete_indexed_database(host, name, move(on_complete));
+}
+
+void Application::clear_indexed_database_object_store(DevTools::TabDescription const& description, String const& host, String const& name, OnIndexedDBInspectionComplete on_complete) const
+{
+    auto view = ViewImplementation::find_view_by_id(description.id);
+    if (!view.has_value()) {
+        on_complete(Error::from_string_literal("Unable to locate tab"));
+        return;
+    }
+
+    view->clear_indexed_database_object_store(host, name, move(on_complete));
+}
+
+void Application::delete_indexed_database_record(DevTools::TabDescription const& description, String const& host, String const& name, OnIndexedDBInspectionComplete on_complete) const
+{
+    auto view = ViewImplementation::find_view_by_id(description.id);
+    if (!view.has_value()) {
+        on_complete(Error::from_string_literal("Unable to locate tab"));
+        return;
+    }
+
+    view->delete_indexed_database_record(host, name, move(on_complete));
+}
+
+u64 Application::add_indexed_database_change_listener(DevTools::TabDescription const& description, OnIndexedDatabaseChange on_indexed_database_change) const
+{
+    if (auto view = ViewImplementation::find_view_by_id(description.id); view.has_value())
+        return view->add_indexed_database_change_listener(move(on_indexed_database_change));
+    return 0;
+}
+
+void Application::remove_indexed_database_change_listener(DevTools::TabDescription const& description, u64 listener_id) const
+{
+    if (auto view = ViewImplementation::find_view_by_id(description.id); view.has_value())
+        view->remove_indexed_database_change_listener(listener_id);
 }
 
 void Application::inspect_tab(DevTools::TabDescription const& description, OnTabInspectionComplete on_complete) const
@@ -2310,6 +2561,68 @@ void Application::stop_listening_for_style_sheet_sources(DevTools::TabDescriptio
         return;
 
     view->on_received_style_sheet_source = nullptr;
+}
+
+void Application::retrieve_sources(DevTools::TabDescription const& description, OnSourcesReceived on_complete) const
+{
+    auto view = ViewImplementation::find_view_by_id(description.id);
+    if (!view.has_value()) {
+        on_complete(Error::from_string_literal("Unable to locate tab"));
+        return;
+    }
+
+    view->retrieve_devtools_sources(move(on_complete));
+}
+
+void Application::retrieve_source(DevTools::TabDescription const& description, Web::HTML::ScriptRegistry::Identifier source_id, OnSourceReceived on_complete) const
+{
+    auto view = ViewImplementation::find_view_by_id(description.id);
+    if (!view.has_value()) {
+        on_complete(Error::from_string_literal("Unable to locate tab"));
+        return;
+    }
+
+    view->on_received_devtools_source.set(source_id, [on_complete = move(on_complete)](Optional<Web::HTML::ScriptRegistry::Content> source) {
+        if (!source.has_value()) {
+            on_complete(Error::from_string_literal("Unable to locate source"));
+            return;
+        }
+
+        on_complete(source.release_value());
+    });
+
+    view->request_devtools_source(source_id);
+}
+
+void Application::listen_for_sources(DevTools::TabDescription const& description, OnSourceAvailable on_source_available) const
+{
+    auto view = ViewImplementation::find_view_by_id(description.id);
+    if (!view.has_value())
+        return;
+
+    view->on_devtools_source_available = [on_source_available = move(on_source_available)](Web::HTML::ScriptRegistry::Description source) {
+        on_source_available(move(source));
+    };
+}
+
+void Application::stop_listening_for_sources(DevTools::TabDescription const& description) const
+{
+    auto view = ViewImplementation::find_view_by_id(description.id);
+    if (!view.has_value())
+        return;
+
+    view->on_devtools_source_available = nullptr;
+}
+
+void Application::resolve_dom_node_url(DevTools::TabDescription const& description, Optional<Web::UniqueNodeID> node_id, String const& url, OnResolvedURLReceived on_complete) const
+{
+    auto view = ViewImplementation::find_view_by_id(description.id);
+    if (!view.has_value()) {
+        on_complete(url);
+        return;
+    }
+
+    view->resolve_dom_node_url(node_id, url, move(on_complete));
 }
 
 void Application::evaluate_javascript(DevTools::TabDescription const& description, String const& script, OnScriptEvaluationComplete on_complete) const

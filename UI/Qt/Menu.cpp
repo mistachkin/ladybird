@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <AK/Base64.h>
+#include <LibWebView/Application.h>
 #include <UI/Qt/Icon.h>
 #include <UI/Qt/Menu.h>
 #include <UI/Qt/StringUtils.h>
@@ -66,7 +66,10 @@ public:
         switch (action.id()) {
         case WebView::ActionID::ToggleVerticalTabsExpanded:
             if (auto* parent = as_if<QWidget>(m_action->parent())) {
-                auto icon = action.engaged() ? ChromeIcon::VerticalTabBarCollapse : ChromeIcon::VerticalTabBarExpand;
+                auto const& tab_settings = WebView::Application::settings().tab_settings();
+                auto icon = tab_settings.vertical_tabs_position == WebView::VerticalTabsPosition::Right
+                    ? (action.engaged() ? ChromeIcon::VerticalTabBarCollapseRight : ChromeIcon::VerticalTabBarExpandRight)
+                    : (action.engaged() ? ChromeIcon::VerticalTabBarCollapse : ChromeIcon::VerticalTabBarExpand);
                 m_action->setIcon(create_chrome_icon(icon, parent->palette()));
             }
             break;
@@ -141,45 +144,30 @@ static void add_properties(QObject& object, T& menu_or_action)
         object.setProperty(key.to_byte_string().characters(), qstring_from_ak_string(value));
 }
 
-static QIcon icon_from_base64_png(StringView favicon_base64_png)
+static void initialize_native_control(WebView::Action& action, QAction& qaction, QPalette const& palette, IncludeActionIcon include_action_icon)
 {
     static constexpr int const MENU_ICON_SIZE = 16;
 
-    auto decoded = decode_base64(favicon_base64_png);
-    if (decoded.is_error())
-        return {};
-
-    QPixmap pixmap;
-    if (!pixmap.loadFromData(decoded.value().data(), static_cast<uint>(decoded.value().size()), "PNG"))
-        return {};
-
-    QIcon icon;
-    for (auto device_pixel_ratio : ICON_DEVICE_PIXEL_RATIOS) {
-        auto size = MENU_ICON_SIZE * device_pixel_ratio;
-        auto scaled_pixmap = pixmap.scaled(size, size, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-        scaled_pixmap.setDevicePixelRatio(device_pixel_ratio);
-        icon.addPixmap(scaled_pixmap);
-    }
-    return icon;
-}
-
-static void initialize_native_control(WebView::Action& action, QAction& qaction, QPalette const& palette, IncludeActionIcon include_action_icon)
-{
     switch (action.id()) {
     case WebView::ActionID::NavigateBack:
         if (include_action_icon == IncludeActionIcon::Yes)
             qaction.setIcon(create_chrome_icon(ChromeIcon::Back, palette));
-        qaction.setShortcut(QKeySequence::StandardKey::Back);
+        qaction.setShortcuts(QKeySequence::keyBindings(QKeySequence::StandardKey::Back));
         break;
     case WebView::ActionID::NavigateForward:
         if (include_action_icon == IncludeActionIcon::Yes)
             qaction.setIcon(create_chrome_icon(ChromeIcon::Forward, palette));
-        qaction.setShortcut(QKeySequence::StandardKey::Forward);
+        qaction.setShortcuts(QKeySequence::keyBindings(QKeySequence::StandardKey::Forward));
         break;
     case WebView::ActionID::Reload:
         if (include_action_icon == IncludeActionIcon::Yes)
             qaction.setIcon(create_chrome_icon(ChromeIcon::Reload, palette));
         qaction.setShortcuts({ QKeySequence(Qt::CTRL | Qt::Key_R), QKeySequence(Qt::Key_F5) });
+        break;
+    case WebView::ActionID::ViewDownloads:
+        if (include_action_icon == IncludeActionIcon::Yes)
+            qaction.setIcon(create_chrome_icon(ChromeIcon::Download, palette));
+        qaction.setShortcut(QKeySequence(Qt::CTRL | Qt::Key_J));
         break;
 
     case WebView::ActionID::CopySelection:
@@ -209,11 +197,25 @@ static void initialize_native_control(WebView::Action& action, QAction& qaction,
         break;
     case WebView::ActionID::BookmarkItem:
         if (auto icon = action.base64_png_icon(); icon.has_value())
-            qaction.setIcon(icon_from_base64_png(*icon));
+            qaction.setIcon(icon_from_base64_png(*icon, MENU_ICON_SIZE));
         else
             qaction.setIcon(create_chrome_icon(ChromeIcon::Globe, palette));
         break;
 
+    case WebView::ActionID::ViewHistory:
+#if defined(AK_OS_MACOS)
+        qaction.setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Y));
+#else
+        qaction.setShortcut(QKeySequence(Qt::CTRL | Qt::Key_H));
+#endif
+        break;
+    case WebView::ActionID::ClearBrowsingData:
+#if defined(AK_OS_MACOS)
+        qaction.setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Backspace));
+#else
+        qaction.setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Delete));
+#endif
+        break;
     case WebView::ActionID::OpenProcessesPage:
         qaction.setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_M));
         break;

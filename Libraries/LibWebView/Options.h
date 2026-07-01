@@ -12,6 +12,7 @@
 #include <AK/Vector.h>
 #include <LibURL/URL.h>
 #include <LibWebView/ProcessType.h>
+#include <LibWebView/SiteIsolation.h>
 
 namespace WebView {
 
@@ -74,7 +75,7 @@ enum class EnableContentBlocker {
     Yes,
 };
 
-enum class EnableSandbox {
+enum class DisableSandbox {
     No,
     Yes,
 };
@@ -98,7 +99,7 @@ struct BrowserOptions {
     Optional<DNSSettings> dns_settings {};
     Optional<u16> devtools_port;
     EnableContentBlocker enable_content_blocker { EnableContentBlocker::Yes };
-    EnableSandbox enable_sandbox { EnableSandbox::No };
+    DisableSandbox disable_sandbox { DisableSandbox::No };
     Vector<ByteString> content_blocker_list_paths {};
 };
 
@@ -131,11 +132,6 @@ enum class EnableIDLTracing {
 };
 
 enum class EnableMemoryHTTPCache {
-    No,
-    Yes,
-};
-
-enum class DisableSiteIsolation {
     No,
     Yes,
 };
@@ -180,12 +176,17 @@ enum class FileSchemeUrlsHaveTupleOrigins {
     Yes,
 };
 
+enum class ReportSessionHistoryUpdatesInTestMode {
+    No,
+    Yes,
+};
+
 struct WebContentOptions {
     Optional<ByteString> config_path {};
     Optional<StringView> user_agent_preset {};
     IsTestMode is_test_mode { IsTestMode::No };
     LogAllJSExceptions log_all_js_exceptions { LogAllJSExceptions::No };
-    DisableSiteIsolation disable_site_isolation { DisableSiteIsolation::No };
+    SiteIsolationMode site_isolation_mode { SiteIsolationMode::TopLevel };
     EnableIDLTracing enable_idl_tracing { EnableIDLTracing::No };
     EnableMemoryHTTPCache enable_http_memory_cache { EnableMemoryHTTPCache::No };
     ExposeExperimentalInterfaces expose_experimental_interfaces { ExposeExperimentalInterfaces::No };
@@ -198,6 +199,7 @@ struct WebContentOptions {
     PaintViewportScrollbars paint_viewport_scrollbars { PaintViewportScrollbars::Yes };
     EnableAsyncScrolling enable_async_scrolling { EnableAsyncScrolling::Yes };
     FileSchemeUrlsHaveTupleOrigins file_scheme_urls_have_tuple_origins { FileSchemeUrlsHaveTupleOrigins::No };
+    ReportSessionHistoryUpdatesInTestMode report_session_history_updates_in_test_mode { ReportSessionHistoryUpdatesInTestMode::No };
     Optional<StringView> default_time_zone {};
     Optional<u64> style_invalidation_counter_dump_interval {};
 };

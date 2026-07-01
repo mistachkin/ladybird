@@ -27,16 +27,20 @@ class TextDecoder
     GC_DECLARE_ALLOCATOR(TextDecoder);
 
 public:
-    static WebIDL::ExceptionOr<GC::Ref<TextDecoder>> construct_impl(JS::Realm&, FlyString encoding, Optional<Bindings::TextDecoderOptions> const& options = {});
+    static WebIDL::ExceptionOr<GC::Ref<TextDecoder>> construct_impl(JS::Realm&, StringView label, Bindings::TextDecoderOptions const&);
 
     virtual ~TextDecoder() override;
 
-    WebIDL::ExceptionOr<String> decode(Optional<WebIDL::BufferSourceVariant>, Optional<Bindings::TextDecodeOptions> const& options = {}) const;
+    WebIDL::ExceptionOr<String> decode(Optional<WebIDL::BufferSourceVariant>, Bindings::TextDecodeOptions const&);
 
 private:
-    TextDecoder(JS::Realm&, TextCodec::Decoder&, FlyString encoding, ErrorMode error_mode, bool ignore_bom);
+    TextDecoder(JS::Realm&, FlyString encoding, TextCodec::ErrorMode error_mode, bool ignore_bom);
 
     virtual void initialize(JS::Realm&) override;
+
+    // https://encoding.spec.whatwg.org/#textdecoder-do-not-flush-flag
+    // A TextDecoder object has an associated do not flush, which is a boolean, initially false.
+    bool m_do_not_flush { false };
 };
 
 }

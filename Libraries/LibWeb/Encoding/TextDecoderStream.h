@@ -6,7 +6,7 @@
 
 #pragma once
 
-#include <AK/ByteBuffer.h>
+#include <AK/OwnPtr.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/Encoding/TextDecoder.h>
 #include <LibWeb/Encoding/TextDecoderCommon.h>
@@ -27,7 +27,7 @@ public:
     virtual ~TextDecoderStream() override;
 
 private:
-    TextDecoderStream(JS::Realm&, GC::Ref<Streams::TransformStream>, TextCodec::Decoder&, FlyString encoding, ErrorMode, bool ignore_bom);
+    TextDecoderStream(JS::Realm&, GC::Ref<Streams::TransformStream>, FlyString encoding, TextCodec::ErrorMode, bool ignore_bom);
 
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Cell::Visitor&) override;
@@ -36,11 +36,6 @@ private:
     WebIDL::ExceptionOr<void> flush_and_enqueue();
 
     WebIDL::ExceptionOr<void> enqueue_decoded_output(String const&);
-
-    // https://encoding.spec.whatwg.org/#textdecodercommon-i-o-queue
-    // NB: We accumulate input bytes that have been pushed to the I/O queue but not yet decoded, so that a multi-byte
-    //     sequence which is split across chunks can be reassembled.
-    ByteBuffer m_io_queue;
 };
 
 }

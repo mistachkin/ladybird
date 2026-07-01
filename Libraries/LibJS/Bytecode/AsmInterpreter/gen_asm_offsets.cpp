@@ -155,7 +155,7 @@ int main()
     EMIT_OFFSET(EXECUTION_CONTEXT_ARGUMENT_COUNT, ExecutionContext, argument_count);
     EMIT_SIZEOF(SIZEOF_EXECUTION_CONTEXT, ExecutionContext);
     outln("const ALIGNOF_EXECUTION_CONTEXT = {}", alignof(ExecutionContext));
-    outln("const EXECUTION_CONTEXT_NO_YIELD_CONTINUATION = {}", ExecutionContext::no_yield_continuation);
+    outln("const EXECUTION_CONTEXT_NO_YIELD_CONTINUATION = {}", static_cast<u32>(ExecutionContext::no_yield_continuation));
     outln("const SIZEOF_SCRIPT_OR_MODULE = {}", sizeof(ScriptOrModule));
 
     // InterpreterStack layout
@@ -293,10 +293,10 @@ int main()
     EMIT_OFFSET(SHARED_FUNCTION_INSTANCE_DATA_FUNCTION_ENVIRONMENT_NEEDED, SharedFunctionInstanceData, m_function_environment_needed);
     EMIT_OFFSET(SHARED_FUNCTION_INSTANCE_DATA_USES_THIS, SharedFunctionInstanceData, m_uses_this);
     EMIT_OFFSET(SHARED_FUNCTION_INSTANCE_DATA_CAN_INLINE_CALL, SharedFunctionInstanceData, m_can_inline_call);
-    outln("const SHARED_FUNCTION_INSTANCE_DATA_ASM_CALL_METADATA_CAN_INLINE_CALL = {}", SharedFunctionInstanceData::asm_call_metadata_can_inline_call);
-    outln("const SHARED_FUNCTION_INSTANCE_DATA_ASM_CALL_METADATA_NEEDS_ENVIRONMENT_OR_THIS_VALUE_RESOLUTION = {}", SharedFunctionInstanceData::asm_call_metadata_needs_environment_or_this_value_resolution);
-    outln("const SHARED_FUNCTION_INSTANCE_DATA_ASM_CALL_METADATA_USES_THIS = {}", SharedFunctionInstanceData::asm_call_metadata_uses_this);
-    outln("const SHARED_FUNCTION_INSTANCE_DATA_ASM_CALL_METADATA_STRICT = {}", SharedFunctionInstanceData::asm_call_metadata_strict);
+    outln("const SHARED_FUNCTION_INSTANCE_DATA_ASM_CALL_METADATA_CAN_INLINE_CALL = {}", static_cast<u64>(SharedFunctionInstanceData::asm_call_metadata_can_inline_call));
+    outln("const SHARED_FUNCTION_INSTANCE_DATA_ASM_CALL_METADATA_NEEDS_ENVIRONMENT_OR_THIS_VALUE_RESOLUTION = {}", static_cast<u64>(SharedFunctionInstanceData::asm_call_metadata_needs_environment_or_this_value_resolution));
+    outln("const SHARED_FUNCTION_INSTANCE_DATA_ASM_CALL_METADATA_USES_THIS = {}", static_cast<u64>(SharedFunctionInstanceData::asm_call_metadata_uses_this));
+    outln("const SHARED_FUNCTION_INSTANCE_DATA_ASM_CALL_METADATA_STRICT = {}", static_cast<u64>(SharedFunctionInstanceData::asm_call_metadata_strict));
 
     // GlobalEnvironment layout
     outln("\n# GlobalEnvironment layout");
@@ -327,6 +327,10 @@ int main()
     EMIT_OFFSET(ENVIRONMENT_SCREWED_BY_EVAL, Environment, m_permanently_screwed_by_eval);
     EMIT_OFFSET(ENVIRONMENT_DECLARATIVE, Environment, m_declarative);
     EMIT_OFFSET(ENVIRONMENT_OUTER, Environment, m_outer_environment);
+
+    // PrivateEnvironment layout
+    outln("\n# PrivateEnvironment layout");
+    EMIT_OFFSET(PRIVATE_ENVIRONMENT_OUTER, PrivateEnvironment, m_outer_environment);
 
     // DeclarativeEnvironment binding storage layout
     outln("\n# DeclarativeEnvironment binding storage layout");
@@ -388,6 +392,7 @@ int main()
     outln("const SYMBOL_TAG = 0x{:X}", static_cast<u64>(SYMBOL_TAG));
     outln("const BIGINT_TAG = 0x{:X}", static_cast<u64>(BIGINT_TAG));
     outln("const ACCESSOR_TAG = 0x{:X}", static_cast<u64>(ACCESSOR_TAG));
+    outln("const IS_CELL_PATTERN = 0x{:X}", static_cast<u64>(GC::IS_CELL_PATTERN));
     outln("const INT32_TAG = 0x{:X}", static_cast<u64>(INT32_TAG));
     outln("const BOOLEAN_TAG = 0x{:X}", static_cast<u64>(BOOLEAN_TAG));
     outln("const UNDEFINED_TAG = 0x{:X}", static_cast<u64>(UNDEFINED_TAG));
@@ -406,7 +411,7 @@ int main()
     outln("const CANON_NAN_BITS = 0x{:X}", static_cast<u64>(GC::CANON_NAN_BITS));
     outln("const DOUBLE_ONE = 0x{:X}", bit_cast<u64>(1.0));
     outln("const NEGATIVE_ZERO = 0x{:X}", static_cast<u64>(NEGATIVE_ZERO_BITS));
-    outln("const CELL_TAG_SHIFTED = 0x{:X}", static_cast<u64>(GC::SHIFTED_IS_CELL_PATTERN));
+    outln("const SHIFTED_IS_CELL_PATTERN = 0x{:X}", static_cast<u64>(GC::SHIFTED_IS_CELL_PATTERN));
 
     outln("const ACCUMULATOR_REG_OFFSET = {}", static_cast<size_t>(Register::accumulator().index()) * sizeof(Value));
     outln("const EXCEPTION_REG_OFFSET = {}", static_cast<size_t>(Register::exception().index()) * sizeof(Value));

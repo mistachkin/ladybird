@@ -7,6 +7,7 @@
 #pragma once
 
 #include <AK/Optional.h>
+#include <LibGC/Weak.h>
 #include <LibGfx/DecodedImageFrame.h>
 #include <LibWeb/HTML/DecodedImageData.h>
 #include <LibWeb/Page/Page.h>
@@ -24,33 +25,29 @@ public:
     static ErrorOr<GC::Ref<SVGDecodedImageData>> create(JS::Realm&, GC::Ref<Page>, URL::URL const&, ReadonlyBytes encoded_svg);
     virtual ~SVGDecodedImageData() override;
 
-    virtual Optional<Gfx::DecodedImageFrame> frame(size_t frame_index, Gfx::IntSize) const override;
+    virtual Optional<Gfx::DecodedImageFrame> default_frame(Gfx::IntSize = {}) const override;
+    virtual Optional<Gfx::DecodedImageFrame> current_frame(Gfx::IntSize = {}) const override;
 
     virtual Optional<CSSPixels> intrinsic_width() const override;
     virtual Optional<CSSPixels> intrinsic_height() const override;
     virtual Optional<CSSPixelFraction> intrinsic_aspect_ratio() const override;
 
     // FIXME: Support SVG animations. :^)
-    virtual int frame_duration(size_t) const override { return 0; }
-    virtual size_t frame_count() const override { return 1; }
-    virtual size_t loop_count() const override { return 0; }
-    virtual bool is_animated() const override { return false; }
-
     DOM::Document const& svg_document() const { return *m_document; }
 
     virtual void visit_edges(Cell::Visitor& visitor) override;
     virtual size_t external_memory_size() const override;
 
-    virtual Optional<Gfx::IntRect> frame_rect(size_t frame_index) const override;
-    virtual void paint(DisplayListRecordingContext&, size_t frame_index, Gfx::IntRect dst_rect, Gfx::ScalingMode scaling_mode) const override;
+    virtual void paint(DisplayListRecordingContext&, Gfx::IntRect dst_rect, CSS::ImageRendering) const override;
 
 private:
     SVGDecodedImageData(GC::Ref<Page>, GC::Ref<SVGPageClient>, GC::Ref<DOM::Document>, GC::Ref<SVG::SVGSVGElement>);
 
-    RefPtr<Gfx::PaintingSurface> surface(size_t frame_index, Gfx::IntSize) const;
     RefPtr<Gfx::PaintingSurface> render_to_surface(Gfx::IntSize) const;
     Optional<Painting::DisplayListResource> record_display_list(Gfx::IntSize, Painting::DisplayListResourceStorage&) const;
     void prune_cached_display_list_resources() const;
+    void did_request_frame();
+    void invalidate_cached_rendering();
 
     // FIXME: Remove this once everything is using surfaces instead.
     mutable HashMap<Gfx::IntSize, Gfx::DecodedImageFrame> m_cached_rendered_frames;
@@ -68,6 +65,8 @@ private:
 
     GC::Ref<DOM::Document> m_document;
     GC::Ref<SVG::SVGSVGElement> m_root_element;
+
+    mutable bool m_is_recording_display_list { false };
 };
 
 class SVGDecodedImageData::SVGPageClient final : public PageClient {
@@ -84,6 +83,7 @@ public:
 
     GC::Ref<Page> m_host_page;
     GC::Ptr<Page> m_svg_page;
+    GC::Weak<SVGDecodedImageData> m_svg_image_data;
 
     virtual u64 id() const override { VERIFY_NOT_REACHED(); }
     virtual Page& page() override { return *m_svg_page; }
@@ -101,9 +101,8 @@ public:
     virtual void request_file(FileRequest) override { }
     virtual Queue<QueuedInputEvent>& input_event_queue() override { VERIFY_NOT_REACHED(); }
     virtual void report_finished_handling_input_event([[maybe_unused]] u64 page_id, [[maybe_unused]] EventResult event_was_handled) override { }
-    virtual void request_frame() override { }
+    virtual void request_frame() override;
 
-    virtual DisplayListPlayerType display_list_player_type() const override { return m_host_page->client().display_list_player_type(); }
     virtual bool is_headless() const override { return m_host_page->client().is_headless(); }
 
 private:

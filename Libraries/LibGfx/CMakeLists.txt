@@ -4,6 +4,8 @@ set(SOURCES
     BitmapExport.cpp
     BitmapSequence.cpp
     CMYKBitmap.cpp
+    CanvasCommandList.cpp
+    CanvasCommandPlayer.cpp
     Color.cpp
     ColorConversion.cpp
     ColorSpace.cpp
@@ -21,14 +23,15 @@ set(SOURCES
     Font/WOFF2/Loader.cpp
     FontCascadeList.cpp
     GradientPainting.cpp
+    Gradients.cpp
     Matrix4x4.cpp
+    DecodedImageFrame.cpp
     ImageFormats/BMPWriter.cpp
     ImageFormats/JPEGWriter.cpp
     ImageFormats/PNGWriter.cpp
     ImageFormats/WebPSharedLossless.cpp
     ImageFormats/WebPWriter.cpp
     ImageFormats/WebPWriterLossless.cpp
-    DecodedImageFrameSkiaImageCache.cpp
     PaintStyle.cpp
     Painter.cpp
     PainterSkia.cpp
@@ -54,6 +57,10 @@ set(SOURCES
 
 if (APPLE)
     list(APPEND SOURCES MetalContext.mm)
+endif()
+
+if (HAS_DIRECTX)
+    list(APPEND SOURCES Direct3DContext.cpp)
 endif()
 
 if (HAS_VULKAN)
@@ -90,6 +97,10 @@ endif()
 if (APPLE)
     target_link_libraries(LibCore PUBLIC "-framework Metal")
     target_link_libraries(LibCore PUBLIC "-framework Accelerate")
+endif()
+
+if (HAS_DIRECTX)
+    target_link_libraries(LibGfx PRIVATE d3d12 dxgi d3dcompiler)
 endif()
 
 if (HAS_VULKAN)

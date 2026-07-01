@@ -6,6 +6,7 @@
 
 #include <AK/Checked.h>
 #include <AK/NumericLimits.h>
+#include <AK/ScopeGuard.h>
 #include <LibGfx/Bitmap.h>
 #include <LibGfx/DecodedImageFrame.h>
 #include <LibGfx/PaintingSurface.h>
@@ -16,10 +17,10 @@
 #include <LibWeb/Fetch/Infrastructure/HTTP/Responses.h>
 #include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/DocumentState.h>
-#include <LibWeb/HTML/Navigable.h>
+#include <LibWeb/HTML/LocalNavigable.h>
+#include <LibWeb/HTML/LocalTraversableNavigable.h>
 #include <LibWeb/HTML/NavigationParams.h>
 #include <LibWeb/HTML/Parser/HTMLParser.h>
-#include <LibWeb/HTML/TraversableNavigable.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/HTML/WindowProxy.h>
 #include <LibWeb/Page/Page.h>
@@ -43,8 +44,8 @@ ErrorOr<GC::Ref<SVGDecodedImageData>> SVGDecodedImageData::create(JS::Realm& rea
     auto page = Page::create(Bindings::main_thread_vm(), *page_client);
     page->set_is_scripting_enabled(false);
     page_client->m_svg_page = page.ptr();
-    page->set_top_level_traversable(Web::HTML::TraversableNavigable::create_a_new_top_level_traversable(*page, nullptr, {}));
-    GC::Ref<HTML::Navigable> navigable = page->top_level_traversable();
+    page->set_top_level_traversable(Web::HTML::LocalTraversableNavigable::create_a_new_top_level_traversable(*page, nullptr, {}));
+    GC::Ref<HTML::LocalNavigable> navigable = page->top_level_traversable();
     auto response = Fetch::Infrastructure::Response::create(navigable->vm());
     response->url_list().append(url);
     auto origin = URL::Origin::create_opaque();
@@ -64,7 +65,7 @@ ErrorOr<GC::Ref<SVGDecodedImageData>> SVGDecodedImageData::create(JS::Realm& rea
         OptionalNone {},
         HTML::UserNavigationInvolvement::None);
 
-    // FIXME: Use Navigable::navigate() instead of manually replacing the navigable's document.
+    // FIXME: Use LocalNavigable::navigate() instead of manually replacing the navigable's document.
     auto document = MUST(DOM::Document::create_and_initialize(DOM::Document::Type::XML, "image/svg+xml"_string, navigation_params));
     navigable->set_ongoing_navigation({});
     navigable->active_document()->destroy();
@@ -88,7 +89,9 @@ ErrorOr<GC::Ref<SVGDecodedImageData>> SVGDecodedImageData::create(JS::Realm& rea
         dbgln("SVGDecodedImageData: Invalid SVG input (no SVGSVGElement found)");
         return Error::from_string_literal("SVGDecodedImageData: Invalid SVG input");
     }
-    return realm.create<SVGDecodedImageData>(page, page_client, document, *svg_root);
+    auto svg_image_data = realm.create<SVGDecodedImageData>(page, page_client, document, *svg_root);
+    page_client->m_svg_image_data = svg_image_data;
+    return svg_image_data;
 }
 
 SVGDecodedImageData::SVGDecodedImageData(GC::Ref<Page> page, GC::Ref<SVGPageClient> page_client, GC::Ref<DOM::Document> document, GC::Ref<SVG::SVGSVGElement> root_element)
@@ -175,6 +178,11 @@ Optional<Painting::DisplayListResource> SVGDecodedImageData::record_display_list
         prune_cached_display_list_resources();
     }
 
+    m_is_recording_display_list = true;
+    ScopeGuard clear_recording_flag = [&] {
+        m_is_recording_display_list = false;
+    };
+
     m_document->navigable()->set_viewport_size(size.to_type<CSSPixels>());
     m_document->update_layout(DOM::UpdateLayoutReason::SVGDecodedImageDataRender);
     auto display_list = m_document->record_display_list({}, resource_storage);
@@ -213,23 +221,15 @@ RefPtr<Gfx::PaintingSurface> SVGDecodedImageData::render_to_surface(Gfx::IntSize
     if (!display_list.has_value())
         return nullptr;
 
-    switch (m_page_client->display_list_player_type()) {
-    case DisplayListPlayerType::SkiaGPUIfAvailable:
-    case DisplayListPlayerType::SkiaCPU: {
-        Painting::DisplayListPlayerSkia display_list_player;
-        display_list_player.execute(*display_list->display_list, display_list->visual_context_tree, resource_storage, {}, surface);
-        display_list_player.flush(*surface);
-        break;
-    }
-    default:
-        VERIFY_NOT_REACHED();
-    }
+    Painting::DisplayListPlayerSkia display_list_player;
+    display_list_player.execute(*display_list->display_list, display_list->visual_context_tree, resource_storage, {}, surface);
+    display_list_player.flush(*surface);
 
     m_cached_rendered_surfaces.set(size, *surface);
     return surface;
 }
 
-Optional<Gfx::DecodedImageFrame> SVGDecodedImageData::frame(size_t, Gfx::IntSize size) const
+Optional<Gfx::DecodedImageFrame> SVGDecodedImageData::current_frame(Gfx::IntSize size) const
 {
     if (size.is_empty())
         return {};
@@ -245,6 +245,13 @@ Optional<Gfx::DecodedImageFrame> SVGDecodedImageData::frame(size_t, Gfx::IntSize
     auto decoded_frame = Gfx::DecodedImageFrame { *render_to_surface(size)->snapshot_bitmap() };
     m_cached_rendered_frames.set(size, decoded_frame);
     return decoded_frame;
+}
+
+Optional<Gfx::DecodedImageFrame> SVGDecodedImageData::default_frame(Gfx::IntSize size) const
+{
+    // FIXME: Implement this properly once we support animated SVGs, potentially by creating a temporary internal
+    //        document which has animations disabled.
+    return current_frame(size);
 }
 
 Optional<CSSPixels> SVGDecodedImageData::intrinsic_width() const
@@ -301,17 +308,33 @@ void SVGDecodedImageData::SVGPageClient::visit_edges(Visitor& visitor)
     visitor.visit(m_svg_page);
 }
 
-Optional<Gfx::IntRect> SVGDecodedImageData::frame_rect(size_t) const
+void SVGDecodedImageData::SVGPageClient::request_frame()
 {
-    return {};
+    if (auto svg_image_data = m_svg_image_data.ptr())
+        svg_image_data->did_request_frame();
 }
 
-RefPtr<Gfx::PaintingSurface> SVGDecodedImageData::surface(size_t, Gfx::IntSize size) const
+void SVGDecodedImageData::did_request_frame()
 {
-    return render_to_surface(size);
+    // Recording the SVG image can itself schedule a frame request through the
+    // inner document. Ignore those requests so we do not invalidate caches while
+    // populating them.
+    if (m_is_recording_display_list)
+        return;
+
+    invalidate_cached_rendering();
+    notify_clients_did_update();
 }
 
-void SVGDecodedImageData::paint(DisplayListRecordingContext& context, size_t, Gfx::IntRect dst_rect, Gfx::ScalingMode) const
+void SVGDecodedImageData::invalidate_cached_rendering()
+{
+    m_cached_rendered_frames.clear();
+    m_cached_rendered_surfaces.clear();
+    m_cached_display_lists.clear();
+    prune_cached_display_list_resources();
+}
+
+void SVGDecodedImageData::paint(DisplayListRecordingContext& context, Gfx::IntRect dst_rect, CSS::ImageRendering) const
 {
     auto display_list = record_display_list(dst_rect.size(), context.display_list_recorder().resource_storage());
     if (!display_list.has_value())

@@ -17,11 +17,11 @@
 #include <LibWeb/HTML/HTMLImageElement.h>
 #include <LibWeb/HTML/ImageBitmap.h>
 #include <LibWeb/HTML/ImageData.h>
+#include <LibWeb/HTML/LocalTraversableNavigable.h>
 #include <LibWeb/HTML/OffscreenCanvas.h>
 #include <LibWeb/HTML/OffscreenCanvasRenderingContext2D.h>
 #include <LibWeb/HTML/Path2D.h>
 #include <LibWeb/HTML/TextMetrics.h>
-#include <LibWeb/HTML/TraversableNavigable.h>
 #include <LibWeb/Infra/CharacterTypes.h>
 #include <LibWeb/Layout/TextNode.h>
 #include <LibWeb/Painting/Paintable.h>
@@ -142,7 +142,7 @@ WebIDL::ExceptionOr<GC::Ref<ImageData>> OffscreenCanvasRenderingContext2D::creat
     return WebIDL::NotSupportedError::create(realm(), "(STUBBED) OffscreenCanvasRenderingContext2D::create_image_data(ImageData&)"_utf16);
 }
 
-WebIDL::ExceptionOr<GC::Ptr<ImageData>> OffscreenCanvasRenderingContext2D::get_image_data(int, int, int, int, Optional<Bindings::ImageDataSettings> const&) const
+WebIDL::ExceptionOr<GC::Ptr<ImageData>> OffscreenCanvasRenderingContext2D::get_image_data(int, int, int, int, Optional<Bindings::ImageDataSettings> const&)
 {
     return WebIDL::NotSupportedError::create(realm(), "(STUBBED) OffscreenCanvasRenderingContext2D::get_image_data()"_utf16);
 }
@@ -322,9 +322,9 @@ void OffscreenCanvasRenderingContext2D::set_global_composite_operation(String)
     dbgln("(STUBBED) OffscreenCanvasRenderingContext2D::set_global_composite_operation()");
 }
 
-[[nodiscard]] Gfx::Painter* OffscreenCanvasRenderingContext2D::painter()
+[[nodiscard]] Gfx::CanvasCommandList* OffscreenCanvasRenderingContext2D::canvas_command_list()
 {
-    dbgln("(STUBBED) OffscreenCanvasRenderingContext2D::painter()");
+    dbgln("(STUBBED) OffscreenCanvasRenderingContext2D::canvas_command_list()");
     return nullptr;
 }
 

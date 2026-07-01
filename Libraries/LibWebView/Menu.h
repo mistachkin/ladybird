@@ -27,7 +27,9 @@ enum class ActionID {
     NavigateBack,
     NavigateForward,
     Reload,
+    ViewDownloads,
     ViewHistory,
+    ClearBrowsingData,
 
     CopySelection,
     CutSelection,
@@ -96,6 +98,7 @@ enum class ActionID {
     DumpLayoutTree,
     DumpPaintTree,
     DumpStackingContextTree,
+    DumpSiteIsolationProcessTree,
     DumpDisplayList,
     DumpStyleSheets,
     DumpStyles,

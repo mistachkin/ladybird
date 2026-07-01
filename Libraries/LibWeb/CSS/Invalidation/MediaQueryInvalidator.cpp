@@ -44,6 +44,8 @@ static void invalidate_style_after_media_rule_changes(DOM::Node& root, MediaQuer
 
 void evaluate_media_rules_and_invalidate_style(DOM::Document& document)
 {
+    ++document.style_invalidation_counters().media_rule_evaluations;
+
     bool document_media_queries_changed_match_state = false;
     MediaQueryRuleInvalidation document_invalidation;
     document.style_scope().for_each_active_css_style_sheet([&](CSS::CSSStyleSheet& style_sheet) {
@@ -66,12 +68,12 @@ void evaluate_media_rules_and_invalidate_style(DOM::Document& document)
         if (!shadow_root_media_queries_changed_match_state)
             return;
 
-        shadow_root.style_scope().invalidate_rule_cache();
+        shadow_root.style_scope().invalidate_style_cache();
         invalidate_style_after_media_rule_changes(shadow_root, shadow_root_invalidation);
     });
 
     if (document_media_queries_changed_match_state) {
-        document.style_scope().invalidate_rule_cache();
+        document.style_scope().invalidate_style_cache();
         invalidate_style_after_media_rule_changes(document, document_invalidation);
     }
 }

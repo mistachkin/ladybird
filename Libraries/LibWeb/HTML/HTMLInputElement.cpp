@@ -14,6 +14,7 @@
  */
 
 #include <AK/NeverDestroyed.h>
+#include <AK/Utf16StringBuilder.h>
 #include <LibGfx/DecodedImageFrame.h>
 #include <LibJS/Runtime/Date.h>
 #include <LibJS/Runtime/NativeFunction.h>
@@ -178,7 +179,7 @@ RefPtr<Layout::Node> HTMLInputElement::create_layout_node(CSS::ComputedPropertie
     }
 }
 
-void HTMLInputElement::adjust_computed_style(CSS::ComputedProperties& style)
+void HTMLInputElement::adjust_computed_style(CSS::ComputedProperties::Builder& style)
 {
     if (type_state() == TypeAttributeState::Hidden || type_state() == TypeAttributeState::SubmitButton || type_state() == TypeAttributeState::Button || type_state() == TypeAttributeState::ResetButton || type_state() == TypeAttributeState::ImageButton || type_state() == TypeAttributeState::Checkbox || type_state() == TypeAttributeState::RadioButton)
         return;
@@ -231,10 +232,17 @@ void HTMLInputElement::set_checked_binding(bool checked)
 }
 
 // https://html.spec.whatwg.org/multipage/input.html#dom-input-indeterminate
+bool HTMLInputElement::indeterminate() const
+{
+    // The indeterminate getter steps are to return this's indeterminateness.
+    return m_indeterminateness;
+}
+
+// https://html.spec.whatwg.org/multipage/input.html#dom-input-indeterminate
 void HTMLInputElement::set_indeterminate(bool value)
 {
-    // On setting, it must be set to the new value. It has no effect except for changing the appearance of checkbox controls.
-    m_indeterminate = value;
+    // The indeterminate setter steps are to set this's indeterminateness to the given value.
+    m_indeterminateness = value;
 }
 
 // https://html.spec.whatwg.org/multipage/input.html#dom-input-list
@@ -279,22 +287,26 @@ Optional<regex::ECMAScriptRegex> HTMLInputElement::compiled_pattern_regular_expr
         return {};
 
     // 2. Let pattern be the value of the pattern attribute of the element.
-    auto pattern = maybe_pattern.release_value();
+    auto pattern = Utf16String::from_utf8(maybe_pattern.release_value());
 
     // 3. Let regexpCompletion be RegExpCreate(pattern, "v").
     regex::ECMAScriptCompileFlags compile_flags {};
     compile_flags.unicode_sets = true;
-    auto regexp_completion = regex::ECMAScriptRegex::compile(pattern.bytes_as_string_view(), compile_flags);
+    auto regexp_completion = regex::ECMAScriptRegex::compile(pattern.utf16_view(), compile_flags);
 
     // 4. If regexpCompletion is an abrupt completion, then return nothing. The element has no compiled pattern regular expression.
     if (regexp_completion.is_error())
         return {};
 
     // 5. Let anchoredPattern be the string "^(?:", followed by pattern, followed by ")$".
-    auto anchored_pattern = MUST(String::formatted("^(?:{})$", pattern));
+    Utf16StringBuilder anchored_pattern_builder;
+    anchored_pattern_builder.append_ascii("^(?:"sv);
+    anchored_pattern_builder.append(pattern.utf16_view());
+    anchored_pattern_builder.append_ascii(")$"sv);
+    auto anchored_pattern = anchored_pattern_builder.to_string();
 
     // 6. Return ! RegExpCreate(anchoredPattern, "v").
-    auto anchored = regex::ECMAScriptRegex::compile(anchored_pattern.bytes_as_string_view(), compile_flags);
+    auto anchored = regex::ECMAScriptRegex::compile(anchored_pattern.utf16_view(), compile_flags);
     if (anchored.is_error())
         return {};
     return anchored.release_value();
@@ -1395,7 +1407,7 @@ void HTMLInputElement::create_range_input_shadow_tree()
             auto key_value = MUST(vm.argument(0).get(vm, "key"_utf16_fly_string));
             if (!key_value.is_string())
                 return JS::js_undefined();
-            auto key = key_value.as_string().utf8_string();
+            auto key = key_value.as_string().utf16_string_view().to_utf8_but_should_be_ported_to_utf16();
 
             if (key == "ArrowLeft" || key == "ArrowDown")
                 MUST(step_down());
@@ -1838,7 +1850,7 @@ Utf16String HTMLInputElement::value_sanitization_algorithm(Utf16String const& va
         if (!value.contains('\r') && !value.contains('\n'))
             return value;
 
-        StringBuilder builder(StringBuilder::Mode::UTF16);
+        Utf16StringBuilder builder;
 
         for (size_t i = 0; i < value.length_in_code_units(); ++i) {
             auto code_unit = value.code_unit_at(i);
@@ -1846,7 +1858,7 @@ Utf16String HTMLInputElement::value_sanitization_algorithm(Utf16String const& va
                 builder.append_code_unit(code_unit);
         }
 
-        return builder.to_utf16_string();
+        return builder.to_string();
     };
 
     auto strip_newlines_and_trim = [&]() {
@@ -2179,15 +2191,14 @@ WebIDL::ExceptionOr<void> HTMLInputElement::cloned(DOM::Node& copy, bool subtree
 {
     TRY(Base::cloned(copy, subtree));
 
-    // The cloning steps for input elements given node, copy, and subtree are to propagate the value, dirty value flag, checkedness, and dirty checkedness flag from node to copy.
+    // The cloning steps for input elements given node, copy, and subtree are to propagate the value, dirty value flag,
+    // checkedness, dirty checkedness flag, and indeterminateness from node to copy.
     auto& input_clone = as<HTMLInputElement>(copy);
     input_clone.m_value = m_value;
     input_clone.m_dirty_value = m_dirty_value;
     input_clone.m_checked = m_checked;
     input_clone.m_dirty_checkedness = m_dirty_checkedness;
-
-    // AD-HOC: The spec doesn't mention propagating this state, but there is a WPT test that expects cloned nodes to preserve it.
-    input_clone.m_indeterminate = m_indeterminate;
+    input_clone.m_indeterminateness = m_indeterminateness;
 
     return {};
 }
@@ -2240,19 +2251,17 @@ void HTMLInputElement::legacy_pre_activation_behavior()
     m_before_legacy_pre_activation_behavior_checked = checked();
     m_before_legacy_pre_activation_behavior_indeterminate = indeterminate();
 
-    // 1. If this element's type attribute is in the Checkbox state, then set
-    // this element's checkedness to its opposite value (i.e. true if it is
-    // false, false if it is true) and set this element's indeterminate IDL
-    // attribute to false.
+    // 1. If this element's type attribute is in the Checkbox state, then set this element's checkedness to its
+    //    opposite value (i.e. true if it is false, false if it is true) and set this element's indeterminateness to
+    //    false.
     if (type_state() == TypeAttributeState::Checkbox) {
         set_checked(!checked());
         set_indeterminate(false);
     }
 
-    // 2. If this element's type attribute is in the Radio Button state, then
-    // get a reference to the element in this element's radio button group that
-    // has its checkedness set to true, if any, and then set this element's
-    // checkedness to true.
+    // 2. If this element's type attribute is in the Radio Button state, then get a reference to the element in this
+    //    element's radio button group that has its checkedness set to true, if any, and then set this element's
+    //    checkedness to true.
     if (type_state() == TypeAttributeState::RadioButton) {
         root().for_each_in_inclusive_subtree_of_type<HTML::HTMLInputElement>([&](auto& element) {
             if (element.checked() && is_in_same_radio_button_group(*this, element)) {
@@ -2269,22 +2278,18 @@ void HTMLInputElement::legacy_pre_activation_behavior()
 // https://html.spec.whatwg.org/multipage/input.html#the-input-element:legacy-canceled-activation-behavior
 void HTMLInputElement::legacy_cancelled_activation_behavior()
 {
-    // 1. If the element's type attribute is in the Checkbox state, then set the
-    // element's checkedness and the element's indeterminate IDL attribute back
-    // to the values they had before the legacy-pre-activation behavior was run.
+    // 1. If the element's type attribute is in the Checkbox state, then set the element's checkedness and the
+    //    element's indeterminateness back to the values they had before the legacy-pre-activation behavior was run.
     if (type_state() == TypeAttributeState::Checkbox) {
         set_checked(m_before_legacy_pre_activation_behavior_checked);
         set_indeterminate(m_before_legacy_pre_activation_behavior_indeterminate);
     }
 
-    // 2. If this element's type attribute is in the Radio Button state, then
-    // if the element to which a reference was obtained in the
-    // legacy-pre-activation behavior, if any, is still in what is now this
-    // element' s radio button group, if it still has one, and if so, set
-    // that element 's checkedness to true; or else, if there was no such
-    // element, or that element is no longer in this element' s radio button
-    // group, or if this element no longer has a radio button group, set
-    // this element's checkedness to false.
+    // 2. If this element's type attribute is in the Radio Button state, then if the element to which a reference was
+    //    obtained in the legacy-pre-activation behavior, if any, is still in what is now this element' s radio button
+    //    group, if it still has one, and if so, set that element 's checkedness to true; or else, if there was no such
+    //    element, or that element is no longer in this element' s radio button group, or if this element no longer has
+    //    a radio button group, set this element's checkedness to false.
     if (type_state() == TypeAttributeState::RadioButton) {
         bool did_reselect_previous_element = false;
         if (m_legacy_pre_activation_behavior_checked_element_in_group) {
@@ -2312,44 +2317,6 @@ GC::Ptr<DecodedImageData> HTMLInputElement::image_data() const
     if (m_resource_request)
         return m_resource_request->image_data();
     return nullptr;
-}
-
-bool HTMLInputElement::is_image_available() const
-{
-    return image_data() != nullptr;
-}
-
-Optional<CSSPixels> HTMLInputElement::intrinsic_width() const
-{
-    if (auto image_data = this->image_data())
-        return image_data->intrinsic_width();
-    return {};
-}
-
-Optional<CSSPixels> HTMLInputElement::intrinsic_height() const
-{
-    if (auto image_data = this->image_data())
-        return image_data->intrinsic_height();
-    return {};
-}
-
-Optional<CSSPixelFraction> HTMLInputElement::intrinsic_aspect_ratio() const
-{
-    if (auto image_data = this->image_data())
-        return image_data->intrinsic_aspect_ratio();
-    return {};
-}
-
-Optional<Gfx::DecodedImageFrame> HTMLInputElement::current_image_frame_sized(Gfx::IntSize size) const
-{
-    if (auto image_data = this->image_data())
-        return image_data->frame(0, size);
-    return {};
-}
-
-void HTMLInputElement::set_visible_in_viewport(bool)
-{
-    // FIXME: Loosen grip on image data when it's not visible, e.g via volatile memory.
 }
 
 // https://html.spec.whatwg.org/multipage/interaction.html#dom-tabindex
@@ -3643,7 +3610,7 @@ bool HTMLInputElement::suffering_from_being_missing() const
 static regex::ECMAScriptRegex& valid_email_address_regex()
 {
     static NeverDestroyed<regex::ECMAScriptRegex> regex { MUST(regex::ECMAScriptRegex::compile(
-        "^[a-zA-Z0-9.!#$%&'*+\\/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$"sv,
+        "^[a-zA-Z0-9.!#$%&'*+\\/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$"_utf16,
         regex::ECMAScriptCompileFlags {})) };
     return *regex;
 }

@@ -25,10 +25,10 @@
 #include <LibWeb/HTML/HTMLInputElement.h>
 #include <LibWeb/HTML/HTMLMediaElement.h>
 #include <LibWeb/HTML/HTMLSelectElement.h>
+#include <LibWeb/HTML/LocalTraversableNavigable.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/HTML/SelectedFile.h>
-#include <LibWeb/HTML/TraversableNavigable.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/Loader/ContentBlocker.h>
 #include <LibWeb/Page/Page.h>
@@ -98,27 +98,39 @@ void Page::visit_edges(JS::Cell::Visitor& visitor)
     });
 }
 
-HTML::Navigable& Page::focused_navigable()
+HTML::LocalNavigable& Page::focused_navigable()
 {
     if (m_focused_navigable)
         return *m_focused_navigable;
     return top_level_traversable();
 }
 
-void Page::set_focused_navigable(Badge<EventHandler>, HTML::Navigable& navigable)
+void Page::set_focused_navigable(Badge<EventHandler>, HTML::LocalNavigable& navigable)
 {
     m_focused_navigable = navigable;
 }
 
-void Page::navigable_document_destroyed(Badge<DOM::Document>, HTML::Navigable& navigable)
+void Page::navigable_document_destroyed(Badge<DOM::Document>, HTML::LocalNavigable& navigable)
 {
     if (&navigable == m_focused_navigable.ptr())
         m_focused_navigable = nullptr;
 }
 
-void Page::load(URL::URL const& url)
+void Page::load(URL::URL const& url, Bindings::NavigationHistoryBehavior history_handling)
 {
-    (void)top_level_traversable()->navigate({ .url = url, .source_document = *top_level_traversable()->active_document(), .user_involvement = HTML::UserNavigationInvolvement::BrowserUI });
+    (void)top_level_traversable()->navigate({ .url = url, .source_document = *top_level_traversable()->active_document(), .history_handling = history_handling, .user_involvement = HTML::UserNavigationInvolvement::BrowserUI });
+}
+
+void Page::load(URL::URL const& url, Variant<Empty, String, HTML::POSTResource> document_resource,
+    Bindings::NavigationHistoryBehavior history_handling)
+{
+    (void)top_level_traversable()->navigate({
+        .url = url,
+        .source_document = *top_level_traversable()->active_document(),
+        .document_resource = move(document_resource),
+        .history_handling = history_handling,
+        .user_involvement = HTML::UserNavigationInvolvement::BrowserUI,
+    });
 }
 
 void Page::load_html(StringView html)
@@ -146,7 +158,7 @@ void Page::load_html(StringView html, URL::URL const& url)
     response->header_list()->append({ "Content-Type"sv, "text/html"sv });
     response->set_body(Fetch::Infrastructure::byte_sequence_as_body(realm, html_string.bytes()));
 
-    HTML::Navigable::NavigateParams params { .url = url,
+    HTML::LocalNavigable::NavigateParams params { .url = url,
         .source_document = *document,
         .response = response,
         .user_involvement = HTML::UserNavigationInvolvement::BrowserUI };
@@ -163,6 +175,14 @@ void Page::reload()
 }
 
 void Page::traverse_the_history_by_delta(int delta)
+{
+    if (m_client->page_did_request_traverse_the_history_by_delta(delta, HistoryTraversalPrecheck::Needed))
+        return;
+
+    traverse_the_history_by_delta_from_ui_process(delta);
+}
+
+void Page::traverse_the_history_by_delta_from_ui_process(int delta)
 {
     top_level_traversable()->traverse_the_history_by_delta(delta);
 }
@@ -405,7 +425,7 @@ void Page::update_needs_beforeunload_check()
     client().page_did_change_needs_beforeunload_check(m_needs_beforeunload_check);
 }
 
-void Page::set_top_level_traversable(GC::Ref<HTML::TraversableNavigable> navigable)
+void Page::set_top_level_traversable(GC::Ref<HTML::LocalTraversableNavigable> navigable)
 {
     VERIFY(!m_top_level_traversable); // Replacement is not allowed!
     VERIFY(&navigable->page() == this);
@@ -428,7 +448,7 @@ HTML::BrowsingContext const& Page::top_level_browsing_context() const
     return *m_top_level_traversable->active_browsing_context();
 }
 
-GC::Ref<HTML::TraversableNavigable> Page::top_level_traversable() const
+GC::Ref<HTML::LocalTraversableNavigable> Page::top_level_traversable() const
 {
     return *m_top_level_traversable;
 }
@@ -696,17 +716,24 @@ void Page::for_each_canvas_element(Callback&& callback)
     }
 }
 
-void Page::present_all_canvas_element_surfaces()
+void Page::prepare_canvas_contexts_for_compositing()
 {
     for_each_canvas_element([](auto& canvas_element) {
-        canvas_element.present();
+        canvas_element.prepare_for_compositing();
     });
 }
 
-void Page::republish_all_canvas_element_surfaces()
+void Page::notify_all_canvas_elements_of_lost_backing_storage()
 {
     for_each_canvas_element([](auto& canvas_element) {
-        canvas_element.republish_compositor_surface();
+        canvas_element.notify_compositor_backing_storage_lost();
+    });
+}
+
+void Page::notify_all_webgl_contexts_lost()
+{
+    for_each_canvas_element([](auto& canvas_element) {
+        canvas_element.notify_compositor_connection_lost();
     });
 }
 
@@ -831,7 +858,7 @@ void Page::invalidate_user_style()
 
     auto invalidate_document = [](DOM::Document& document) {
         document.invalidate_content_blocker_style_sheet();
-        document.style_scope().invalidate_rule_cache();
+        document.style_scope().invalidate_user_style_sheet();
         document.for_each_shadow_root([](auto& shadow_root) {
             shadow_root.invalidate_style(DOM::StyleInvalidationReason::StyleSheetReplace);
         });

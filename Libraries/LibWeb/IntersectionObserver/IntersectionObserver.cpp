@@ -12,7 +12,7 @@
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Element.h>
 #include <LibWeb/HTML/BrowsingContext.h>
-#include <LibWeb/HTML/TraversableNavigable.h>
+#include <LibWeb/HTML/LocalTraversableNavigable.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/IntersectionObserver/IntersectionObserver.h>
 #include <LibWeb/Layout/Viewport.h>
@@ -285,9 +285,12 @@ CSSPixelRect IntersectionObserver::root_intersection_rectangle() const
         // Since the spec says that this is only reach if the document is fully active, that means it must have a navigable.
         VERIFY(document->navigable());
 
-        // NOTE: This rect is the *size* of the viewport. The viewport *offset* is not relevant,
-        //       as intersections are computed using viewport-relative element rects.
-        rect = CSSPixelRect { CSSPixelPoint { 0, 0 }, document->viewport_rect().size() };
+        // NOTE: This rect is in the same layout viewport coordinate space as
+        //       Element::getBoundingClientRect().
+        rect = CSSPixelRect {
+            CSSPixelPoint { 0, 0 },
+            document->viewport_rect().size(),
+        };
     } else {
         VERIFY(intersection_root.has<GC::Ref<DOM::Element>>());
         auto element = intersection_root.get<GC::Ref<DOM::Element>>();
@@ -312,13 +315,11 @@ CSSPixelRect IntersectionObserver::root_intersection_rectangle() const
         document = &intersection_root.get<GC::Ref<DOM::Element>>()->document();
     }
     if (m_document && document->origin().is_same_origin(m_document->origin())) {
-        if (auto layout_node = intersection_root.visit([&](auto& node) -> Layout::Node* { return node->layout_node(); })) {
-            rect.inflate(
-                m_root_margin[0].to_px(*layout_node, rect.height()),
-                m_root_margin[1].to_px(*layout_node, rect.width()),
-                m_root_margin[2].to_px(*layout_node, rect.height()),
-                m_root_margin[3].to_px(*layout_node, rect.width()));
-        }
+        rect.inflate(
+            m_root_margin[0].to_px(rect.height()),
+            m_root_margin[1].to_px(rect.width()),
+            m_root_margin[2].to_px(rect.height()),
+            m_root_margin[3].to_px(rect.width()));
     }
 
     return rect;

@@ -175,7 +175,7 @@ Vector<Token> Tokenizer::tokenize(StringView input, StringView encoding, Tokeniz
                     input = input.substring_view(3);
                 return String::from_utf8_without_validation(input.bytes());
             }
-            return MUST(decoder->to_utf8(input));
+            return MUST(decoder->to_utf8(input, TextCodec::IgnoreBOM::No, TextCodec::ErrorMode::Replacement));
         }();
 
         // OPTIMIZATION: If the input doesn't contain any filterable characters, we can skip the filtering
@@ -264,9 +264,11 @@ u32 Tokenizer::next_code_point()
 
     m_prev_position = m_position;
     if (is_newline(code_point)) {
+        VERIFY(m_position.line < NumericLimits<u32>::max());
         m_position.line++;
         m_position.column = 0;
     } else {
+        VERIFY(m_position.column < NumericLimits<u32>::max());
         m_position.column++;
     }
 

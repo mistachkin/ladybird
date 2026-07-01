@@ -17,6 +17,7 @@ public:
     SeccompPolicy();
 
     void deny_readonly_filesystem_probes();
+    void deny_current_directory_queries();
     void allow_readonly_file_opens();
     void allow_filesystem_metadata_queries();
     void allow_filesystem_writes();
@@ -26,6 +27,7 @@ public:
     void allow_network();
     void allow_memory_without_executable_mappings();
     void allow_executable_memory_mappings();
+    void allow_writable_executable_memory_mappings();
     void allow_threads();
     void allow_signals();
     void allow_clocks();

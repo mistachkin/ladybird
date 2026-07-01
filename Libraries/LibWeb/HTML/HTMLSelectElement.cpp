@@ -27,7 +27,7 @@
 #include <LibWeb/HTML/HTMLOptionElement.h>
 #include <LibWeb/HTML/HTMLSelectElement.h>
 #include <LibWeb/HTML/HTMLSelectedContentElement.h>
-#include <LibWeb/HTML/Navigable.h>
+#include <LibWeb/HTML/LocalNavigable.h>
 #include <LibWeb/HTML/Numbers.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/Infra/Strings.h>
@@ -79,7 +79,7 @@ void HTMLSelectElement::visit_edges(Cell::Visitor& visitor)
     }
 }
 
-void HTMLSelectElement::adjust_computed_style(CSS::ComputedProperties& style)
+void HTMLSelectElement::adjust_computed_style(CSS::ComputedProperties::Builder& style)
 {
     // https://drafts.csswg.org/css-display-3/#unbox
     if (style.display().is_contents())

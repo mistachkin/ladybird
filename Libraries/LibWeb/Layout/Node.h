@@ -14,6 +14,7 @@
 #include <AK/Vector.h>
 #include <AK/WeakPtr.h>
 #include <AK/Weakable.h>
+#include <AK/kmalloc.h>
 #include <LibGC/Cell.h>
 #include <LibGC/Weak.h>
 #include <LibWeb/CSS/StyleValues/AbstractImageStyleValue.h>
@@ -53,6 +54,8 @@ class WEB_API Node
     , public RefCountedTreeNode<Node> {
 
 public:
+    AK_ALLOC_WITH_KMALLOC_PARTITION(HeapPartition::Layout);
+
     using Base = RefCountedTreeNode<Node>;
 
     virtual ~Node();
@@ -102,7 +105,7 @@ public:
     DOM::Document& document();
     DOM::Document const& document() const;
 
-    GC::Ptr<HTML::Navigable> navigable() const;
+    GC::Ptr<HTML::LocalNavigable> navigable() const;
 
     Viewport const& root() const;
     Viewport& root();
@@ -124,6 +127,7 @@ public:
     bool is_inline_table() const;
 
     bool is_atomic_inline() const;
+    bool is_transformable() const;
 
     bool is_out_of_flow(FormattingContext const&) const;
 
@@ -242,6 +246,9 @@ public:
 
     [[nodiscard]] bool has_css_transform() const
     {
+        if (!is_transformable())
+            return false;
+
         auto const& computed_values = this->computed_values();
         return !computed_values.transformations().is_empty()
             || computed_values.rotate()

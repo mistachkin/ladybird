@@ -269,7 +269,7 @@ GC::Ref<WebIDL::Promise> WindowOrWorkerGlobalScopeMixin::create_image_bitmap_imp
 
     // 1. If either sw or sh is given and is 0, then return a promise rejected with a RangeError.
     if (sw == 0 || sh == 0) {
-        auto error_message = MUST(String::formatted("{} is an invalid value for {}", sw == 0 ? *sw : *sh, sw == 0 ? "sw"sv : "sh"sv));
+        auto error_message = Utf16String::formatted("{} is an invalid value for {}", sw == 0 ? *sw : *sh, sw == 0 ? "sw"sv : "sh"sv);
         auto error = JS::RangeError::create(realm, move(error_message));
         return WebIDL::create_rejected_promise(realm, move(error));
     }
@@ -447,34 +447,43 @@ GC::Ref<WebIDL::Promise> WindowOrWorkerGlobalScopeMixin::create_image_bitmap_imp
                 },
                 [&](GC::Ref<OffscreenCanvas>) {
                     dbgln("(STUBBED) createImageBitmap() for OffscreenCanvas");
-                    auto const error = JS::Error::create(realm, "Not Implemented: createImageBitmap() for OffscreenCanvas"sv);
+                    auto const error = JS::Error::create(realm, "Not Implemented: createImageBitmap() for OffscreenCanvas"_utf16);
                     TemporaryExecutionContext const context { relevant_realm(p->promise()), TemporaryExecutionContext::CallbacksEnabled::Yes };
                     WebIDL::reject_promise(realm, *p, error);
                 },
                 // -> video
                 [&](GC::Ref<HTMLVideoElement>) {
                     dbgln("(STUBBED) createImageBitmap() for HTMLVideoElement");
-                    auto const error = JS::Error::create(realm, "Not Implemented: createImageBitmap() for HTMLVideoElement"sv);
+                    auto const error = JS::Error::create(realm, "Not Implemented: createImageBitmap() for HTMLVideoElement"_utf16);
                     TemporaryExecutionContext const context { relevant_realm(p->promise()), TemporaryExecutionContext::CallbacksEnabled::Yes };
                     WebIDL::reject_promise(realm, *p, error);
                 },
                 // -> img
                 // -> SVG image
                 [&](auto const& image_element) {
-                    // 1. If image's media data has no natural dimensions (e.g., it's a vector graphic with no specified content size) and options's resizeWidth or options's resizeHeight is not present, then return a promise rejected with an "InvalidStateError" DOMException.
+                    // 1. If image's media data has no natural dimensions (e.g., it's a vector graphic with no specified
+                    //    content size) and options's resizeWidth or options's resizeHeight is not present, then return
+                    //    a promise rejected with an "InvalidStateError" DOMException.
                     auto const has_natural_dimensions = image_element->intrinsic_width().has_value() && image_element->intrinsic_height().has_value();
                     if (!has_natural_dimensions && (!options.has_value() || !options->resize_width.has_value() || !options->resize_height.has_value())) {
                         WebIDL::reject_promise(realm, *p, WebIDL::InvalidStateError::create(image_bitmap->realm(), "Image data is detached"_utf16));
                         return;
                     }
 
-                    // 2. If image's media data has no natural dimensions (e.g., it's a vector graphic with no specified content size), it should be rendered to a bitmap of the size specified by the resizeWidth and the resizeHeight options.
-                    // 3. Set imageBitmap's bitmap data to a copy of image's media data, cropped to the source rectangle with formatting. If this is an animated image, imageBitmap's bitmap data must only be taken from the default image of the animation (the one that the format defines is to be used when animation is not supported or is disabled), or, if there is no such image, the first frame of the animation.
+                    // 2. If image's media data has no natural dimensions (e.g., it's a vector graphic with no specified
+                    //    content size), it should be rendered to a bitmap of the size specified by the resizeWidth and
+                    //    the resizeHeight options.
+
+                    // 3. Set imageBitmap's bitmap data to a copy of image's media data, cropped to the source rectangle
+                    //    with formatting. If this is an animated image, imageBitmap's bitmap data must only be taken
+                    //    from the default image of the animation (the one that the format defines is to be used when
+                    //    animation is not supported or is disabled), or, if there is no such image, the first frame of
+                    //    the animation.
                     Optional<Gfx::DecodedImageFrame> decoded_frame;
                     if (has_natural_dimensions) {
-                        decoded_frame = image_element->default_image_frame_sized(Gfx::IntSize { *image_element->intrinsic_width(), *image_element->intrinsic_height() });
+                        decoded_frame = image_element->default_image_frame(Gfx::IntSize { *image_element->intrinsic_width(), *image_element->intrinsic_height() });
                     } else {
-                        decoded_frame = image_element->default_image_frame_sized(Gfx::IntSize { *options->resize_width, *options->resize_height });
+                        decoded_frame = image_element->default_image_frame(Gfx::IntSize { *options->resize_width, *options->resize_height });
                     }
                     auto cropped_bitmap_or_error = crop_to_the_source_rectangle_with_formatting(decoded_frame->bitmap(), sx, sy, sw, sh, options);
                     // AD-HOC: Reject promise with an "InvalidStateError" DOMException on allocation failure
@@ -624,8 +633,9 @@ i32 WindowOrWorkerGlobalScopeMixin::run_timer_initialization_steps(TimerHandler 
                 // 2. Assert: handler is a string.
                 // 3. Perform EnsureCSPDoesNotBlockStringCompilation(realm, « », handler, handler, timer, « », handler).
                 //    If this throws an exception, catch it, report it for global, and abort these steps.
-                auto handler_primitive_string = JS::PrimitiveString::create(vm, source);
-                if (auto result = ContentSecurityPolicy::ensure_csp_does_not_block_string_compilation(realm, {}, source, source, JS::CompilationType::Timer, {}, handler_primitive_string); result.is_throw_completion()) {
+                auto source_utf16 = Utf16String::from_utf8(source);
+                auto handler_primitive_string = JS::PrimitiveString::create(vm, source_utf16);
+                if (auto result = ContentSecurityPolicy::ensure_csp_does_not_block_string_compilation(realm, {}, source_utf16, source_utf16, JS::CompilationType::Timer, {}, handler_primitive_string); result.is_throw_completion()) {
                     report_exception(result, realm);
                     return false;
                 }
@@ -1195,7 +1205,7 @@ GC::Ref<JS::Object> WindowOrWorkerGlobalScopeMixin::supported_entry_types() cons
         GC::RootVector<JS::Value> supported_entry_types;
 
 #define __ENUMERATE_SUPPORTED_PERFORMANCE_ENTRY_TYPES(entry_type, cpp_class) \
-    supported_entry_types.append(JS::PrimitiveString::create(vm, entry_type));
+    supported_entry_types.append(JS::PrimitiveString::create(vm, Utf16FlyString::from_utf8(entry_type)));
         ENUMERATE_SUPPORTED_PERFORMANCE_ENTRY_TYPES
 #undef __ENUMERATE_SUPPORTED_PERFORMANCE_ENTRY_TYPES
 

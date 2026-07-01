@@ -24,6 +24,8 @@ class Menu;
 class OutOfProcessWebView;
 class ProcessManager;
 class Settings;
+class SiteIsolationManager;
+class TraversableSessionHistory;
 class ViewImplementation;
 class WebContentClient;
 class WebWorkerClient;

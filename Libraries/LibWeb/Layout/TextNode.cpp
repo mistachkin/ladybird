@@ -8,14 +8,14 @@
  */
 
 #include <AK/CharacterTypes.h>
-#include <AK/StringBuilder.h>
 #include <AK/UnicodeUtils.h>
+#include <AK/Utf16StringBuilder.h>
 #include <LibUnicode/CharacterTypes.h>
 #include <LibUnicode/Locale.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/Layout/InlineFormattingContext.h>
 #include <LibWeb/Layout/TextNode.h>
-#include <LibWeb/Painting/TextPaintable.h>
+#include <LibWeb/Painting/PaintableBox.h>
 
 namespace Web::Layout {
 
@@ -307,12 +307,12 @@ static Utf16String apply_math_auto_text_transform(Utf16String const& string)
         }
     };
 
-    StringBuilder builder { StringBuilder::Mode::UTF16, string.length_in_code_units() };
+    Utf16StringBuilder builder { string.length_in_code_units() };
 
     for (auto code_point : string)
         builder.append_code_point(map_code_point_to_italic(code_point));
 
-    return builder.to_utf16_string();
+    return builder.to_string();
 }
 
 static Utf16String apply_text_transform(Utf16String const& string, CSS::TextTransform text_transform, Optional<StringView> const& locale)
@@ -457,13 +457,13 @@ Utf16String TextNode::compute_text_for_rendering(TextForRenderingCacheKey const&
     // AD-HOC: It's important to not change the amount of code units in the resulting transformed text, so ChunkIterator
     //         can pass views to this string with associated code unit offsets that still match the original text.
     if (convert_newlines || convert_tabs) {
-        StringBuilder text_builder { StringBuilder::Mode::UTF16, text.length_in_code_units() };
+        Utf16StringBuilder text_builder { text.length_in_code_units() };
         for (auto code_point : text) {
             if ((convert_newlines && code_point == '\n') || (convert_tabs && code_point == '\t'))
                 code_point = ' ';
             text_builder.append_code_point(code_point);
         }
-        text = text_builder.to_utf16_string();
+        text = text_builder.to_string();
     }
 
     return text;
@@ -513,6 +513,7 @@ TextNode::ChunkList const& TextNode::chunks_for_layout(bool should_wrap_lines, b
         .should_respect_linebreaks = should_respect_linebreaks,
         .white_space_collapse = computed_values.white_space_collapse(),
         .word_break = computed_values.word_break(),
+        .font_variant_emoji = computed_values.font_variant_emoji(),
         .font_cascade_list = computed_values.font_list(),
     };
 
@@ -558,6 +559,7 @@ TextNode::ChunkIterator::ChunkIterator(TextNode const& text_node, Utf16View cons
     , m_grapheme_segmenter(grapheme_segmenter)
     , m_line_segmenter(line_segmenter)
     , m_word_break(word_break)
+    , m_font_variant_emoji(text_node.computed_values().font_variant_emoji())
 {
     m_should_collapse_whitespace = first_is_one_of(text_node.computed_values().white_space_collapse(), CSS::WhiteSpaceCollapse::Collapse, CSS::WhiteSpaceCollapse::PreserveBreaks);
 }
@@ -758,7 +760,7 @@ Gfx::Font const& TextNode::ChunkIterator::font_for_space(size_t at_index, u32 sp
     for (size_t i = at_index; i < m_view.length_in_code_units();) {
         auto cp = m_view.code_point_at(i);
         if (!is_interword_space(cp) && cp != '\t' && cp != '\n') {
-            auto const& font = m_font_cascade_list.font_for_code_point(cp, Gfx::FontCascadeList::TriggerPendingLoads::Yes);
+            auto const& font = m_font_cascade_list.font_for_code_point(cp, Gfx::FontCascadeList::TriggerPendingLoads::Yes, emoji_presentation_at(i, cp));
             if (!font.is_emoji_font() && has_glyph(font))
                 return font;
             // Text is coming from an emoji face; we'll fall back to (3).
@@ -769,6 +771,31 @@ Gfx::Font const& TextNode::ChunkIterator::font_for_space(size_t at_index, u32 sp
 
     // 3. No text around (leading/trailing/all spaces) — pick a font with the glyph from the cascade.
     return m_font_cascade_list.font_for_code_point(space_code_point, Gfx::FontCascadeList::TriggerPendingLoads::Yes);
+}
+
+Gfx::EmojiPresentationResult TextNode::ChunkIterator::emoji_presentation_at(size_t code_unit_offset, u32 code_point) const
+{
+    auto next_offset = code_unit_offset + AK::UnicodeUtils::code_unit_length_for_code_point(code_point);
+    Optional<u32> next_code_point;
+    if (next_offset < m_view.length_in_code_units())
+        next_code_point = m_view.code_point_at(next_offset);
+
+    auto default_presentation = Gfx::emoji_presentation_for_code_point(code_point, next_code_point);
+
+    if (default_presentation.forced == Gfx::ForcedPresentation::Yes || !Unicode::code_point_has_emoji_property(code_point))
+        return default_presentation;
+
+    switch (m_font_variant_emoji) {
+    case CSS::FontVariantEmoji::Text:
+        return { Gfx::EmojiPresentation::Text, Gfx::ForcedPresentation::Yes };
+    case CSS::FontVariantEmoji::Emoji:
+        return { Gfx::EmojiPresentation::Emoji, Gfx::ForcedPresentation::Yes };
+    case CSS::FontVariantEmoji::Unicode:
+        return { default_presentation.presentation, Gfx::ForcedPresentation::Yes };
+    case CSS::FontVariantEmoji::Normal:
+        return default_presentation;
+    }
+    VERIFY_NOT_REACHED();
 }
 
 Optional<TextNode::Chunk> TextNode::ChunkIterator::next_without_peek()
@@ -795,7 +822,7 @@ Optional<TextNode::Chunk> TextNode::ChunkIterator::next_without_peek()
     auto const& expected_font_for = [&](u32 cp) -> Gfx::Font const& {
         return is_interword_space(cp)
             ? font_for_space(m_current_index, cp)
-            : m_font_cascade_list.font_for_code_point(cp, Gfx::FontCascadeList::TriggerPendingLoads::Yes);
+            : m_font_cascade_list.font_for_code_point(cp, Gfx::FontCascadeList::TriggerPendingLoads::Yes, emoji_presentation_at(m_current_index, cp));
     };
 
     auto const& font = expected_font_for(current_code_point());
@@ -914,9 +941,12 @@ Optional<TextNode::Chunk> TextNode::ChunkIterator::try_commit_chunk(size_t start
     return {};
 }
 
-RefPtr<Painting::Paintable> TextNode::create_paintable() const
+void TextNode::set_needs_repaint(InvalidateDisplayList should_invalidate_display_list) const
 {
-    return Painting::TextPaintable::create(*this);
+    if (auto* containing_block = this->containing_block()) {
+        if (auto paintable_box = const_cast<Box&>(*containing_block).paintable_box())
+            paintable_box->set_needs_repaint(should_invalidate_display_list);
+    }
 }
 
 }

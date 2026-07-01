@@ -7,7 +7,7 @@
 #include <AK/JsonObject.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/HTML/BrowsingContext.h>
-#include <LibWeb/HTML/TraversableNavigable.h>
+#include <LibWeb/HTML/LocalTraversableNavigable.h>
 #include <LibWeb/HTML/WindowProxy.h>
 #include <LibWeb/WebDriver/Contexts.h>
 
@@ -44,9 +44,9 @@ JsonObject window_proxy_reference_object(HTML::WindowProxy const& window)
     return object;
 }
 
-static GC::Ptr<HTML::Navigable> find_navigable_with_handle(StringView handle, bool should_be_top_level)
+static GC::Ptr<HTML::LocalNavigable> find_navigable_with_handle(StringView handle, bool should_be_top_level)
 {
-    for (auto navigable : Web::HTML::all_navigables()) {
+    for (auto navigable : Web::HTML::all_local_navigables()) {
         if (navigable->is_top_level_traversable() != should_be_top_level)
             continue;
 
@@ -77,7 +77,7 @@ ErrorOr<GC::Ref<HTML::WindowProxy>, WebDriver::Error> deserialize_web_frame(JS::
         return WebDriver::Error::from_code(WebDriver::ErrorCode::InvalidArgument, "Object is not a web frame"sv);
 
     // 2. Let reference be the result of getting the web frame identifier property from object.
-    auto reference = property.value().as_string().utf8_string();
+    auto reference = property.value().as_string().utf16_string_view().to_utf8_but_should_be_ported_to_utf16();
 
     // 3. Let browsing context be the browsing context whose window handle is reference, or null if no such browsing
     //    context exists.
@@ -112,7 +112,7 @@ ErrorOr<GC::Ref<HTML::WindowProxy>, WebDriver::Error> deserialize_web_window(JS:
         return WebDriver::Error::from_code(WebDriver::ErrorCode::InvalidArgument, "Object is not a web window"sv);
 
     // 2. Let reference be the result of getting the web window identifier property from object.
-    auto reference = property.value().as_string().utf8_string();
+    auto reference = property.value().as_string().utf16_string_view().to_utf8_but_should_be_ported_to_utf16();
 
     // 3. Let browsing context be the browsing context whose window handle is reference, or null if no such browsing
     //    context exists.

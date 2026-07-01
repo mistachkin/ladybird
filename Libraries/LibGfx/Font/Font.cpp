@@ -168,8 +168,10 @@ bool Font::is_emoji_font() const
         auto* hb_font = harfbuzz_font();
         hb_face_t* face = hb_font_get_face(hb_font);
 
-        bool has_colr = hb_ot_color_has_layers(hb_font_get_face(hb_font));
-        bool has_svg = hb_ot_color_has_svg(hb_font_get_face(hb_font));
+        // hb_ot_color_has_layers() only reports COLRv0 layered glyphs; COLRv1 fonts (e.g. Noto Color Emoji's COLRv1
+        // build) carry a paint graph instead, reported by hb_ot_color_has_paint().
+        bool has_colr = hb_ot_color_has_layers(face) || hb_ot_color_has_paint(face);
+        bool has_svg = hb_ot_color_has_svg(face);
 
         bool has_sbix = hb_face_has_table(face, HB_TAG('s', 'b', 'i', 'x'));
         bool has_cbdt = hb_face_has_table(face, HB_TAG('C', 'B', 'D', 'T'));
@@ -185,7 +187,6 @@ bool Font::is_emoji_font() const
         }();
 
         m_is_emoji_font = (name_contains_emoji && !looks_like_text) || (has_any_color && !looks_like_text) ? TriState::True : TriState::False;
-        return false;
     }
 
     return m_is_emoji_font == TriState::True;

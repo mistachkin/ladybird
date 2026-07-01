@@ -18,7 +18,7 @@ LineBuilder::LineBuilder(InlineFormattingContext& context, LayoutState& layout_s
     , m_writing_mode(writing_mode)
 {
     auto text_indent = m_context.containing_block().computed_values().text_indent();
-    m_text_indent = text_indent.length_percentage.to_px(m_context.containing_block(), m_containing_block_used_values.content_width());
+    m_text_indent = text_indent.length_percentage.to_px(m_containing_block_used_values.content_width());
     m_text_indent_each_line = text_indent.each_line;
     m_text_indent_hanging = text_indent.hanging;
     begin_new_line(false);
@@ -41,9 +41,10 @@ void LineBuilder::break_line(ForcedBreak forced_break, Optional<CSSPixels> next_
         m_containing_block_used_values.line_boxes.append(LineBox(m_direction, m_writing_mode));
         begin_new_line(true, break_count == 0, forced_break);
         break_count++;
-        floats_intrude_at_current_y = m_context.any_floats_intrude_at_block_offset(m_current_block_offset);
+        auto current_line_height = max(m_max_height_on_current_line, m_context.containing_block().computed_values().line_height());
+        floats_intrude_at_current_y = m_context.any_floats_intrude_in_block_range(m_current_block_offset, m_current_block_offset + current_line_height);
     } while (floats_intrude_at_current_y
-        && (!m_context.can_fit_new_line_at_block_offset(m_current_block_offset)
+        && (!m_context.can_fit_new_line_at_block_offset(m_current_block_offset, m_context.containing_block().computed_values().line_height())
             || (next_item_width.value_or(0) > m_available_width_for_current_line)));
 }
 
@@ -59,15 +60,10 @@ void LineBuilder::begin_new_line(bool increment_y, bool is_first_break_in_sequen
         } else {
             // We're doing more than one break in a row.
             // This means we're trying to squeeze past intruding floats.
-            // Scan 1px at a time until we find a Y value where a new line can fit.
-            // FIXME: This is super dumb and inefficient.
-            CSSPixels candidate_block_offset = m_current_block_offset + 1;
-            while (true) {
-                if (m_context.can_fit_new_line_at_block_offset(candidate_block_offset))
-                    break;
-                ++candidate_block_offset;
-            }
-            m_current_block_offset = candidate_block_offset;
+            if (auto next_band_start = m_context.next_float_band_block_start_after(m_current_block_offset); next_band_start.has_value())
+                m_current_block_offset = next_band_start.value();
+            else
+                m_current_block_offset += max(m_max_height_on_current_line, m_context.containing_block().computed_values().line_height());
         }
     }
     recalculate_available_space();
@@ -125,11 +121,15 @@ void LineBuilder::append_text_chunk(TextNode const& text_node, size_t offset_in_
     m_max_height_on_current_line = max(m_max_height_on_current_line, line_box.block_length());
 }
 
-CSSPixels LineBuilder::y_for_float_to_be_inserted_here(Box const& box)
+void LineBuilder::append_static_position_marker(Box const& box)
+{
+    ensure_last_line_box().add_static_position_marker(box);
+}
+
+CSSPixels LineBuilder::ceiling_for_float_to_be_inserted_here(Box const& box)
 {
     auto const& box_state = m_layout_state.get(box);
     CSSPixels const width = box_state.margin_box_width();
-    CSSPixels const height = box_state.margin_box_height();
 
     CSSPixels candidate_block_offset = m_current_block_offset;
 
@@ -143,50 +143,6 @@ CSSPixels LineBuilder::y_for_float_to_be_inserted_here(Box const& box)
     if (current_line_width > 0 && (current_line_width + width) > m_available_width_for_current_line)
         candidate_block_offset += current_line.height();
 
-    // Then, look for the next Y position where we can fit the new float.
-    auto box_in_root_rect = m_context.parent().content_box_rect_in_ancestor_coordinate_space(box_state, m_context.parent().root());
-
-    // New floats will always be placed vertically at or below the lowest float.
-    // This applies to all floats, so the last inserted float will always be the lowest.
-    auto last_float = m_context.parent().last_inserted_float();
-    if (last_float.has_value()) {
-        auto float_box_top = last_float->margin_box_rect_in_root_coordinate_space.top() - box_in_root_rect.y();
-        candidate_block_offset = max(candidate_block_offset, float_box_top);
-    }
-
-    HashMap<CSSPixels, AvailableSize> available_space_cache;
-    for (;;) {
-        Optional<CSSPixels> highest_intersection_bottom;
-        auto candidate_block_bottom = candidate_block_offset + height;
-
-        m_context.parent().for_each_floating_box([&](auto const& float_box) {
-            auto float_box_top = float_box.margin_box_rect_in_root_coordinate_space.top() - box_in_root_rect.y();
-            auto float_box_bottom = float_box.margin_box_rect_in_root_coordinate_space.bottom() - box_in_root_rect.y();
-            if (float_box_bottom <= candidate_block_offset)
-                return IterationDecision::Continue;
-
-            auto intersection_test = [&](auto y_coordinate, auto top, auto bottom) {
-                if (y_coordinate < top || y_coordinate > bottom)
-                    return;
-                auto available_space = available_space_cache.ensure(y_coordinate, [&]() {
-                    return m_context.available_space_for_line(y_coordinate);
-                });
-                if (width > available_space)
-                    highest_intersection_bottom = min(highest_intersection_bottom.value_or(float_box_bottom), float_box_bottom);
-            };
-
-            intersection_test(float_box_top, candidate_block_offset, candidate_block_bottom);
-            intersection_test(float_box_bottom, candidate_block_offset, candidate_block_bottom);
-            intersection_test(candidate_block_offset, float_box_top, float_box_bottom);
-            intersection_test(candidate_block_bottom, float_box_top, float_box_bottom);
-
-            return IterationDecision::Continue;
-        });
-        if (!highest_intersection_bottom.has_value() || highest_intersection_bottom.value() == candidate_block_offset)
-            break;
-        candidate_block_offset = highest_intersection_bottom.value();
-    }
-
     return max(candidate_block_offset, m_context.vertical_float_clearance());
 }
 
@@ -198,10 +154,9 @@ bool LineBuilder::should_break(CSSPixels next_item_width)
     auto const& line_boxes = m_containing_block_used_values.line_boxes;
     if (line_boxes.is_empty() || line_boxes.last().is_empty()) {
         // If we don't have a single line box yet *and* there are no floats intruding
-        // at this Y coordinate, we don't need to break before inserting anything.
-        if (!m_context.any_floats_intrude_at_block_offset(m_current_block_offset))
-            return false;
-        if (!m_context.any_floats_intrude_at_block_offset(m_current_block_offset + m_context.containing_block().computed_values().line_height()))
+        // into this line box, we don't need to break before inserting anything.
+        auto line_height = m_context.containing_block().computed_values().line_height();
+        if (!m_context.any_floats_intrude_in_block_range(m_current_block_offset, m_current_block_offset + line_height))
             return false;
     }
     auto current_line_width = ensure_last_line_box().width();
@@ -224,9 +179,8 @@ void LineBuilder::update_last_line()
     auto direction = m_context.containing_block().computed_values().direction();
 
     auto current_line_height = max(m_max_height_on_current_line, m_context.containing_block().computed_values().line_height());
-    CSSPixels inline_offset_top = m_context.leftmost_inline_offset_at(m_current_block_offset);
-    CSSPixels inline_offset_bottom = m_context.leftmost_inline_offset_at(m_current_block_offset + current_line_height - 1);
-    CSSPixels inline_offset = max(inline_offset_top, inline_offset_bottom);
+    CSSPixels start_inline_offset = m_context.leftmost_inline_offset_at(m_current_block_offset, current_line_height);
+    CSSPixels inline_offset = start_inline_offset;
     CSSPixels block_offset = 0;
 
     // FIXME: Respect inline direction.
@@ -268,35 +222,30 @@ void LineBuilder::update_last_line()
         }
     }
 
+    auto baseline_for_font = [](Gfx::FontPixelMetrics const& font_metrics, CSSPixels line_height) {
+        auto const typographic_height = CSSPixels::nearest_value_for(font_metrics.ascent + font_metrics.descent);
+        auto const half_leading = (line_height - typographic_height) / 2;
+        return CSSPixels::nearest_value_for(font_metrics.ascent) + half_leading;
+    };
+
     auto strut_baseline = [&] {
         auto& font = m_context.containing_block().first_available_font();
         auto const line_height = m_context.containing_block().computed_values().line_height();
-        auto const font_metrics = font.pixel_metrics();
-        auto const typographic_height = CSSPixels::nearest_value_for(font_metrics.ascent + font_metrics.descent);
-        auto const leading = line_height - typographic_height;
-        auto const half_leading = leading / 2;
-        return CSSPixels::nearest_value_for(font_metrics.ascent) + half_leading;
+        return baseline_for_font(font.pixel_metrics(), line_height);
     }();
 
     bool should_align_strut_to_line_box_baseline = false;
     auto line_box_baseline = [&] {
         CSSPixels line_box_baseline = strut_baseline;
         for (auto& fragment : line_box.fragments()) {
-            auto const& font = fragment.layout_node().first_available_font();
             auto const line_height = fragment.layout_node().computed_values().line_height();
-            auto const font_metrics = font.pixel_metrics();
-            auto const typographic_height = CSSPixels::nearest_value_for(font_metrics.ascent + font_metrics.descent);
-            auto const leading = line_height - typographic_height;
-            auto const half_leading = leading / 2;
-
-            // The CSS specification calls this AD (A+D, Ascent + Descent).
 
             CSSPixels fragment_baseline = 0;
             if (fragment.layout_node().is_text_node()) {
-                fragment_baseline = CSSPixels::nearest_value_for(font_metrics.ascent) + half_leading;
+                fragment_baseline = baseline_for_font(fragment.layout_node().first_available_font().pixel_metrics(), line_height);
             } else {
                 auto const& box = as<Layout::Box>(fragment.layout_node());
-                fragment_baseline = m_context.box_baseline(box);
+                fragment_baseline = m_context.box_baseline(box, FormattingContext::BaselineSet::Last);
             }
 
             // Remember the baseline used for this fragment. This will be used when painting the fragment.
@@ -305,7 +254,7 @@ void LineBuilder::update_last_line()
             // NOTE: For fragments with a <length-percentage> vertical-align, shift the line box baseline down by the resolved amount.
             //       This ensures that we make enough vertical space on the line for any manually-aligned fragments.
             if (auto const* length_percentage = fragment.layout_node().computed_values().vertical_align().get_pointer<CSS::LengthPercentage>()) {
-                fragment_baseline += length_percentage->to_px(fragment.layout_node(), line_height);
+                fragment_baseline += length_percentage->to_px(line_height);
             }
 
             if (fragment_baseline > line_box_baseline) {
@@ -333,61 +282,108 @@ void LineBuilder::update_last_line()
     CSSPixels uppermost_box_top = strut_top;
     CSSPixels lowermost_box_bottom = strut_bottom;
 
+    struct VerticalAlignMetrics {
+        CSSPixels baseline { 0 };
+        CSSPixels height { 0 };
+        CSSPixels effective_box_top_offset { 0 };
+        CSSPixels effective_box_bottom_offset { 0 };
+        CSSPixels line_height { 0 };
+    };
+
+    auto block_offset_value_for_alignment = [&](Variant<CSS::VerticalAlign, CSS::LengthPercentage> const& vertical_align, VerticalAlignMetrics const& metrics) -> CSSPixels {
+        auto alphabetic_baseline = m_current_block_offset + line_box_baseline - metrics.baseline + metrics.effective_box_top_offset;
+
+        if (auto const* length_percentage = vertical_align.get_pointer<CSS::LengthPercentage>())
+            return alphabetic_baseline - length_percentage->to_px(metrics.line_height);
+
+        switch (vertical_align.get<CSS::VerticalAlign>()) {
+        case CSS::VerticalAlign::Baseline:
+            return alphabetic_baseline;
+        case CSS::VerticalAlign::Top:
+            return m_current_block_offset + metrics.effective_box_top_offset;
+        case CSS::VerticalAlign::Middle: {
+            // Align the vertical midpoint of the box with the baseline of the parent box
+            // plus half the x-height of the parent.
+            // FIXME: Per CSS2 §10.8.1 this should use the parent inline box's x-height, not the containing block's.
+            auto const x_height = CSSPixels::nearest_value_for(m_context.containing_block().first_available_font().pixel_metrics().x_height);
+            return m_current_block_offset + line_box_baseline + ((metrics.effective_box_top_offset - metrics.effective_box_bottom_offset - x_height - metrics.height) / 2);
+        }
+        case CSS::VerticalAlign::Sub:
+            // https://drafts.csswg.org/css-inline/#valdef-baseline-shift-sub
+            // Lower by the offset appropriate for subscripts of the parent’s box.
+            // The UA may use the parent’s font metrics to find this offset; otherwise it defaults to dropping by one fifth of the parent’s used font-size.
+            // FIXME: Use font metrics to find a more appropriate offset, if possible
+            return alphabetic_baseline + m_context.containing_block().computed_values().font_size() / 5;
+        case CSS::VerticalAlign::Super:
+            // https://drafts.csswg.org/css-inline/#valdef-baseline-shift-super
+            // Raise by the offset appropriate for superscripts of the parent’s box.
+            // The UA may use the parent’s font metrics to find this offset; otherwise it defaults to raising by one third of the parent’s used font-size.
+            // FIXME: Use font metrics to find a more appropriate offset, if possible
+            return alphabetic_baseline - m_context.containing_block().computed_values().font_size() / 3;
+        case CSS::VerticalAlign::Bottom:
+        case CSS::VerticalAlign::TextBottom:
+        case CSS::VerticalAlign::TextTop:
+            // FIXME: These are all 'baseline'
+            return alphabetic_baseline;
+        }
+        VERIFY_NOT_REACHED();
+    };
+
+    auto inline_box_alignment_metrics = [&](NodeWithStyle const& inline_box) {
+        auto const line_height = inline_box.computed_values().line_height();
+        auto const& used_values = m_layout_state.get(inline_box);
+        return VerticalAlignMetrics {
+            .baseline = baseline_for_font(inline_box.first_available_font().pixel_metrics(), line_height),
+            .height = line_height,
+            .effective_box_top_offset = used_values.border_box_top(),
+            .effective_box_bottom_offset = used_values.border_box_bottom(),
+            .line_height = line_height,
+        };
+    };
+
     for (auto& fragment : line_box.fragments()) {
         CSSPixels new_fragment_inline_offset = inline_offset + fragment.inline_offset();
-        CSSPixels new_fragment_block_offset = 0;
 
-        auto block_offset_value_for_alignment = [&](CSS::VerticalAlign vertical_align) {
-            CSSPixels effective_box_top_offset = fragment.border_box_top();
-            CSSPixels effective_box_bottom_offset = fragment.border_box_top();
-            if (fragment.is_atomic_inline()) {
-                auto const& fragment_box_state = m_layout_state.get(static_cast<Box const&>(fragment.layout_node()));
-                effective_box_top_offset = fragment_box_state.margin_box_top();
-                effective_box_bottom_offset = fragment_box_state.margin_box_bottom();
-            }
-
-            auto alphabetic_baseline = m_current_block_offset + line_box_baseline - fragment.baseline() + effective_box_top_offset;
-
-            switch (vertical_align) {
-            case CSS::VerticalAlign::Baseline:
-                return alphabetic_baseline;
-            case CSS::VerticalAlign::Top:
-                return m_current_block_offset + effective_box_top_offset;
-            case CSS::VerticalAlign::Middle: {
-                // Align the vertical midpoint of the box with the baseline of the parent box
-                // plus half the x-height of the parent.
-                auto const x_height = CSSPixels::nearest_value_for(m_context.containing_block().first_available_font().pixel_metrics().x_height);
-                return m_current_block_offset + line_box_baseline + ((effective_box_top_offset - effective_box_bottom_offset - x_height - fragment.height()) / 2);
-            }
-            case CSS::VerticalAlign::Sub:
-                // https://drafts.csswg.org/css-inline/#valdef-baseline-shift-sub
-                // Lower by the offset appropriate for subscripts of the parent’s box.
-                // The UA may use the parent’s font metrics to find this offset; otherwise it defaults to dropping by one fifth of the parent’s used font-size.
-                // FIXME: Use font metrics to find a more appropriate offset, if possible
-                return alphabetic_baseline + m_context.containing_block().computed_values().font_size() / 5;
-            case CSS::VerticalAlign::Super:
-                // https://drafts.csswg.org/css-inline/#valdef-baseline-shift-super
-                // Raise by the offset appropriate for superscripts of the parent’s box.
-                // The UA may use the parent’s font metrics to find this offset; otherwise it defaults to raising by one third of the parent’s used font-size.
-                // FIXME: Use font metrics to find a more appropriate offset, if possible
-                return alphabetic_baseline - m_context.containing_block().computed_values().font_size() / 3;
-            case CSS::VerticalAlign::Bottom:
-            case CSS::VerticalAlign::TextBottom:
-            case CSS::VerticalAlign::TextTop:
-                // FIXME: These are all 'baseline'
-                return alphabetic_baseline;
-            }
-            VERIFY_NOT_REACHED();
+        VerticalAlignMetrics fragment_metrics {
+            .baseline = fragment.baseline(),
+            .height = fragment.height(),
+            .effective_box_top_offset = fragment.border_box_top(),
+            .effective_box_bottom_offset = fragment.border_box_top(),
+            .line_height = fragment.layout_node().computed_values().line_height(),
         };
+        if (fragment.is_atomic_inline()) {
+            auto const& fragment_box_state = m_layout_state.get(static_cast<Box const&>(fragment.layout_node()));
+            fragment_metrics.effective_box_top_offset = fragment_box_state.margin_box_top();
+            fragment_metrics.effective_box_bottom_offset = fragment_box_state.margin_box_bottom();
+        }
 
-        auto const& vertical_align = fragment.layout_node().computed_values().vertical_align();
-        if (vertical_align.has<CSS::VerticalAlign>()) {
-            new_fragment_block_offset = block_offset_value_for_alignment(vertical_align.get<CSS::VerticalAlign>());
-        } else {
-            if (auto const* length_percentage = vertical_align.get_pointer<CSS::LengthPercentage>()) {
-                auto vertical_align_amount = length_percentage->to_px(fragment.layout_node(), fragment.layout_node().computed_values().line_height());
-                new_fragment_block_offset = block_offset_value_for_alignment(CSS::VerticalAlign::Baseline) - vertical_align_amount;
+        // Position the fragment according to the vertical-align of its own styled inline element.
+        auto const& own_vertical_align = fragment.layout_node().computed_values().vertical_align();
+        CSSPixels new_fragment_block_offset = block_offset_value_for_alignment(own_vertical_align, fragment_metrics);
+
+        // A 'top'- or 'bottom'-aligned box forms the root of its own aligned subtree and is positioned relative to the
+        // line box, so it must ignore the vertical-align of its ancestors.
+        auto* own_alignment = own_vertical_align.get_pointer<CSS::VerticalAlign>();
+        bool own_alignment_is_line_relative = own_alignment && first_is_one_of(*own_alignment, CSS::VerticalAlign::Top, CSS::VerticalAlign::Bottom);
+
+        auto const& node = fragment.layout_node().has_style()
+            ? static_cast<NodeWithStyle const&>(fragment.layout_node())
+            : *fragment.layout_node().parent();
+        auto const* containing_block = &m_context.containing_block();
+        auto const* first_ancestor = &node == containing_block ? nullptr : node.parent();
+        for (auto const* ancestor = first_ancestor; !own_alignment_is_line_relative && ancestor && ancestor->is_inline_node() && ancestor != containing_block; ancestor = ancestor->parent()) {
+            auto const& ancestor_vertical_align = ancestor->computed_values().vertical_align();
+            if (ancestor_vertical_align.has<CSS::VerticalAlign>()) {
+                auto keyword = ancestor_vertical_align.get<CSS::VerticalAlign>();
+                if (keyword == CSS::VerticalAlign::Baseline)
+                    continue;
+                // FIXME: Implement aligning a 'top'- or 'bottom'-aligned ancestor's aligned subtree to the line box
+                if (first_is_one_of(keyword, CSS::VerticalAlign::Top, CSS::VerticalAlign::Bottom))
+                    break;
             }
+            auto ancestor_metrics = inline_box_alignment_metrics(*ancestor);
+            new_fragment_block_offset += block_offset_value_for_alignment(ancestor_vertical_align, ancestor_metrics)
+                - block_offset_value_for_alignment(CSS::VerticalAlign::Baseline, ancestor_metrics);
         }
 
         fragment.set_inline_offset(new_fragment_inline_offset);
@@ -410,12 +406,20 @@ void LineBuilder::update_last_line()
                 bottom_of_inline_box = (fragment.block_offset() + fragment.baseline() + CSSPixels::nearest_value_for(font_metrics.descent) + half_leading);
             }
             if (auto const* length_percentage = fragment.layout_node().computed_values().vertical_align().get_pointer<CSS::LengthPercentage>()) {
-                bottom_of_inline_box += length_percentage->to_px(fragment.layout_node(), fragment.layout_node().computed_values().line_height());
+                bottom_of_inline_box += length_percentage->to_px(fragment.layout_node().computed_values().line_height());
             }
         }
 
         uppermost_box_top = min(uppermost_box_top, top_of_inline_box);
         lowermost_box_bottom = max(lowermost_box_bottom, bottom_of_inline_box);
+    }
+
+    auto marker_inline_offset = line_box.fragments().is_empty()
+        ? start_inline_offset
+        : inline_offset;
+    for (auto& marker : line_box.static_position_markers()) {
+        marker.inline_offset += marker_inline_offset;
+        marker.block_offset += block_offset + m_current_block_offset;
     }
 
     // 3. The line box height is the distance between the uppermost box top and the lowermost box bottom.
@@ -439,9 +443,7 @@ void LineBuilder::remove_last_line_if_empty()
 void LineBuilder::recalculate_available_space()
 {
     auto current_line_height = max(m_max_height_on_current_line, m_context.containing_block().computed_values().line_height());
-    auto available_at_top_of_line_box = m_context.available_space_for_line(m_current_block_offset);
-    auto available_at_bottom_of_line_box = m_context.available_space_for_line(m_current_block_offset + current_line_height - 1);
-    m_available_width_for_current_line = min(available_at_bottom_of_line_box, available_at_top_of_line_box);
+    m_available_width_for_current_line = m_context.available_space_for_line(m_current_block_offset, current_line_height);
     if (!m_containing_block_used_values.line_boxes.is_empty())
         m_containing_block_used_values.line_boxes.last().m_original_available_width = m_available_width_for_current_line;
 }

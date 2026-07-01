@@ -1,13 +1,11 @@
 include(libjs_generators)
 
 set(SOURCES
-    Bytecode/AsmInterpreter/AsmInterpreter.cpp
-    Bytecode/BasicBlock.cpp
+    Bytecode/AsmInterpreter/AsmSlowPaths.cpp
     Bytecode/Executable.cpp
     Bytecode/IdentifierTable.cpp
     Bytecode/Instruction.cpp
     Bytecode/Interpreter.cpp
-    Bytecode/Label.cpp
     Bytecode/PropertyNameIterator.cpp
     Bytecode/PropertyKeyTable.cpp
     Bytecode/RegexTable.cpp
@@ -323,19 +321,21 @@ if(NOT BUILD_SHARED_LIBS)
     set_property(SOURCE RustIntegration.cpp APPEND PROPERTY OBJECT_DEPENDS ${_libjs_rust_lib})
 endif()
 
-# AsmInterpreter: generate platform-specific assembly from DSL
-# NB: Win64 uses a different ABI (shadow space, different arg registers)
-#     from SysV AMD64, and the x86_64 backend only supports SysV for now.
-if (NOT WIN32 AND ("${CMAKE_SYSTEM_PROCESSOR}" MATCHES "^(x86_64|amd64|AMD64)$"))
+# AsmInterpreter: generate platform-specific assembly from DSL.
+if ("${CMAKE_SYSTEM_PROCESSOR}" MATCHES "^(x86_64|amd64|AMD64)$")
     set(ASMINT_ARCH "x86_64")
-elseif ("${CMAKE_SYSTEM_PROCESSOR}" MATCHES "^(aarch64|arm64)$")
+elseif ("${CMAKE_SYSTEM_PROCESSOR}" MATCHES "^(aarch64|arm64|ARM64)$")
     set(ASMINT_ARCH "aarch64")
+else()
+    message(FATAL_ERROR "LibJS requires AsmInterpreter support for ${CMAKE_SYSTEM_PROCESSOR}")
 endif()
 
 if (DEFINED ASMINT_ARCH)
     enable_language(ASM)
-    set(ASMINTGEN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/AsmIntGen")
-    set(ASMINTGEN_BIN "${ASMINTGEN_DIR}/target/release/asmintgen")
+    if (WIN32 AND CMAKE_ASM_COMPILER_ID MATCHES "Clang")
+        set(CMAKE_ASM_COMPILE_OPTIONS_MSVC_DEBUG_INFORMATION_FORMAT_ProgramDatabase "")
+        set(CMAKE_ASM_COMPILE_OPTIONS_MSVC_DEBUG_INFORMATION_FORMAT_EditAndContinue "")
+    endif()
     set(ASMINT_DSL "${CMAKE_CURRENT_SOURCE_DIR}/Bytecode/AsmInterpreter/asmint.asm")
     set(ASMINT_GENERATED_S "${CMAKE_CURRENT_BINARY_DIR}/Bytecode/AsmInterpreter/asmint_${ASMINT_ARCH}.S")
     set(ASM_OFFSETS_FILE "${CMAKE_CURRENT_BINARY_DIR}/Bytecode/AsmInterpreter/asm_offsets.conf")
@@ -344,6 +344,9 @@ if (DEFINED ASMINT_ARCH)
     # offsetof() to emit struct field offsets as DSL constants.
     add_executable(gen_asm_offsets "${CMAKE_CURRENT_SOURCE_DIR}/Bytecode/AsmInterpreter/gen_asm_offsets.cpp")
     target_link_libraries(gen_asm_offsets PRIVATE AK)
+    if (MSVC)
+        target_compile_definitions(gen_asm_offsets PRIVATE _ALLOW_KEYWORD_MACROS)
+    endif()
     target_compile_definitions(gen_asm_offsets PRIVATE private=public protected=public)
     # NB: Strip fuzzer sanitizer flags so gen_asm_offsets can define its own main().
     if (ENABLE_FUZZERS_LIBFUZZER)
@@ -360,35 +363,18 @@ if (DEFINED ASMINT_ARCH)
         COMMENT "Generating asm struct offsets"
     )
 
-    file(GLOB ASMINTGEN_RUST_SOURCES CONFIGURE_DEPENDS "${ASMINTGEN_DIR}/src/*.rs")
-    file(GLOB ASMINTGEN_BYTECODE_DEF_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/BytecodeDef/src/*.rs")
-    set(ASMINTGEN_SOURCES
-        "${ASMINTGEN_DIR}/Cargo.toml"
-        "${ASMINTGEN_DIR}/Cargo.lock"
-        "${CMAKE_CURRENT_SOURCE_DIR}/BytecodeDef/Cargo.toml"
-        ${ASMINTGEN_RUST_SOURCES}
-        ${ASMINTGEN_BYTECODE_DEF_SOURCES}
-    )
-    # NB: Clear linker-related env vars so cargo uses the default host
-    # linker. The CI may set CC/CXX or CARGO_TARGET_*_LINKER to a
-    # compiler that isn't available in all build configurations (e.g.
-    # clang-21 in GNU builds). asmintgen is a pure Rust host tool.
-    add_custom_command(
-        OUTPUT "${ASMINTGEN_BIN}"
-        COMMAND ${CMAKE_COMMAND} -E env
-            --unset=CC
-            --unset=CXX
-            --unset=CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER
-            --unset=CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER
-            cargo build --release
-        WORKING_DIRECTORY "${ASMINTGEN_DIR}"
-        DEPENDS ${ASMINTGEN_SOURCES}
-        COMMENT "Building asmintgen"
+    build_rust_binary(
+        MANIFEST_PATH AsmIntGen/Cargo.toml
+        CRATE_NAME asmintgen
+        BINARY_NAME asmintgen
+        OUTPUT_PATH_VAR ASMINTGEN_BIN
     )
 
     set(BYTECODE_DEF "${CMAKE_CURRENT_SOURCE_DIR}/Bytecode/Bytecode.def")
 
-    if (APPLE)
+    if (WIN32)
+        set(ASMINT_OBJ_FORMAT "coff")
+    elseif (APPLE)
         set(ASMINT_OBJ_FORMAT "macho")
     else()
         set(ASMINT_OBJ_FORMAT "elf")

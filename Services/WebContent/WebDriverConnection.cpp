@@ -8,18 +8,21 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/JsonArray.h>
 #include <AK/JsonObject.h>
 #include <AK/JsonValue.h>
 #include <AK/LexicalPath.h>
-#include <AK/NeverDestroyed.h>
+#include <AK/RefCounted.h>
 #include <AK/Time.h>
 #include <AK/Vector.h>
 #include <LibCore/File.h>
+#include <LibCore/Process.h>
 #if !defined(AK_OS_MACOS)
 #    include <LibCore/Socket.h>
 #else
 #    include <LibIPC/TransportBootstrapMach.h>
 #endif
+#include <LibGC/Root.h>
 #include <LibGC/Timer.h>
 #include <LibHTTP/Cookie/Cookie.h>
 #include <LibHTTP/Cookie/ParsedCookie.h>
@@ -51,12 +54,14 @@
 #include <LibWeb/HTML/HTMLOptionElement.h>
 #include <LibWeb/HTML/HTMLSelectElement.h>
 #include <LibWeb/HTML/HTMLTextAreaElement.h>
+#include <LibWeb/HTML/LocalNavigable.h>
+#include <LibWeb/HTML/LocalTraversableNavigable.h>
 #include <LibWeb/HTML/NavigationObserver.h>
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/HTML/SelectedFile.h>
-#include <LibWeb/HTML/TraversableNavigable.h>
 #include <LibWeb/HTML/WindowProxy.h>
 #include <LibWeb/HTML/XMLSerializer.h>
+#include <LibWeb/Loader/FileRequest.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/Platform/EventLoopPlugin.h>
 #include <LibWeb/Platform/Timer.h>
@@ -70,9 +75,20 @@
 #include <LibWeb/WebDriver/Properties.h>
 #include <LibWeb/WebDriver/Screenshot.h>
 #include <LibWeb/WebDriver/UserPrompt.h>
+#include <LibWebView/HistoryDebug.h>
+#include <WebContent/PageClient.h>
 #include <WebContent/WebDriverConnection.h>
 
 namespace WebContent {
+
+struct WebDriverHistoryTraversalMetadata
+    : public RefCounted<WebDriverHistoryTraversalMetadata> {
+    Web::WebDriver::Response response { JsonValue {} };
+    bool will_replace_web_content_process { false };
+    bool wait_for_driver_execution_complete { true };
+    bool wait_for_navigation_completion { true };
+    bool sync_response_returned { false };
+};
 
 #define WEBDRIVER_TRY(expression)                                                                    \
     ({                                                                                               \
@@ -124,6 +140,30 @@ static Gfx::IntRect compute_window_rect(Web::Page const& page)
         page.window_size().width(),
         page.window_size().height()
     };
+}
+
+static Optional<size_t> current_top_level_entry_index(Web::HTML::LocalTraversableNavigable::SessionHistorySnapshot const& session_history_snapshot)
+{
+    VERIFY(session_history_snapshot.current_used_step_index < session_history_snapshot.used_session_history_steps.size());
+    auto current_step = session_history_snapshot.used_session_history_steps[session_history_snapshot.current_used_step_index];
+
+    Optional<size_t> result;
+    for (size_t i = 0; i < session_history_snapshot.top_level_session_history_entries.size(); ++i) {
+        if (session_history_snapshot.top_level_session_history_entries[i].step > current_step)
+            break;
+        result = i;
+    }
+    return result;
+}
+
+static JsonObject serialize_session_history_snapshot_for_webdriver(Web::HTML::LocalTraversableNavigable::SessionHistorySnapshot const& session_history_snapshot)
+{
+    JsonObject serialized;
+    serialized.set("currentUsedStepIndex"sv, session_history_snapshot.current_used_step_index);
+    serialized.set("currentStep"sv, session_history_snapshot.used_session_history_steps[session_history_snapshot.current_used_step_index]);
+    serialized.set("entries"sv, WebView::history_json_entries(session_history_snapshot.top_level_session_history_entries, current_top_level_entry_index(session_history_snapshot)));
+    serialized.set("usedSteps"sv, WebView::history_json_steps(session_history_snapshot.used_session_history_steps, session_history_snapshot.current_used_step_index));
+    return serialized;
 }
 
 // https://w3c.github.io/webdriver/#dfn-scrolls-into-view
@@ -228,6 +268,41 @@ WebDriverConnection::WebDriverConnection(NonnullOwnPtr<IPC::Transport> transport
     set_current_top_level_browsing_context(page_client.page().top_level_browsing_context());
 }
 
+void WebDriverConnection::page_did_set_window_handle(Badge<PageClient>, String const& window_handle)
+{
+    async_did_set_window_handle(window_handle);
+}
+
+void WebDriverConnection::page_did_start_window_replacement(Badge<PageClient>, String const& window_handle)
+{
+    async_did_start_window_replacement(window_handle);
+    if (m_should_complete_driver_execution_when_navigation_starts_or_is_canceled) {
+        m_should_complete_driver_execution_when_navigation_starts_or_is_canceled = false;
+        async_driver_execution_complete(JsonValue {});
+    }
+}
+
+void WebDriverConnection::page_did_start_loading(Badge<PageClient>, URL::URL const&)
+{
+    if (m_should_complete_driver_execution_when_navigation_starts_or_is_canceled) {
+        m_should_complete_driver_execution_when_navigation_starts_or_is_canceled = false;
+        async_driver_execution_complete(JsonValue {});
+    }
+}
+
+void WebDriverConnection::page_did_cancel_loading(Badge<PageClient>, URL::URL const&)
+{
+    if (m_should_complete_driver_execution_when_navigation_starts_or_is_canceled) {
+        m_should_complete_driver_execution_when_navigation_starts_or_is_canceled = false;
+        async_driver_execution_complete(JsonValue {});
+    }
+}
+
+void WebDriverConnection::page_did_close_window(Badge<PageClient>, String const& window_handle)
+{
+    async_did_close_window(window_handle);
+}
+
 void WebDriverConnection::visit_edges(JS::Cell::Visitor& visitor)
 {
     visitor.visit(m_current_browsing_context);
@@ -247,9 +322,8 @@ void WebDriverConnection::close_session()
     set_is_webdriver_active(false);
 
     // 5. Optionally, close all top-level browsing contexts, without prompting to unload.
-    for (auto navigable : Web::HTML::all_navigables()) {
-        if (auto traversable = navigable->top_level_traversable())
-            traversable->close_top_level_traversable();
+    for (auto navigable : Web::HTML::all_local_navigables()) {
+        as<Web::HTML::LocalTraversableNavigable>(*navigable->top_level_traversable()).close_top_level_traversable();
     }
 }
 
@@ -305,17 +379,21 @@ Messages::WebDriverClient::SetTimeoutsResponse WebDriverConnection::set_timeouts
 Messages::WebDriverClient::NavigateToResponse WebDriverConnection::navigate_to(JsonValue payload)
 {
     // 1. If the current top-level browsing context is no longer open, return error with error code no such window.
-    TRY(ensure_current_top_level_browsing_context_is_open());
+    if (auto result = ensure_current_top_level_browsing_context_is_open(); result.is_error())
+        return { Web::WebDriver::Response { result.release_error() }, false };
 
     // 2. Let url be the result of getting the property url from the parameters argument.
     if (!payload.is_object() || !payload.as_object().has_string("url"sv))
-        return Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::InvalidArgument, "Payload doesn't have a string `url`"sv);
+        return { Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::InvalidArgument, "Payload doesn't have a string `url`"sv), false };
     auto url = URL::Parser::basic_parse(payload.as_object().get_string("url"sv).value());
 
     // FIXME: 3. If url is not an absolute URL or is not an absolute URL with fragment or not a local scheme, return error with error code invalid argument.
 
+    auto const& current_url = current_top_level_browsing_context()->active_document()->url();
+    auto will_replace_web_content_process = current_top_level_browsing_context()->page().client().decide_navigation_process(current_url, url.value(), Web::NavigationTarget::TopLevel) == Web::NavigationProcessDecision::Remote;
+
     // 4. Handle any user prompts and return its value if it is an error.
-    handle_any_user_prompts([this, url = move(url)]() {
+    handle_any_user_prompts([this, url = move(url), will_replace_web_content_process]() {
         // 5. Let current URL be the current top-level browsing context’s active document’s URL.
         auto const& current_url = current_top_level_browsing_context()->active_document()->url();
 
@@ -323,33 +401,32 @@ Messages::WebDriverClient::NavigateToResponse WebDriverConnection::navigate_to(J
         // FIXME:     a. If timer has not been started, start a timer. If this algorithm has not completed before timer reaches the session’s session page load timeout in milliseconds, return an error with error code timeout.
 
         // 7. Navigate the current top-level browsing context to url.
+        // NB: "Navigate to a javascript: URL" can evaluate without producing a new Document,
+        //     in which case "we will not perform a navigation".
+        // https://html.spec.whatwg.org/multipage/browsing-the-web.html#navigate-to-a-javascript:-url
+        auto is_same_document_fragment_navigation = url->fragment().has_value()
+            && url->equals(current_url, URL::ExcludeFragment::Yes);
+        if (url->scheme() != "javascript"sv && !is_same_document_fragment_navigation)
+            static_cast<WebContent::PageClient&>(current_top_level_browsing_context()->page().client()).did_start_webdriver_navigation(url.value());
         current_top_level_browsing_context()->page().load(url.value());
 
-        auto navigation_complete = GC::create_function(current_top_level_browsing_context()->heap(), [this](Web::WebDriver::Response result) {
+        auto navigation_complete = GC::create_function(current_top_level_browsing_context()->heap(), [this, will_replace_web_content_process](Web::WebDriver::Response result) {
             // 9. Set the current browsing context with the current top-level browsing context.
             set_current_browsing_context(*current_top_level_browsing_context());
 
             // FIXME: 10. If the current top-level browsing context contains a refresh state pragma directive of time 1 second or less, wait until the refresh timeout has elapsed, a new navigate has begun, and return to the first step of this algorithm.
 
-            async_driver_execution_complete(move(result));
+            if (will_replace_web_content_process)
+                m_should_complete_driver_execution_when_navigation_starts_or_is_canceled = true;
+            else
+                async_driver_execution_complete(move(result));
         });
 
-        // 8. If url is special except for file and current URL and URL do not have the same absolute URL:
-        // AD-HOC: We wait for the navigation to complete regardless of whether the current URL differs from the provided
-        //         URL. Even if they're the same, the navigation queues a tasks that we must await, otherwise subsequent
-        //         endpoint invocations will attempt to operate on the wrong page.
-        if (url->is_special() && url->scheme() != "file"sv) {
-            // a. Try to wait for navigation to complete.
-            wait_for_navigation_to_complete(navigation_complete);
-
-            // FIXME: b. Try to run the post-navigation checks.
-        } else {
-            navigation_complete->function()(JsonValue {});
-        }
+        navigation_complete->function()(JsonValue {});
     });
 
     // 11. Return success with data null.
-    return JsonValue {};
+    return { JsonValue {}, will_replace_web_content_process };
 }
 
 // 10.2 Get Current URL, https://w3c.github.io/webdriver/#get-current-url
@@ -374,148 +451,64 @@ Messages::WebDriverClient::GetCurrentUrlResponse WebDriverConnection::get_curren
 Messages::WebDriverClient::BackResponse WebDriverConnection::back()
 {
     // 1. If session's current top-level browsing context is no longer open, return error with error code no such window.
-    TRY(ensure_current_top_level_browsing_context_is_open());
+    if (auto result = ensure_current_top_level_browsing_context_is_open(); result.is_error())
+        return { Web::WebDriver::Response { result.release_error() }, false, false, false };
 
     // 2. Try to handle any user prompts with session.
-    handle_any_user_prompts([this]() {
-        auto& realm = current_top_level_browsing_context()->active_document()->realm();
-
-        // 3. Let timeout be session' session timeouts page load timeout.
-        auto timeout = m_timeouts_configuration.page_load_timeout;
-
-        // 4. Let timer be a new timer.
-        auto timer = realm.heap().allocate<GC::Timer>();
-
-        auto on_complete = GC::create_function(realm.heap(), [this, timer]() {
-            timer->stop();
-
-            if (m_document_observer) {
-                m_document_observer->set_document_page_showing_observer({});
-                m_document_observer = nullptr;
-            }
-
-            // 8. If timer' timeout fired flag is set:
-            if (timer->is_timed_out()) {
-                // 1. Handle any user prompts.
-                handle_any_user_prompts([this]() {
-                    // 2. Return error with error code timeout.
-                    async_driver_execution_complete(Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::Timeout, "Navigation timed out"sv));
-                });
-
+    auto metadata = adopt_ref(*new WebDriverHistoryTraversalMetadata);
+    handle_any_user_prompts([this, metadata]() {
+        auto& page_client = static_cast<WebContent::PageClient&>(current_top_level_browsing_context()->page().client());
+        page_client.request_webdriver_history_traversal(-1, [this, metadata](auto traversal_result) {
+            if (!traversal_result.accepted) {
+                async_driver_execution_complete(Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::NoSuchWindow, "Window not found"sv));
                 return;
             }
 
-            // 9. Return success with data null.
-            async_driver_execution_complete(JsonValue {});
+            metadata->will_replace_web_content_process = traversal_result.will_replace_web_content_process;
+            metadata->wait_for_navigation_completion = true;
+            if (metadata->will_replace_web_content_process)
+                async_did_start_window_replacement(current_top_level_browsing_context()->page().top_level_traversable()->window_handle());
+            if (metadata->sync_response_returned)
+                async_driver_execution_complete(JsonValue {});
+            else
+                metadata->wait_for_driver_execution_complete = false;
         });
-
-        // 5. If timeout is not null:
-        if (timeout.has_value()) {
-            // 1. Start the timer with timer and timeout.
-            timer->start(*timeout, on_complete);
-        }
-
-        // 6. Traverse the history by a delta –1 for session's current browsing context.
-        current_top_level_browsing_context()->top_level_traversable()->traverse_the_history_by_delta(-1);
-
-        // 7. If the previous step completed results in a pageHide event firing, wait until pageShow event fires or
-        //    timer' timeout fired flag to be set, whichever occurs first.
-        current_top_level_browsing_context()->top_level_traversable()->append_session_history_traversal_steps(GC::create_function(realm.heap(), [this, timer, on_complete](NonnullRefPtr<Core::Promise<Empty>> signal) {
-            if (timer->is_timed_out()) {
-                signal->resolve({});
-                return;
-            }
-
-            if (auto* document = current_top_level_browsing_context()->active_document(); document->page_showing()) {
-                on_complete->function()();
-            } else {
-                auto& realm = document->realm();
-
-                m_document_observer = realm.create<Web::DOM::DocumentObserver>(realm, *document);
-                m_document_observer->set_document_page_showing_observer([on_complete](auto) {
-                    on_complete->function()();
-                });
-            }
-
-            signal->resolve({});
-        }));
     });
 
-    return JsonValue {};
+    metadata->sync_response_returned = true;
+    return { move(metadata->response), metadata->will_replace_web_content_process, metadata->wait_for_driver_execution_complete, metadata->wait_for_navigation_completion };
 }
 
 // 10.4 Forward, https://w3c.github.io/webdriver/#dfn-forward
 Messages::WebDriverClient::ForwardResponse WebDriverConnection::forward()
 {
     // 1. If session's current top-level browsing context is no longer open, return error with error code no such window.
-    TRY(ensure_current_top_level_browsing_context_is_open());
+    if (auto result = ensure_current_top_level_browsing_context_is_open(); result.is_error())
+        return { Web::WebDriver::Response { result.release_error() }, false, false, false };
 
     // 2. Try to handle any user prompts with session.
-    handle_any_user_prompts([this]() {
-        auto& realm = current_top_level_browsing_context()->active_document()->realm();
-
-        // 3. Let timeout be session' session timeouts page load timeout.
-        auto timeout = m_timeouts_configuration.page_load_timeout;
-
-        // 4. Let timer be a new timer.
-        auto timer = realm.heap().allocate<GC::Timer>();
-
-        auto on_complete = GC::create_function(realm.heap(), [this, timer]() {
-            timer->stop();
-
-            if (m_document_observer) {
-                m_document_observer->set_document_page_showing_observer({});
-                m_document_observer = nullptr;
-            }
-
-            // 8. If timer' timeout fired flag is set:
-            if (timer->is_timed_out()) {
-                // 1. Handle any user prompts.
-                handle_any_user_prompts([this]() {
-                    // 2. Return error with error code timeout.
-                    async_driver_execution_complete(Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::Timeout, "Navigation timed out"sv));
-                });
-
+    auto metadata = adopt_ref(*new WebDriverHistoryTraversalMetadata);
+    handle_any_user_prompts([this, metadata]() {
+        auto& page_client = static_cast<WebContent::PageClient&>(current_top_level_browsing_context()->page().client());
+        page_client.request_webdriver_history_traversal(1, [this, metadata](auto traversal_result) {
+            if (!traversal_result.accepted) {
+                async_driver_execution_complete(Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::NoSuchWindow, "Window not found"sv));
                 return;
             }
 
-            // 9. Return success with data null.
-            async_driver_execution_complete(JsonValue {});
+            metadata->will_replace_web_content_process = traversal_result.will_replace_web_content_process;
+            metadata->wait_for_navigation_completion = true;
+            if (metadata->will_replace_web_content_process)
+                async_did_start_window_replacement(current_top_level_browsing_context()->page().top_level_traversable()->window_handle());
+            if (metadata->sync_response_returned)
+                async_driver_execution_complete(JsonValue {});
+            else
+                metadata->wait_for_driver_execution_complete = false;
         });
-
-        // 5. If timeout is not null:
-        if (timeout.has_value()) {
-            // 1. Start the timer with timer and timeout.
-            timer->start(*timeout, on_complete);
-        }
-
-        // 6. Traverse the history by a delta 1 for session's current browsing context.
-        current_top_level_browsing_context()->top_level_traversable()->traverse_the_history_by_delta(1);
-
-        // 7. If the previous step completed results in a pageHide event firing, wait until pageShow event fires or
-        //    timer' timeout fired flag to be set, whichever occurs first.
-        current_top_level_browsing_context()->top_level_traversable()->append_session_history_traversal_steps(GC::create_function(realm.heap(), [this, timer, on_complete](NonnullRefPtr<Core::Promise<Empty>> signal) {
-            if (timer->is_timed_out()) {
-                signal->resolve({});
-                return;
-            }
-
-            if (auto* document = current_top_level_browsing_context()->active_document(); document->page_showing()) {
-                on_complete->function()();
-            } else {
-                auto& realm = document->realm();
-
-                m_document_observer = realm.create<Web::DOM::DocumentObserver>(realm, *document);
-                m_document_observer->set_document_page_showing_observer([on_complete](auto) {
-                    on_complete->function()();
-                });
-            }
-
-            signal->resolve({});
-        }));
     });
 
-    return JsonValue {};
+    metadata->sync_response_returned = true;
+    return { move(metadata->response), metadata->will_replace_web_content_process, metadata->wait_for_driver_execution_complete, metadata->wait_for_navigation_completion };
 }
 
 // 10.5 Refresh, https://w3c.github.io/webdriver/#dfn-refresh
@@ -540,6 +533,107 @@ Messages::WebDriverClient::RefreshResponse WebDriverConnection::refresh()
         async_driver_execution_complete(JsonValue {});
     });
 
+    return JsonValue {};
+}
+
+Messages::WebDriverClient::WaitForNavigationCompletionResponse WebDriverConnection::wait_for_navigation_completion()
+{
+    if (m_page_load_strategy == Web::WebDriver::PageLoadStrategy::None) {
+        async_driver_execution_complete(JsonValue {});
+        return JsonValue {};
+    }
+
+    auto& page_client = static_cast<WebContent::PageClient&>(current_top_level_browsing_context()->page().client());
+    page_client.wait_for_webdriver_navigation_completion(m_timeouts_configuration.page_load_timeout, [this](Web::WebDriver::Response response) {
+        async_driver_execution_complete(move(response));
+    });
+    return JsonValue {};
+}
+
+void WebDriverConnection::crash_current_page()
+{
+    Core::deferred_invoke([] {
+        Core::Process::terminate_immediately(1);
+    });
+}
+
+Messages::WebDriverClient::LoadUrlFromUiResponse WebDriverConnection::load_url_from_ui(JsonValue payload)
+{
+    TRY(ensure_current_top_level_browsing_context_is_open());
+
+    if (!payload.is_object() || !payload.as_object().has_string("url"sv))
+        return Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::InvalidArgument, "Payload doesn't have a string `url`"sv);
+    auto url = URL::Parser::basic_parse(payload.as_object().get_string("url"sv).value());
+    if (!url.has_value())
+        return Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::InvalidArgument, "Payload has an invalid `url`"sv);
+
+    auto const& current_url = current_top_level_browsing_context()->active_document()->url();
+    auto will_replace_web_content_process = current_top_level_browsing_context()->page().client().decide_navigation_process(current_url, *url, Web::NavigationTarget::TopLevel) == Web::NavigationProcessDecision::Remote;
+
+    auto& page_client = static_cast<WebContent::PageClient&>(current_top_level_browsing_context()->page().client());
+    auto response = page_client.request_webdriver_load_url_from_ui(*url);
+    if (response.is_error())
+        return response.release_error();
+
+    JsonObject result;
+    result.set("willReplaceWebContentProcess"sv, will_replace_web_content_process);
+    async_driver_execution_complete(JsonValue { move(result) });
+    return JsonValue {};
+}
+
+Messages::WebDriverClient::TraverseHistoryFromUiResponse WebDriverConnection::traverse_history_from_ui(JsonValue payload)
+{
+    TRY(ensure_current_top_level_browsing_context_is_open());
+
+    if (!payload.is_object() || !payload.as_object().has_i32("delta"sv))
+        return Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::InvalidArgument, "Payload doesn't have an integer `delta`"sv);
+
+    auto& page_client = static_cast<WebContent::PageClient&>(current_top_level_browsing_context()->page().client());
+    page_client.request_webdriver_history_traversal(payload.as_object().get_i32("delta"sv).value(), [this](auto traversal_result) {
+        if (!traversal_result.accepted) {
+            async_driver_execution_complete(Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::NoSuchWindow, "Window not found"sv));
+            return;
+        }
+
+        if (traversal_result.will_replace_web_content_process)
+            async_did_start_window_replacement(current_top_level_browsing_context()->page().top_level_traversable()->window_handle());
+
+        JsonObject result;
+        result.set("willReplaceWebContentProcess"sv, traversal_result.will_replace_web_content_process);
+        result.set("willChangeTopLevelEntry"sv, traversal_result.will_change_top_level_entry);
+        async_driver_execution_complete(JsonValue { move(result) });
+    });
+    return JsonValue {};
+}
+
+Messages::WebDriverClient::MarkWebContentSessionHistoryStaleResponse WebDriverConnection::mark_web_content_session_history_stale()
+{
+    TRY(ensure_current_top_level_browsing_context_is_open());
+
+    auto& page_client = static_cast<WebContent::PageClient&>(current_top_level_browsing_context()->page().client());
+    auto response = page_client.request_webdriver_mark_web_content_session_history_stale();
+    if (response.is_error())
+        return response.release_error();
+
+    async_driver_execution_complete(JsonValue {});
+    return JsonValue {};
+}
+
+Messages::WebDriverClient::GetSessionHistoryResponse WebDriverConnection::get_session_history()
+{
+    TRY(ensure_current_top_level_browsing_context_is_open());
+
+    auto& page_client = static_cast<WebContent::PageClient&>(current_top_level_browsing_context()->page().client());
+    auto ui_session_history = page_client.request_webdriver_session_history();
+    if (ui_session_history.is_error())
+        return ui_session_history.release_error();
+
+    auto web_content_session_history_snapshot = current_top_level_browsing_context()->top_level_traversable()->create_session_history_snapshot();
+
+    JsonObject result;
+    result.set("ui"sv, ui_session_history.release_value());
+    result.set("webContent"sv, serialize_session_history_snapshot_for_webdriver(web_content_session_history_snapshot));
+    async_driver_execution_complete(JsonValue { move(result) });
     return JsonValue {};
 }
 
@@ -592,13 +686,13 @@ Messages::WebDriverClient::SwitchToWindowResponse WebDriverConnection::switch_to
     //    Otherwise, return error with error code no such window.
     bool found_matching_context = false;
 
-    for (auto navigable : Web::HTML::all_navigables()) {
-        auto traversable = navigable->top_level_traversable();
-        if (!traversable || !traversable->active_browsing_context())
+    for (auto navigable : Web::HTML::all_local_navigables()) {
+        auto& traversable = as<Web::HTML::LocalTraversableNavigable>(*navigable->top_level_traversable());
+        if (!traversable.active_browsing_context())
             continue;
 
-        if (handle == traversable->window_handle()) {
-            set_current_top_level_browsing_context(*traversable->active_browsing_context());
+        if (handle == traversable.window_handle()) {
+            set_current_top_level_browsing_context(*traversable.active_browsing_context());
             found_matching_context = true;
             break;
         }
@@ -1945,34 +2039,44 @@ Web::WebDriver::Response WebDriverConnection::element_send_keys_impl(StringView 
         // 5. Verify that each file given by the user exists. If any do not, return error with error code invalid argument.
         // 6. Complete implementation specific steps equivalent to setting the selected files on the input element. If
         //    multiple is true files are be appended to element's selected files.
-        auto create_selected_file = [](auto const& path) -> ErrorOr<Web::HTML::SelectedFile> {
-            auto file = TRY(Core::File::open(path, Core::File::OpenMode::Read));
-            auto contents = TRY(file->read_until_eof());
+        // NB: Each file is opened in the unsandboxed UI process, because the WebContent sandbox blocks this
+        //     process from opening arbitrary paths.
+        auto read_files_and_apply_selection = [connection = this, input_element = GC::make_root(input_element)](this auto const& self, Vector<String> paths, size_t index, Vector<Web::HTML::SelectedFile> selected_files) -> void {
+            if (index < paths.size()) {
+                auto path = paths[index].to_byte_string();
 
-            return Web::HTML::SelectedFile { LexicalPath::basename(path), move(contents) };
+                Web::FileRequest file_request(path, [connection, self, paths = move(paths), index, selected_files = move(selected_files), path](ErrorOr<i32> file_descriptor_or_error) mutable {
+                    auto contents_or_error = [&]() -> ErrorOr<ByteBuffer> {
+                        auto opened_file = TRY(Core::File::adopt_fd(TRY(file_descriptor_or_error), Core::File::OpenMode::Read));
+                        return opened_file->read_until_eof();
+                    }();
+
+                    if (contents_or_error.is_error()) {
+                        connection->async_driver_execution_complete(Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::InvalidArgument, MUST(String::formatted("'{}' does not exist", path))));
+                        return;
+                    }
+
+                    selected_files.append(Web::HTML::SelectedFile { LexicalPath::basename(path), contents_or_error.release_value() });
+                    self(move(paths), index + 1, move(selected_files));
+                });
+
+                connection->current_browsing_context().page().client().request_file(move(file_request));
+                return;
+            }
+
+            input_element->did_select_files(selected_files, Web::HTML::HTMLInputElement::MultipleHandling::Append);
+
+            // 7. Fire these events in order on element:
+            //     1. input
+            //     2. change
+            // NOTE: These events are fired by `did_select_files` as an element task. So instead of firing them here, we
+            //       spin the event loop once before informing the client that the action is complete.
+            Web::HTML::queue_a_task(Web::HTML::Task::Source::Unspecified, nullptr, nullptr, GC::create_function(connection->current_browsing_context().heap(), [connection]() {
+                connection->async_driver_execution_complete(JsonValue {});
+            }));
         };
 
-        Vector<Web::HTML::SelectedFile> selected_files;
-        selected_files.ensure_capacity(files.size());
-
-        for (auto const& path : files) {
-            auto selected_file = create_selected_file(path.bytes_as_string_view());
-            if (selected_file.is_error())
-                return Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::InvalidArgument, MUST(String::formatted("'{}' does not exist", path)));
-
-            selected_files.unchecked_append(selected_file.release_value());
-        }
-
-        input_element.did_select_files(selected_files, Web::HTML::HTMLInputElement::MultipleHandling::Append);
-
-        // 7. Fire these events in order on element:
-        //     1. input
-        //     2. change
-        // NOTE: These events are fired by `did_select_files` as an element task. So instead of firing them here, we spin
-        //       the event loop once before informing the client that the action is complete.
-        Web::HTML::queue_a_task(Web::HTML::Task::Source::Unspecified, nullptr, nullptr, GC::create_function(current_browsing_context().heap(), [this]() {
-            async_driver_execution_complete(JsonValue {});
-        }));
+        read_files_and_apply_selection(move(files), 0, {});
 
         // 8. Return success with data null.
         return JsonValue {};
@@ -2621,7 +2725,7 @@ void WebDriverConnection::set_current_browsing_context(Web::HTML::BrowsingContex
     // 2. Set the session's current parent browsing context to the parent browsing context of context, if that context
     //    exists, or null otherwise.
     if (auto navigable = browsing_context.active_document()->navigable(); navigable && navigable->parent())
-        m_current_parent_browsing_context = navigable->parent()->active_browsing_context();
+        m_current_parent_browsing_context = as<Web::HTML::LocalNavigable>(*navigable->parent()).active_browsing_context();
     else
         m_current_parent_browsing_context = nullptr;
 }
@@ -2668,30 +2772,7 @@ ErrorOr<void, Web::WebDriver::Error> WebDriverConnection::ensure_current_top_lev
 // https://w3c.github.io/webdriver/#dfn-get-the-prompt-handler
 Web::WebDriver::PromptHandlerConfiguration WebDriverConnection::get_the_prompt_handler(Web::WebDriver::PromptType type) const
 {
-    static NeverDestroyed<Web::WebDriver::UserPromptHandler::ValueType> empty_user_prompt_handler;
-    auto const& user_prompt_handler = Web::WebDriver::user_prompt_handler();
-
-    // 1. If the user prompt handler is null, let handlers be an empty map. Otherwise let handlers be user prompt handler.
-    auto const& handlers = user_prompt_handler.has_value() ? *user_prompt_handler : *empty_user_prompt_handler;
-
-    // 2. If handlers contains type return handlers[type].
-    if (auto handler = handlers.get(type); handler.has_value())
-        return *handler;
-
-    // 3. If handlers contains "default" return handlers["default"].
-    if (auto handler = handlers.get(Web::WebDriver::PromptType::Default); handler.has_value())
-        return *handler;
-
-    // 4. If type is "beforeUnload", return a prompt handler configuration with handler "accept" and notify false.
-    if (type == Web::WebDriver::PromptType::BeforeUnload)
-        return { .handler = Web::WebDriver::PromptHandler::Accept, .notify = Web::WebDriver::PromptHandlerConfiguration::Notify::No };
-
-    // 5. If handlers contains "fallbackDefault" return handlers["fallbackDefault"].
-    if (auto handler = handlers.get(Web::WebDriver::PromptType::FallbackDefault); handler.has_value())
-        return *handler;
-
-    // 6. Return a prompt handler configuration with handler "dismiss" and notify true.
-    return { .handler = Web::WebDriver::PromptHandler::Dismiss, .notify = Web::WebDriver::PromptHandlerConfiguration::Notify::Yes };
+    return Web::WebDriver::get_the_prompt_handler(type);
 }
 
 // https://w3c.github.io/webdriver/#dfn-annotated-unexpected-alert-open-error

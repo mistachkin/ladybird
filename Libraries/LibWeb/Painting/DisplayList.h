@@ -33,7 +33,7 @@ class WEB_API DisplayListPlayer {
 public:
     virtual ~DisplayListPlayer() = default;
 
-    void execute(DisplayList const&, AccumulatedVisualContextTree const&, DisplayListResourceStorage const&, ScrollStateSnapshot const&, RefPtr<Gfx::PaintingSurface>);
+    void execute(DisplayList const&, AccumulatedVisualContextTree const&, DisplayListResourceStorage const&, ScrollStateSnapshot const&, RefPtr<Gfx::PaintingSurface>, CanvasSurfaceRegistry const* = nullptr);
     virtual void flush(Gfx::PaintingSurface&) = 0;
 
 protected:
@@ -41,6 +41,7 @@ protected:
     DisplayList const& active_display_list() const { return *m_active_display_list; }
     AccumulatedVisualContextTree const& active_visual_context_tree() const { return *m_active_visual_context_tree; }
     DisplayListResourceStorage const& resource_storage() const { return *m_resource_storage; }
+    CanvasSurfaceRegistry const* canvas_surface_registry() const { return m_canvas_surface_registry; }
     ReadonlyBytes inline_data(DisplayListDataSpan span) const
     {
         VERIFY(static_cast<size_t>(span.offset) + span.size <= m_current_command_payload.size());
@@ -60,42 +61,11 @@ protected:
     void execute_nested_display_list(DisplayList const&, AccumulatedVisualContextTree const&, ScrollStateSnapshot const&, ReadonlyBytes command_bytes);
 
 private:
-    virtual void draw_glyph_run(DrawGlyphRun const&) = 0;
-    virtual void fill_rect(FillRect const&) = 0;
-    virtual void draw_scaled_decoded_image_frame(DrawScaledDecodedImageFrame const&) = 0;
-    virtual void draw_repeated_decoded_image_frame(DrawRepeatedDecodedImageFrame const&) = 0;
-    virtual void draw_compositor_surface(DrawCompositorSurface const&) = 0;
-    virtual void draw_video_frame(DrawVideoFrame const&) = 0;
-    virtual void save(Save const&) = 0;
-    virtual void save_layer(SaveLayer const&) = 0;
-    virtual void restore(Restore const&) = 0;
-    virtual void translate(Translate const&) = 0;
-    virtual void add_clip_rect(AddClipRect const&) = 0;
-    virtual void paint_linear_gradient(PaintLinearGradient const&) = 0;
-    virtual void paint_radial_gradient(PaintRadialGradient const&) = 0;
-    virtual void paint_conic_gradient(PaintConicGradient const&) = 0;
-    virtual void paint_outer_box_shadow(PaintOuterBoxShadow const&) = 0;
-    virtual void paint_inner_box_shadow(PaintInnerBoxShadow const&) = 0;
-    virtual void paint_text_shadow(PaintTextShadow const&) = 0;
-    virtual void fill_rect_with_rounded_corners(FillRectWithRoundedCorners const&) = 0;
-    virtual void fill_path(FillPath const&) = 0;
-    virtual void stroke_path(StrokePath const&) = 0;
-    virtual void draw_ellipse(DrawEllipse const&) = 0;
-    virtual void fill_ellipse(FillEllipse const&) = 0;
-    virtual void draw_line(DrawLine const&) = 0;
-    virtual void apply_backdrop_filter(ApplyBackdropFilter const&) = 0;
-    virtual void draw_rect(DrawRect const&) = 0;
-    virtual void add_rounded_rect_clip(AddRoundedRectClip const&) = 0;
-    virtual void paint_nested_display_list(PaintNestedDisplayList const&) = 0;
-    virtual void compositor_scroll_node(CompositorScrollNode const&) = 0;
-    virtual void compositor_sticky_area(CompositorStickyArea const&) = 0;
-    virtual void compositor_wheel_hit_test_target(CompositorWheelHitTestTarget const&) = 0;
-    virtual void compositor_wheel_hit_test_target_with_corner_radii(CompositorWheelHitTestTargetWithCornerRadii const&) = 0;
-    virtual void compositor_main_thread_wheel_event_region(CompositorMainThreadWheelEventRegion const&) = 0;
-    virtual void compositor_viewport_scrollbar(CompositorViewportScrollbar const&) = 0;
-    virtual void compositor_blocking_wheel_event_region(CompositorBlockingWheelEventRegion const&) = 0;
-    virtual void paint_scrollbar(PaintScrollBar const&) = 0;
-    virtual void apply_effects(ApplyEffects const&, Gfx::Filter const* = nullptr) = 0;
+#define DECLARE_PLAY_COMMAND(command_type, player_method) \
+    virtual void play_command(command_type const&) = 0;
+    ENUMERATE_DISPLAY_LIST_COMMANDS(DECLARE_PLAY_COMMAND)
+#undef DECLARE_PLAY_COMMAND
+    virtual void play_command(ApplyEffects const&, Gfx::Filter const*) = 0;
     virtual void apply_transform(Gfx::FloatPoint origin, Gfx::FloatMatrix4x4 const&) = 0;
     virtual bool would_be_fully_clipped_by_painter(Gfx::IntRect) const = 0;
 
@@ -104,6 +74,7 @@ private:
     DisplayList const* m_active_display_list { nullptr };
     AccumulatedVisualContextTree const* m_active_visual_context_tree { nullptr };
     DisplayListResourceStorage const* m_resource_storage { nullptr };
+    CanvasSurfaceRegistry const* m_canvas_surface_registry { nullptr };
     RefPtr<Gfx::PaintingSurface> m_surface;
     ReadonlyBytes m_current_command_payload;
 };

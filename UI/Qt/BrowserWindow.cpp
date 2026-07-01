@@ -64,6 +64,8 @@ static constexpr auto WINDOW_DRAG_REGION_PROPERTY = "LadybirdWindowDragRegion";
 #if defined(AK_OS_MACOS)
 static constexpr qreal WINDOW_CORNER_RADIUS = 12.0;
 #endif
+static constexpr int WINDOW_RESIZE_BORDER_WIDTH = 6;
+static constexpr int WINDOW_RESIZE_CORNER_WIDTH = WINDOW_RESIZE_BORDER_WIDTH * 2;
 
 static bool should_use_screen_signal_for_dpi_changes()
 {
@@ -88,14 +90,6 @@ static Optional<u64> display_id_for_screen(QScreen* screen)
     });
 }
 
-static QString reopen_recently_closed_action_text(Optional<WebView::RecentlyClosedEntry const&> entry)
-{
-    if (entry.has_value() && entry->was_window)
-        return "&Reopen Recently Closed Window";
-
-    return "&Reopen Recently Closed Tab";
-}
-
 static Vector<URL::URL> recently_closed_urls_for_window(TabWidget const& tabs_container)
 {
     Vector<URL::URL> urls;
@@ -105,6 +99,16 @@ static Vector<URL::URL> recently_closed_urls_for_window(TabWidget const& tabs_co
         urls.append(tabs_container.tab(index)->view().url());
 
     return urls;
+}
+
+static int visible_browser_window_count()
+{
+    int count = 0;
+    for (auto* widget : QApplication::topLevelWidgets()) {
+        if (as_if<BrowserWindow>(widget) && widget->isVisible())
+            ++count;
+    }
+    return count;
 }
 
 FullscreenMode::FullscreenMode(BrowserWindow* window, ExitFullscreenButton* exit_button)
@@ -243,6 +247,7 @@ BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow
     setWindowIcon(app_icon());
     qApp->installEventFilter(this);
     update_window_corners();
+    update_appkit_window_resizability();
     update_window_border();
 
     update_tabs_display();
@@ -295,6 +300,9 @@ BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow
     open_file_action->setShortcut(QKeySequence(QKeySequence::StandardKey::Open));
     m_hamburger_menu->addAction(open_file_action);
     file_menu->addAction(open_file_action);
+
+    m_hamburger_menu->addAction(create_application_action(*this, application.open_downloads_page_action(), IncludeActionIcon::No));
+    file_menu->addAction(create_application_action(*this, application.open_downloads_page_action(), IncludeActionIcon::No));
 
     m_hamburger_menu->addSeparator();
 
@@ -370,7 +378,9 @@ BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow
     if (show_menubar_option_available())
         view_menu->addAction(create_application_action(*view_menu, application.toggle_menu_bar_action(), IncludeActionIcon::No));
 
-    m_bookmarks_menu = create_application_menu(*this, application.bookmarks_menu());
+    m_bookmarks_menu = Application::the().qt_bookmarks_menu();
+    if (!m_bookmarks_menu)
+        m_bookmarks_menu = create_application_menu(*this, application.bookmarks_menu());
     m_hamburger_menu->addMenu(m_bookmarks_menu);
     menuBar()->addMenu(m_bookmarks_menu);
 
@@ -398,35 +408,26 @@ BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow
     quit_action->setShortcuts(QKeySequence::keyBindings(QKeySequence::StandardKey::Quit));
     m_hamburger_menu->addAction(quit_action);
     file_menu->addAction(quit_action);
+#if defined(AK_OS_MACOS)
+    QObject::connect(quit_action, &QAction::triggered, this, [] {
+        Application::the().quit();
+    });
+#else
     QObject::connect(quit_action, &QAction::triggered, this, &QMainWindow::close);
+#endif
 
-    QObject::connect(m_new_tab_action, &QAction::triggered, this, [this] {
-        auto& tab = new_tab_from_url(WebView::Application::settings().new_tab_page_url(), Web::HTML::ActivateTab::Yes);
-        tab.set_url_is_hidden(true);
-        tab.focus_location_editor();
+    QObject::connect(m_new_tab_action, &QAction::triggered, this, [] {
+        Application::the().open_new_tab();
     });
     QObject::connect(m_new_window_action, &QAction::triggered, this, [] {
-        auto const& previous_active_window = Application::the().active_window();
-        WindowConfiguration configuration {
-            .width = previous_active_window.width(),
-            .height = previous_active_window.height(),
-            .maximized = previous_active_window.isMaximized(),
-        };
-        Application::the().new_window({ WebView::Application::settings().new_tab_page_url() }, configuration);
+        Application::the().open_new_window();
     });
-    QObject::connect(m_reopen_recently_closed_tab_action, &QAction::triggered, this, [this] {
-        auto recently_closed_entry = Application::history_store().pop_most_recently_closed_entry();
-        if (recently_closed_entry.has_value()) {
-            if (recently_closed_entry->was_window) {
-                auto& window = Application::the().new_window(recently_closed_entry->urls);
-                window.activate_tab(static_cast<int>(recently_closed_entry->active_tab_index));
-            } else if (!recently_closed_entry->urls.is_empty()) {
-                new_tab_from_url(recently_closed_entry->urls[0], Web::HTML::ActivateTab::Yes);
-            }
-        }
-        Application::the().update_reopen_recently_closed_actions();
+    QObject::connect(m_reopen_recently_closed_tab_action, &QAction::triggered, this, [] {
+        Application::the().reopen_recently_closed_tab();
     });
-    QObject::connect(open_file_action, &QAction::triggered, this, &BrowserWindow::open_file);
+    QObject::connect(open_file_action, &QAction::triggered, this, [] {
+        Application::the().open_file();
+    });
 
     m_exit_button = new ExitFullscreenButton { this };
     m_fullscreen_mode = new FullscreenMode { this, m_exit_button };
@@ -507,11 +508,13 @@ void BrowserWindow::update_tabs_display()
     m_tabs_container->set_vertical_tabs_enabled(settings.vertical_tabs_enabled);
     m_tabs_container->set_vertical_tabs_expanded(settings.vertical_tabs_expanded);
     m_tabs_container->set_vertical_tabs_expand_on_hover(settings.vertical_tabs_expand_on_hover);
+    m_tabs_container->set_vertical_tabs_position(settings.vertical_tabs_position);
 }
 
 void BrowserWindow::rebuild_bookmarks_menu()
 {
-    repopulate_application_menu(*m_bookmarks_menu, *this, Application::the().bookmarks_menu());
+    if (m_bookmarks_menu != Application::the().qt_bookmarks_menu())
+        repopulate_application_menu(*m_bookmarks_menu, *this, Application::the().bookmarks_menu());
 
     for_each_tab([](Tab& tab) {
         tab.bookmarks_bar().rebuild();
@@ -609,6 +612,10 @@ void BrowserWindow::initialize_tab(Tab* tab)
 
         for (qsizetype i = 1; i < urls.size(); ++i)
             new_tab_from_url(ak_url_from_qurl(urls[i]), Web::HTML::ActivateTab::No);
+    });
+
+    QObject::connect(&tab->view(), &WebContentView::native_window_pointer_event, this, [this] {
+        refresh_resize_cursor_at_current_position();
     });
 
     tab->view().on_new_web_view = [this, tab](auto activate_tab, Web::HTML::WebViewHints hints, Optional<u64> page_index) {
@@ -715,8 +722,25 @@ void BrowserWindow::activate_tab(int index)
     m_tabs_container->set_current_index(index);
 }
 
-void BrowserWindow::definitely_close_tab(int index)
+bool BrowserWindow::activate_tab_with_url(URL::URL const& url)
 {
+    for (int index = 0; index < m_tabs_container->count(); ++index) {
+        auto* tab = m_tabs_container->tab(index);
+        if (tab && tab->view().url() == url) {
+            m_tabs_container->set_current_index(index);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool BrowserWindow::definitely_close_tab(int index)
+{
+    if (m_tabs_container->count() == 1 && Application::the().file_downloader().has_active_downloads() && visible_browser_window_count() <= 1) {
+        if (!Application::the().confirm_cancel_active_downloads(this))
+            return false;
+    }
+
     auto* tab = m_tabs_container->tab(index);
     auto url = tab->view().url();
     m_tabs_container->remove_tab(index);
@@ -728,6 +752,8 @@ void BrowserWindow::definitely_close_tab(int index)
         m_should_record_closed_window_on_close = false;
         close();
     }
+
+    return true;
 }
 
 void BrowserWindow::update_reopen_recently_closed_action()
@@ -736,7 +762,7 @@ void BrowserWindow::update_reopen_recently_closed_action()
         return;
 
     auto recently_closed_entry = Application::history_store().most_recently_closed_entry();
-    m_reopen_recently_closed_tab_action->setText(reopen_recently_closed_action_text(recently_closed_entry));
+    m_reopen_recently_closed_tab_action->setText("&Reopen Recently Closed Tab");
     m_reopen_recently_closed_tab_action->setEnabled(recently_closed_entry.has_value());
 }
 
@@ -980,6 +1006,7 @@ void BrowserWindow::update_window_decoration_state()
         }
     }
 
+    update_appkit_window_resizability();
     update_menu_bar_visibility();
     update_window_border();
 }
@@ -1148,6 +1175,7 @@ bool BrowserWindow::event(QEvent* event)
 #if defined(AK_OS_MACOS)
             QTimer::singleShot(0, this, [this] {
                 update_window_corners();
+                update_appkit_window_resizability();
             });
 #endif
         } else if (platform_surface_event->surfaceEventType() == QPlatformSurfaceEvent::SurfaceAboutToBeDestroyed) {
@@ -1157,10 +1185,17 @@ bool BrowserWindow::event(QEvent* event)
     if (event->type() == QEvent::ScreenChangeInternal)
         screen_changed(screen());
 
-    if (event->type() == QEvent::WindowActivate)
+    if (event->type() == QEvent::WindowActivate) {
         Application::the().set_active_window(*this);
-    else if (event->type() == QEvent::WindowDeactivate || event->type() == QEvent::Hide)
+        QTimer::singleShot(0, this, [this] {
+            refresh_resize_cursor_at_current_position(true);
+        });
+        QTimer::singleShot(50, this, [this] {
+            refresh_resize_cursor_at_current_position(true);
+        });
+    } else if (event->type() == QEvent::WindowDeactivate || event->type() == QEvent::Hide) {
         clear_resize_cursor();
+    }
 
     return QMainWindow::event(event);
 }
@@ -1172,6 +1207,18 @@ bool BrowserWindow::eventFilter(QObject* object, QEvent* event)
         return QMainWindow::eventFilter(object, event);
     if (!uses_client_side_decorations())
         return QMainWindow::eventFilter(object, event);
+
+    if (m_is_resizing_window) {
+        if (event->type() == QEvent::MouseMove) {
+            auto* mouse_event = static_cast<QMouseEvent*>(event);
+            update_window_resize(mouse_event->globalPosition().toPoint());
+            return true;
+        }
+        if (event->type() == QEvent::MouseButtonRelease) {
+            finish_window_resize();
+            return true;
+        }
+    }
 
     auto const is_button = qobject_cast<QAbstractButton*>(object) != nullptr;
 
@@ -1203,11 +1250,18 @@ bool BrowserWindow::eventFilter(QObject* object, QEvent* event)
         return QMainWindow::eventFilter(object, event);
 
     auto position = widget->mapTo(this, mouse_event->position().toPoint());
+    auto edges = resize_edges_for_position(position);
     if (event->type() == QEvent::MouseButtonPress && !isMaximized() && !isFullScreen()) {
-        auto edges = resize_edges_for_position(position);
-        auto* handle = windowHandle();
-        if (edges != Qt::Edges {} && handle && handle->startSystemResize(edges))
-            return true;
+        if (edges != Qt::Edges {}) {
+#if defined(AK_OS_MACOS)
+            if (start_window_resize(edges, mouse_event->globalPosition().toPoint()))
+                return true;
+#else
+            auto* handle = windowHandle();
+            if (handle && handle->startSystemResize(edges))
+                return true;
+#endif
+        }
     }
 
     auto is_empty_window_drag_region = widget->property(WINDOW_DRAG_REGION_PROPERTY).toBool()
@@ -1236,18 +1290,62 @@ bool BrowserWindow::eventFilter(QObject* object, QEvent* event)
     return QMainWindow::eventFilter(object, event);
 }
 
+bool BrowserWindow::position_is_in_rounded_corner_cutout(QPoint const& position) const
+{
+#if defined(AK_OS_MACOS)
+    auto should_use_rounded_corners = WebView::Application::settings().config_variable_as_bool(WebView::ConfigVariableID::UseRoundedWindowCorners);
+    if (!should_use_rounded_corners || isFullScreen())
+        return false;
+
+    auto const radius = WINDOW_CORNER_RADIUS;
+    auto const x = static_cast<qreal>(position.x());
+    auto const y = static_cast<qreal>(position.y());
+    auto const right = static_cast<qreal>(width());
+    auto const bottom = static_cast<qreal>(height());
+
+    auto is_outside_corner_arc = [radius](qreal dx, qreal dy) {
+        return dx * dx + dy * dy > radius * radius;
+    };
+
+    auto in_cutout = false;
+    if (x < radius && y < radius)
+        in_cutout = is_outside_corner_arc(radius - x, radius - y);
+    else if (x >= right - radius && y < radius)
+        in_cutout = is_outside_corner_arc(x - (right - radius), radius - y);
+    else if (x < radius && y >= bottom - radius)
+        in_cutout = is_outside_corner_arc(radius - x, y - (bottom - radius));
+    else if (x >= right - radius && y >= bottom - radius)
+        in_cutout = is_outside_corner_arc(x - (right - radius), y - (bottom - radius));
+
+    return in_cutout;
+#else
+    (void)position;
+#endif
+    return false;
+}
+
 Qt::Edges BrowserWindow::resize_edges_for_position(QPoint const& position) const
 {
-    static constexpr int resize_border_width = 6;
+    if (position_is_in_rounded_corner_cutout(position))
+        return {};
 
     Qt::Edges edges;
-    if (position.x() <= resize_border_width)
+    auto in_left_resize_edge = position.x() <= WINDOW_RESIZE_BORDER_WIDTH;
+    auto in_right_resize_edge = position.x() >= width() - WINDOW_RESIZE_BORDER_WIDTH;
+    auto in_top_resize_edge = position.y() <= WINDOW_RESIZE_BORDER_WIDTH;
+    auto in_bottom_resize_edge = position.y() >= height() - WINDOW_RESIZE_BORDER_WIDTH;
+    auto in_left_resize_corner = position.x() <= WINDOW_RESIZE_CORNER_WIDTH;
+    auto in_right_resize_corner = position.x() >= width() - WINDOW_RESIZE_CORNER_WIDTH;
+    auto in_top_resize_corner = position.y() <= WINDOW_RESIZE_CORNER_WIDTH;
+    auto in_bottom_resize_corner = position.y() >= height() - WINDOW_RESIZE_CORNER_WIDTH;
+
+    if (in_left_resize_edge || (in_left_resize_corner && (in_top_resize_corner || in_bottom_resize_corner)))
         edges |= Qt::LeftEdge;
-    if (position.x() >= width() - resize_border_width)
+    if (in_right_resize_edge || (in_right_resize_corner && (in_top_resize_corner || in_bottom_resize_corner)))
         edges |= Qt::RightEdge;
-    if (position.y() <= resize_border_width)
+    if (in_top_resize_edge || (in_top_resize_corner && (in_left_resize_corner || in_right_resize_corner)))
         edges |= Qt::TopEdge;
-    if (position.y() >= height() - resize_border_width)
+    if (in_bottom_resize_edge || (in_bottom_resize_corner && (in_left_resize_corner || in_right_resize_corner)))
         edges |= Qt::BottomEdge;
 
     return edges;
@@ -1270,6 +1368,56 @@ Optional<Qt::CursorShape> BrowserWindow::resize_cursor_for_edges(Qt::Edges edges
     return {};
 }
 
+bool BrowserWindow::start_window_resize(Qt::Edges edges, QPoint const& global_position)
+{
+    if (edges == Qt::Edges {} || isMaximized() || isFullScreen())
+        return false;
+
+    m_is_resizing_window = true;
+    m_resize_edges = edges;
+    m_resize_start_global_position = global_position;
+    m_resize_start_geometry = geometry();
+    grabMouse();
+    return true;
+}
+
+void BrowserWindow::update_window_resize(QPoint const& global_position)
+{
+    if (!m_is_resizing_window)
+        return;
+
+    auto delta = global_position - m_resize_start_global_position;
+    auto new_geometry = m_resize_start_geometry;
+
+    if (m_resize_edges & Qt::LeftEdge) {
+        auto new_width = qBound(minimumWidth(), m_resize_start_geometry.width() - delta.x(), maximumWidth());
+        new_geometry.setX(m_resize_start_geometry.right() - new_width + 1);
+    } else if (m_resize_edges & Qt::RightEdge) {
+        auto new_width = qBound(minimumWidth(), m_resize_start_geometry.width() + delta.x(), maximumWidth());
+        new_geometry.setWidth(new_width);
+    }
+
+    if (m_resize_edges & Qt::TopEdge) {
+        auto new_height = qBound(minimumHeight(), m_resize_start_geometry.height() - delta.y(), maximumHeight());
+        new_geometry.setY(m_resize_start_geometry.bottom() - new_height + 1);
+    } else if (m_resize_edges & Qt::BottomEdge) {
+        auto new_height = qBound(minimumHeight(), m_resize_start_geometry.height() + delta.y(), maximumHeight());
+        new_geometry.setHeight(new_height);
+    }
+
+    setGeometry(new_geometry);
+}
+
+void BrowserWindow::finish_window_resize()
+{
+    if (!m_is_resizing_window)
+        return;
+
+    m_is_resizing_window = false;
+    m_resize_edges = {};
+    releaseMouse();
+}
+
 void BrowserWindow::update_resize_cursor(QPoint const& position)
 {
     if (!uses_client_side_decorations() || isMaximized() || isFullScreen() || !rect().contains(position)) {
@@ -1289,6 +1437,25 @@ void BrowserWindow::update_resize_cursor(QPoint const& position)
         QApplication::setOverrideCursor(*cursor_shape);
         m_resize_cursor_active = true;
     }
+}
+
+void BrowserWindow::refresh_resize_cursor_at_current_position(bool force_reapply)
+{
+    auto position = mapFromGlobal(QCursor::pos());
+    auto* child = childAt(position);
+    for (auto* object = child; object; object = qobject_cast<QWidget*>(object->parent())) {
+        if (qobject_cast<QAbstractButton*>(object)) {
+            clear_resize_cursor();
+            return;
+        }
+    }
+
+    if (force_reapply && m_resize_cursor_active) {
+        QApplication::restoreOverrideCursor();
+        m_resize_cursor_active = false;
+    }
+
+    update_resize_cursor(position);
 }
 
 void BrowserWindow::clear_resize_cursor()
@@ -1361,6 +1528,13 @@ void BrowserWindow::update_window_corners()
 #endif
 }
 
+void BrowserWindow::update_appkit_window_resizability()
+{
+#if defined(AK_OS_MACOS)
+    set_appkit_window_resizable(*this, !uses_client_side_decorations());
+#endif
+}
+
 bool BrowserWindow::should_draw_window_border() const
 {
 #if defined(AK_OS_MACOS)
@@ -1418,6 +1592,15 @@ void BrowserWindow::wheelEvent(QWheelEvent* event)
 
 void BrowserWindow::closeEvent(QCloseEvent* event)
 {
+    if (Application::the().file_downloader().has_active_downloads()) {
+        if (visible_browser_window_count() <= 1) {
+            if (!Application::the().confirm_cancel_active_downloads(this)) {
+                event->ignore();
+                return;
+            }
+        }
+    }
+
     clear_resize_cursor();
 
     Optional<Vector<URL::URL>> recently_closed_window_urls;

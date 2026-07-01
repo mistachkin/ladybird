@@ -6,11 +6,14 @@
 
 #pragma once
 
+#include <AK/Utf16String.h>
 #include <LibJS/Heap/Cell.h>
 #include <LibJS/Script.h>
+#include <LibJS/SourceCode.h>
 #include <LibURL/URL.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
+#include <LibWeb/HTML/Scripting/ScriptRegistry.h>
 
 namespace Web::HTML {
 
@@ -26,6 +29,7 @@ public:
 
     Optional<URL::URL> const& base_url() const { return m_base_url; }
     ByteString const& filename() const { return m_filename; }
+    Utf16String const& display_filename() const { return m_display_filename; }
 
     EnvironmentSettingsObject& settings_object();
 
@@ -46,6 +50,7 @@ private:
 
     Optional<URL::URL> m_base_url;
     ByteString m_filename;
+    Utf16String m_display_filename;
 
     // https://html.spec.whatwg.org/multipage/webappapis.html#settings-object
     // An environment settings object, containing various settings that are shared with other scripts in the same context.
@@ -57,6 +62,8 @@ private:
     // https://html.spec.whatwg.org/multipage/webappapis.html#concept-script-error-to-rethrow
     JS::Value m_error_to_rethrow;
 };
+
+void register_javascript_source(Script&, NonnullRefPtr<JS::SourceCode const>, ScriptRegistry::IsInlineSource, size_t source_line_number);
 
 }
 

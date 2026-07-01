@@ -26,7 +26,7 @@
 #include <LibWeb/HTML/HTMLMediaElement.h>
 #include <LibWeb/HTML/HTMLObjectElement.h>
 #include <LibWeb/HTML/ImageRequest.h>
-#include <LibWeb/HTML/Navigable.h>
+#include <LibWeb/HTML/LocalNavigable.h>
 #include <LibWeb/HTML/Numbers.h>
 #include <LibWeb/HTML/Parser/HTMLParser.h>
 #include <LibWeb/HTML/PotentialCORSRequest.h>
@@ -221,7 +221,7 @@ RefPtr<Layout::Node> HTMLObjectElement::create_layout_node(CSS::ComputedProperti
     return nullptr;
 }
 
-void HTMLObjectElement::adjust_computed_style(CSS::ComputedProperties& style)
+void HTMLObjectElement::adjust_computed_style(CSS::ComputedProperties::Builder& style)
 {
     // https://drafts.csswg.org/css-display-3/#unbox
     if (style.display().is_contents())
@@ -592,44 +592,6 @@ GC::Ptr<DecodedImageData> HTMLObjectElement::image_data() const
     if (!m_resource_request)
         return nullptr;
     return m_resource_request->image_data();
-}
-
-bool HTMLObjectElement::is_image_available() const
-{
-    return image_data() != nullptr;
-}
-
-Optional<CSSPixels> HTMLObjectElement::intrinsic_width() const
-{
-    if (auto image_data = this->image_data())
-        return image_data->intrinsic_width();
-    return {};
-}
-
-Optional<CSSPixels> HTMLObjectElement::intrinsic_height() const
-{
-    if (auto image_data = this->image_data())
-        return image_data->intrinsic_height();
-    return {};
-}
-
-Optional<CSSPixelFraction> HTMLObjectElement::intrinsic_aspect_ratio() const
-{
-    if (auto image_data = this->image_data())
-        return image_data->intrinsic_aspect_ratio();
-    return {};
-}
-
-Optional<Gfx::DecodedImageFrame> HTMLObjectElement::current_image_frame_sized(Gfx::IntSize size) const
-{
-    if (auto image_data = this->image_data())
-        return image_data->frame(0, size);
-    return {};
-}
-
-void HTMLObjectElement::set_visible_in_viewport(bool)
-{
-    // FIXME: Loosen grip on image data when it's not visible, e.g via volatile memory.
 }
 
 }

@@ -10,6 +10,7 @@
 #include <AK/MemoryStream.h>
 #include <AK/StackInfo.h>
 #include <AK/Utf16String.h>
+#include <AK/Utf16StringBuilder.h>
 #include <LibCore/ArgsParser.h>
 #include <LibCore/EventLoop.h>
 #include <LibCore/File.h>
@@ -233,11 +234,21 @@ static ErrorOr<ParsedValue> parse_value(StringView spec)
                 width = sizeof(u64);
                 break;
             case Wasm::ValueType::V128:
+            case Wasm::ValueType::I8:
+            case Wasm::ValueType::I16:
             case Wasm::ValueType::FunctionReference:
+            case Wasm::ValueType::NoFunctionReference:
             case Wasm::ValueType::ExternReference:
+            case Wasm::ValueType::NoExternReference:
             case Wasm::ValueType::ExceptionReference:
+            case Wasm::ValueType::NoExceptionReference:
+            case Wasm::ValueType::AnyReference:
+            case Wasm::ValueType::EqReference:
+            case Wasm::ValueType::I31Reference:
+            case Wasm::ValueType::StructReference:
+            case Wasm::ValueType::ArrayReference:
+            case Wasm::ValueType::NoneReference:
             case Wasm::ValueType::TypeUseReference:
-            case Wasm::ValueType::UnsupportedHeapReference:
                 VERIFY_NOT_REACHED();
             }
             last_value = parsed.value.value();
@@ -294,7 +305,7 @@ static ErrorOr<T, Wasm::Result> trap_for_js_exception(JS::VM& vm, JS::ThrowCompl
 
     auto const& completion = result.error();
     auto& exception = completion.value();
-    warnln("JS exception: {}", MUST(exception.to_string(vm)));
+    warnln("JS exception: {}", MUST(exception.to_utf16_string(vm)));
     return Wasm::Trap { ByteString("JS exception") };
 }
 
@@ -404,17 +415,20 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
             }
 
             auto source_text = lexer.consume_all().trim_whitespace();
-            StringBuilder builder;
-            builder.append("("sv);
+            Utf16StringBuilder builder;
+            builder.append_ascii("("sv);
             auto first = true;
             for (auto& arg : formal_params) {
                 if (!first)
-                    builder.append(", "sv);
+                    builder.append_ascii(", "sv);
                 first = false;
-                builder.append(arg.name);
+                auto argument_name = Utf16String::from_utf8(arg.name);
+                builder.append(argument_name.utf16_view());
             }
-            builder.appendff(") => {}", source_text);
-            auto js_function = builder.to_byte_string();
+            builder.append_ascii(") => "sv);
+            auto source_text_utf16 = Utf16String::from_utf8(source_text);
+            builder.append(source_text_utf16.utf16_view());
+            auto js_function = builder.to_string();
             auto name = ByteString::formatted("{}.{}", module, fn_name);
             auto script = JS::Script::parse(js_function, realm, name);
             if (script.is_error()) {
@@ -730,7 +744,8 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
                             dbgln("[wasm runtime] Cannot stub tag import {}::{}: type is not a function", entry.module, entry.name);
                             return;
                         }
-                        address = *machine.store().allocate(type.function(), tag_type.flags());
+                        // The module is not yet validated here, so its canonical types may not be known.
+                        address = *machine.store().allocate(type.function(), nullptr, tag_type.flags());
                     });
 
                 if (address.has_value())

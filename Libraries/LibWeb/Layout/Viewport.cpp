@@ -5,6 +5,7 @@
  */
 
 #include <AK/CharacterTypes.h>
+#include <AK/Utf16StringBuilder.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Range.h>
 #include <LibWeb/Dump.h>
@@ -43,7 +44,7 @@ Vector<Viewport::TextBlock> const& Viewport::text_blocks()
 
 void Viewport::update_text_blocks()
 {
-    StringBuilder builder(StringBuilder::Mode::UTF16);
+    Utf16StringBuilder builder;
     Vector<TextPosition> text_positions;
     Vector<TextBlock> text_blocks;
 
@@ -55,7 +56,7 @@ void Viewport::update_text_blocks()
 
     auto flush_block = [&] {
         if (!builder.is_empty())
-            text_blocks.append({ builder.to_utf16_string(), text_positions });
+            text_blocks.append({ builder.to_string(), text_positions });
         text_positions.clear_with_capacity();
         builder.clear();
         builder_length_in_code_units = 0;
@@ -73,7 +74,7 @@ void Viewport::update_text_blocks()
     };
 
     for_each_in_inclusive_subtree([&](auto const& layout_node) {
-        if (layout_node.display().is_none() || !layout_node.first_paintable() || !layout_node.first_paintable()->is_visible())
+        if (layout_node.display().is_none())
             return TraversalDecision::Continue;
 
         auto const pseudo = layout_node.generated_for_pseudo_element();
@@ -85,6 +86,10 @@ void Viewport::update_text_blocks()
         }
 
         if (auto* text_node = as_if<Layout::TextNode>(layout_node)) {
+            auto const& computed_values = text_node->computed_values();
+            if (computed_values.visibility() != CSS::Visibility::Visible || computed_values.opacity() == 0)
+                return TraversalDecision::Continue;
+
             // https://html.spec.whatwg.org/multipage/interaction.html#inert-subtrees
             // When a node is inert:
             // - The user agent should ignore the node for the purposes of find-in-page.
@@ -96,7 +101,7 @@ void Viewport::update_text_blocks()
             if (dom_node.is_inert())
                 return TraversalDecision::Continue;
 
-            auto white_space_collapse = text_node->computed_values().white_space_collapse();
+            auto white_space_collapse = computed_values.white_space_collapse();
             auto const should_collapse = first_is_one_of(white_space_collapse,
                 CSS::WhiteSpaceCollapse::Collapse,
                 CSS::WhiteSpaceCollapse::PreserveBreaks);

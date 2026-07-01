@@ -36,7 +36,7 @@ static String decode_and_filter_code_points(StringView input, StringView encodin
                 input = input.substring_view(3);
             return String::from_utf8_without_validation(input.bytes());
         }
-        return MUST(decoder->to_utf8(input));
+        return MUST(decoder->to_utf8(input, TextCodec::IgnoreBOM::No, TextCodec::ErrorMode::Replacement));
     }();
 
     // OPTIMIZATION: If the input doesn't contain any filterable characters, we can skip the filtering
@@ -104,7 +104,9 @@ static Number::Type css_number_type_from_ffi(FFI::CssNumberType number_type)
 
 static SourcePosition position_from_ffi(size_t line, size_t column)
 {
-    return { line, column };
+    VERIFY(line <= NumericLimits<u32>::max());
+    VERIFY(column <= NumericLimits<u32>::max());
+    return { static_cast<u32>(line), static_cast<u32>(column) };
 }
 
 Token RustTokenizer::token_from_ffi(FFI::CssToken const& ffi_token)

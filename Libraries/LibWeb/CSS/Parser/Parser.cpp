@@ -82,6 +82,7 @@ Parser::Parser(ParsingParams const& context, Vector<Token> tokens)
     , m_realm(context.realm)
     , m_parsing_mode(context.mode)
     , m_is_ua_style_sheet(context.is_ua_style_sheet)
+    , m_computed_style_for_custom_property_resolution(context.computed_style_for_custom_property_resolution)
     , m_tokens(move(tokens))
     , m_token_stream(m_tokens)
     , m_value_context(move(context.value_context))
@@ -1435,16 +1436,17 @@ void Parser::consume_the_remnants_of_a_bad_declaration(TokenStream<T>& input, Ne
     }
 }
 
-CSSRule* Parser::parse_as_css_rule()
+CSSRule* Parser::parse_as_css_rule(bool nested)
 {
-    if (auto maybe_rule = parse_a_rule(m_token_stream); maybe_rule.has_value())
-        return convert_to_rule<CSSNestedDeclarations>(maybe_rule.value(), Nested::No);
+    auto nested_mode = nested ? Nested::Yes : Nested::No;
+    if (auto maybe_rule = parse_a_rule(m_token_stream, nested_mode); maybe_rule.has_value())
+        return convert_to_rule<CSSNestedDeclarations>(maybe_rule.value(), nested_mode);
     return {};
 }
 
 // https://drafts.csswg.org/css-syntax/#parse-rule
 template<typename T>
-Optional<Rule> Parser::parse_a_rule(TokenStream<T>& input)
+Optional<Rule> Parser::parse_a_rule(TokenStream<T>& input, Nested nested)
 {
     // To parse a rule from input:
     Optional<Rule> rule;
@@ -1462,14 +1464,12 @@ Optional<Rule> Parser::parse_a_rule(TokenStream<T>& input)
     //    Otherwise, if the next token from input is an <at-keyword-token>,
     //    consume an at-rule from input, and let rule be the return value.
     else if (input.next_token().is(Token::Type::AtKeyword)) {
-        rule = consume_an_at_rule(m_token_stream).map([](auto&& it) { return Rule { it }; });
+        rule = consume_an_at_rule(m_token_stream, nested).map([](auto&& it) { return Rule { it }; });
     }
     //    Otherwise, consume a qualified rule from input and let rule be the return value.
     //    If nothing or an invalid rule error was returned, return a syntax error.
     else {
-        consume_a_qualified_rule(input).visit(
-            [&](QualifiedRule qualified_rule) { rule = move(qualified_rule); },
-            [](auto&) {});
+        consume_a_qualified_rule(input, {}, nested).visit([&](QualifiedRule qualified_rule) { rule = move(qualified_rule); }, [](auto&) {});
 
         if (!rule.has_value())
             return {};
@@ -1957,13 +1957,14 @@ GC::Ref<CSSStyleProperties> Parser::convert_to_style_declaration(Vector<Declarat
 
 Optional<StylePropertyAndName> Parser::convert_to_style_property(Declaration const& declaration)
 {
-    auto property = PropertyNameAndID::from_name(Utf16FlyString::from_utf8(declaration.name));
+    auto utf16_declaration_name = Utf16FlyString::from_utf8(declaration.name);
+    auto property = PropertyNameAndID::from_name(utf16_declaration_name);
 
     if (!property.has_value()) {
         if (has_ignored_vendor_prefix(declaration.name)) {
             return {};
         }
-        ErrorReporter::the().report(UnknownPropertyError { .property_name = declaration.name });
+        ErrorReporter::the().report(UnknownPropertyError { .property_name = utf16_declaration_name });
         return {};
     }
 
@@ -1971,10 +1972,8 @@ Optional<StylePropertyAndName> Parser::convert_to_style_property(Declaration con
     auto value = parse_css_value(property->id(), value_token_stream, declaration.original_value_text);
     if (value.is_error()) {
         if (value.error() == ParseError::SyntaxError) {
-            auto property_name = property->name().to_utf16_string();
-            auto property_name_utf8 = property_name.to_utf8_but_should_be_ported_to_utf16();
             ErrorReporter::the().report(InvalidPropertyError {
-                .property_name = MUST(FlyString::from_utf8(property_name_utf8.bytes_as_string_view())),
+                .property_name = property->name(),
                 .value_string = value_token_stream.dump_string(),
                 .description = "Failed to parse."_string,
             });
@@ -2328,8 +2327,8 @@ template Optional<Declaration> Parser::consume_a_declaration(TokenStream<Compone
 template void Parser::consume_the_remnants_of_a_bad_declaration(TokenStream<Token>&, Nested);
 template void Parser::consume_the_remnants_of_a_bad_declaration(TokenStream<ComponentValue>&, Nested);
 
-template Optional<Rule> Parser::parse_a_rule(TokenStream<Token>&);
-template Optional<Rule> Parser::parse_a_rule(TokenStream<ComponentValue>&);
+template Optional<Rule> Parser::parse_a_rule(TokenStream<Token>&, Nested);
+template Optional<Rule> Parser::parse_a_rule(TokenStream<ComponentValue>&, Nested);
 
 template Vector<RuleOrListOfDeclarations> Parser::parse_a_blocks_contents(TokenStream<Token>&);
 template Vector<RuleOrListOfDeclarations> Parser::parse_a_blocks_contents(TokenStream<ComponentValue>&);

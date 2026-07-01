@@ -9,6 +9,7 @@
 #include <AK/RefCounted.h>
 #include <AK/WeakPtr.h>
 #include <AK/Weakable.h>
+#include <AK/kmalloc.h>
 #include <LibGC/Ptr.h>
 #include <LibWeb/CSS/ComputedValues.h>
 #include <LibWeb/CSS/Display.h>
@@ -38,6 +39,8 @@ class WEB_API Paintable
     , public RefCountedTreeNode<Paintable> {
 
 public:
+    AK_ALLOC_WITH_KMALLOC_PARTITION(HeapPartition::Painting);
+
     virtual ~Paintable();
 
     virtual StringView class_name() const { return "Paintable"sv; }
@@ -80,7 +83,7 @@ public:
 
     bool visible_for_hit_testing() const;
 
-    GC::Ptr<HTML::Navigable> navigable() const;
+    GC::Ptr<HTML::LocalNavigable> navigable() const;
 
     virtual void set_needs_repaint(InvalidateDisplayList = InvalidateDisplayList::Yes);
 
@@ -97,13 +100,13 @@ public:
     [[nodiscard]] virtual bool is_svg_svg_paintable() const { return false; }
     [[nodiscard]] virtual bool is_svg_path_paintable() const { return false; }
     [[nodiscard]] virtual bool is_svg_graphics_paintable() const { return false; }
-    [[nodiscard]] virtual bool is_text_paintable() const { return false; }
 
     DOM::Document const& document() const;
     DOM::Document& document();
 
     CSSPixelPoint box_type_agnostic_position() const;
 
+    static void scroll_text_offset_into_view(DOM::Text const&, size_t offset);
     void scroll_ancestor_to_offset_into_view(size_t offset);
 
     enum class SelectionState : u8 {
@@ -125,9 +128,9 @@ public:
     };
     struct SelectionStyle {
         Color background_color;
-        Optional<Color> text_color;
-        Optional<Vector<ShadowData>> text_shadow;
-        Optional<TextDecorationStyle> text_decoration;
+        Optional<Color> text_color {};
+        Optional<Vector<ShadowData>> text_shadow {};
+        Optional<TextDecorationStyle> text_decoration {};
 
         bool has_styling() const
         {
@@ -135,6 +138,7 @@ public:
         }
     };
     [[nodiscard]] SelectionStyle selection_style() const;
+    [[nodiscard]] static SelectionStyle selection_style_for_node(Layout::Node const&, GC::Ptr<DOM::Node const>);
 
     [[nodiscard]] String debug_description() const;
 
@@ -176,9 +180,6 @@ inline bool Paintable::fast_is<PaintableBox>() const { return is_paintable_box()
 template<>
 inline bool Paintable::fast_is<PaintableWithLines>() const { return is_paintable_with_lines(); }
 
-template<>
-inline bool Paintable::fast_is<TextPaintable>() const { return is_text_paintable(); }
-
-WEB_API Painting::BorderRadiiData normalize_border_radii_data(Layout::Node const& node, CSSPixelRect const& border_rect, CSSPixelRect const& reference_rect, CSS::BorderRadiusData const& top_left_radius, CSS::BorderRadiusData const& top_right_radius, CSS::BorderRadiusData const& bottom_right_radius, CSS::BorderRadiusData const& bottom_left_radius);
+WEB_API Painting::BorderRadiiData normalize_border_radii_data(CSSPixelRect const& border_rect, CSSPixelRect const& reference_rect, CSS::BorderRadiusData const& top_left_radius, CSS::BorderRadiusData const& top_right_radius, CSS::BorderRadiusData const& bottom_right_radius, CSS::BorderRadiusData const& bottom_left_radius);
 
 }

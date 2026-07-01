@@ -40,7 +40,12 @@ void DrawRepeatedDecodedImageFrame::dump(StringBuilder& builder) const
     builder.appendff(" dst_rect={} clip_rect={}", dst_rect, clip_rect);
 }
 
-void DrawCompositorSurface::dump(StringBuilder& builder) const
+void DrawCompositedContext::dump(StringBuilder& builder) const
+{
+    builder.appendff(" dst_rect={}", dst_rect);
+}
+
+void DrawCanvas::dump(StringBuilder& builder) const
 {
     builder.appendff(" dst_rect={}", dst_rect);
 }

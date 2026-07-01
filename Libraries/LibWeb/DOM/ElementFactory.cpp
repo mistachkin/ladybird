@@ -87,6 +87,7 @@
 #include <LibWeb/HTML/Scripting/SimilarOriginWindowAgent.h>
 #include <LibWeb/HTML/WindowOrWorkerGlobalScope.h>
 #include <LibWeb/Infra/Strings.h>
+#include <LibWeb/MathML/MathMLAnchorElement.h>
 #include <LibWeb/MathML/MathMLElement.h>
 #include <LibWeb/MathML/MathMLMiElement.h>
 #include <LibWeb/MathML/MathMLMspaceElement.h>
@@ -592,6 +593,12 @@ static GC::Ref<MathML::MathMLElement> create_mathml_element(Document& document, 
     auto& realm = document.realm();
 
     auto const& local_name = qualified_name.local_name();
+
+    // https://w3c.github.io/mathml-core/#dom-mathmlanchorelement
+    // The <a> element must implement, and expose to scripts, the following MathMLAnchorElement interface.
+    if (local_name == MathML::TagNames::a)
+        return realm.create<MathML::MathMLAnchorElement>(document, move(qualified_name));
+
     if (local_name == MathML::TagNames::mi)
         return realm.create<MathML::MathMLMiElement>(document, move(qualified_name));
     if (local_name == MathML::TagNames::mspace)
@@ -698,7 +705,7 @@ WebIDL::ExceptionOr<GC::Ref<Element>> create_element(Document& document, FlyStri
                 // NOTE: IDL does not currently convert the object for us, so we will have to do it here.
                 result = TRY(WebIDL::construct(constructor, {})).as_if<HTML::HTMLElement>();
                 if (!result)
-                    return JS::throw_completion(JS::TypeError::create(realm, "Custom element constructor must return an object that implements HTMLElement"_string));
+                    return JS::throw_completion(JS::TypeError::create(realm, "Custom element constructor must return an object that implements HTMLElement"_utf16));
 
                 // FIXME: 2. Assert: result’s custom element state and custom element definition are initialized.
 

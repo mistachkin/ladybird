@@ -12,23 +12,29 @@
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Position.h>
 #include <LibWeb/HTML/FormAssociatedElement.h>
-#include <LibWeb/HTML/Navigable.h>
+#include <LibWeb/HTML/LocalNavigable.h>
 #include <LibWeb/Layout/BlockContainer.h>
 #include <LibWeb/Layout/InlineNode.h>
+#include <LibWeb/Layout/TextNode.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/Painting/DisplayListRecorder.h>
 #include <LibWeb/Painting/HitTestDisplayList.h>
 #include <LibWeb/Painting/PaintableWithLines.h>
 #include <LibWeb/Painting/ShadowPainting.h>
 #include <LibWeb/Painting/StackingContext.h>
-#include <LibWeb/Painting/TextPaintable.h>
 
 namespace Web::Painting {
 
-static void paint_text_decoration(DisplayListRecordingContext&, TextPaintable const&, PaintableFragment::FragmentSpan const&);
+static void paint_text_decoration(DisplayListRecordingContext&, Layout::TextNode const&, PaintableFragment::FragmentSpan const&);
 static Gfx::Path build_triangle_wave_path(Gfx::IntPoint from, Gfx::IntPoint to, float amplitude);
 static void compute_render_spans(PaintableFragment const&, Vector<PaintableFragment::FragmentSpan, 4>&);
 static void paint_text_fragment(DisplayListRecordingContext&, PaintableFragment::FragmentSpan const&);
+
+static bool layout_node_is_visible(Layout::Node const& layout_node)
+{
+    auto const& computed_values = layout_node.computed_values();
+    return computed_values.visibility() == CSS::Visibility::Visible && computed_values.opacity() != 0;
+}
 
 NonnullRefPtr<PaintableWithLines> PaintableWithLines::create(Layout::BlockContainer const& block_container)
 {
@@ -106,7 +112,6 @@ void PaintableWithLines::record_hit_test_items(DisplayListRecordingContext& cont
 
 static void resolve_text_fragment_properties(PaintableWithLines const& paintable_with_lines)
 {
-    auto const& parent_layout_node = paintable_with_lines.layout_node();
     for (auto& fragment : const_cast<PaintableWithLines&>(paintable_with_lines).fragments()) {
         auto const* text_node = as_if<Layout::TextNode>(fragment.layout_node());
         if (!text_node)
@@ -131,7 +136,7 @@ static void resolve_text_fragment_properties(PaintableWithLines const& paintable
                 },
                 [&](CSS::LengthPercentage const& length_percentage) {
                     // https://drafts.csswg.org/css-text-decor-4/#valdef-text-decoration-thickness-length-percentage
-                    auto resolved_length = length_percentage.resolved(*text_node, CSS::Length(1, CSS::LengthUnit::Em).to_px(*text_node)).to_px(*text_node);
+                    auto resolved_length = length_percentage.resolved(CSS::Length(1, CSS::LengthUnit::Em).to_px(*text_node)).to_px(*text_node);
                     return max(resolved_length, 1);
                 });
         }();
@@ -142,7 +147,7 @@ static void resolve_text_fragment_properties(PaintableWithLines const& paintable
         if (!text_shadow.is_empty()) {
             resolved_shadow_data.ensure_capacity(text_shadow.size());
             for (auto const& layer : text_shadow)
-                resolved_shadow_data.append(ShadowData::from_css(layer, parent_layout_node));
+                resolved_shadow_data.append(ShadowData::from_css(layer));
         }
         fragment.set_shadows(move(resolved_shadow_data));
     }
@@ -182,8 +187,8 @@ void PaintableWithLines::paint(DisplayListRecordingContext& context, PaintPhase 
 
 void compute_render_spans(PaintableFragment const& fragment, Vector<PaintableFragment::FragmentSpan, 4>& spans)
 {
-    auto const* maybe_text_paintable = as_if<TextPaintable>(fragment.paintable());
-    if (!maybe_text_paintable) {
+    auto const* text_node = as_if<Layout::TextNode>(fragment.layout_node());
+    if (!text_node) {
         // Non-text fragments still need shadow painting.
         spans.append({
             .fragment = fragment,
@@ -196,12 +201,11 @@ void compute_render_spans(PaintableFragment const& fragment, Vector<PaintableFra
         });
         return;
     }
-    auto const& text_paintable = *maybe_text_paintable;
 
-    if (!text_paintable.is_visible())
+    if (!layout_node_is_visible(*text_node))
         return;
 
-    auto text_color = text_paintable.computed_values().webkit_text_fill_color();
+    auto text_color = text_node->computed_values().webkit_text_fill_color();
     auto selection_offsets = fragment.selection_offsets();
 
     // No selection: single span with base styling.
@@ -219,7 +223,7 @@ void compute_render_spans(PaintableFragment const& fragment, Vector<PaintableFra
     }
 
     auto [selection_start, selection_end, _] = *selection_offsets;
-    auto selection_style = text_paintable.selection_style();
+    auto selection_style = Paintable::selection_style_for_node(*text_node, text_node->dom_text());
     auto selection_text_color = selection_style.text_color.value_or(text_color);
 
     // Convert selection text decoration to fragment text decoration data.
@@ -280,7 +284,7 @@ void paint_text_fragment(DisplayListRecordingContext& context, PaintableFragment
     if (span.start_code_unit == span.end_code_unit)
         return;
 
-    auto const& text_paintable = as<TextPaintable>(fragment.paintable());
+    auto const& text_node = as<Layout::TextNode>(fragment.layout_node());
 
     if (context.should_show_line_box_borders())
         PaintableWithLines::paint_text_fragment_debug_highlight(context, fragment);
@@ -313,20 +317,20 @@ void paint_text_fragment(DisplayListRecordingContext& context, PaintableFragment
         painter.restore();
     }
 
-    paint_text_decoration(context, text_paintable, span);
+    paint_text_decoration(context, text_node, span);
 }
 
 Optional<PaintableFragment const&> PaintableWithLines::fragment_at_position(DOM::Position const& position) const
 {
     return m_fragments.first_matching([&](auto const& fragment) {
-        auto const* text_paintable = as_if<TextPaintable>(fragment.paintable());
-        if (!text_paintable)
+        auto const* text_node = as_if<Layout::TextNode>(fragment.layout_node());
+        if (!text_node || !text_node->dom_text())
             return false;
         if (position.offset() < fragment.dom_start_offset_in_node())
             return false;
         if (position.offset() > fragment.dom_end_offset_in_node())
             return false;
-        return position.node() == text_paintable->dom_node();
+        return position.node() == text_node->dom_text();
     });
 }
 
@@ -354,7 +358,7 @@ void PaintableWithLines::paint_cursor(DisplayListRecordingContext& context) cons
     Color caret_color;
 
     if (fragment.has_value()) {
-        caret_color = as<TextPaintable>(fragment->paintable()).computed_values().caret_color();
+        caret_color = fragment->layout_node().computed_values().caret_color();
         cursor_rect = fragment->range_rect(SelectionState::StartAndEnd, cursor_position->offset(), cursor_position->offset());
     } else {
         // Empty editable elements have no fragments, but should still draw a cursor.
@@ -436,7 +440,7 @@ static Vector<DecorationSegment> compute_skip_ink_segments(
     return segments;
 }
 
-void paint_text_decoration(DisplayListRecordingContext& context, TextPaintable const& paintable, PaintableFragment::FragmentSpan const& span)
+void paint_text_decoration(DisplayListRecordingContext& context, Layout::TextNode const& text_node, PaintableFragment::FragmentSpan const& span)
 {
     auto const& fragment = span.fragment;
     auto& recorder = context.display_list_recorder();
@@ -453,9 +457,9 @@ void paint_text_decoration(DisplayListRecordingContext& context, TextPaintable c
         line_style = span.text_decoration->style;
         text_decoration_lines = span.text_decoration->line;
     } else {
-        line_color = paintable.computed_values().text_decoration_color();
-        line_style = paintable.computed_values().text_decoration_style();
-        text_decoration_lines = paintable.computed_values().text_decoration_line();
+        line_color = text_node.computed_values().text_decoration_color();
+        line_style = text_node.computed_values().text_decoration_style();
+        text_decoration_lines = text_node.computed_values().text_decoration_line();
     }
 
     // Compute the decoration box for this span.
@@ -467,8 +471,8 @@ void paint_text_decoration(DisplayListRecordingContext& context, TextPaintable c
         fragment_box.set_x(span_rect.x());
         fragment_box.set_width(span_rect.width());
     }
-    auto text_underline_offset = paintable.computed_values().text_underline_offset();
-    auto text_underline_position = paintable.computed_values().text_underline_position();
+    auto text_underline_offset = text_node.computed_values().text_underline_offset();
+    auto text_underline_position = text_node.computed_values().text_underline_position();
     for (auto line : text_decoration_lines) {
         auto line_thickness = fragment.text_decoration_thickness();
 
@@ -561,7 +565,7 @@ void paint_text_decoration(DisplayListRecordingContext& context, TextPaintable c
         // https://drafts.csswg.org/css-text-decor-4/#text-decoration-skip-ink-property
         // FIXME: For text-decoration-skip-ink: auto, skip CJK ideographs and symbols from the intercept
         //        computation, since their complex strokes would create too many gaps in the decoration line.
-        auto skip_ink = paintable.computed_values().text_decoration_skip_ink();
+        auto skip_ink = text_node.computed_values().text_decoration_skip_ink();
         bool should_skip_ink = skip_ink != CSS::TextDecorationSkipInk::None
             && first_is_one_of(line, CSS::TextDecorationLine::Underline, CSS::TextDecorationLine::Overline);
 

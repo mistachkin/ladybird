@@ -8,6 +8,7 @@
 #include "Selector.h"
 #include <AK/GenericShorthands.h>
 #include <AK/NeverDestroyed.h>
+#include <LibWeb/CSS/AncestorFilter.h>
 #include <LibWeb/CSS/CSSStyleRule.h>
 #include <LibWeb/CSS/Parser/ErrorReporter.h>
 #include <LibWeb/CSS/Serialize.h>
@@ -154,39 +155,204 @@ void Selector::collect_ancestor_hashes()
     }
 
     size_t next_hash_index = 0;
-    auto append_unique_hash = [&](u32 hash) -> bool {
-        if (next_hash_index >= m_ancestor_hashes.size())
-            return true;
-        for (size_t i = 0; i < next_hash_index; ++i) {
-            if (m_ancestor_hashes[i] == hash)
-                return false;
-        }
-        m_ancestor_hashes[next_hash_index++] = hash;
-        return false;
-    };
+    struct AncestorHashCollector {
+        enum class IncludeRightmostCompound : bool {
+            No,
+            Yes,
+        };
 
-    auto append_hashes_from_compound = [&](CompoundSelector const& compound_selector) {
-        for (auto const& simple_selector : compound_selector.simple_selectors) {
+        Array<u32, 8>& ancestor_hashes;
+        size_t& next_hash_index;
+
+        static bool contains_hash(Vector<u32> const& hashes, u32 hash)
+        {
+            for (auto existing_hash : hashes) {
+                if (existing_hash == hash)
+                    return true;
+            }
+            return false;
+        }
+
+        static void append_unique_hash(Vector<u32>& hashes, u32 hash)
+        {
+            if (!contains_hash(hashes, hash))
+                hashes.append(hash);
+        }
+
+        static void intersect_hashes(Vector<u32>& hashes, Vector<u32> const& other_hashes)
+        {
+            for (size_t i = 0; i < hashes.size();) {
+                if (contains_hash(other_hashes, hashes[i])) {
+                    ++i;
+                    continue;
+                }
+                hashes.remove(i);
+            }
+        }
+
+        bool append_unique_hash(u32 hash)
+        {
+            if (next_hash_index >= ancestor_hashes.size())
+                return true;
+            for (size_t i = 0; i < next_hash_index; ++i) {
+                if (ancestor_hashes[i] == hash)
+                    return false;
+            }
+            ancestor_hashes[next_hash_index++] = hash;
+            return false;
+        }
+
+        Vector<u32> hashes_from_simple_selector(SimpleSelector const& simple_selector)
+        {
+            Vector<u32> hashes;
             switch (simple_selector.type) {
             case SimpleSelector::Type::Id:
+                hashes.append(ancestor_filter_hash_for_id(simple_selector.name().hash()));
+                break;
             case SimpleSelector::Type::Class:
-                if (append_unique_hash(simple_selector.name().hash()))
-                    return true;
+                hashes.append(ancestor_filter_hash_for_class(simple_selector.name().hash()));
                 break;
             case SimpleSelector::Type::TagName:
-                if (append_unique_hash(simple_selector.qualified_name().name.lowercase_name.hash()))
-                    return true;
+                hashes.append(ancestor_filter_hash_for_tag_name(simple_selector.qualified_name().name.lowercase_name.hash()));
                 break;
             case SimpleSelector::Type::Attribute:
-                if (append_unique_hash(simple_selector.attribute().qualified_name.name.lowercase_name.hash()))
-                    return true;
+                hashes.append(ancestor_filter_hash_for_attribute(simple_selector.attribute().qualified_name.name.lowercase_name.hash()));
                 break;
+            case SimpleSelector::Type::PseudoClass: {
+                auto const& pseudo_class = simple_selector.pseudo_class();
+                if (pseudo_class.type != PseudoClass::Is && pseudo_class.type != PseudoClass::Where)
+                    break;
+
+                // The selector's ancestor hashes are all mandatory. For :is()/:where(), only
+                // hashes required by every alternative can reject the selector without running it.
+                hashes = common_hashes_from_selector_list(pseudo_class.argument_selector_list, IncludeRightmostCompound::Yes);
+                break;
+            }
             default:
                 break;
             }
+            return hashes;
         }
-        return false;
+
+        Vector<u32> hashes_from_compound(CompoundSelector const& compound_selector)
+        {
+            Vector<u32> hashes;
+            for (auto const& simple_selector : compound_selector.simple_selectors) {
+                for (auto hash : hashes_from_simple_selector(simple_selector))
+                    append_unique_hash(hashes, hash);
+            }
+            return hashes;
+        }
+
+        Vector<u32> hashes_from_subject_compound_selector_list_pseudo_classes(CompoundSelector const& compound_selector)
+        {
+            Vector<u32> hashes;
+            for (auto const& simple_selector : compound_selector.simple_selectors) {
+                if (simple_selector.type != SimpleSelector::Type::PseudoClass)
+                    continue;
+
+                auto const& pseudo_class = simple_selector.pseudo_class();
+                if (pseudo_class.type != PseudoClass::Is && pseudo_class.type != PseudoClass::Where)
+                    continue;
+
+                for (auto hash : common_hashes_from_selector_list(pseudo_class.argument_selector_list, IncludeRightmostCompound::No))
+                    append_unique_hash(hashes, hash);
+            }
+            return hashes;
+        }
+
+        Vector<u32> hashes_from_selector(Selector const& selector, IncludeRightmostCompound include_rightmost_compound)
+        {
+            Vector<u32> hashes;
+            auto const& compound_selectors = selector.compound_selectors();
+            if (compound_selectors.is_empty())
+                return hashes;
+
+            if (include_rightmost_compound == IncludeRightmostCompound::Yes) {
+                // A selector-list pseudo-class in an ancestor compound matches that ancestor.
+                // The argument selector's rightmost compound is therefore on the subject's
+                // ancestor chain.
+                for (auto hash : hashes_from_compound(compound_selectors.last()))
+                    append_unique_hash(hashes, hash);
+            } else {
+                // A selector-list pseudo-class in the subject compound can still contain
+                // ancestor requirements inside its alternatives, e.g. `:is(.foo > .bar)`.
+                for (auto hash : hashes_from_subject_compound_selector_list_pseudo_classes(compound_selectors.last()))
+                    append_unique_hash(hashes, hash);
+            }
+
+            auto combinator_to_right = compound_selectors.last().combinator;
+            for (ssize_t i = static_cast<ssize_t>(compound_selectors.size()) - 2; i >= 0; --i) {
+                auto const& compound_selector = compound_selectors[i];
+
+                switch (combinator_to_right) {
+                case Combinator::Descendant:
+                case Combinator::ImmediateChild:
+                case Combinator::PseudoElement:
+                    for (auto hash : hashes_from_compound(compound_selector))
+                        append_unique_hash(hashes, hash);
+                    break;
+                case Combinator::NextSibling:
+                case Combinator::SubsequentSibling:
+                    break;
+                case Combinator::Column:
+                default:
+                    return hashes;
+                }
+
+                combinator_to_right = compound_selector.combinator;
+            }
+
+            return hashes;
+        }
+
+        Vector<u32> common_hashes_from_selector_list(SelectorList const& selector_list, IncludeRightmostCompound include_rightmost_compound)
+        {
+            if (selector_list.is_empty())
+                return {};
+
+            Optional<Vector<u32>> common_hashes;
+            for (auto const& argument_selector : selector_list) {
+                auto hashes = hashes_from_selector(*argument_selector, include_rightmost_compound);
+                if (!common_hashes.has_value()) {
+                    common_hashes = move(hashes);
+                    continue;
+                }
+
+                intersect_hashes(common_hashes.value(), hashes);
+                if (common_hashes->is_empty())
+                    break;
+            }
+
+            return common_hashes.release_value();
+        }
+
+        bool append_hashes_from_simple_selector(SimpleSelector const& simple_selector)
+        {
+            for (auto hash : hashes_from_simple_selector(simple_selector)) {
+                if (append_unique_hash(hash))
+                    return true;
+            }
+            return false;
+        }
+
+        bool append_hashes_from_compound(CompoundSelector const& compound_selector)
+        {
+            for (auto const& simple_selector : compound_selector.simple_selectors) {
+                if (append_hashes_from_simple_selector(simple_selector))
+                    return true;
+            }
+            return false;
+        }
     };
+    AncestorHashCollector ancestor_hash_collector { m_ancestor_hashes, next_hash_index };
+
+    for (auto hash : ancestor_hash_collector.hashes_from_subject_compound_selector_list_pseudo_classes(m_compound_selectors.last())) {
+        if (ancestor_hash_collector.append_unique_hash(hash)) {
+            m_can_use_ancestor_filter = (next_hash_index > 0);
+            return;
+        }
+    }
 
     // Walk from the compound immediately to the left of the subject toward the left.
     // The combinator that connects `i` to `i+1` is stored on `i+1`.
@@ -204,7 +370,7 @@ void Selector::collect_ancestor_hashes()
         case Combinator::PseudoElement:
             // This compound is on the ancestor axis (directly, as the originating element for a pseudo-element,
             // or as a shared ancestor past a sibling boundary).
-            if (append_hashes_from_compound(compound_selector)) {
+            if (ancestor_hash_collector.append_hashes_from_compound(compound_selector)) {
                 m_can_use_ancestor_filter = (next_hash_index > 0);
                 return;
             }
@@ -920,14 +1086,15 @@ SelectorList adapt_nested_relative_selector_list(SelectorList const& selectors, 
     for (auto const& selector : selectors) {
         auto first_combinator = selector->compound_selectors().first().combinator;
 
-        // Nested relative selectors get a `&` inserted at the beginning.
+        // Nested relative selectors get a `&` inserted at the beginning when the nearest nesting parent is a style rule.
         // This is, handily, how the spec wants them serialized:
         // "When serializing a relative selector in a nested style rule, the selector must be absolutized, with the
         // implied nesting selector inserted."
         // - https://drafts.csswg.org/css-nesting-1/#cssom
-        // However, if we are directly inside a @scope rule and contain `:scope`, then we do not insert the `&`.
-        bool insert_leading_ampersand = !first_is_one_of(first_combinator, Selector::Combinator::None, Selector::Combinator::Descendant);
-        if (!selector->contains_the_nesting_selector() && style_nesting_parent != StyleNestingParent::Scope)
+        // However, relative selectors directly inside a @scope rule stay relative to the scoping root.
+        bool insert_leading_ampersand = style_nesting_parent == StyleNestingParent::Style
+            && !first_is_one_of(first_combinator, Selector::Combinator::None, Selector::Combinator::Descendant);
+        if (!selector->contains_the_nesting_selector() && style_nesting_parent == StyleNestingParent::Style)
             insert_leading_ampersand = true;
 
         if (insert_leading_ampersand) {
@@ -969,11 +1136,17 @@ SelectorList absolutize_selectors_relative_to(SelectorList const& selectors, GC:
         },
     } };
 
+    auto parent_is_scope_rule = parent && parent->type() == CSSRule::Type::Scope;
+    auto selector_is_scope_relative = [](Selector const& selector) {
+        return !first_is_one_of(selector.compound_selectors().first().combinator, Selector::Combinator::None, Selector::Combinator::Descendant);
+    };
+
     // Replace all occurrences of `&` with the nearest ancestor style rule's selector list wrapped in `:is(...)`,
-    // or if we have no such ancestor, with `:scope`.
+    // or if we have no such ancestor, with `:scope`. Selectors directly inside @scope may remain serialized as
+    // relative selectors, but need to be absolutized against :scope before matching.
 
     // If we don't have any nesting selectors, we can just use our selectors as they are.
-    if (!any_of(selectors, [](auto const& selector) { return selector->contains_the_nesting_selector(); }))
+    if (!any_of(selectors, [&](auto const& selector) { return selector->contains_the_nesting_selector() || (parent_is_scope_rule && selector_is_scope_relative(*selector)); }))
         return selectors;
 
     // Otherwise, build up a new list of selectors with the `&` replaced.
@@ -1000,6 +1173,13 @@ SelectorList absolutize_selectors_relative_to(SelectorList const& selectors, GC:
 
     SelectorList absolutized_selectors;
     for (auto const& selector : selectors) {
+        if (!selector->contains_the_nesting_selector()) {
+            if (parent_is_scope_rule && selector_is_scope_relative(*selector))
+                absolutized_selectors.append(selector->relative_to(parent_selector));
+            else
+                absolutized_selectors.append(selector);
+            continue;
+        }
         if (auto absolutized = selector->absolutized(parent_selector))
             absolutized_selectors.append(absolutized.release_nonnull());
     }
@@ -1029,9 +1209,10 @@ bool Selector::SimpleSelector::ANPlusBPattern::matches(int index) const
     if (step_size < 0 && offset < 0)
         return false;
 
-    // Like "a % b", but handles negative integers correctly.
-    auto const canonical_modulo = [](int a, int b) -> int {
-        int c = a % b;
+    // Like "a % b", but handles negative integers correctly. Done in 64 bits because "index - offset" and "-step_size"
+    // overflow a 32-bit int for an extreme An+B value such as :nth-child(2n-2147483648).
+    auto const canonical_modulo = [](i64 a, i64 b) -> i64 {
+        i64 c = a % b;
         if ((c < 0 && b > 0) || (c > 0 && b < 0)) {
             c += b;
         }
@@ -1040,10 +1221,10 @@ bool Selector::SimpleSelector::ANPlusBPattern::matches(int index) const
 
     // When "step_size < 0", we start at "offset" and count backwards.
     if (step_size < 0)
-        return index <= offset && canonical_modulo(index - offset, -step_size) == 0;
+        return index <= offset && canonical_modulo(static_cast<i64>(index) - offset, -static_cast<i64>(step_size)) == 0;
 
     // Otherwise, we start at "offset" and count forwards.
-    return index >= offset && canonical_modulo(index - offset, step_size) == 0;
+    return index >= offset && canonical_modulo(static_cast<i64>(index) - offset, step_size) == 0;
 }
 
 // https://drafts.csswg.org/css-syntax-3/#serializing-anb

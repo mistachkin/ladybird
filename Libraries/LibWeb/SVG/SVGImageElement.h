@@ -8,6 +8,7 @@
 
 #include <LibGC/Ptr.h>
 #include <LibWeb/DOM/DocumentLoadEventDelayer.h>
+#include <LibWeb/HTML/DecodedImageData.h>
 #include <LibWeb/Layout/ImageProvider.h>
 #include <LibWeb/SVG/SVGAnimatedLength.h>
 #include <LibWeb/SVG/SVGGraphicsElement.h>
@@ -17,12 +18,15 @@ namespace Web::SVG {
 class SVGImageElement final
     : public SVGGraphicsElement
     , public SVGURIReferenceMixin<SupportsXLinkHref::Yes>
-    , public Layout::ImageProvider {
+    , public Layout::ImageProvider
+    , public HTML::DecodedImageData::Client {
     WEB_PLATFORM_OBJECT(SVGImageElement, SVGGraphicsElement);
     GC_DECLARE_ALLOCATOR(SVGImageElement);
 
 public:
-    ~SVGImageElement();
+    static constexpr bool OVERRIDES_FINALIZE = true;
+
+    virtual ~SVGImageElement() override;
 
     virtual void attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
 
@@ -31,19 +35,9 @@ public:
     GC::Ref<SVG::SVGAnimatedLength> width();
     GC::Ref<SVG::SVGAnimatedLength> height();
 
-    Gfx::FloatRect bounding_box() const;
-
-    virtual Optional<Gfx::DecodedImageFrame> default_image_frame_sized(Gfx::IntSize) const override;
+    Gfx::FloatRect bounding_box(CSSPixelSize viewport_size) const;
 
     // ^Layout::ImageProvider
-    virtual bool is_image_available() const override;
-    virtual Optional<CSSPixels> intrinsic_width() const override;
-    virtual Optional<CSSPixels> intrinsic_height() const override;
-    virtual Optional<CSSPixelFraction> intrinsic_aspect_ratio() const override;
-    virtual Optional<Gfx::DecodedImageFrame> current_image_frame_sized(Gfx::IntSize) const override;
-    virtual void set_visible_in_viewport(bool) override { }
-    virtual GC::Ptr<DOM::Element const> to_html_element() const override { return *this; }
-    virtual size_t current_frame_index() const override { return m_current_frame_index; }
     virtual GC::Ptr<HTML::DecodedImageData> decoded_image_data() const override;
 
 protected:
@@ -57,17 +51,15 @@ protected:
     void fetch_the_document(URL::URL const& url);
 
 private:
+    virtual void finalize() override;
+
     virtual RefPtr<Layout::Node> create_layout_node(CSS::ComputedProperties const&) override;
-    void animate();
+    virtual void decoded_image_data_did_update() override { set_needs_repaint(); }
 
-    GC::Ptr<SVG::SVGAnimatedLength> m_x;
-    GC::Ptr<SVG::SVGAnimatedLength> m_y;
-    GC::Ptr<SVG::SVGAnimatedLength> m_width;
-    GC::Ptr<SVG::SVGAnimatedLength> m_height;
-
-    RefPtr<Core::Timer> m_animation_timer;
-    size_t m_current_frame_index { 0 };
-    size_t m_loops_completed { 0 };
+    Optional<NumberPercentage> m_x;
+    Optional<NumberPercentage> m_y;
+    Optional<NumberPercentage> m_width;
+    Optional<NumberPercentage> m_height;
 
     Optional<URL::URL> m_href;
 

@@ -8,6 +8,7 @@
 #include <LibGfx/Bitmap.h>
 #include <LibJS/Runtime/ExternalMemory.h>
 #include <LibJS/Runtime/Realm.h>
+#include <LibWeb/CSS/ComputedValues.h>
 #include <LibWeb/HTML/BitmapDecodedImageData.h>
 #include <LibWeb/Painting/DisplayListRecorder.h>
 #include <LibWeb/Painting/DisplayListRecordingContext.h>
@@ -16,15 +17,13 @@ namespace Web::HTML {
 
 GC_DEFINE_ALLOCATOR(BitmapDecodedImageData);
 
-ErrorOr<GC::Ref<BitmapDecodedImageData>> BitmapDecodedImageData::create(JS::Realm& realm, Vector<Frame>&& frames, size_t loop_count, bool animated)
+GC::Ref<BitmapDecodedImageData> BitmapDecodedImageData::create(JS::Realm& realm, Gfx::DecodedImageFrame&& frame)
 {
-    return realm.create<BitmapDecodedImageData>(move(frames), loop_count, animated);
+    return realm.create<BitmapDecodedImageData>(move(frame));
 }
 
-BitmapDecodedImageData::BitmapDecodedImageData(Vector<Frame>&& frames, size_t loop_count, bool animated)
-    : m_frames(move(frames))
-    , m_loop_count(loop_count)
-    , m_animated(animated)
+BitmapDecodedImageData::BitmapDecodedImageData(Gfx::DecodedImageFrame&& frame)
+    : m_frame(move(frame))
 {
 }
 
@@ -32,49 +31,39 @@ BitmapDecodedImageData::~BitmapDecodedImageData() = default;
 
 size_t BitmapDecodedImageData::external_memory_size() const
 {
-    size_t size = JS::vector_external_memory_size(m_frames);
-    for (auto const& frame : m_frames)
-        size = JS::saturating_add_external_memory_size(size, frame.frame.bitmap().data_size());
-    return size;
+    return m_frame.bitmap().data_size();
 }
 
-Optional<Gfx::DecodedImageFrame> BitmapDecodedImageData::frame(size_t frame_index, Gfx::IntSize) const
+Optional<Gfx::DecodedImageFrame> BitmapDecodedImageData::current_frame(Gfx::IntSize) const
 {
-    if (frame_index >= m_frames.size())
-        return {};
-    return m_frames[frame_index].frame;
+    return m_frame;
 }
 
-int BitmapDecodedImageData::frame_duration(size_t frame_index) const
+Optional<Gfx::DecodedImageFrame> BitmapDecodedImageData::default_frame(Gfx::IntSize) const
 {
-    if (frame_index >= m_frames.size())
-        return 0;
-    return m_frames[frame_index].duration;
+    return m_frame;
 }
 
 Optional<CSSPixels> BitmapDecodedImageData::intrinsic_width() const
 {
-    return m_frames.first().frame.width();
+    return m_frame.width();
 }
 
 Optional<CSSPixels> BitmapDecodedImageData::intrinsic_height() const
 {
-    return m_frames.first().frame.height();
+    return m_frame.height();
 }
 
 Optional<CSSPixelFraction> BitmapDecodedImageData::intrinsic_aspect_ratio() const
 {
-    return CSSPixels(m_frames.first().frame.width()) / CSSPixels(m_frames.first().frame.height());
+    return CSSPixels(m_frame.width()) / CSSPixels(m_frame.height());
 }
 
-Optional<Gfx::IntRect> BitmapDecodedImageData::frame_rect(size_t frame_index) const
+void BitmapDecodedImageData::paint(DisplayListRecordingContext& context, Gfx::IntRect dst_rect, CSS::ImageRendering image_rendering) const
 {
-    return m_frames[frame_index].frame.rect();
-}
+    auto scaling_mode = CSS::to_gfx_scaling_mode(image_rendering, m_frame.size(), dst_rect.size());
 
-void BitmapDecodedImageData::paint(DisplayListRecordingContext& context, size_t frame_index, Gfx::IntRect dst_rect, Gfx::ScalingMode scaling_mode) const
-{
-    context.display_list_recorder().draw_scaled_decoded_image_frame(dst_rect, m_frames[frame_index].frame, scaling_mode);
+    context.display_list_recorder().draw_scaled_decoded_image_frame(dst_rect, m_frame, scaling_mode);
 }
 
 }

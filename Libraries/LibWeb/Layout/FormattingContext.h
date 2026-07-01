@@ -9,6 +9,7 @@
 #include <AK/OwnPtr.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/Layout/AvailableSpace.h>
+#include <LibWeb/Layout/LayoutInput.h>
 #include <LibWeb/Layout/LayoutState.h>
 
 namespace Web::Layout {
@@ -105,7 +106,13 @@ public:
         VERIFY_NOT_REACHED();
     }
 
-    virtual void run(AvailableSpace const&) = 0;
+    // https://drafts.csswg.org/css-align-3/#baseline-export
+    enum class BaselineSet : u8 {
+        First,
+        Last,
+    };
+
+    virtual void run(LayoutInput const&) = 0;
 
     // These functions return the automatic content dimensions of the context's root box.
     virtual CSSPixels automatic_content_width() const = 0;
@@ -150,13 +157,12 @@ public:
 
     virtual CSSPixels greatest_child_width(Box const&) const;
 
-    [[nodiscard]] CSSPixelRect absolute_content_rect(Box const&) const;
     [[nodiscard]] CSSPixelRect margin_box_rect_in_ancestor_coordinate_space(Box const&, Box const& ancestor_box) const;
     [[nodiscard]] CSSPixelRect margin_box_rect_in_ancestor_coordinate_space(LayoutState::UsedValues const&, Box const& ancestor_box) const;
     [[nodiscard]] CSSPixelRect content_box_rect(Box const&) const;
     [[nodiscard]] CSSPixelRect content_box_rect(LayoutState::UsedValues const&) const;
     [[nodiscard]] CSSPixelRect content_box_rect_in_ancestor_coordinate_space(LayoutState::UsedValues const&, Box const& ancestor_box) const;
-    [[nodiscard]] CSSPixels box_baseline(Box const&) const;
+    [[nodiscard]] CSSPixels box_baseline(Box const&, BaselineSet) const;
     [[nodiscard]] CSSPixels containing_block_width_for(NodeWithStyleAndBoxModelMetrics const&) const;
 
     [[nodiscard]] CSSPixels calculate_stretch_fit_width(Box const&, AvailableSize const&) const;
@@ -170,6 +176,7 @@ protected:
     FormattingContext(Type, LayoutMode, LayoutState&, Box const&, FormattingContext* parent = nullptr);
 
     [[nodiscard]] static bool computed_height_establishes_definite_containing_block_height(CSS::Size const&);
+    [[nodiscard]] Optional<CSSPixels> calculate_transferred_width_for_replaced_element(Layout::Box const&) const;
 
     [[nodiscard]] bool should_treat_width_as_auto(Box const&, AvailableSpace const&) const;
     [[nodiscard]] bool should_treat_height_as_auto(Box const&, AvailableSpace const&) const;
@@ -179,23 +186,11 @@ protected:
 
     [[nodiscard]] bool box_is_sized_as_replaced_element(Box const&, AvailableSpace const&) const;
 
-    OwnPtr<FormattingContext> layout_inside(Box const&, LayoutMode, AvailableSpace const&);
+    OwnPtr<FormattingContext> layout_inside(Box const&, LayoutMode, LayoutInput const&);
 
     struct SpaceUsedByFloats {
         CSSPixels left { 0 };
         CSSPixels right { 0 };
-    };
-
-    struct SpaceUsedAndContainingMarginForFloats {
-        // Width for left / right floats, including their own margins.
-        CSSPixels left_used_space;
-        CSSPixels right_used_space;
-        // Left / right total margins from the outermost containing block to the floating element.
-        // Each block in the containing chain adds its own margin and we store the total here.
-        CSSPixels left_total_containing_margin;
-        CSSPixels right_total_containing_margin;
-        Box const* matching_left_float_box { nullptr };
-        Box const* matching_right_float_box { nullptr };
     };
 
     struct ShrinkToFitResult {
@@ -217,6 +212,7 @@ protected:
     CSSPixels gap_to_px(Variant<CSS::LengthPercentage, CSS::NormalGap> const& gap, CSSPixels reference_value) const;
 
     void layout_absolutely_positioned_children();
+    void layout_absolutely_positioned_children(Box const&);
     virtual AbsposContainingBlockInfo resolve_abspos_containing_block_info(Box const&);
     void resolve_anchor_insets(Box&) const;
     void compute_width_for_absolutely_positioned_element(Box const&, AvailableSpace const&);
@@ -233,7 +229,7 @@ protected:
 
     [[nodiscard]] Optional<CSSPixels> compute_auto_height_for_absolutely_positioned_element(Box const&, AvailableSpace const&, BeforeOrAfterInsideLayout) const;
 
-    [[nodiscard]] Box const* box_child_to_derive_baseline_from(Box const&) const;
+    [[nodiscard]] Box const* box_child_to_derive_baseline_from(Box const&, BaselineSet) const;
 
     Type m_type {};
     LayoutMode m_layout_mode;

@@ -24,6 +24,7 @@
 #include <LibWeb/CSS/Selector.h>
 #include <LibWeb/CSS/StyleSheetIdentifier.h>
 #include <LibWeb/Forward.h>
+#include <LibWeb/HTML/Scripting/ScriptRegistry.h>
 #include <LibWeb/StorageAPI/StorageEndpoint.h>
 #include <LibWebView/DOMNodeProperties.h>
 #include <LibWebView/Forward.h>
@@ -74,6 +75,16 @@ public:
     using OnStorageChange = Function<void(StorageChange)>;
     virtual u64 add_storage_change_listener(TabDescription const&, OnStorageChange) const { return 0; }
     virtual void remove_storage_change_listener(TabDescription const&, u64) const { }
+
+    using OnIndexedDBInspectionComplete = Function<void(ErrorOr<JsonObject>)>;
+    virtual void inspect_indexed_database_storage(TabDescription const&, OnIndexedDBInspectionComplete) const { }
+    virtual void inspect_indexed_database_objects(TabDescription const&, String const&, Optional<JsonArray>, JsonObject, OnIndexedDBInspectionComplete) const { }
+    virtual void delete_indexed_database(TabDescription const&, String const&, String const&, OnIndexedDBInspectionComplete) const { }
+    virtual void clear_indexed_database_object_store(TabDescription const&, String const&, String const&, OnIndexedDBInspectionComplete) const { }
+    virtual void delete_indexed_database_record(TabDescription const&, String const&, String const&, OnIndexedDBInspectionComplete) const { }
+    using OnIndexedDatabaseChange = Function<void(JsonObject)>;
+    virtual u64 add_indexed_database_change_listener(TabDescription const&, OnIndexedDatabaseChange) const { return 0; }
+    virtual void remove_indexed_database_change_listener(TabDescription const&, u64) const { }
 
     using OnTabInspectionComplete = Function<void(ErrorOr<JsonValue>)>;
     virtual void inspect_tab(TabDescription const&, OnTabInspectionComplete) const { }
@@ -136,12 +147,23 @@ public:
     virtual void clone_dom_node(TabDescription const&, Web::UniqueNodeID, OnDOMNodeEditComplete) const { }
     virtual void remove_dom_node(TabDescription const&, Web::UniqueNodeID, OnDOMNodeEditComplete) const { }
 
+    using OnResolvedURLReceived = Function<void(ErrorOr<String>)>;
+    virtual void resolve_dom_node_url(TabDescription const&, Optional<Web::UniqueNodeID>, String const&, OnResolvedURLReceived) const { }
+
     using OnStyleSheetsReceived = Function<void(ErrorOr<Vector<Web::CSS::StyleSheetIdentifier>>)>;
     using OnStyleSheetSourceReceived = Function<void(Web::CSS::StyleSheetIdentifier const&, String)>;
     virtual void retrieve_style_sheets(TabDescription const&, OnStyleSheetsReceived) const { }
     virtual void retrieve_style_sheet_source(TabDescription const&, Web::CSS::StyleSheetIdentifier const&) const { }
     virtual void listen_for_style_sheet_sources(TabDescription const&, OnStyleSheetSourceReceived) const { }
     virtual void stop_listening_for_style_sheet_sources(TabDescription const&) const { }
+
+    using OnSourcesReceived = Function<void(ErrorOr<Vector<Web::HTML::ScriptRegistry::Description>>)>;
+    using OnSourceReceived = Function<void(ErrorOr<Web::HTML::ScriptRegistry::Content>)>;
+    using OnSourceAvailable = Function<void(Web::HTML::ScriptRegistry::Description)>;
+    virtual void retrieve_sources(TabDescription const&, OnSourcesReceived) const { }
+    virtual void retrieve_source(TabDescription const&, Web::HTML::ScriptRegistry::Identifier, OnSourceReceived) const { }
+    virtual void listen_for_sources(TabDescription const&, OnSourceAvailable) const { }
+    virtual void stop_listening_for_sources(TabDescription const&) const { }
 
     using OnScriptEvaluationComplete = Function<void(ErrorOr<JsonValue>)>;
     virtual void evaluate_javascript(TabDescription const&, String const&, OnScriptEvaluationComplete) const { }

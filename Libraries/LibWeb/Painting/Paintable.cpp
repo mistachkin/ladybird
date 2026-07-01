@@ -113,7 +113,7 @@ GC::Ptr<DOM::Node const> Paintable::dom_node() const
     return m_dom_node.ptr();
 }
 
-GC::Ptr<HTML::Navigable> Paintable::navigable() const
+GC::Ptr<HTML::LocalNavigable> Paintable::navigable() const
 {
     return document().navigable();
 }
@@ -132,6 +132,9 @@ bool Paintable::has_stacking_context() const
 
 DOM::Node* HitTestResult::dom_node()
 {
+    if (dom_node_override)
+        return dom_node_override.ptr();
+
     for (auto* current = paintable.ptr(); current; current = current->parent()) {
         if (auto node = current->dom_node())
             return node;
@@ -141,6 +144,9 @@ DOM::Node* HitTestResult::dom_node()
 
 DOM::Node const* HitTestResult::dom_node() const
 {
+    if (dom_node_override)
+        return dom_node_override.ptr();
+
     for (auto const* current = paintable.ptr(); current; current = current->parent()) {
         if (auto node = current->dom_node())
             return node;
@@ -240,15 +246,15 @@ CSSPixelPoint Paintable::box_type_agnostic_position() const
     return position;
 }
 
-Painting::BorderRadiiData normalize_border_radii_data(Layout::Node const& node, CSSPixelRect const& border_rect, CSSPixelRect const& reference_rect, CSS::BorderRadiusData const& top_left_radius, CSS::BorderRadiusData const& top_right_radius, CSS::BorderRadiusData const& bottom_right_radius, CSS::BorderRadiusData const& bottom_left_radius)
+Painting::BorderRadiiData normalize_border_radii_data(CSSPixelRect const& border_rect, CSSPixelRect const& reference_rect, CSS::BorderRadiusData const& top_left_radius, CSS::BorderRadiusData const& top_right_radius, CSS::BorderRadiusData const& bottom_right_radius, CSS::BorderRadiusData const& bottom_left_radius)
 {
     Painting::BorderRadiiData radii_px {
         .top_left = {
-            top_left_radius.horizontal_radius.to_px(node, reference_rect.width()),
-            top_left_radius.vertical_radius.to_px(node, reference_rect.height()) },
-        .top_right = { top_right_radius.horizontal_radius.to_px(node, reference_rect.width()), top_right_radius.vertical_radius.to_px(node, reference_rect.height()) },
-        .bottom_right = { bottom_right_radius.horizontal_radius.to_px(node, reference_rect.width()), bottom_right_radius.vertical_radius.to_px(node, reference_rect.height()) },
-        .bottom_left = { bottom_left_radius.horizontal_radius.to_px(node, reference_rect.width()), bottom_left_radius.vertical_radius.to_px(node, reference_rect.height()) }
+            top_left_radius.horizontal_radius.to_px(reference_rect.width()),
+            top_left_radius.vertical_radius.to_px(reference_rect.height()) },
+        .top_right = { top_right_radius.horizontal_radius.to_px(reference_rect.width()), top_right_radius.vertical_radius.to_px(reference_rect.height()) },
+        .bottom_right = { bottom_right_radius.horizontal_radius.to_px(reference_rect.width()), bottom_right_radius.vertical_radius.to_px(reference_rect.height()) },
+        .bottom_left = { bottom_left_radius.horizontal_radius.to_px(reference_rect.width()), bottom_left_radius.vertical_radius.to_px(reference_rect.height()) }
     };
 
     // Scale overlapping curves according to https://www.w3.org/TR/css-backgrounds-3/#corner-overlap
@@ -299,40 +305,35 @@ Painting::BorderRadiiData normalize_border_radii_data(Layout::Node const& node, 
 //        fill-color, stroke-width, and CSS custom properties.
 Paintable::SelectionStyle Paintable::selection_style() const
 {
+    return selection_style_for_node(layout_node(), dom_node());
+}
+
+Paintable::SelectionStyle Paintable::selection_style_for_node(Layout::Node const& layout_node, GC::Ptr<DOM::Node const> node)
+{
     auto default_style_for_color_scheme = [&](CSS::PreferredColorScheme color_scheme, bool use_palette_for_normal_color_scheme = true) {
-        auto palette = document().page().palette();
+        auto palette = layout_node.document().page().palette();
         auto palette_color_scheme = palette.is_dark() ? CSS::PreferredColorScheme::Dark : CSS::PreferredColorScheme::Light;
-        if (color_scheme == palette_color_scheme || use_palette_for_normal_color_scheme) {
-            return SelectionStyle {
-                CSS::SystemColor::transform_selection_background_color(palette.selection()),
-                palette.selection_text(),
-                {},
-                {},
-            };
-        }
+        if (color_scheme == palette_color_scheme || use_palette_for_normal_color_scheme)
+            return SelectionStyle { CSS::SystemColor::transform_selection_background_color(palette.selection()) };
 
         return SelectionStyle {
-            CSS::SystemColor::transform_selection_background_color(CSS::SystemColor::highlight(color_scheme)),
-            CSS::SystemColor::highlight_text(color_scheme),
-            {},
-            {},
+            CSS::SystemColor::transform_selection_background_color(CSS::SystemColor::highlight(color_scheme))
         };
     };
 
     // For text nodes, check the parent element since text nodes don't have computed properties.
-    auto node = dom_node();
     if (!node)
-        return default_style_for_color_scheme(computed_values().color_scheme());
+        return default_style_for_color_scheme(layout_node.computed_values().color_scheme());
 
     DOM::Element const* element = as_if<DOM::Element>(*node);
     if (!element)
         element = node->parent_element();
     if (!element)
-        return default_style_for_color_scheme(computed_values().color_scheme());
+        return default_style_for_color_scheme(layout_node.computed_values().color_scheme());
 
     auto color_scheme_is_normal = element->computed_properties()->property(CSS::PropertyID::ColorScheme).as_color_scheme().schemes().is_empty();
-    auto use_palette_for_normal_color_scheme = color_scheme_is_normal && !document().supported_color_schemes().has_value();
-    auto default_style = default_style_for_color_scheme(computed_values().color_scheme(), use_palette_for_normal_color_scheme);
+    auto use_palette_for_normal_color_scheme = color_scheme_is_normal && !layout_node.document().supported_color_schemes().has_value();
+    auto default_style = default_style_for_color_scheme(layout_node.computed_values().color_scheme(), use_palette_for_normal_color_scheme);
 
     auto style_from_element = [&](DOM::Element const& element) -> Optional<SelectionStyle> {
         auto element_layout_node = element.layout_node();
@@ -358,7 +359,7 @@ Paintable::SelectionStyle Paintable::selection_style() const
             Vector<ShadowData> shadows;
             shadows.ensure_capacity(css_shadows.size());
             for (auto const& shadow : css_shadows)
-                shadows.unchecked_append(ShadowData::from_css(shadow, *element_layout_node));
+                shadows.unchecked_append(ShadowData::from_css(shadow));
             style.text_shadow = move(shadows);
         }
 
@@ -413,11 +414,11 @@ void Paintable::set_selection_state(SelectionState state)
     }
 }
 
-void Paintable::scroll_ancestor_to_offset_into_view(size_t offset)
+void Paintable::scroll_text_offset_into_view(DOM::Text const& text, size_t offset)
 {
-    auto scroll_to_cursor = [&](PaintableFragment const& fragment, Paintable const& fragment_paintable) {
+    auto scroll_to_cursor = [&](PaintableFragment const& fragment) {
         auto cursor_rect = fragment.range_rect(SelectionState::StartAndEnd, offset, offset);
-        for (auto ancestor = fragment_paintable.containing_block(); ancestor; ancestor = ancestor->containing_block()) {
+        for (auto ancestor = fragment.containing_block_paintable(); ancestor; ancestor = ancestor->containing_block()) {
             if (ancestor->has_scrollable_overflow()) {
                 ancestor->scroll_into_view(cursor_rect);
                 return;
@@ -425,37 +426,19 @@ void Paintable::scroll_ancestor_to_offset_into_view(size_t offset)
         }
     };
 
-    // Find the paintable fragment containing the cursor offset and scroll it into view.
-    auto scan_layout_fragment = [&](Paintable const& slice_paintable) -> bool {
-        auto paintable_with_lines = slice_paintable.first_ancestor_of_type<PaintableWithLines>();
-        if (!paintable_with_lines)
-            return false;
-        for (auto const& fragment : paintable_with_lines->fragments()) {
-            if (&fragment.paintable() != &slice_paintable)
-                continue;
-            if (offset < fragment.dom_start_offset_in_node() || offset > fragment.dom_end_offset_in_node())
-                continue;
-            scroll_to_cursor(fragment, slice_paintable);
-            return true;
-        }
-        return false;
-    };
+    Layout::TextOffsetMapping mapping { text };
+    mapping.for_each_paintable_fragment([&](PaintableFragment const& fragment) {
+        if (offset < fragment.dom_start_offset_in_node() || offset > fragment.dom_end_offset_in_node())
+            return TraversalDecision::Continue;
+        scroll_to_cursor(fragment);
+        return TraversalDecision::Break;
+    });
+}
 
-    if (auto const* text = as_if<DOM::Text>(dom_node().ptr())) {
-        Layout::TextOffsetMapping mapping { *text };
-        bool scrolled = false;
-        mapping.for_each_fragment([&](Layout::TextNode const& slice) {
-            if (scrolled)
-                return;
-            if (auto slice_paintable = slice.first_paintable()) {
-                if (scan_layout_fragment(*slice_paintable))
-                    scrolled = true;
-            }
-        });
-        return;
-    }
-
-    scan_layout_fragment(*this);
+void Paintable::scroll_ancestor_to_offset_into_view(size_t offset)
+{
+    if (auto const* text = as_if<DOM::Text>(dom_node().ptr()))
+        scroll_text_offset_into_view(*text, offset);
 }
 
 }

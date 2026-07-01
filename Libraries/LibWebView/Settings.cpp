@@ -27,6 +27,7 @@ static constexpr auto TAB_SETTINGS_KEY = "tabs"sv;
 static constexpr auto VERTICAL_TABS_ENABLED_KEY = "verticalTabsEnabled"sv;
 static constexpr auto VERTICAL_TABS_EXPANDED_KEY = "verticalTabsExpanded"sv;
 static constexpr auto VERTICAL_TABS_EXPAND_ON_HOVER_KEY = "verticalTabsExpandOnHover"sv;
+static constexpr auto VERTICAL_TABS_POSITION_KEY = "verticalTabsPosition"sv;
 static constexpr auto VERTICAL_TABS_EXPANDED_WIDTH_KEY = "verticalTabsExpandedWidth"sv;
 
 static constexpr auto SHOW_MENU_BAR_KEY = "showMenuBar"sv;
@@ -55,7 +56,7 @@ static constexpr auto SEARCH_ENGINE_URL_KEY = "url"sv;
 static constexpr auto AUTOCOMPLETE_ENGINE_KEY = "autocompleteEngine"sv;
 static constexpr auto AUTOCOMPLETE_ENGINE_NAME_KEY = "name"sv;
 
-static constexpr auto SITE_SETTING_ENABLED_GLOBALLY_KEY = "enabledGlobally"sv;
+static constexpr auto SITE_SETTING_POLICY_KEY = "policy"sv;
 static constexpr auto SITE_SETTING_SITE_FILTERS_KEY = "siteFilters"sv;
 
 static constexpr auto AUTOPLAY_KEY = "autoplay"sv;
@@ -116,6 +117,26 @@ static auto const& CONFIG_VARIABLE_DEFINITIONS = *new Array<ConfigVariableDefini
 ReadonlySpan<ConfigVariableDefinition const> config_variable_definitions()
 {
     return CONFIG_VARIABLE_DEFINITIONS;
+}
+
+static StringView vertical_tabs_position_to_string(VerticalTabsPosition position)
+{
+    switch (position) {
+    case VerticalTabsPosition::Left:
+        return "left"sv;
+    case VerticalTabsPosition::Right:
+        return "right"sv;
+    }
+    VERIFY_NOT_REACHED();
+}
+
+static Optional<VerticalTabsPosition> vertical_tabs_position_from_string(StringView position)
+{
+    if (position == "left"sv)
+        return VerticalTabsPosition::Left;
+    if (position == "right"sv)
+        return VerticalTabsPosition::Right;
+    return {};
 }
 
 Optional<ConfigVariableID> config_variable_id_from_name(StringView name)
@@ -242,13 +263,15 @@ Settings Settings::create(Badge<Application>)
         }
     }
 
-    auto load_site_setting = [&](SiteSetting& site_setting, StringView key) {
+    auto load_site_setting = [&](AutoplaySiteSetting& site_setting, StringView key) {
         auto saved_settings = settings_json.value().get_object(key);
         if (!saved_settings.has_value())
             return;
 
-        if (auto enabled_globally = saved_settings->get_bool(SITE_SETTING_ENABLED_GLOBALLY_KEY); enabled_globally.has_value())
-            site_setting.enabled_globally = *enabled_globally;
+        if (auto policy = saved_settings->get_string(SITE_SETTING_POLICY_KEY); policy.has_value()) {
+            if (auto parsed = Web::HTML::autoplay_policy_from_string(*policy); parsed.has_value())
+                site_setting.policy = *parsed;
+        }
 
         if (auto site_filters = saved_settings->get_array(SITE_SETTING_SITE_FILTERS_KEY); site_filters.has_value()) {
             site_setting.site_filters.clear();
@@ -305,6 +328,7 @@ JsonValue Settings::serialize_json() const
     tab_settings.set(VERTICAL_TABS_ENABLED_KEY, m_tab_settings.vertical_tabs_enabled);
     tab_settings.set(VERTICAL_TABS_EXPANDED_KEY, m_tab_settings.vertical_tabs_expanded);
     tab_settings.set(VERTICAL_TABS_EXPAND_ON_HOVER_KEY, m_tab_settings.vertical_tabs_expand_on_hover);
+    tab_settings.set(VERTICAL_TABS_POSITION_KEY, vertical_tabs_position_to_string(m_tab_settings.vertical_tabs_position));
     if (m_tab_settings.vertical_tabs_expanded_width.has_value())
         tab_settings.set(VERTICAL_TABS_EXPANDED_WIDTH_KEY, *m_tab_settings.vertical_tabs_expanded_width);
     settings.set(TAB_SETTINGS_KEY, move(tab_settings));
@@ -360,7 +384,7 @@ JsonValue Settings::serialize_json() const
         settings.set(AUTOCOMPLETE_ENGINE_KEY, move(autocomplete_engine));
     }
 
-    auto save_site_setting = [&](SiteSetting const& site_setting, StringView key) {
+    auto save_site_setting = [&](AutoplaySiteSetting const& site_setting, StringView key) {
         JsonArray site_filters;
         site_filters.ensure_capacity(site_setting.site_filters.size());
 
@@ -368,8 +392,8 @@ JsonValue Settings::serialize_json() const
             site_filters.must_append(site_filter);
 
         JsonObject setting;
-        setting.set("enabledGlobally"sv, site_setting.enabled_globally);
-        setting.set("siteFilters"sv, move(site_filters));
+        setting.set(SITE_SETTING_POLICY_KEY, Web::HTML::autoplay_policy_to_string(site_setting.policy));
+        setting.set(SITE_SETTING_SITE_FILTERS_KEY, move(site_filters));
 
         settings.set(key, move(setting));
     };
@@ -439,6 +463,10 @@ TabSettings Settings::parse_tab_settings(JsonValue const& settings)
         tab_settings.vertical_tabs_expanded = *vertical_tabs_expanded;
     if (auto vertical_tabs_expand_on_hover = settings.as_object().get_bool(VERTICAL_TABS_EXPAND_ON_HOVER_KEY); vertical_tabs_expand_on_hover.has_value())
         tab_settings.vertical_tabs_expand_on_hover = *vertical_tabs_expand_on_hover;
+    if (auto vertical_tabs_position = settings.as_object().get_string(VERTICAL_TABS_POSITION_KEY); vertical_tabs_position.has_value()) {
+        if (auto parsed_position = vertical_tabs_position_from_string(*vertical_tabs_position); parsed_position.has_value())
+            tab_settings.vertical_tabs_position = *parsed_position;
+    }
     if (auto vertical_tabs_expanded_width = settings.as_object().get_integer<u16>(VERTICAL_TABS_EXPANDED_WIDTH_KEY); vertical_tabs_expanded_width.has_value())
         tab_settings.vertical_tabs_expanded_width = *vertical_tabs_expanded_width;
 
@@ -654,9 +682,19 @@ void Settings::set_autocomplete_engine(Optional<StringView> autocomplete_engine_
         observer.autocomplete_engine_changed();
 }
 
-void Settings::set_autoplay_enabled_globally(bool enabled_globally)
+void Settings::set_autocomplete_engine(AutocompleteEngine autocomplete_engine)
 {
-    m_autoplay.enabled_globally = enabled_globally;
+    // Custom engines are not persisted: settings stores the engine by name and reloads it
+    // from the builtin list, so a non-builtin engine would not round-trip.
+    m_autocomplete_engine = autocomplete_engine;
+
+    for (auto& observer : m_observers)
+        observer.autocomplete_engine_changed();
+}
+
+void Settings::set_autoplay_policy(Web::HTML::AutoplayPolicy policy)
+{
+    m_autoplay.policy = policy;
     persist_settings();
 
     for (auto& observer : m_observers)
@@ -857,11 +895,6 @@ SettingsObserver::SettingsObserver()
 SettingsObserver::~SettingsObserver()
 {
     Settings::remove_observer({}, *this);
-}
-
-SiteSetting::SiteSetting()
-{
-    site_filters.set("file://"_string);
 }
 
 }

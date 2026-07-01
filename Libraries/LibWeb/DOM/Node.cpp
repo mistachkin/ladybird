@@ -12,6 +12,7 @@
 #include <AK/JsonObjectSerializer.h>
 #include <AK/NeverDestroyed.h>
 #include <AK/StringBuilder.h>
+#include <AK/Utf16StringBuilder.h>
 #include <LibGC/DeferGC.h>
 #include <LibGC/WeakHashMap.h>
 #include <LibJS/Runtime/ExternalMemory.h>
@@ -57,7 +58,7 @@
 #include <LibWeb/HTML/HTMLStyleElement.h>
 #include <LibWeb/HTML/HTMLTableElement.h>
 #include <LibWeb/HTML/HTMLTextAreaElement.h>
-#include <LibWeb/HTML/Navigable.h>
+#include <LibWeb/HTML/LocalNavigable.h>
 #include <LibWeb/HTML/NavigableContainer.h>
 #include <LibWeb/HTML/Parser/HTMLParser.h>
 #include <LibWeb/HTML/Scripting/SimilarOriginWindowAgent.h>
@@ -191,14 +192,14 @@ Optional<String> Node::alternative_text() const
 // https://dom.spec.whatwg.org/#concept-descendant-text-content
 Utf16String Node::descendant_text_content() const
 {
-    StringBuilder builder(StringBuilder::Mode::UTF16);
+    Utf16StringBuilder builder;
 
     for_each_in_subtree_of_type<Text>([&](auto& text_node) {
         builder.append(text_node.data());
         return TraversalDecision::Continue;
     });
 
-    return builder.to_utf16_string();
+    return builder.to_string();
 }
 
 // https://dom.spec.whatwg.org/#dom-node-textcontent
@@ -310,12 +311,12 @@ WebIDL::ExceptionOr<void> Node::normalize()
         }
 
         // 3. Let data be the concatenation of the data of node’s contiguous exclusive Text nodes (excluding itself), in tree order.
-        StringBuilder data(StringBuilder::Mode::UTF16);
+        Utf16StringBuilder data;
         for (auto const& text_node : contiguous_exclusive_text_nodes_excluding_self(node))
             data.append(text_node->data());
 
         // 4. Replace data with node node, offset length, count 0, and data data.
-        TRY(character_data.replace_data(length, 0, data.to_utf16_string()));
+        TRY(character_data.replace_data(length, 0, data.to_string()));
 
         // 5. Let currentNode be node’s next sibling.
         auto* current_node = node.next_sibling();
@@ -412,7 +413,7 @@ WebIDL::ExceptionOr<void> Node::set_node_value(Optional<String> const& maybe_val
 }
 
 // https://html.spec.whatwg.org/multipage/document-sequences.html#node-navigable
-GC::Ptr<HTML::Navigable> Node::navigable() const
+GC::Ptr<HTML::LocalNavigable> Node::navigable() const
 {
     // To get the node navigable of a node node, return the navigable whose active document is node's node document,
     // or null if there is no such navigable.
@@ -471,7 +472,7 @@ Utf16String Node::child_text_content() const
     if (!parent_node)
         return {};
 
-    StringBuilder builder(StringBuilder::Mode::UTF16);
+    Utf16StringBuilder builder;
 
     parent_node->for_each_child_of_type<Text>([&](auto const& child) {
         if (auto content = child.text_content(); content.has_value())
@@ -479,7 +480,7 @@ Utf16String Node::child_text_content() const
         return IterationDecision::Continue;
     });
 
-    return builder.to_utf16_string();
+    return builder.to_string();
 }
 
 // https://dom.spec.whatwg.org/#concept-shadow-including-root
@@ -1799,13 +1800,29 @@ void Node::inserted()
     set_needs_style_update(true);
 }
 
+void Node::clear_layout_node_paintables()
+{
+    if (!m_layout_node)
+        return;
+
+    m_layout_node->clear_paintables();
+
+    // NB: Block-in-inline splitting can create multiple layout nodes for a single DOM node. Only the last one is stored
+    //     in m_layout_node so we need to clear the paintables for the continued nodes as well
+    auto* node_with_metrics = as_if<Layout::NodeWithStyleAndBoxModelMetrics>(*m_layout_node);
+    if (!node_with_metrics)
+        return;
+
+    for (auto* continuation = node_with_metrics->continuation_of_node(); continuation; continuation = continuation->continuation_of_node())
+        continuation->clear_paintables();
+}
+
 void Node::removed_from(IsSubtreeRoot, Node*, Node&)
 {
     m_is_connected = false;
     m_in_editable_subtree = false;
     m_inside_blocking_wheel_event_handler = false;
-    if (m_layout_node)
-        m_layout_node->clear_paintables();
+    clear_layout_node_paintables();
     m_layout_node = nullptr;
     m_paintable = nullptr;
 
@@ -2713,6 +2730,10 @@ void Node::clear_paintable()
 void Node::set_needs_repaint(InvalidateDisplayList should_invalidate_display_list)
 {
     if (auto* layout_node = unsafe_layout_node()) {
+        if (auto* text_node = as_if<Layout::TextNode>(*layout_node)) {
+            text_node->set_needs_repaint(should_invalidate_display_list);
+            return;
+        }
         for (auto& paintable : layout_node->paintables())
             paintable->set_needs_repaint(should_invalidate_display_list);
     }
@@ -3346,13 +3367,13 @@ ErrorOr<String> Node::name_or_description(NameOrDescription target, Document con
     // aria-labelledby or aria-describedby and/or un-hidden. See the comment for substep A above.
     if (is_text() && (!parent_element() || (parent_element()->is_referenced() || !parent_element()->is_hidden() || !parent_element()->has_hidden_ancestor() || parent_element()->has_referenced_and_hidden_ancestor()))) {
         if (layout_node()) {
-            StringBuilder builder { StringBuilder::Mode::UTF16 };
+            Utf16StringBuilder builder;
             Layout::TextOffsetMapping mapping { static_cast<DOM::Text const&>(*this) };
             mapping.for_each_fragment([&](Layout::TextNode const& slice) {
                 builder.append(slice.text_for_rendering());
             });
             if (!builder.is_empty())
-                return builder.to_utf16_string().to_utf8_but_should_be_ported_to_utf16();
+                return builder.to_string().to_utf8_but_should_be_ported_to_utf16();
         }
         return text_content()->to_utf8_but_should_be_ported_to_utf16();
     }

@@ -162,9 +162,9 @@ The generated code provides:
   the same name.
 - `FlyString to_string(AtRuleID)`, mostly for debug logging.
 - A `DescriptorID` enum, listing every descriptor.
-- `Optional<DescriptorID> descriptor_id_from_string(AtRuleID, StringView)` for getting a DescriptorID from a string, if
+- `Optional<DescriptorID> descriptor_id_from_string(AtRuleID, Utf16View)` for getting a DescriptorID from a string, if
   it exists in that at-rule.
-- `FlyString to_string(DescriptorID)` for serializing descriptor names.
+- `Utf16FlyString const& to_string(DescriptorID)` for serializing descriptor names.
 - `bool at_rule_supports_descriptor(AtRuleID, DescriptorID)` to query if the given at-rule allows the descriptor.
 - `RefPtr<StyleValue const> descriptor_initial_value(AtRuleID, DescriptorID)` for getting a descriptor's initial value.
 - `DescriptorMetadata get_descriptor_metadata(AtRuleID, DescriptorID)` returns data used for parsing the descriptor.
@@ -297,7 +297,7 @@ The following categories are supported:
 - `#inline-typesetting-properties`: Properties defined in [CSS Text](https://drafts.csswg.org/css-text-4/)
 - `#margin-properties`: `margin` and its longhands
 - `#padding-properties`: `padding` and its longhands
-- `#text-decoration-properties`: `text-decoration` and its longhands
+- `#text-decoration-properties`: Properties defined in [CSS Text Decoration](https://drafts.csswg.org/css-text-decor-4/)
 
 ### `implementation`
 

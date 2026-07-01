@@ -50,7 +50,7 @@ public:
         return meets_focusable_area_rendering_requirements();
     }
 
-    virtual void adjust_computed_style(CSS::ComputedProperties& style) override;
+    virtual void adjust_computed_style(CSS::ComputedProperties::Builder& style) override;
 
     // NOTE: The function is wrapped in a GC::HeapFunction immediately.
     void queue_a_media_element_task(Function<void(HTMLMediaElement&)>);
@@ -255,6 +255,7 @@ private:
     void update_current_video_frame();
 
     bool is_eligible_for_autoplay() const;
+    bool is_allowed_to_play() const;
 
     enum class PlaybackDirection : u8 {
         Forwards,

@@ -88,7 +88,7 @@
 #include <LibWeb/CSS/StyleValues/UnicodeRangeStyleValue.h>
 #include <LibWeb/CSS/StyleValues/UnresolvedStyleValue.h>
 #include <LibWeb/DOM/Document.h>
-#include <LibWeb/HTML/Navigable.h>
+#include <LibWeb/HTML/LocalNavigable.h>
 #include <LibWeb/Layout/Node.h>
 #include <LibWeb/Page/Page.h>
 
@@ -163,7 +163,7 @@ Vector<Parser::ComponentValue> StyleValue::tokenize() const
 {
     // This is an inefficient way of producing ComponentValues, but it's guaranteed to work for types that round-trip.
     // FIXME: Implement better versions in the subclasses.
-    return Parser::Parser::create(Parser::ParsingParams {}, to_string(SerializationMode::Normal)).parse_as_list_of_component_values();
+    return Parser::Parser::create(Parser::ParsingParams {}, to_string(SerializationMode::ResolvedValue)).parse_as_list_of_component_values();
 }
 
 // https://drafts.css-houdini.org/css-typed-om-1/#reify-as-a-cssstylevalue

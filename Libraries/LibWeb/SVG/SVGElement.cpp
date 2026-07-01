@@ -46,7 +46,7 @@ struct NamedPropertyID {
     {
     }
     NamedPropertyID(CSS::PropertyID property_id, Vector<FlyString> supported_elements = {})
-        : NamedPropertyID(property_id, CSS::string_from_property_id(property_id), move(supported_elements))
+        : NamedPropertyID(property_id, CSS::string_from_property_id(property_id).to_utf16_string().to_utf8_but_should_be_ported_to_utf16(), move(supported_elements))
     {
     }
 
@@ -66,6 +66,7 @@ static ReadonlySpan<NamedPropertyID> attribute_style_properties()
         NamedPropertyID(CSS::PropertyID::ClipRule),
         NamedPropertyID(CSS::PropertyID::Color),
         NamedPropertyID(CSS::PropertyID::ColorInterpolation),
+        NamedPropertyID(CSS::PropertyID::ColorInterpolationFilters),
         NamedPropertyID(CSS::PropertyID::Cursor),
         NamedPropertyID(CSS::PropertyID::Cx, { SVG::TagNames::circle, SVG::TagNames::ellipse }),
         NamedPropertyID(CSS::PropertyID::Cy, { SVG::TagNames::circle, SVG::TagNames::ellipse }),
@@ -269,6 +270,12 @@ void SVGElement::removed_from(IsSubtreeRoot is_subtree_root, Node* old_ancestor,
         return;
 
     remove_from_use_element_that_reference_this();
+
+    // A <mask>, <clipPath>, or <pattern> referenced via url(#id) is laid out as a resource box attached to the
+    // referencing element's layout subtree. So it outlives this element's own DOM node. Rebuild the layout tree
+    // while this element is still alive — so those stale resource boxes are dropped before this node is collected.
+    if (id().has_value())
+        document().set_needs_full_layout_tree_update(true);
 }
 
 void SVGElement::remove_from_use_element_that_reference_this()
@@ -288,7 +295,7 @@ void SVGElement::remove_from_use_element_that_reference_this()
     }
 }
 
-void SVGElement::adjust_computed_style(CSS::ComputedProperties& computed_properties)
+void SVGElement::adjust_computed_style(CSS::ComputedProperties::Builder& computed_properties)
 {
     Base::adjust_computed_style(computed_properties);
 

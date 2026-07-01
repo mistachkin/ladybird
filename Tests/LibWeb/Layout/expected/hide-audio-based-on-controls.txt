@@ -46,7 +46,6 @@ ViewportPaintable (Viewport<#document>) [0,0 800x600]
                   SVGSVGPaintable (SVGSVGBox<svg>.icon.play-pause-icon) [16,20 24x24]
                     SVGPathPaintable (SVGGeometryBox<path>.play-path) [22,25 13x14]
                 PaintableWithLines (BlockContainer<SPAN>.timestamp) [48,25 80.84375x14]
-                  TextPaintable (TextNode<#text>)
                 PaintableBox (Box<BUTTON>.control-button.mute-button.high.muted) [276,20 24x24]
                   SVGSVGPaintable (SVGSVGBox<svg>.icon) [276,20 24x24]
                     SVGPathPaintable (SVGGeometryBox<path>.muted-line) [279.5,25 15.5x15.5]
@@ -54,6 +53,6 @@ ViewportPaintable (Viewport<#document>) [0,0 800x600]
                     SVGPathPaintable (SVGGeometryBox<path>.volume-low) [290,27.671875 2.03125x8.65625]
                     SVGPathPaintable (SVGGeometryBox<path>.speaker) [280,24 8x16]
 
-SC for Viewport<#document> [0,0 800x600] [children: 1] (z-index: auto)
- SC for BlockContainer<HTML> [0,0 800x59] [children: 1] (z-index: auto)
-  SC for BlockContainer<DIV>.timeline [8,8 300x5] [children: 0] (z-index: 1)
+SC for Viewport<#document> [0,0 800x600] (z-index: auto)
+ SC for BlockContainer<HTML> [0,0 800x59] (z-index: auto)
+  SC for BlockContainer<DIV>.timeline [8,8 300x5] (z-index: 1)

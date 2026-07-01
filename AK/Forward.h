@@ -6,7 +6,6 @@
 
 #pragma once
 
-#include <AK/DefaultDelete.h>
 #include <AK/SinglyLinkedListSizePolicy.h>
 #include <AK/StdLibExtras.h>
 #include <AK/Types.h>
@@ -58,6 +57,7 @@ class StringView;
 class UnixDateTime;
 class Utf16FlyString;
 class Utf16String;
+class Utf16StringBuilder;
 class Utf16View;
 class Utf8CodePointIterator;
 class Utf8View;
@@ -148,7 +148,7 @@ class Optional<FlyString>;
 template<typename T>
 class RefPtr;
 
-template<typename T, typename TDeleter = DefaultDelete<T>>
+template<typename T>
 class OwnPtr;
 
 template<typename T>

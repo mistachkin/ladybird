@@ -15,10 +15,10 @@
 #include <LibWeb/DOM/Event.h>
 #include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/HTMLIFrameElement.h>
-#include <LibWeb/HTML/Navigable.h>
+#include <LibWeb/HTML/LocalNavigable.h>
+#include <LibWeb/HTML/LocalTraversableNavigable.h>
 #include <LibWeb/HTML/Numbers.h>
 #include <LibWeb/HTML/Parser/HTMLParser.h>
-#include <LibWeb/HTML/TraversableNavigable.h>
 #include <LibWeb/Layout/NavigableContainerViewport.h>
 #include <LibWeb/ResourceTiming/PerformanceResourceTiming.h>
 #include <LibWeb/TrustedTypes/RequireTrustedTypesForDirective.h>
@@ -46,7 +46,7 @@ RefPtr<Layout::Node> HTMLIFrameElement::create_layout_node(CSS::ComputedProperti
     return make_ref_counted<Layout::NavigableContainerViewport>(document(), *this, style);
 }
 
-void HTMLIFrameElement::adjust_computed_style(CSS::ComputedProperties& style)
+void HTMLIFrameElement::adjust_computed_style(CSS::ComputedProperties::Builder& style)
 {
     // https://drafts.csswg.org/css-display-3/#unbox
     if (style.display().is_contents())

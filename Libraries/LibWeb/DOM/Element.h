@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <AK/Badge.h>
 #include <AK/Concepts.h>
 #include <AK/Optional.h>
 #include <LibGfx/DecodedImageFrame.h>
@@ -14,6 +15,7 @@
 #include <LibWeb/Bindings/Element.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/Bindings/ShadowRoot.h>
+#include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/Selector.h>
 #include <LibWeb/CSS/StyleProperty.h>
 #include <LibWeb/DOM/ChildNode.h>
@@ -36,6 +38,13 @@
 #include <LibWeb/TrustedTypes/TrustedScriptURL.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
 #include <LibWeb/WebIDL/Types.h>
+
+namespace Web::Animations {
+
+struct AnimationUpdateContext;
+class KeyframeEffect;
+
+}
 
 namespace Web::DOM {
 
@@ -208,9 +217,10 @@ public:
     Layout::NodeWithStyle* unsafe_layout_node();
     Layout::NodeWithStyle const* unsafe_layout_node() const;
 
-    RefPtr<CSS::ComputedProperties> computed_properties(Optional<CSS::PseudoElement> = {});
     RefPtr<CSS::ComputedProperties const> computed_properties(Optional<CSS::PseudoElement> = {}) const;
     void set_computed_properties(Optional<CSS::PseudoElement>, RefPtr<CSS::ComputedProperties>);
+    void update_animated_properties(Badge<Web::Animations::KeyframeEffect> const&, Optional<CSS::PseudoElement>, Web::Animations::KeyframeEffect&, Web::Animations::AnimationUpdateContext&);
+    void update_animated_properties_for_abstract_element(Badge<Web::Animations::KeyframeEffect> const&, DOM::AbstractElement, Web::Animations::KeyframeEffect&, Web::Animations::AnimationUpdateContext&);
 
     Optional<SyntheticPseudoElement&> get_synthetic_pseudo_element(CSS::PseudoElement) const;
     Optional<PseudoElement&> get_pseudo_element(CSS::PseudoElement) const;
@@ -362,7 +372,7 @@ public:
     [[nodiscard]] CSSPixelRect bounding_client_rect_assuming_layout_clean() const;
 
     virtual RefPtr<Layout::Node> create_layout_node(CSS::ComputedProperties const&);
-    virtual void adjust_computed_style(CSS::ComputedProperties&) { }
+    virtual void adjust_computed_style(CSS::ComputedProperties::Builder&) { }
 
     virtual void did_receive_focus() { }
     virtual void did_lose_focus() { }
@@ -675,7 +685,7 @@ private:
     FlyString make_html_uppercased_qualified_name() const;
 
     void exit_fullscreen_on_element_removal();
-    CSS::RequiredInvalidationAfterStyleChange recompute_pseudo_element_styles(bool& did_change_custom_properties, bool had_list_marker);
+    CSS::RequiredInvalidationAfterStyleChange recompute_pseudo_element_styles(bool& did_change_custom_properties, bool had_list_marker, CSS::ComputedProperties const* old_originating_style);
     void apply_computed_style_to_layout_node_if_needed(CSS::RequiredInvalidationAfterStyleChange const&);
 
     WebIDL::ExceptionOr<GC::Ptr<Node>> insert_adjacent(StringView where, GC::Ref<Node> node);

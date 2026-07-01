@@ -282,7 +282,7 @@ void {interface.name}IteratorPrototype::initialize(JS::Realm& realm)
     auto& vm = this->vm();
     Base::initialize(realm);
     define_native_function(realm, vm.names.next, next, 0, JS::Attribute::Writable | JS::Attribute::Enumerable | JS::Attribute::Configurable);
-    define_direct_property(vm.well_known_symbol_to_string_tag(), JS::PrimitiveString::create(vm, "{interface.name} Iterator"_string), JS::Attribute::Configurable);
+    define_direct_property(vm.well_known_symbol_to_string_tag(), JS::PrimitiveString::create(vm, "{interface.name} Iterator"_utf16), JS::Attribute::Configurable);
 }}
 
 static JS::ThrowCompletionOr<{fully_qualified_name_for_interface(interface)}Iterator*> {make_name_acceptable_cpp(title_case_to_snake_case(iterator_interface_name))}_impl_from(JS::VM& vm)
@@ -373,7 +373,7 @@ void {interface.name}AsyncIteratorPrototype::initialize(JS::Realm& realm)
 {{
     auto& vm = this->vm();
     Base::initialize(realm);
-    define_direct_property(vm.well_known_symbol_to_string_tag(), JS::PrimitiveString::create(vm, "{interface.name} AsyncIterator"_string), JS::Attribute::Configurable);
+    define_direct_property(vm.well_known_symbol_to_string_tag(), JS::PrimitiveString::create(vm, "{interface.name} AsyncIterator"_utf16), JS::Attribute::Configurable);
 
     define_native_function(realm, vm.names.next, next, 0, JS::default_attributes);
     {"define_native_function(realm, vm.names.return_, return_, 1, JS::default_attributes);" if "DefinesAsyncIteratorReturn" in interface.extended_attributes else ""}
@@ -508,7 +508,7 @@ JS_DEFINE_NATIVE_FUNCTION({interface.prototype_class}::for_each)
     auto this_arg = vm.argument(1);
 
     // 6. For each key → value of map:
-    for (auto& [key, value] : *map) {{
+    for (auto [key, value] : *map) {{
         // 1. Let jsKey and jsValue be key and value converted to a JavaScript value.
         // 2. Perform ? Call(callbackFn, thisArg, « jsValue, jsKey, O »).
         TRY(JS::call(vm, callback.as_function(), this_arg, value, key, this_impl));
@@ -746,9 +746,8 @@ JS_DEFINE_NATIVE_FUNCTION({interface.prototype_class}::for_each)
     auto this_arg = vm.argument(1);
 
     // 6. For each value of set:
-    for (auto& entry : *set) {{
+    for (auto value : *set) {{
         // 1. Let jsValue be value converted to a JavaScript value.
-        auto value = entry.key;
 
         // 2. Perform ? Call(callbackFn, thisArg, « jsValue, jsValue, O»).
         TRY(JS::call(vm, callback.as_function(), this_arg, value, value, this_impl));

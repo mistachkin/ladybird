@@ -18,6 +18,7 @@
 #include <QIcon>
 #include <QMainWindow>
 #include <QPushButton>
+#include <QRect>
 #include <QTabBar>
 
 class QPropertyAnimation;
@@ -103,6 +104,7 @@ public:
 
     Tab& create_new_tab(Web::HTML::ActivateTab activate_tab);
     Tab* current_tab() const { return m_current_tab; }
+    bool activate_tab_with_url(URL::URL const&);
     FullscreenMode& fullscreen_mode();
 
     QMenu& hamburger_menu() const { return *m_hamburger_menu; }
@@ -136,7 +138,7 @@ public slots:
     Tab& new_tab_from_url(URL::URL const&, Web::HTML::ActivateTab);
     Tab& new_child_tab(Web::HTML::ActivateTab, Tab& parent, Optional<u64> page_index);
     void activate_tab(int index);
-    void definitely_close_tab(int index);
+    bool definitely_close_tab(int index);
     void move_tab(int old_index, int new_index);
     void request_to_close_tab(int index);
     void request_to_close_current_tab();
@@ -166,11 +168,17 @@ private:
     void uninitialize_tab(Tab*);
 
     void set_current_tab(Tab* tab);
+    bool position_is_in_rounded_corner_cutout(QPoint const&) const;
     Qt::Edges resize_edges_for_position(QPoint const&) const;
     Optional<Qt::CursorShape> resize_cursor_for_edges(Qt::Edges) const;
+    bool start_window_resize(Qt::Edges, QPoint const& global_position);
+    void update_window_resize(QPoint const& global_position);
+    void finish_window_resize();
     void update_resize_cursor(QPoint const&);
+    void refresh_resize_cursor_at_current_position(bool force_reapply = false);
     void clear_resize_cursor();
     void update_window_corners();
+    void update_appkit_window_resizability();
     bool should_draw_window_border() const;
     void update_window_border();
 
@@ -231,6 +239,10 @@ private:
     bool m_restore_to_maximized { false };
     bool m_should_record_closed_window_on_close { true };
     bool m_resize_cursor_active { false };
+    bool m_is_resizing_window { false };
+    Qt::Edges m_resize_edges {};
+    QPoint m_resize_start_global_position;
+    QRect m_resize_start_geometry;
 };
 
 }

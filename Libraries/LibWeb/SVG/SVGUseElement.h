@@ -23,6 +23,8 @@ class SVGUseElement final
     GC_DECLARE_ALLOCATOR(SVGUseElement);
 
 public:
+    static constexpr bool OVERRIDES_FINALIZE = true;
+
     virtual ~SVGUseElement() override = default;
 
     virtual void attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
@@ -46,6 +48,7 @@ private:
 
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Cell::Visitor&) override;
+    virtual void finalize() override;
     virtual void adopted_from(DOM::Document&) override;
     virtual void inserted() override;
     virtual void removed_from(IsSubtreeRoot, Node* old_ancestor, Node& old_root) override;
@@ -56,6 +59,7 @@ private:
     virtual RefPtr<Layout::Node> create_layout_node(CSS::ComputedProperties const&) override;
 
     void process_the_url(Optional<String> const& href);
+    Optional<String> href_value() const;
 
     static Optional<FlyString> parse_id_from_href(StringView);
 
@@ -71,8 +75,8 @@ private:
     void register_for_referenced_element_changes();
     void unregister_for_referenced_element_changes();
 
-    Optional<float> m_x;
-    Optional<float> m_y;
+    Optional<NumberPercentage> m_x;
+    Optional<NumberPercentage> m_y;
     bool m_needs_document_complete_reclone { false };
 
     Optional<URL::URL> m_href;

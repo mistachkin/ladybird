@@ -18,7 +18,7 @@
 #include <LibWeb/DOM/AbstractElement.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Element.h>
-#include <LibWeb/HTML/Navigable.h>
+#include <LibWeb/HTML/LocalNavigable.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/Layout/Node.h>
 #include <LibWeb/Painting/PaintableBox.h>
@@ -397,20 +397,6 @@ LengthOrAuto LengthOrAuto::from_style_value(NonnullRefPtr<StyleValue const> cons
     if (style_value->has_auto())
         return make_auto();
     return LengthOrAuto { Length::from_style_value(style_value, percentage_basis) };
-}
-
-Length Length::resolve_calculated(NonnullRefPtr<CalculatedStyleValue const> const& calculated, Layout::Node const& layout_node, Length const& reference_value)
-{
-    CalculationResolutionContext context {
-        .percentage_basis = reference_value,
-        .length_resolution_context = ResolutionContext::for_layout_node(layout_node),
-    };
-    return calculated->resolve_length(context).value();
-}
-
-Length Length::resolve_calculated(NonnullRefPtr<CalculatedStyleValue const> const& calculated, Layout::Node const& layout_node, CSSPixels reference_value)
-{
-    return resolve_calculated(calculated, layout_node, make_px(reference_value));
 }
 
 }

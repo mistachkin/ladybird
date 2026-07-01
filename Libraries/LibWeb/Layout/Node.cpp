@@ -10,6 +10,7 @@
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/StyleValues/AbstractImageStyleValue.h>
 #include <LibWeb/CSS/StyleValues/BorderRadiusStyleValue.h>
+#include <LibWeb/CSS/StyleValues/CursorStyleValue.h>
 #include <LibWeb/CSS/StyleValues/CustomIdentStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ImageSetStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ImageStyleValue.h>
@@ -30,7 +31,7 @@
 #include <LibWeb/Dump.h>
 #include <LibWeb/HTML/FormAssociatedElement.h>
 #include <LibWeb/HTML/HTMLHtmlElement.h>
-#include <LibWeb/HTML/Navigable.h>
+#include <LibWeb/HTML/LocalNavigable.h>
 #include <LibWeb/Layout/BlockContainer.h>
 #include <LibWeb/Layout/FormattingContext.h>
 #include <LibWeb/Layout/ImageBox.h>
@@ -42,8 +43,12 @@
 #include <LibWeb/Layout/Viewport.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/Painting/PaintableBox.h>
+#include <LibWeb/SVG/SVGClipPathElement.h>
 #include <LibWeb/SVG/SVGFilterElement.h>
 #include <LibWeb/SVG/SVGForeignObjectElement.h>
+#include <LibWeb/SVG/SVGGradientElement.h>
+#include <LibWeb/SVG/SVGPatternElement.h>
+#include <LibWeb/SVG/SVGTextContentElement.h>
 
 namespace Web::Layout {
 
@@ -124,21 +129,23 @@ bool Node::computed_values_establish_absolute_positioning_containing_block() con
     if (computed_values.position() != CSS::Positioning::Static || will_change_property(CSS::PropertyID::Position))
         return true;
 
-    // https://drafts.csswg.org/css-transforms-1/#propdef-transform
-    // Any computed value other than none for the transform affects containing block and stacking context
-    if (!computed_values.transformations().is_empty() || will_change_property(CSS::PropertyID::Transform))
-        return true;
-    if (computed_values.translate() || will_change_property(CSS::PropertyID::Translate))
-        return true;
-    if (computed_values.rotate() || will_change_property(CSS::PropertyID::Rotate))
-        return true;
-    if (computed_values.scale() || will_change_property(CSS::PropertyID::Scale))
-        return true;
+    if (is_transformable()) {
+        // https://drafts.csswg.org/css-transforms-1/#propdef-transform
+        // Any computed value other than none for the transform affects containing block and stacking context.
+        if (!computed_values.transformations().is_empty() || will_change_property(CSS::PropertyID::Transform))
+            return true;
+        if (computed_values.translate() || will_change_property(CSS::PropertyID::Translate))
+            return true;
+        if (computed_values.rotate() || will_change_property(CSS::PropertyID::Rotate))
+            return true;
+        if (computed_values.scale() || will_change_property(CSS::PropertyID::Scale))
+            return true;
+    }
 
     // https://drafts.csswg.org/css-transforms-2/#propdef-perspective
     // The use of this property with any value other than 'none' establishes a stacking context. It also establishes
     // a containing block for all descendants, just like the 'transform' property does.
-    if (computed_values.perspective().has_value() || will_change_property(CSS::PropertyID::Perspective))
+    if (is_transformable() && (computed_values.perspective().has_value() || will_change_property(CSS::PropertyID::Perspective)))
         return true;
 
     // https://drafts.csswg.org/filter-effects-1/#FilterProperty
@@ -166,8 +173,7 @@ bool Node::computed_values_establish_absolute_positioning_containing_block() con
     // https://drafts.csswg.org/css-transforms-2/#transform-style-property
     // A computed value of 'preserve-3d' for 'transform-style' on a transformable element establishes both a
     // stacking context and a containing block for all descendants.
-    // FIXME: Check that the element is a transformable element.
-    if (computed_values.transform_style() == CSS::TransformStyle::Preserve3d || will_change_property(CSS::PropertyID::TransformStyle))
+    if (is_transformable() && (computed_values.transform_style() == CSS::TransformStyle::Preserve3d || will_change_property(CSS::PropertyID::TransformStyle)))
         return true;
 
     // https://drafts.csswg.org/css-view-transitions-1/#snapshot-containing-block-concept
@@ -210,21 +216,23 @@ bool Node::establishes_a_fixed_positioning_containing_block() const
         return computed_values.will_change().has_property(property_id);
     };
 
-    // https://drafts.csswg.org/css-transforms-1/#propdef-transform
-    // Any computed value other than none for the transform affects containing block and stacking context
-    if (!computed_values.transformations().is_empty() || will_change_property(CSS::PropertyID::Transform))
-        return true;
-    if (computed_values.translate() || will_change_property(CSS::PropertyID::Translate))
-        return true;
-    if (computed_values.rotate() || will_change_property(CSS::PropertyID::Rotate))
-        return true;
-    if (computed_values.scale() || will_change_property(CSS::PropertyID::Scale))
-        return true;
+    if (is_transformable()) {
+        // https://drafts.csswg.org/css-transforms-1/#propdef-transform
+        // Any computed value other than none for the transform affects containing block and stacking context.
+        if (!computed_values.transformations().is_empty() || will_change_property(CSS::PropertyID::Transform))
+            return true;
+        if (computed_values.translate() || will_change_property(CSS::PropertyID::Translate))
+            return true;
+        if (computed_values.rotate() || will_change_property(CSS::PropertyID::Rotate))
+            return true;
+        if (computed_values.scale() || will_change_property(CSS::PropertyID::Scale))
+            return true;
+    }
 
     // https://drafts.csswg.org/css-transforms-2/#propdef-perspective
     // The use of this property with any value other than 'none' establishes a stacking context. It also establishes
     // a containing block for all descendants, just like the 'transform' property does.
-    if (computed_values.perspective().has_value() || will_change_property(CSS::PropertyID::Perspective))
+    if (is_transformable() && (computed_values.perspective().has_value() || will_change_property(CSS::PropertyID::Perspective)))
         return true;
 
     // https://drafts.csswg.org/filter-effects-1/#FilterProperty
@@ -252,8 +260,7 @@ bool Node::establishes_a_fixed_positioning_containing_block() const
     // https://drafts.csswg.org/css-transforms-2/#transform-style-property
     // A computed value of 'preserve-3d' for 'transform-style' on a transformable element establishes both a
     // stacking context and a containing block for all descendants.
-    // FIXME: Check that the element is a transformable element.
-    if (computed_values.transform_style() == CSS::TransformStyle::Preserve3d || will_change_property(CSS::PropertyID::TransformStyle))
+    if (is_transformable() && (computed_values.transform_style() == CSS::TransformStyle::Preserve3d || will_change_property(CSS::PropertyID::TransformStyle)))
         return true;
 
     // https://drafts.csswg.org/css-view-transitions-1/#snapshot-containing-block-concept
@@ -449,17 +456,19 @@ bool Node::establishes_stacking_context() const
         return true;
     }
 
-    if (!computed_values.transformations().is_empty() || will_change_property(CSS::PropertyID::Transform))
-        return true;
+    if (is_transformable()) {
+        if (!computed_values.transformations().is_empty() || will_change_property(CSS::PropertyID::Transform))
+            return true;
 
-    if (computed_values.translate() || will_change_property(CSS::PropertyID::Translate))
-        return true;
+        if (computed_values.translate() || will_change_property(CSS::PropertyID::Translate))
+            return true;
 
-    if (computed_values.rotate() || will_change_property(CSS::PropertyID::Rotate))
-        return true;
+        if (computed_values.rotate() || will_change_property(CSS::PropertyID::Rotate))
+            return true;
 
-    if (computed_values.scale() || will_change_property(CSS::PropertyID::Scale))
-        return true;
+        if (computed_values.scale() || will_change_property(CSS::PropertyID::Scale))
+            return true;
+    }
 
     // Element that is a child of a flex container, with z-index value other than auto.
     if (parent() && parent()->display().is_flex_inside() && has_z_index)
@@ -523,20 +532,19 @@ bool Node::establishes_stacking_context() const
 
     // https://drafts.csswg.org/css-transforms-2/#propdef-perspective
     // The use of this property with any value other than 'none' establishes a stacking context.
-    if (computed_values.perspective().has_value() || will_change_property(CSS::PropertyID::Perspective))
+    if (is_transformable() && (computed_values.perspective().has_value() || will_change_property(CSS::PropertyID::Perspective)))
         return true;
 
     // https://drafts.csswg.org/css-transforms-2/#transform-style-property
     // A computed value of 'preserve-3d' for 'transform-style' on a transformable element establishes both a
     // stacking context and a containing block for all descendants.
-    // FIXME: Check that the element is a transformable element.
-    if (computed_values.transform_style() == CSS::TransformStyle::Preserve3d || will_change_property(CSS::PropertyID::TransformStyle))
+    if (is_transformable() && (computed_values.transform_style() == CSS::TransformStyle::Preserve3d || will_change_property(CSS::PropertyID::TransformStyle)))
         return true;
 
     return computed_values.opacity() < 1.0f || will_change_property(CSS::PropertyID::Opacity);
 }
 
-GC::Ptr<HTML::Navigable> Node::navigable() const
+GC::Ptr<HTML::LocalNavigable> Node::navigable() const
 {
     return document().navigable();
 }
@@ -680,7 +688,13 @@ void NodeWithStyle::rebuild_image_observers()
     for (auto const& layer : computed_values().background_layers())
         add_observer_for(layer.background_image.ptr(), new_observers);
     add_observer_for(m_list_style_image.ptr(), new_observers);
-    add_observer_for(computed_values().mask_image().ptr(), new_observers);
+    for (auto const& layer : computed_values().mask_layers())
+        add_observer_for(layer.background_image.ptr(), new_observers);
+    for (auto const& cursor : computed_values().cursor()) {
+        if (auto const* cursor_style_value = cursor.get_pointer<NonnullRefPtr<CSS::CursorStyleValue const>>())
+            add_observer_for(&(*cursor_style_value)->image(), new_observers);
+    }
+    // TODO: Observe border-image and other <image> accepting properties once we support them.
 
     m_image_observers = move(new_observers);
 }
@@ -700,6 +714,7 @@ void NodeWithStyle::apply_style(CSS::ComputedProperties const& computed_style)
     computed_values.set_font_size(computed_style.font_size());
     computed_values.set_font_weight(computed_style.font_weight());
     computed_values.set_line_height(computed_style.line_height());
+    computed_values.set_font_variant_emoji(computed_style.font_variant_emoji());
 
     // NOTE: color must be set after color-scheme to ensure currentColor can be resolved in other properties (e.g. background-color).
     // NOTE: color must be set after font_size as `CalculatedStyleValue`s can rely on it being set for resolving lengths.
@@ -807,7 +822,12 @@ void NodeWithStyle::apply_style(CSS::ComputedProperties const& computed_style)
     computed_values.set_overflow_x(computed_style.overflow_x());
     computed_values.set_overflow_y(computed_style.overflow_y());
     computed_values.set_content_visibility(computed_style.content_visibility());
-    computed_values.set_cursor(computed_style.cursor());
+    auto cursor = computed_style.cursor();
+    for (auto const& cursor_data : cursor) {
+        if (auto const* cursor_style_value = cursor_data.get_pointer<NonnullRefPtr<CSS::CursorStyleValue const>>())
+            const_cast<CSS::AbstractImageStyleValue&>((*cursor_style_value)->image()).load_any_resources(*this);
+    }
+    computed_values.set_cursor(move(cursor));
     computed_values.set_image_rendering(computed_style.image_rendering());
     computed_values.set_pointer_events(computed_style.pointer_events());
     computed_values.set_text_decoration_line(computed_style.text_decoration_line());
@@ -851,9 +871,9 @@ void NodeWithStyle::apply_style(CSS::ComputedProperties const& computed_style)
             auto const& value = computed_style.property(property_id);
             if (value.is_overflow_clip_margin()) {
                 auto const& overflow_clip_margin = value.as_overflow_clip_margin();
-                CSS::Length offset = CSS::Length::make_px(0);
+                CSSPixels offset = 0;
                 if (overflow_clip_margin.offset().is_length())
-                    offset = overflow_clip_margin.offset().as_length().length();
+                    offset = overflow_clip_margin.offset().as_length().length().absolute_length_to_px();
                 return { overflow_clip_margin.visual_box(), offset };
             }
             return {};
@@ -868,15 +888,9 @@ void NodeWithStyle::apply_style(CSS::ComputedProperties const& computed_style)
 
     computed_values.set_box_shadow(computed_style.box_shadow(*this));
 
-    if (auto rotate_value = computed_style.rotate())
-        computed_values.set_rotate(rotate_value.release_nonnull());
-
-    if (auto translate_value = computed_style.translate())
-        computed_values.set_translate(translate_value.release_nonnull());
-
-    if (auto scale_value = computed_style.scale())
-        computed_values.set_scale(scale_value.release_nonnull());
-
+    computed_values.set_rotate(computed_style.rotate());
+    computed_values.set_translate(computed_style.translate());
+    computed_values.set_scale(computed_style.scale());
     computed_values.set_transformations(computed_style.transformations());
     computed_values.set_transform_box(computed_style.transform_box());
     computed_values.set_transform_origin(computed_style.transform_origin());
@@ -908,7 +922,7 @@ void NodeWithStyle::apply_style(CSS::ComputedProperties const& computed_style)
         computed_values.set_outline_color(outline_color.to_color(color_resolution_context).value());
     // FIXME: Support calc()
     if (auto const& outline_offset = computed_style.property(CSS::PropertyID::OutlineOffset); outline_offset.is_length())
-        computed_values.set_outline_offset(outline_offset.as_length().length());
+        computed_values.set_outline_offset(outline_offset.as_length().length().absolute_length_to_px());
     computed_values.set_outline_style(computed_style.outline_style());
 
     // FIXME: Interpolation can cause negative values - we clamp here but should instead clamp as part of interpolation.
@@ -951,7 +965,8 @@ void NodeWithStyle::apply_style(CSS::ComputedProperties const& computed_style)
     computed_values.set_shape_rendering(computed_style.shape_rendering());
     computed_values.set_paint_order(computed_style.paint_order());
 
-    // FIXME: We should support SVG mask references in every mask layer rather than just using the first.
+    // FIXME: Remove this once we support URL values in mask_layers and can therefore use it in
+    //        `establishes_stacking_context()`
     auto const& mask_image = [&] -> CSS::StyleValue const& {
         auto const& value = computed_style.property(CSS::PropertyID::MaskImage);
 
@@ -1074,6 +1089,7 @@ void NodeWithStyle::apply_style(CSS::ComputedProperties const& computed_style)
 
     computed_values.set_caret_color(computed_style.caret_color(*this));
     computed_values.set_color_interpolation(computed_style.color_interpolation());
+    computed_values.set_color_interpolation_filters(computed_style.color_interpolation_filters());
     computed_values.set_resize(computed_style.resize());
 
     propagate_style_to_anonymous_wrappers();
@@ -1200,6 +1216,46 @@ bool Node::is_atomic_inline() const
         return true;
     auto display = this->display();
     return display.is_inline_outside() && !display.is_flow_inside();
+}
+
+// https://drafts.csswg.org/css-transforms-1/#transformable-element
+bool Node::is_transformable() const
+{
+    // A transformable element is an element in one of these categories:
+    auto const* dom_node = this->dom_node();
+
+    // * all SVG paint server elements, the clipPath element and SVG renderable elements with the exception
+    //   of any descendant element of text content elements [SVG2].
+    if (is<SVG::SVGElement>(dom_node)) {
+        // Paint servers and clipPath are always transformable.
+        if (is<SVG::SVGGradientElement>(*dom_node) || is<SVG::SVGPatternElement>(*dom_node) || is<SVG::SVGClipPathElement>(*dom_node))
+            return true;
+        auto const is_renderable = (is_svg_graphics_box() && !is_svg_mask_box()) || is_svg_svg_box() || is_svg_foreign_object_box();
+        if (!is_renderable)
+            return false;
+        // ...with the exception of any descendant of a text content element.
+        for (auto const* ancestor = parent(); ancestor; ancestor = ancestor->parent()) {
+            if (auto const* ancestor_dom_node = ancestor->dom_node(); ancestor_dom_node && is<SVG::SVGTextContentElement>(*ancestor_dom_node))
+                return false;
+        }
+        return true;
+    }
+
+    // * all elements whose layout is governed by the CSS box model except for non-replaced inline boxes,
+    //   table-column boxes, and table-column-group boxes [CSS2].
+    bool is_element_or_pseudo_element = is<DOM::Element>(dom_node) || is_generated_for_pseudo_element();
+    if (is_element_or_pseudo_element && is_box()) {
+        auto display = this->display();
+        if (display.is_table_column() || display.is_table_column_group())
+            return false;
+
+        if (is_inline() && !is_atomic_inline())
+            return false;
+
+        return true;
+    }
+
+    return false;
 }
 
 NonnullRefPtr<NodeWithStyle> NodeWithStyle::create_anonymous_wrapper() const

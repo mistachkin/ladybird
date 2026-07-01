@@ -9,6 +9,7 @@ set(SOURCES
     Actors/DeviceActor.cpp
     Actors/FrameActor.cpp
     Actors/HighlighterActor.cpp
+    Actors/IndexedDBActor.cpp
     Actors/InspectorActor.cpp
     Actors/LayoutInspectorActor.cpp
     Actors/NetworkEventActor.cpp
@@ -19,6 +20,7 @@ set(SOURCES
     Actors/PreferenceActor.cpp
     Actors/ProcessActor.cpp
     Actors/RootActor.cpp
+    Actors/SourceActor.cpp
     Actors/StyleRuleActor.cpp
     Actors/StyleSheetsActor.cpp
     Actors/StorageActor.cpp
@@ -30,6 +32,7 @@ set(SOURCES
     Actors/WatcherActor.cpp
     Connection.cpp
     DevToolsServer.cpp
+    IndexedDBSerialization.cpp
     StorageHelpers.cpp
 )
 

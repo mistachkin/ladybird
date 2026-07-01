@@ -293,9 +293,12 @@ Iterator
 KeyboardEvent
 KeyframeEffect
 Location
+Lock
+LockManager
 ManagedMediaSource
 ManagedSourceBuffer
 Map
+MathMLAnchorElement
 MathMLElement
 MediaCapabilities
 MediaDeviceInfo

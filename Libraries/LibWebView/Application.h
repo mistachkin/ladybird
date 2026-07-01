@@ -45,6 +45,7 @@
 namespace Web {
 
 struct MouseEvent;
+struct PinchEvent;
 
 }
 
@@ -94,6 +95,11 @@ public:
 #endif
 
     ErrorOr<NonnullRefPtr<WebContentClient>> launch_web_content_process(ViewImplementation&);
+    struct ChildFrameWebContentProcess {
+        NonnullRefPtr<WebContentClient> client;
+        u64 page_id { 0 };
+    };
+    ErrorOr<ChildFrameWebContentProcess> launch_child_frame_web_content_process();
     u64 allocate_page_id();
     Web::Compositor::CompositorContextId allocate_compositor_context_id();
     ErrorOr<void> connect_web_content_to_compositor(WebContentClient&);
@@ -103,12 +109,14 @@ public:
     void update_compositor_display_metadata(Web::Compositor::CompositorContextId, Optional<u64> display_id, double refresh_rate);
     bool send_async_scroll_to_compositor(Web::Compositor::CompositorContextId, Gfx::FloatPoint position, Gfx::FloatPoint delta_in_device_pixels);
     bool handle_mouse_event_in_compositor(Web::Compositor::CompositorContextId, Web::MouseEvent const&);
+    bool handle_pinch_event_in_compositor(Web::Compositor::CompositorContextId, Web::PinchEvent const&);
     bool dispatch_mouse_event_to_web_content(Web::Compositor::CompositorContextId, Web::MouseEvent const&);
     void notify_compositor_presented_bitmap_ready_to_paint(Web::Compositor::CompositorContextId, i32 bitmap_id);
 
     virtual Optional<ViewImplementation&> active_web_view() const { return {}; }
     virtual Optional<ViewImplementation&> open_blank_new_tab(Web::HTML::ActivateTab) const { return {}; }
-    void open_url_in_new_tab(URL::URL const&, Web::HTML::ActivateTab) const;
+    virtual bool activate_tab_with_url(URL::URL const&) const { return false; }
+    virtual void open_url_in_new_tab(URL::URL const&, Web::HTML::ActivateTab) const;
     void open_bookmark_in_new_tab(String const& bookmark_id, Web::HTML::ActivateTab) const;
 
     Main::Arguments const& command_line_arguments() const { return m_arguments; }
@@ -124,10 +132,15 @@ public:
 
     virtual bool should_capture_web_content_output() const { return false; }
 
-    ErrorOr<LexicalPath> path_for_downloaded_file(StringView file) const;
+    ErrorOr<LexicalPath> default_path_for_downloaded_file(ByteString const& file) const;
+    ErrorOr<LexicalPath> path_for_downloaded_file(ByteString const& file) const;
 
     virtual void display_download_confirmation_dialog(StringView download_name, LexicalPath const& path) const;
     virtual void display_error_dialog(StringView error_message) const;
+    ErrorOr<String> download_file_path_for_frontend_action(FileDownloader::Download const&) const;
+    ErrorOr<String> download_directory_path_for_frontend_action(FileDownloader::Download const&) const;
+    virtual void open_download(FileDownloader::Download const&) const;
+    virtual void show_download_in_folder(FileDownloader::Download const&) const;
 
     // FIXME: We should implement UI-agnostic platform APIs to interact with the system clipboard.
     enum class ClipboardType : u8 {
@@ -170,6 +183,7 @@ public:
     Action& select_all_action() { return *m_select_all_action; }
 
     Action& open_about_page_action() { return *m_open_about_page_action; }
+    Action& open_downloads_page_action() { return *m_open_downloads_page_action; }
     Action& open_settings_page_action() { return *m_open_settings_page_action; }
 
     Menu& zoom_menu() { return *m_zoom_menu; }
@@ -215,7 +229,7 @@ protected:
     virtual void create_platform_options(BrowserOptions&, RequestServerOptions&, WebContentOptions&) { }
     virtual Core::EventLoop& create_platform_event_loop();
 
-    virtual Optional<ByteString> ask_user_for_download_path([[maybe_unused]] StringView file) const { return {}; }
+    virtual Optional<ByteString> ask_user_for_download_path([[maybe_unused]] ByteString const& file) const { return {}; }
 
     virtual void update_tabs_display() const { }
 
@@ -280,6 +294,13 @@ private:
     virtual ErrorOr<void> clear_storage(DevTools::TabDescription const&, Web::StorageAPI::StorageEndpointType, String const&) const override;
     virtual u64 add_storage_change_listener(DevTools::TabDescription const&, OnStorageChange) const override;
     virtual void remove_storage_change_listener(DevTools::TabDescription const&, u64) const override;
+    virtual void inspect_indexed_database_storage(DevTools::TabDescription const&, OnIndexedDBInspectionComplete) const override;
+    virtual void inspect_indexed_database_objects(DevTools::TabDescription const&, String const&, Optional<JsonArray>, JsonObject, OnIndexedDBInspectionComplete) const override;
+    virtual void delete_indexed_database(DevTools::TabDescription const&, String const&, String const&, OnIndexedDBInspectionComplete) const override;
+    virtual void clear_indexed_database_object_store(DevTools::TabDescription const&, String const&, String const&, OnIndexedDBInspectionComplete) const override;
+    virtual void delete_indexed_database_record(DevTools::TabDescription const&, String const&, String const&, OnIndexedDBInspectionComplete) const override;
+    virtual u64 add_indexed_database_change_listener(DevTools::TabDescription const&, OnIndexedDatabaseChange) const override;
+    virtual void remove_indexed_database_change_listener(DevTools::TabDescription const&, u64) const override;
     virtual void inspect_tab(DevTools::TabDescription const&, OnTabInspectionComplete) const override;
     virtual void inspect_accessibility_tree(DevTools::TabDescription const&, OnAccessibilityTreeInspectionComplete) const override;
     virtual void listen_for_dom_properties(DevTools::TabDescription const&, OnDOMNodePropertiesReceived) const override;
@@ -315,6 +336,11 @@ private:
     virtual void retrieve_style_sheet_source(DevTools::TabDescription const&, Web::CSS::StyleSheetIdentifier const&) const override;
     virtual void listen_for_style_sheet_sources(DevTools::TabDescription const&, OnStyleSheetSourceReceived) const override;
     virtual void stop_listening_for_style_sheet_sources(DevTools::TabDescription const&) const override;
+    virtual void retrieve_sources(DevTools::TabDescription const&, OnSourcesReceived) const override;
+    virtual void retrieve_source(DevTools::TabDescription const&, Web::HTML::ScriptRegistry::Identifier, OnSourceReceived) const override;
+    virtual void listen_for_sources(DevTools::TabDescription const&, OnSourceAvailable) const override;
+    virtual void stop_listening_for_sources(DevTools::TabDescription const&) const override;
+    virtual void resolve_dom_node_url(DevTools::TabDescription const&, Optional<Web::UniqueNodeID>, String const&, OnResolvedURLReceived) const override;
     virtual void evaluate_javascript(DevTools::TabDescription const&, String const&, OnScriptEvaluationComplete) const override;
     virtual void listen_for_console_messages(DevTools::TabDescription const&, OnConsoleMessage) const override;
     virtual void stop_listening_for_console_messages(DevTools::TabDescription const&) const override;
@@ -373,6 +399,7 @@ private:
     RefPtr<Action> m_select_all_action;
 
     RefPtr<Action> m_open_about_page_action;
+    RefPtr<Action> m_open_downloads_page_action;
     RefPtr<Action> m_open_settings_page_action;
 
     RefPtr<Menu> m_zoom_menu;

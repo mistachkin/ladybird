@@ -74,6 +74,7 @@ public:
     WebIDL::ExceptionOr<bool> dispatch_user_activated_event(DOM::EventTarget&, DOM::Event& event);
 
     void spoof_current_url(String const& url);
+    void load_url(String const& url);
 
     GC::Ref<InternalAnimationTimeline> create_internal_animation_timeline();
 
@@ -82,10 +83,12 @@ public:
     void simulate_drop(double x, double y);
 
     void expire_cookies_with_time_offset(WebIDL::LongLong seconds);
+    GC::Ref<WebIDL::Promise> delete_all_cookies();
 
     bool set_http_memory_cache_enabled(bool enabled);
     WebIDL::ExceptionOr<void> set_content_blockers(String const& patterns);
     void set_content_blocking_enabled(bool enabled);
+    void set_autoplay_policy(String const& policy);
 
     String get_computed_role(DOM::Element& element);
     String get_computed_label(DOM::Element& element);
@@ -110,6 +113,10 @@ public:
     String dump_stacking_context_tree();
     String dump_gc_graph();
     String dump_session_history();
+    String dump_ui_process_session_history();
+    String dump_site_isolation_process_tree();
+    GC::Ref<WebIDL::Promise> flush_session_history_traversal_queue();
+    void clobber_next_navigation_with_a_traversal();
 
     GC::Ptr<DOM::ShadowRoot> get_shadow_root(GC::Ref<DOM::Element>);
 
@@ -131,7 +138,7 @@ public:
     void set_preferred_color_scheme(StringView color_scheme);
     String canvas_color_scheme();
     bool style_sheet_may_have_has_selectors(CSS::CSSStyleSheet&);
-    WebIDL::UnsignedLongLong active_image_style_value_animation_count();
+    WebIDL::ExceptionOr<JS::Object*> image_animation_state_for_url(String const& url);
     JS::Object* async_scrolling_state();
     bool async_scrolling_state_blocks_wheel_event_at(double x, double y);
     bool async_scrolling_state_can_wheel_scroll_at(double x, double y, double delta_x, double delta_y, bool force_stale_wheel_event_regions);

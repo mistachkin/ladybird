@@ -16,9 +16,9 @@
 #include <LibWeb/HTML/HTMLDocument.h>
 #include <LibWeb/HTML/HTMLIFrameElement.h>
 #include <LibWeb/HTML/HTMLInputElement.h>
+#include <LibWeb/HTML/LocalTraversableNavigable.h>
 #include <LibWeb/HTML/SandboxingFlagSet.h>
 #include <LibWeb/HTML/Scripting/WindowEnvironmentSettingsObject.h>
-#include <LibWeb/HTML/TraversableNavigable.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/HTML/WindowProxy.h>
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
@@ -320,13 +320,12 @@ void BrowsingContext::visit_edges(Cell::Visitor& visitor)
 }
 
 // https://html.spec.whatwg.org/multipage/document-sequences.html#bc-traversable
-GC::Ref<TraversableNavigable> BrowsingContext::top_level_traversable() const
+GC::Ref<LocalTraversableNavigable> BrowsingContext::top_level_traversable() const
 {
     // A browsing context's top-level traversable is its active document's node navigable's top-level traversable.
-    auto traversable = active_document()->navigable()->top_level_traversable();
-    VERIFY(traversable);
-    VERIFY(traversable->is_top_level_traversable());
-    return *traversable;
+    auto& traversable = as<LocalTraversableNavigable>(*active_document()->navigable()->top_level_traversable());
+    VERIFY(traversable.is_top_level_traversable());
+    return traversable;
 }
 
 // https://html.spec.whatwg.org/multipage/browsers.html#top-level-browsing-context
@@ -350,7 +349,7 @@ GC::Ptr<BrowsingContext> BrowsingContext::top_level_browsing_context() const
 
     // 3. While navigable's parent is not null, set navigable to navigable's parent.
     while (navigable->parent()) {
-        navigable = navigable->parent();
+        navigable = as<LocalNavigable>(*navigable->parent());
     }
 
     // 4. Return navigable's active browsing context.
@@ -464,7 +463,7 @@ bool BrowsingContext::is_ancestor_of(BrowsingContext const& potential_descendant
 
     // 3. Let ancestorBCs be the list obtained by taking the browsing context of the active document of each member of potentialDescendantDocument's ancestor navigables.
     for (auto const& ancestor : potential_descendant_document->ancestor_navigables()) {
-        auto ancestor_browsing_context = ancestor->active_browsing_context();
+        auto ancestor_browsing_context = as<HTML::LocalNavigable>(*ancestor).active_browsing_context();
 
         // 4. If ancestorBCs contains potentialAncestor, then return true.
         if (ancestor_browsing_context == this)
@@ -502,7 +501,7 @@ bool BrowsingContext::is_familiar_with(BrowsingContext const& other) const
         return false;
 
     for (auto const& ancestor : B.active_document()->ancestor_navigables()) {
-        if (ancestor->active_document()->origin().is_same_origin(A.active_document()->origin()))
+        if (ancestor->active_document_origin()->is_same_origin(A.active_document()->origin()))
             return true;
     }
 

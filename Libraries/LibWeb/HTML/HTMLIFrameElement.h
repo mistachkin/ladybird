@@ -24,7 +24,7 @@ public:
     virtual ~HTMLIFrameElement() override;
 
     virtual RefPtr<Layout::Node> create_layout_node(CSS::ComputedProperties const&) override;
-    virtual void adjust_computed_style(CSS::ComputedProperties&) override;
+    virtual void adjust_computed_style(CSS::ComputedProperties::Builder&) override;
 
     // ^EventTarget
     virtual bool is_focusable() const override
@@ -92,7 +92,7 @@ private:
     SandboxingFlagSet m_iframe_sandboxing_flag_set {};
 };
 
-void run_iframe_load_event_steps(HTML::HTMLIFrameElement&);
+WEB_API void run_iframe_load_event_steps(HTML::HTMLIFrameElement&);
 
 ReferrerPolicy::ReferrerPolicy determine_iframe_element_referrer_policy(GC::Ptr<DOM::Element> embedder);
 

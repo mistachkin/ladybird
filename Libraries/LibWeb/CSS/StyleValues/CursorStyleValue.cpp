@@ -59,10 +59,8 @@ Optional<Gfx::ImageCursor> CursorStyleValue::make_image_cursor(Layout::NodeWithS
 {
     auto const& image = *m_properties.image;
     auto const& document = layout_node.document();
-    if (!image.is_paintable(document)) {
-        const_cast<AbstractImageStyleValue&>(image).load_any_resources(const_cast<DOM::Document&>(layout_node.document()));
+    if (!image.is_paintable(document))
         return {};
-    }
 
     auto const& current_color = layout_node.computed_values().color();
 
@@ -114,16 +112,10 @@ Optional<Gfx::ImageCursor> CursorStyleValue::make_image_cursor(Layout::NodeWithS
         image.resolve_for_size(layout_node, CSSPixelSize { bitmap.size() });
         image.paint(paint_context, document, DevicePixelRect { bitmap.rect() }, ImageRendering::Auto);
 
-        switch (document.page().client().display_list_player_type()) {
-        case DisplayListPlayerType::SkiaGPUIfAvailable:
-        case DisplayListPlayerType::SkiaCPU: {
-            auto painting_surface = Gfx::PaintingSurface::wrap_bitmap(bitmap);
-            Painting::DisplayListPlayerSkia display_list_player;
-            display_list_player.execute(*display_list, visual_context_tree, resource_storage, {}, painting_surface);
-            display_list_player.flush(*painting_surface);
-            break;
-        }
-        }
+        auto painting_surface = Gfx::PaintingSurface::wrap_bitmap(bitmap);
+        Painting::DisplayListPlayerSkia display_list_player;
+        display_list_player.execute(*display_list, visual_context_tree, resource_storage, {}, painting_surface);
+        display_list_player.flush(*painting_surface);
     }
 
     // "If the values are unspecified, then the natural hotspot defined inside the image resource itself is used.
