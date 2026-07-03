@@ -15,9 +15,15 @@
 #     against a minimal mock Document.  Blocked on a libFuzzer-friendly
 #     fixture for the GC heap + DOM tree; consider following the
 #     LibWeb/Layout test-fixture pattern under Tests/LibWeb/.
-#   - fuzz_th8_handle_parse:  drive HandleTable::resolve with
-#     adversarial handle strings (myobj42, obj-1, obj42extra, etc.) to
-#     verify the strict ^obj([0-9]+)$ contract once M10 lands.
+#   - fuzz_th8_handle_parse:  the M10 concern (strict ^obj([0-9]+)$
+#     handle parse) is now covered by
+#     Tests/LibWeb/TestTH8HandleTable.cpp, which drives the pure
+#     HandleTable::parse_handle_id() helper against ~40 adversarial
+#     inputs (missing prefix, wrong-case prefix, junk prefix, sign
+#     characters, hex-shape digits, embedded whitespace, u64 overflow,
+#     high-byte / NUL bytes).  A dedicated libFuzzer target no longer
+#     buys additional coverage against the parse contract; leave here
+#     as a note in case the parse grows richer semantics later.
 
 if (ENABLE_FUZZERS)
     add_executable(fuzz_th8_eval FuzzTH8Eval.cpp)

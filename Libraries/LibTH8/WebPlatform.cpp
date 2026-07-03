@@ -185,6 +185,20 @@ Th8_Platform build_web_content_platform_layers()
     // want; those are NULLed out by deny_sandbox_unsafe_slots below
     // regardless of what POSIX filled in here.
     Th8_MergePlatform(&platform, Th8_GetPosixPlatform());
+#elif defined(TH8_PLATFORM_WIN32)
+    // Layer 4 (Windows): Mutex, time, high-resolution timer, and
+    // random-bytes callbacks from the Win32 layer (CryptGenRandom
+    // + QueryPerformanceCounter + CRITICAL_SECTION).  Like the POSIX
+    // arm, Win32 also fills filesystem / loading / process-info /
+    // stdio slots which we intentionally deny; deny_sandbox_unsafe_slots
+    // below strips them regardless of what Win32 filled in here.
+    //
+    // TH8_PLATFORM_POSIX and TH8_PLATFORM_WIN32 are mutually exclusive
+    // auto-defines from `Vendor/th8.h:156-162` (POSIX for everything
+    // except _WIN32, WIN32 otherwise).  Th8_GetWin32Platform is
+    // declared only under `_WIN32 || WIN32` in the same header, so this
+    // arm compiles exactly when the symbol exists.
+    Th8_MergePlatform(&platform, Th8_GetWin32Platform());
 #endif
 
     // Explicitly NULL out the sandbox-unsafe slots regardless of merge

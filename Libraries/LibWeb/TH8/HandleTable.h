@@ -8,7 +8,9 @@
 
 #include <AK/ByteString.h>
 #include <AK/HashMap.h>
+#include <AK/Optional.h>
 #include <AK/StringView.h>
+#include <AK/Types.h>
 #include <LibGC/RootHashMap.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 
@@ -47,6 +49,14 @@ public:
     // [M10] All issued handles take the form `<handle_prefix><decimal-id>`.
     // resolve() requires the prefix exactly, then digits only.
     static constexpr StringView handle_prefix = "obj"sv;
+
+    // Parse-only helper: extracts the id portion of a handle string
+    // without touching the table.  Returns the id on success or an
+    // empty Optional on any of: missing prefix, empty id part,
+    // non-digit character in id, or u64 overflow.  Exposed so the
+    // strict [M10] contract can be exercised by unit tests without
+    // constructing a GC::Heap.
+    static Optional<u64> parse_handle_id(StringView handle);
 
 private:
     ByteString make_handle_string(Bindings::PlatformObject& object, u64 id);

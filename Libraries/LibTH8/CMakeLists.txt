@@ -10,10 +10,10 @@ ladybird_lib(LibTH8 th8 EXPLICIT_SYMBOL_EXPORT)
 set_source_files_properties(Vendor/th8.c PROPERTIES LANGUAGE C)
 
 # [L18] Suppress warnings in vendored code.  Use a generator expression
-# so the right flag fires for both GCC/Clang (-w) and MSVC (/w).
-# ENABLE_TH8 is forced OFF on Windows today (see cmake_options.cmake),
-# but this keeps the LibTH8 CMakeLists.txt portable for the day the
-# Win32 WebPlatform arm lands.
+# so the right flag fires for both GCC/Clang (-w) and MSVC (/w) --
+# ENABLE_TH8 is now valid on both POSIX and Windows (WebPlatform.cpp
+# has a Th8_GetWin32Platform arm), so the MSVC branch is actually
+# reachable.
 set_source_files_properties(Vendor/th8.c PROPERTIES COMPILE_OPTIONS
     "$<$<C_COMPILER_ID:GNU,Clang,AppleClang>:-w>;$<$<C_COMPILER_ID:MSVC>:/w>")
 

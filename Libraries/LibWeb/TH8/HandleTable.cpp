@@ -44,25 +44,31 @@ ByteString HandleTable::register_handle(Bindings::PlatformObject& object)
     return handle_string;
 }
 
-Bindings::PlatformObject* HandleTable::resolve(StringView handle) const
+Optional<u64> HandleTable::parse_handle_id(StringView handle)
 {
     // [M10] Strict ^obj([0-9]+)$ parse.  The previous "skip to first
     // digit" parse let `myobj42` resolve the same as `obj42`, which
     // gave script code a way to fabricate handles by prefixing junk
     // before the prefix.  Now: handle MUST start with the exact
     // `handle_prefix` literal, followed by one-or-more ASCII digits
-    // and nothing else.
+    // and nothing else.  Rejects: missing prefix, wrong-case prefix,
+    // prefix without digits, non-digit characters, trailing junk,
+    // u64 overflow.
     if (!handle.starts_with(handle_prefix))
-        return nullptr;
+        return {};
     auto id_part = handle.substring_view(handle_prefix.length());
     if (id_part.is_empty())
-        return nullptr;
+        return {};
     for (size_t i = 0; i < id_part.length(); ++i) {
         if (id_part[i] < '0' || id_part[i] > '9')
-            return nullptr;
+            return {};
     }
+    return id_part.to_number<u64>();
+}
 
-    auto maybe_id = id_part.to_number<u64>();
+Bindings::PlatformObject* HandleTable::resolve(StringView handle) const
+{
+    auto maybe_id = parse_handle_id(handle);
     if (!maybe_id.has_value())
         return nullptr;
 

@@ -23,6 +23,12 @@ set(TEST_SOURCES
     TestStrings.cpp
 )
 
+# [B4] Tests that reach into LibTH8 / LibWeb TH8 code are gated on
+# ENABLE_TH8 so the LibWeb non-TH8 build keeps compiling.
+if (ENABLE_TH8)
+    list(APPEND TEST_SOURCES TestTH8HandleTable.cpp)
+endif()
+
 foreach(source IN LISTS TEST_SOURCES)
     ladybird_test("${source}" LibWeb LIBS LibWeb)
 endforeach()

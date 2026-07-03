@@ -25,14 +25,10 @@ option(ENABLE_GUI_TARGETS "Enable building GUI targets" ON)
 # TH8 (Tcl-derived scripting language for web content) is built and
 # linked into LibWeb / LibDevTools / LibTest by default on POSIX
 # platforms.  Distros wanting a JS-only build can pass
-# `-DENABLE_TH8=OFF`.  TH8's WebPlatform layer currently lacks a Win32
-# arm (see Libraries/LibTH8/WebPlatform.cpp), so the option is forced
-# OFF on Windows until that gap is closed.
+# `-DENABLE_TH8=OFF` on any platform.  The WebPlatform layer now has
+# both POSIX and Win32 arms (see Libraries/LibTH8/WebPlatform.cpp
+# build_web_content_platform_layers).
 option(ENABLE_TH8 "Enable TH8 scripting language in web content" ON)
-if (WIN32 AND ENABLE_TH8)
-    message(STATUS "ENABLE_TH8 forced OFF on Windows (no Win32 WebPlatform yet)")
-    set(ENABLE_TH8 OFF CACHE BOOL "Enable TH8 scripting language in web content" FORCE)
-endif()
 if (ENABLE_TH8)
     add_compile_definitions(LADYBIRD_ENABLE_TH8=1)
 else()
