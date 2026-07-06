@@ -1,0 +1,4 @@
+[submodule "Libraries/LibTH8/Vendor"]
+	path = Libraries/LibTH8/Vendor
+	url = https://github.com/mistachkin/th8_language
+	branch = trunk
