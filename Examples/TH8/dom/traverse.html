@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="TH8-Script-Policy" content="no-javascript">
+  <title>TH8 DOM example: tree traversal</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; }
+    pre { background: #f4f4f4; padding: 1rem; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>Menu</h1>
+
+  <ul id="menu">
+    <li>Home</li>
+    <li>Products</li>
+    <li>About</li>
+    <li>Contact</li>
+  </ul>
+
+  <pre id="output">(script did not run)</pre>
+
+  <!--
+    Tree traversal: walk a list's children with firstChild /
+    nextSibling collecting their tag names, then climb back up with
+    parentNode.  lastChild / previousSibling round out the node-tree
+    accessors the bridge exposes.
+  -->
+  <script type="text/th8">
+    set doc [dom::document]
+    set menu [$doc getElementById menu]
+
+    set tags [list]
+
+    for {set node [$menu firstChild]} {$node ne ""} {set node [$node nextSibling]} {
+      lappend tags [$node tagName]
+    }
+
+    set childCount [llength $tags]
+    set parentTag [[[$menu firstChild] parentNode] tagName]
+    set lastText [[$menu lastChild] textContent]
+
+    [$doc getElementById output] textContent \
+        "children=$childCount tags=$tags parent=$parentTag last=$lastText"
+
+    dom::console log "traversed $childCount children of a $parentTag"
+  </script>
+</body>
+</html>

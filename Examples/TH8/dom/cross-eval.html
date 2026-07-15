@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <!--
+    "cross-eval" opts this page into two-way TH8<->JavaScript
+    evaluation: TH8 may call JS via `dom::eval_js`, and JS may call TH8
+    via `window.th8.eval`.  cross-eval is mutually exclusive with
+    "no-javascript" (declaring both drops cross-eval).
+  -->
+  <meta http-equiv="TH8-Script-Policy" content="cross-eval">
+  <title>TH8 DOM example: cross-eval with JavaScript</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; }
+    pre { background: #f4f4f4; padding: 1rem; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1 id="greeting">Cross-eval</h1>
+
+  <pre id="output">(script did not run)</pre>
+
+  <!--
+    Cross-eval: TH8 evaluates a JavaScript expression via dom::eval_js
+    and receives the result as a string.  Errors in the JS propagate
+    back as a TH8 error.  Here TH8 computes a value in JS and also has
+    JS report the document title.
+  -->
+  <script type="text/th8">
+    set doc [dom::document]
+
+    set sum [dom::eval_js {2 + 2}]
+    set title [dom::eval_js {document.title}]
+
+    [$doc getElementById output] textContent "js(2+2)=$sum  js(document.title)=$title"
+    dom::console log "cross-eval returned $sum and \"$title\""
+  </script>
+
+  <!--
+    The reverse direction (JS -> TH8) uses window.th8.eval; shown here
+    for completeness.  It runs only because this page opted into
+    cross-eval above.
+  -->
+  <script>
+    // JavaScript calling into TH8 and reading the returned string.
+    const th8Result = window.th8.eval("expr {6 * 7}");
+    document.getElementById("greeting").setAttribute("data-th8", th8Result);
+  </script>
+</body>
+</html>

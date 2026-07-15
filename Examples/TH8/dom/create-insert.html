@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="TH8-Script-Policy" content="no-javascript">
+  <title>TH8 DOM example: create and insert nodes</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; }
+    li.item { color: #226; }
+    pre { background: #f4f4f4; padding: 1rem; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>To-do</h1>
+
+  <ul id="todo"></ul>
+
+  <pre id="output">(script did not run)</pre>
+
+  <!--
+    Node creation and insertion: createElement / createTextNode build
+    new nodes, setAttribute sets a class, appendChild links them into
+    the tree.  The list is then read back by walking firstChild /
+    nextSibling to confirm what was built.
+  -->
+  <script type="text/th8">
+    set doc [dom::document]
+    set list [$doc getElementById todo]
+
+    foreach task {{Buy groceries} {Cook dinner} {Take a nap}} {
+      set item [$doc createElement li]
+      $item setAttribute class item
+
+      set text [$doc createTextNode $task]
+      $item appendChild $text
+
+      $list appendChild $item
+    }
+
+    set count 0
+    set labels [list]
+
+    for {set node [$list firstChild]} {$node ne ""} {set node [$node nextSibling]} {
+      incr count
+      lappend labels [$node textContent]
+    }
+
+    [$doc getElementById output] textContent "inserted $count items: $labels"
+    dom::console log "created $count list items"
+  </script>
+</body>
+</html>
