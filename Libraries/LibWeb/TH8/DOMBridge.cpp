@@ -262,17 +262,19 @@ ByteString register_object_command(Th8_Interp* interp, HandleTable& handles, Bin
 // ---- Command Implementations ----
 
 // dom::document ?subcommand? ?args...?
-static int document_command(Th8_Interp* interp, void* ctx, int argc, char const** argv, size_t* argl)
+// Dispatch a document-scoped subcommand (querySelector, getElementById,
+// createElement, createTextNode, body, head, title).  Shared by
+// document_command (the `dom::document` ensemble) and
+// object_ensemble_command, so a captured document handle
+// (`set doc [dom::document]`) resolves the same document-only methods
+// that `dom::document <sub>` does -- these are not node methods and
+// otherwise fall through to the node ensemble's "unknown subcommand".
+// Sets out_handled to true when the subcommand matched; leaves it false
+// (and returns TH8_OK) so the caller can continue its own dispatch.
+static int document_subcommand(Th8_Interp* interp, DOM::Document& document,
+    HandleTable& handles, int argc, char const** argv, size_t* argl, bool& out_handled)
 {
-    auto* bridge = static_cast<BridgeContext*>(ctx);
-    auto& document = *bridge->document;
-    auto& handles = *bridge->handles;
-
-    if (argc < 2) {
-        auto handle = register_object_command(interp, handles, document);
-        return set_result_string(interp, handle);
-    }
-
+    out_handled = true;
     StringView subcommand { argv[1], argl[1] };
 
     if (subcommand == "querySelector"sv) {
@@ -343,6 +345,27 @@ static int document_command(Th8_Interp* interp, void* ctx, int argc, char const*
         return set_result_string(interp, title_utf8);
     }
 
+    out_handled = false;
+    return TH8_OK;
+}
+
+static int document_command(Th8_Interp* interp, void* ctx, int argc, char const** argv, size_t* argl)
+{
+    auto* bridge = static_cast<BridgeContext*>(ctx);
+    auto& document = *bridge->document;
+    auto& handles = *bridge->handles;
+
+    if (argc < 2) {
+        auto handle = register_object_command(interp, handles, document);
+        return set_result_string(interp, handle);
+    }
+
+    bool handled = false;
+    int rc = document_subcommand(interp, document, handles, argc, argv, argl, handled);
+    if (handled)
+        return rc;
+
+    StringView subcommand { argv[1], argl[1] };
     return set_error(interp, ByteString::formatted("unknown document subcommand \"{}\"", subcommand));
 }
 
@@ -383,6 +406,23 @@ static int object_ensemble_command(Th8_Interp* interp, void* ctx, int argc, char
         return set_error(interp, ByteString::formatted("invalid handle \"{}\"", StringView { argv[0], argl[0] }));
 
     StringView subcommand { argv[1], argl[1] };
+
+    // ---- Document methods ----
+    //
+    // A captured document handle (`set doc [dom::document]`) resolves to
+    // this node ensemble, but getElementById / createElement /
+    // createTextNode / body / head / title / querySelector are
+    // document-scoped, not node methods.  Delegate them to the shared
+    // document dispatch when this handle is the Document; anything it
+    // does not claim falls through to the node methods below (a Document
+    // is also a Node, so appendChild / childNodes / etc. still apply).
+    if (is<DOM::Document>(object)) {
+        bool handled = false;
+        int rc = document_subcommand(interp, static_cast<DOM::Document&>(*object),
+            *handles, argc, argv, argl, handled);
+        if (handled)
+            return rc;
+    }
 
     // ---- Node methods ----
 
