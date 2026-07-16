@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Utf16String.h>
 #include <LibJS/Runtime/Error.h>
 #include <LibJS/Runtime/Object.h>
 #include <LibJS/Runtime/Realm.h>
@@ -45,11 +46,9 @@ GC::Ref<JS::Object> create_window_th8_namespace(JS::Realm& realm, GC::Ref<DOM::D
         realm,
         JS::PropertyKey { "eval"_utf16_fly_string },
         [document](JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
-            auto& realm = *vm.current_realm();
-
             if (vm.argument_count() < 1) {
                 return vm.throw_completion<JS::TypeError>(
-                    "window.th8.eval: missing argument"sv);
+                    "window.th8.eval: missing argument"_utf16);
             }
 
             // [M15-followup] Per-document runtime kill switch.  Surface
@@ -58,7 +57,7 @@ GC::Ref<JS::Object> create_window_th8_namespace(JS::Realm& realm, GC::Ref<DOM::D
             // not opted in".
             if (document->th8_disabled()) {
                 return vm.throw_completion<JS::TypeError>(
-                    "window.th8.eval: TH8 is disabled on this document"sv);
+                    "window.th8.eval: TH8 is disabled on this document"_utf16);
             }
 
             // Gate on cross-eval policy.  Throw SecurityError-style
@@ -68,7 +67,7 @@ GC::Ref<JS::Object> create_window_th8_namespace(JS::Realm& realm, GC::Ref<DOM::D
                 return vm.throw_completion<JS::TypeError>(
                     "window.th8.eval: cross-eval not permitted; "
                     "add <meta http-equiv=\"TH8-Script-Policy\" content=\"cross-eval\"> "
-                    "to enable"sv);
+                    "to enable"_utf16);
             }
 
             if (document->is_javascript_execution_disabled()) {
@@ -77,11 +76,12 @@ GC::Ref<JS::Object> create_window_th8_namespace(JS::Realm& realm, GC::Ref<DOM::D
                 // the symmetric flag.
                 return vm.throw_completion<JS::TypeError>(
                     "window.th8.eval: JavaScript execution is disabled "
-                    "on this document"sv);
+                    "on this document"_utf16);
             }
 
             auto source_value = vm.argument(0);
-            auto source_string = TRY(source_value.to_string(vm));
+            auto source_utf16 = TRY(source_value.to_utf16_string(vm));
+            auto source_string = source_utf16.utf16_view().to_utf8_but_should_be_ported_to_utf16();
 
             auto& th8_context = document->ensure_th8_context();
             int rc = th8_context.evaluate(source_string.bytes_as_string_view(),
@@ -90,7 +90,7 @@ GC::Ref<JS::Object> create_window_th8_namespace(JS::Realm& realm, GC::Ref<DOM::D
             if (rc != TH8_OK) {
                 auto error_message = th8_context.result_string();
                 return vm.throw_completion<JS::Error>(
-                    String::from_utf8_with_replacement_character(error_message));
+                    Utf16String::from_utf8_with_replacement_character(error_message));
             }
 
             // Return the interpreter's result string.  TH8 stores the
@@ -99,7 +99,7 @@ GC::Ref<JS::Object> create_window_th8_namespace(JS::Realm& realm, GC::Ref<DOM::D
             // require an IDL-shaped surface.
             auto result = th8_context.result_string();
             return JS::PrimitiveString::create(vm,
-                String::from_utf8_with_replacement_character(result));
+                Utf16String::from_utf8_with_replacement_character(result));
         },
         /*length=*/1,
         JS::default_attributes);

@@ -4,13 +4,17 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibGC/Heap.h>
 #include <LibWeb/TH8/HandleTable.h>
 
 namespace Web::TH8 {
 
-HandleTable::HandleTable(GC::Heap& heap)
-    : m_id_to_object(heap)
+HandleTable::HandleTable(GC::Heap&)
 {
+    // m_id_to_object is a GC::RootHashMap: it self-registers with the
+    // current heap (GC::Heap::the()) on default construction, so the
+    // Heap& argument is no longer consumed here.  The parameter is kept
+    // for API stability with existing callers (e.g. TH8Context).
 }
 
 ByteString HandleTable::make_handle_string([[maybe_unused]] Bindings::PlatformObject& object, u64 id)

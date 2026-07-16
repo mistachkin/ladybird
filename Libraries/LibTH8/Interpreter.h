@@ -15,7 +15,7 @@
 
 namespace TH8 {
 
-class Interpreter {
+class TH8_API Interpreter {
     AK_MAKE_NONCOPYABLE(Interpreter);
     AK_MAKE_NONMOVABLE(Interpreter);
 

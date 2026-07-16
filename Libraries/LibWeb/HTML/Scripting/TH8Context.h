@@ -14,6 +14,7 @@
 #include <AK/StringView.h>
 #include <AK/Vector.h>
 #include <LibGC/Cell.h>
+#include <LibGC/CellAllocator.h>
 #include <LibGC/Ptr.h>
 #include <LibTH8/Forward.h>
 #include <LibTH8/WebPlatform.h>

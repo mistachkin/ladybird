@@ -11,6 +11,8 @@
 #include <LibJS/Runtime/NativeFunction.h>
 #include <LibJS/Runtime/PrimitiveString.h>
 #include <LibJS/Runtime/ValueInlines.h>
+#include <LibTH8/Interpreter.h>
+#include <LibWeb/Bindings/Document.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/DOM/DOMEventListener.h>
 #include <LibWeb/DOM/Document.h>
@@ -21,6 +23,7 @@
 #include <LibWeb/DOM/Node.h>
 #include <LibWeb/DOM/ParentNode.h>
 #include <LibWeb/DOM/Text.h>
+#include <LibWeb/HTML/HTMLElement.h>
 #include <LibWeb/HTML/HTMLHeadElement.h>
 #include <LibWeb/HTML/Scripting/ClassicScript.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
@@ -198,7 +201,7 @@ static int add_th8_event_listener(
                 // errors -- a silent dbgln was easy to miss.
                 auto& realm = vm.current_realm() ? *vm.current_realm() : live_document.realm();
                 auto error = JS::Error::create(realm,
-                    String::from_utf8_with_replacement_character(err_view));
+                    Utf16String::from_utf8_with_replacement_character(err_view));
                 auto& window_or_worker = as<HTML::WindowOrWorkerGlobalScopeMixin>(realm.global_object());
                 window_or_worker.report_an_exception(error);
             }
@@ -301,7 +304,7 @@ static int document_subcommand(Th8_Interp* interp, DOM::Document& document,
         if (argc < 3)
             return set_error(interp, "wrong # args: should be \"dom::document createElement tagName\""sv);
         auto tag = string_from_th8(argv[2], argl[2]);
-        Variant<String, DOM::ElementCreationOptions> options { DOM::ElementCreationOptions {} };
+        Variant<String, Bindings::ElementCreationOptions> options { Bindings::ElementCreationOptions {} };
         auto result = document.create_element(tag, options);
         if (result.is_error())
             return set_error(interp, "createElement failed"sv);
@@ -680,7 +683,8 @@ static int eval_js_command(Th8_Interp* interp, void* ctx, int argc, char const**
     auto completion = script->run(HTML::ClassicScript::RethrowErrors::Yes);
 
     if (completion.is_abrupt()) {
-        auto err_str = completion.value().to_string_without_side_effects();
+        auto err_utf16 = completion.value().to_utf16_string_without_side_effects();
+        auto err_str = err_utf16.utf16_view().to_utf8_but_should_be_ported_to_utf16();
         return set_error(interp, err_str.bytes_as_string_view());
     }
 
@@ -695,7 +699,8 @@ static int eval_js_command(Th8_Interp* interp, void* ctx, int argc, char const**
 
     // Convert everything else to string via to_string_without_side_effects
     // to avoid re-entering JS (which could cause reentrancy issues).
-    auto result_str = value.to_string_without_side_effects();
+    auto result_utf16 = value.to_utf16_string_without_side_effects();
+    auto result_str = result_utf16.utf16_view().to_utf8_but_should_be_ported_to_utf16();
     return set_result_string(interp, result_str.bytes_as_string_view());
 }
 

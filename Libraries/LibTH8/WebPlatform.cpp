@@ -48,6 +48,12 @@ Optional<ReadonlyBytes> WebPlatformContext::get_sidecar(StringView resource_name
 
 namespace {
 
+// Forward declaration so the definition below has a visible prototype
+// (-Wmissing-prototypes).  The extern "C" linkage is required: this
+// thunk is installed directly into the C Th8_Platform.xGetData slot.
+extern "C" int th8_web_platform_x_get_data(
+    Th8_Interp*, void*, char const*, size_t, char**, size_t*);
+
 // C-callable thunk for the Th8_Platform.xGetData slot.  Consults the
 // WebPlatformContext stashed in pCtx and returns sidecar bytes when
 // the requested name matches a registered entry; otherwise returns

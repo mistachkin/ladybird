@@ -2914,7 +2914,7 @@ GC::Ptr<DOM::Document> LocalNavigable::evaluate_javascript_url(URL::URL const& u
     // content="no-javascript">), reject the javascript: URL entirely so it
     // does not subvert the no-javascript policy that the <script> element
     // gate already enforces.
-    if (auto* document = active_document(); document && document->is_javascript_execution_disabled())
+    if (auto document = active_document(); document && document->is_javascript_execution_disabled())
         return nullptr;
 
     // 1. Let urlString be the result of running the URL serializer on url.

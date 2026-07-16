@@ -22,6 +22,7 @@
 #include <LibWeb/Bindings/PerformanceObserver.h>
 #include <LibWeb/ContentSecurityPolicy/BlockingAlgorithms.h>
 #include <LibWeb/Crypto/Crypto.h>
+#include <LibWeb/DOM/Document.h>
 #include <LibWeb/Fetch/FetchMethod.h>
 #include <LibWeb/HTML/CanvasRenderingContext2D.h>
 #include <LibWeb/HTML/DedicatedWorkerGlobalScope.h>

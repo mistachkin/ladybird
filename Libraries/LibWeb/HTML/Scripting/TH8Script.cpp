@@ -7,6 +7,7 @@
 #include <LibWeb/HTML/Scripting/TH8Script.h>
 
 #include <AK/Debug.h>
+#include <AK/Utf16String.h>
 #include <LibJS/Runtime/VM.h>
 #include <LibTH8/Interpreter.h>
 #include <LibWeb/DOM/Document.h>
@@ -89,7 +90,7 @@ JS::Completion TH8Script::run(RethrowErrors rethrow_errors)
         // aborts the process on invalid UTF-8 -- replace decode errors
         // with U+FFFD instead.
         auto& realm = settings.realm();
-        auto error = JS::Error::create(realm, String::from_utf8_with_replacement_character(error_message));
+        auto error = JS::Error::create(realm, Utf16String::from_utf8_with_replacement_character(error_message));
 
         if (rethrow_errors == RethrowErrors::Yes) {
             result = JS::throw_completion(error);

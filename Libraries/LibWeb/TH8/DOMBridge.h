@@ -6,8 +6,12 @@
 
 #pragma once
 
+#include <LibTH8/CAPI.h>
 #include <LibWeb/Forward.h>
-#include <th8.h>
+
+namespace Web::Bindings {
+class PlatformObject;
+}
 
 namespace Web::TH8 {
 

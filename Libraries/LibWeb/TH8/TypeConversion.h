@@ -11,8 +11,8 @@
 #include <AK/String.h>
 #include <AK/StringView.h>
 #include <LibGC/Ptr.h>
+#include <LibTH8/CAPI.h>
 #include <LibWeb/Forward.h>
-#include <th8.h>
 
 namespace Web::TH8 {
 

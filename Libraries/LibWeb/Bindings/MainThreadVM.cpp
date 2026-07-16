@@ -132,7 +132,7 @@ void initialize_main_thread_vm(AgentType type)
         if (auto* window = as_if<HTML::Window>(realm.global_object())) {
             if (window->associated_document().is_javascript_execution_disabled()) {
                 return realm.vm().throw_completion<JS::EvalError>(
-                    "JavaScript string compilation (eval/Function) is disabled by the TH8-Script-Policy"sv);
+                    "JavaScript string compilation (eval/Function) is disabled by the TH8-Script-Policy"_utf16);
             }
         }
 

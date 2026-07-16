@@ -33,7 +33,7 @@ namespace TH8 {
 //
 // The context is owned by TH8Context and must outlive the
 // Th8_Platform / Th8_Interp constructed from it.
-class WebPlatformContext {
+class TH8_API WebPlatformContext {
 public:
     WebPlatformContext() = default;
     ~WebPlatformContext() = default;
@@ -59,7 +59,7 @@ private:
 // `desc->raw()` straight to Interpreter::create, which takes a
 // const Th8_Platform& (forward-decl suffices in headers; the full
 // type is resolved inside LibTH8.cpp via the PRIVATE Vendor/ path).
-class PlatformDescriptor {
+class TH8_API PlatformDescriptor {
 public:
     PlatformDescriptor();
     ~PlatformDescriptor();
@@ -93,8 +93,8 @@ private:
 // installs a custom xGetData that serves signature sidecars from the
 // context.  The caller must keep `context` alive for at least as
 // long as any Th8_Interp constructed from the returned platform.
-NonnullOwnPtr<PlatformDescriptor> create_web_content_platform();
-NonnullOwnPtr<PlatformDescriptor> create_web_content_platform(WebPlatformContext& context);
+TH8_API NonnullOwnPtr<PlatformDescriptor> create_web_content_platform();
+TH8_API NonnullOwnPtr<PlatformDescriptor> create_web_content_platform(WebPlatformContext& context);
 
 // Default resource limits for web content interpreters.
 static constexpr i64 default_step_limit = 10'000'000;
