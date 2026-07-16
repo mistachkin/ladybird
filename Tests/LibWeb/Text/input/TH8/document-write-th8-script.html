@@ -6,6 +6,7 @@
     so injected TH8 sources are not silently dropped.
 -->
 <body>
+<script src="../include.js"></script>
 <div id="result">pending</div>
 <script>
 // document.write while the page is still parsing -- inserts the
@@ -20,11 +21,13 @@ document.write(
 );
 </script>
 <script>
-let r = document.getElementById('result').textContent;
-if (r === 'th8-via-document-write') {
-    println("PASS: document.write of TH8 script executes");
-} else {
-    println("FAIL: " + r);
-}
+test(() => {
+    let r = document.getElementById('result').textContent;
+    if (r === 'th8-via-document-write') {
+        println("PASS: document.write of TH8 script executes");
+    } else {
+        println("FAIL: " + r);
+    }
+});
 </script>
 </body>

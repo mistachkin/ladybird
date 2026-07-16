@@ -13,13 +13,14 @@
 #include <AK/Types.h>
 #include <LibGC/RootHashMap.h>
 #include <LibWeb/Bindings/PlatformObject.h>
+#include <LibWeb/Export.h>
 
 namespace Web::TH8 {
 
 // Maps opaque string handles (e.g., "elem42") to GC-managed DOM objects.
 // The RootHashMap ensures all referenced objects are reported as GC roots,
 // preventing premature collection while TH8 code holds a handle.
-class HandleTable {
+class WEB_API HandleTable {
 public:
     explicit HandleTable(GC::Heap&);
     ~HandleTable() = default;

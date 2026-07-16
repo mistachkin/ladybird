@@ -7,6 +7,7 @@
 -->
 <meta http-equiv="TH8-Script-Policy" content="cross-eval">
 <body>
+<script src="../include.js"></script>
 <div id="result">pending</div>
 <script type="text/th8">
 set doc [dom::document]
@@ -33,15 +34,17 @@ if {[catch {
 }
 </script>
 <script>
-let r = document.getElementById('result').textContent;
-// Either "bounded:ok" (the inner attempt was rejected and didn't
-// propagate an error to the outer scope) or "bounded:<error>" (an
-// error did propagate).  Both indicate the bomb was bounded.  The
-// FAIL signal is anything else, including a hang or crash.
-if (r.startsWith('bounded:')) {
-    println("PASS: cross-eval recursion is bounded by reentrancy guard");
-} else {
-    println("FAIL: " + r);
-}
+test(() => {
+    let r = document.getElementById('result').textContent;
+    // Either "bounded:ok" (the inner attempt was rejected and didn't
+    // propagate an error to the outer scope) or "bounded:<error>" (an
+    // error did propagate).  Both indicate the bomb was bounded.  The
+    // FAIL signal is anything else, including a hang or crash.
+    if (r.startsWith('bounded:')) {
+        println("PASS: cross-eval recursion is bounded by reentrancy guard");
+    } else {
+        println("FAIL: " + r);
+    }
+});
 </script>
 </body>

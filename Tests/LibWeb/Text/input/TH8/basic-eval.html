@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <body>
+<script src="../include.js"></script>
 <div id="output"></div>
 <script type="text/th8">
 set doc [dom::document]
@@ -10,12 +11,14 @@ set body [$doc querySelector body]
 $body appendChild $div
 </script>
 <script>
-// JS verification: check that TH8 created the element
-let div = document.getElementById('th8-created');
-if (div && div.textContent === 'Hello from TH8') {
-    println("PASS: TH8 basic evaluation works");
-} else {
-    println("FAIL: expected element with text 'Hello from TH8'");
-}
+test(() => {
+    // JS verification: check that TH8 created the element
+    let div = document.getElementById('th8-created');
+    if (div && div.textContent === 'Hello from TH8') {
+        println("PASS: TH8 basic evaluation works");
+    } else {
+        println("FAIL: expected element with text 'Hello from TH8'");
+    }
+});
 </script>
 </body>

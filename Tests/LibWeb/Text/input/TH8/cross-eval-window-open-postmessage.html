@@ -17,6 +17,7 @@
 -->
 <meta http-equiv="TH8-Script-Policy" content="cross-eval">
 <body>
+<script src="../include.js"></script>
 <div id="open_ok">pending</div>
 <div id="post_ok">pending</div>
 <script>
@@ -55,12 +56,14 @@ if {[catch {
 }
 </script>
 <script>
-let o = document.getElementById('open_ok').textContent;
-let p = document.getElementById('post_ok').textContent;
-if (o === 'ok' && p === 'ok') {
-    println("PASS: TH8 cross-eval reaches window.open + postMessage");
-} else {
-    println("FAIL: open=" + o + " post=" + p);
-}
+test(() => {
+    let o = document.getElementById('open_ok').textContent;
+    let p = document.getElementById('post_ok').textContent;
+    if (o === 'ok' && p === 'ok') {
+        println("PASS: TH8 cross-eval reaches window.open + postMessage");
+    } else {
+        println("FAIL: open=" + o + " post=" + p);
+    }
+});
 </script>
 </body>

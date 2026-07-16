@@ -5,6 +5,7 @@
     <title>TH8 Cross-Eval Test</title>
 </head>
 <body>
+<script src="../include.js"></script>
 <div id="result">pending</div>
 <script type="text/th8">
 # Evaluate JavaScript from TH8 via the cross-eval bridge.
@@ -14,13 +15,15 @@ set div [$doc getElementById result]
 $div textContent "js_result: $js_result"
 </script>
 <script>
-// Verify the cross-eval result.
-let result = document.getElementById('result').textContent;
-if (result === 'js_result: 4') {
-    println("PASS: TH8 cross-eval returned JS result");
-} else {
-    println("FAIL: expected 'js_result: 4', got '" + result + "'");
-}
+test(() => {
+    // Verify the cross-eval result.
+    let result = document.getElementById('result').textContent;
+    if (result === 'js_result: 4') {
+        println("PASS: TH8 cross-eval returned JS result");
+    } else {
+        println("FAIL: expected 'js_result: 4', got '" + result + "'");
+    }
+});
 </script>
 </body>
 </html>

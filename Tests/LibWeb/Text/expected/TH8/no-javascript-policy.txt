@@ -1,1 +1,1 @@
-
+PASS: no-javascript blocks JS while TH8 still runs

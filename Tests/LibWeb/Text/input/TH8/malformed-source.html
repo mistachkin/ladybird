@@ -9,6 +9,7 @@
     produced a non-FAIL outcome.
 -->
 <body>
+<script src="../include.js"></script>
 <div id="nested">pending</div>
 <div id="unterm">pending</div>
 <div id="nul">pending</div>
@@ -48,17 +49,19 @@ set s [format "%c" 0]
 [$doc getElementById nul] textContent "len:[string length $s]"
 </script>
 <script>
-let n = document.getElementById('nested').textContent;
-let u = document.getElementById('unterm').textContent;
-let z = document.getElementById('nul').textContent;
-let bad = [];
-if (n === 'pending' || n === 'FAIL') bad.push('nested=' + n);
-if (u === 'pending' || u === 'FAIL') bad.push('unterm=' + u);
-if (z !== 'len:1') bad.push('nul=' + z);
-if (bad.length === 0) {
-    println("PASS: TH8 handles malformed sources without crashing or hanging");
-} else {
-    println("FAIL: " + bad.join(' '));
-}
+test(() => {
+    let n = document.getElementById('nested').textContent;
+    let u = document.getElementById('unterm').textContent;
+    let z = document.getElementById('nul').textContent;
+    let bad = [];
+    if (n === 'pending' || n === 'FAIL') bad.push('nested=' + n);
+    if (u === 'pending' || u === 'FAIL') bad.push('unterm=' + u);
+    if (z !== 'len:1') bad.push('nul=' + z);
+    if (bad.length === 0) {
+        println("PASS: TH8 handles malformed sources without crashing or hanging");
+    } else {
+        println("FAIL: " + bad.join(' '));
+    }
+});
 </script>
 </body>

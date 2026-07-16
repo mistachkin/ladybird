@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <body>
+<script src="../include.js"></script>
 <!-- No cross-eval policy meta tag: dom::eval_js should fail. -->
 <div id="result">pending</div>
 <script type="text/th8">
@@ -14,11 +15,13 @@ if {[catch {dom::eval_js "1 + 1"} err]} {
 }
 </script>
 <script>
-let result = document.getElementById('result').textContent;
-if (result.startsWith('blocked:')) {
-    println("PASS: cross-eval correctly blocked without policy");
-} else {
-    println("FAIL: expected 'blocked:...', got '" + result + "'");
-}
+test(() => {
+    let result = document.getElementById('result').textContent;
+    if (result.startsWith('blocked:')) {
+        println("PASS: cross-eval correctly blocked without policy");
+    } else {
+        println("FAIL: expected 'blocked:...', got '" + result + "'");
+    }
+});
 </script>
 </body>

@@ -88,6 +88,15 @@ private:
     // destruction would destroy m_handle_table before m_interpreter,
     // and Th8_DeleteInterp can synchronously invoke command callbacks
     // (BridgeContext destructors) that still reach for the handle table.
+    //
+    // [H8] m_platform_descriptor owns the Th8_Platform value that
+    // Th8_CreateInterp stores by BARE POINTER (interp->pPlatform, "not
+    // owned").  It MUST outlive m_interpreter: every allocation the
+    // interpreter makes -- including the cross-thread WallClockWatchdog
+    // cancel path -- dereferences interp->pPlatform->xMalloc.  Declared
+    // first so default reverse-order destruction tears it down last; the
+    // destructor also clears it explicitly after m_interpreter.
+    OwnPtr<::TH8::PlatformDescriptor> m_platform_descriptor;
     OwnPtr<::TH8::WebPlatformContext> m_platform_context;
     OwnPtr<Web::TH8::HandleTable> m_handle_table;
     OwnPtr<::TH8::Interpreter> m_interpreter;

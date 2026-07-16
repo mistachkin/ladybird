@@ -5,24 +5,31 @@
     inner div from its initial value.
 -->
 <body>
-<iframe sandbox srcdoc="
+<script src="../include.js"></script>
+<!-- allow-same-origin (but NOT allow-scripts) so the parent can read the
+     child's DOM to confirm the inner script did not run; scripting -- JS
+     and TH8 alike -- is still blocked by the absence of allow-scripts. -->
+<iframe sandbox="allow-same-origin" srcdoc="
     <body>
     <div id='inner'>blocked</div>
     <script type='text/th8'>
     set doc [dom::document]
-    [$doc getElementById inner] textContent 'FAIL'
+    [$doc getElementById inner] textContent FAIL
     </script>
     </body>
 "></iframe>
 <script>
-let f = document.querySelector('iframe');
-f.addEventListener('load', () => {
-    let inner = f.contentDocument.getElementById('inner').textContent;
-    if (inner === 'blocked') {
-        println("PASS: sandbox without allow-scripts blocks TH8");
-    } else {
-        println("FAIL: TH8 ran in sandboxed iframe (" + inner + ")");
-    }
+asyncTest(done => {
+    let f = document.querySelector('iframe');
+    f.addEventListener('load', () => {
+        let inner = f.contentDocument.getElementById('inner').textContent;
+        if (inner === 'blocked') {
+            println("PASS: sandbox without allow-scripts blocks TH8");
+        } else {
+            println("FAIL: TH8 ran in sandboxed iframe (" + inner + ")");
+        }
+        done();
+    });
 });
 </script>
 </body>

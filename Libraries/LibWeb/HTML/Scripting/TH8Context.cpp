@@ -107,14 +107,19 @@ TH8Context::~TH8Context()
     // platform context.  Default reverse-declaration destruction
     // would have torn down m_handle_table first, leaving Th8_DeleteInterp
     // with a dangling HandleTable*.  Explicit ordered teardown:
-    //   1. m_interpreter   (Th8_DeleteInterp synchronously fires callbacks)
+    //   1. m_interpreter   (Th8_DeleteInterp synchronously fires callbacks
+    //                       AND allocates/frees via interp->pPlatform->xMalloc,
+    //                       so the platform descriptor must still be alive)
     //   2. m_handle_table  (no longer reachable from any callback)
     //   3. m_platform_context (no longer reachable; was only consulted
     //                          via the platform's xGetData slot which the
     //                          dead interpreter no longer reaches)
+    //   4. m_platform_descriptor ([H8] owns the Th8_Platform the now-dead
+    //                          interpreter pointed at; safe to free last)
     m_interpreter.clear();
     m_handle_table.clear();
     m_platform_context.clear();
+    m_platform_descriptor.clear();
 }
 
 void TH8Context::initialize_interpreter()
@@ -123,12 +128,17 @@ void TH8Context::initialize_interpreter()
     // (sidecar lookup for the signed-only policy).  It must outlive
     // the Th8_Interp; making it a member ensures destruction order.
     m_platform_context = make<::TH8::WebPlatformContext>();
-    // [L19] PlatformDescriptor is an opaque RAII wrapper; the
-    // underlying Th8_Platform value is copied into the interp by
-    // Th8_CreateInterp during create(), so dropping the descriptor
-    // after create() returns is fine.
-    auto platform = ::TH8::create_web_content_platform(*m_platform_context);
-    auto interpreter_or_error = ::TH8::Interpreter::create(platform->raw());
+    // [H8] PlatformDescriptor owns the Th8_Platform value.  Th8_CreateInterp
+    // does NOT copy it -- it stores a bare pointer (interp->pPlatform,
+    // documented "not owned").  A local descriptor would therefore be freed
+    // the moment initialize_interpreter() returns, leaving interp->pPlatform
+    // dangling; main-thread eval survives only by reading the not-yet-reused
+    // freed block, but the WallClockWatchdog's cross-thread cancel fires
+    // ~250ms later after the block is overwritten and crashes calling a
+    // garbage xMalloc.  Keep the descriptor alive as a member for the
+    // interpreter's full lifetime.
+    m_platform_descriptor = ::TH8::create_web_content_platform(*m_platform_context);
+    auto interpreter_or_error = ::TH8::Interpreter::create(m_platform_descriptor->raw());
     if (interpreter_or_error.is_error()) {
         dbgln("TH8Context: Failed to create interpreter: {}", interpreter_or_error.error());
         return;

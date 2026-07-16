@@ -6,24 +6,28 @@
     page.
 -->
 <body>
+<script src="../include.js"></script>
 <iframe srcdoc="
     <body>
     <div id='inner'>pending</div>
     <script type='text/th8'>
     set doc [dom::document]
-    [$doc getElementById inner] textContent 'th8-ran-in-srcdoc'
+    [$doc getElementById inner] textContent th8-ran-in-srcdoc
     </script>
     </body>
 "></iframe>
 <script>
-let f = document.querySelector('iframe');
-f.addEventListener('load', () => {
-    let inner = f.contentDocument.getElementById('inner').textContent;
-    if (inner === 'th8-ran-in-srcdoc') {
-        println("PASS: TH8 runs in iframe srcdoc");
-    } else {
-        println("FAIL: inner='" + inner + "'");
-    }
+asyncTest(done => {
+    let f = document.querySelector('iframe');
+    f.addEventListener('load', () => {
+        let inner = f.contentDocument.getElementById('inner').textContent;
+        if (inner === 'th8-ran-in-srcdoc') {
+            println("PASS: TH8 runs in iframe srcdoc");
+        } else {
+            println("FAIL: inner='" + inner + "'");
+        }
+        done();
+    });
 });
 </script>
 </body>

@@ -20,14 +20,40 @@ ErrorOr<NonnullOwnPtr<Interpreter>> Interpreter::create(Th8_Platform const& plat
 {
     auto* mutable_platform = const_cast<Th8_Platform*>(&platform);
 
-    int rc = Th8_Initialize(mutable_platform);
-    if (rc != TH8_OK)
+    // [H9] Th8_Initialize sets up PROCESS-GLOBAL library state (main-thread
+    // allocator registration, the global mutex, and a copy of the platform)
+    // and deliberately returns TH8_ERROR when called more than once.  A single
+    // WebContent process hosts many documents -- each Document builds its own
+    // TH8Context and Interpreter, and processes are reused across navigations
+    // -- so initializing per interpreter succeeds for the first document and
+    // fails ("already initialized") for every one after it, leaving all later
+    // documents without a working TH8 interpreter.  Initialize the library
+    // exactly once per process via a magic static (C++ guarantees thread-safe,
+    // run-once initialization) and treat that single result as authoritative
+    // for every interpreter.  Each interpreter still receives its own
+    // per-document platform through Th8_CreateInterp below; the copy
+    // Th8_Initialize takes of this first platform only seeds global
+    // mutex/allocator state, which is identical across every web platform.
+    // Th8_Finalize is intentionally never called: the global state lives for
+    // the whole process and is reclaimed by the OS at exit.
+    static int const s_library_init_rc = Th8_Initialize(mutable_platform);
+    if (s_library_init_rc != TH8_OK)
         return Error::from_string_literal("Failed to initialize TH8 platform");
 
     auto* interp = Th8_CreateInterp(mutable_platform);
-    if (!interp) {
-        Th8_Finalize(mutable_platform);
+    if (!interp)
         return Error::from_string_literal("Failed to create TH8 interpreter");
+
+    // [H10] A bare Th8_CreateInterp interpreter has NO commands registered --
+    // not even `set`, `if`, `expr`, or `proc`.  Th8_RegisterLanguage installs
+    // the built-in language commands and must be called exactly once per
+    // interpreter to make it usable as a scripting engine.  These are pure
+    // computation commands (control flow, variables, string/list ops); all
+    // I/O, loading, and process access remain denied by the sandboxed
+    // platform, so registering the full language is safe for web content.
+    if (Th8_RegisterLanguage(interp) != TH8_OK) {
+        Th8_DeleteInterp(interp);
+        return Error::from_string_literal("Failed to register TH8 language commands");
     }
 
     return adopt_own(*new Interpreter(interp));

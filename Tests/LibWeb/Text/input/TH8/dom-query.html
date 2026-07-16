@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <body>
+<script src="../include.js"></script>
 <div id="target" class="test-class">Query Target</div>
 <div id="result">pending</div>
 <script type="text/th8">
@@ -22,11 +23,13 @@ set has_class [$elem2 hasAttribute class]
 [$doc getElementById result] textContent "tag=$tag text=$text class=$class_val has=$has_class"
 </script>
 <script>
-let result = document.getElementById('result').textContent;
-if (result === 'tag=DIV text=Query Target class=test-class has=1') {
-    println("PASS: DOM query tests");
-} else {
-    println("FAIL: " + result);
-}
+test(() => {
+    let result = document.getElementById('result').textContent;
+    if (result === 'tag=DIV text=Query Target class=test-class has=1') {
+        println("PASS: DOM query tests");
+    } else {
+        println("FAIL: " + result);
+    }
+});
 </script>
 </body>

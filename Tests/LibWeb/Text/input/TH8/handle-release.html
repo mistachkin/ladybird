@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <body>
+<script src="../include.js"></script>
 <div id="target">hello</div>
 <div id="result">pending</div>
 <script type="text/th8">
@@ -22,11 +23,13 @@ if {[catch {$elem textContent} err]} {
 }
 </script>
 <script>
-let result = document.getElementById('result').textContent;
-if (result === 'released: before=hello') {
-    println("PASS: handle release works");
-} else {
-    println("FAIL: " + result);
-}
+test(() => {
+    let result = document.getElementById('result').textContent;
+    if (result === 'released: before=hello') {
+        println("PASS: handle release works");
+    } else {
+        println("FAIL: " + result);
+    }
+});
 </script>
 </body>

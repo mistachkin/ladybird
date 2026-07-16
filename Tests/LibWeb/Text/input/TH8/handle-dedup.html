@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <body>
+<script src="../include.js"></script>
 <div id="target">original</div>
 <div id="result">pending</div>
 <script type="text/th8">
@@ -17,11 +18,13 @@ if {$elem1 eq $elem2} {
 }
 </script>
 <script>
-let result = document.getElementById('result').textContent;
-if (result === 'dedup: same') {
-    println("PASS: handle deduplication works");
-} else {
-    println("FAIL: " + result);
-}
+test(() => {
+    let result = document.getElementById('result').textContent;
+    if (result === 'dedup: same') {
+        println("PASS: handle deduplication works");
+    } else {
+        println("FAIL: " + result);
+    }
+});
 </script>
 </body>

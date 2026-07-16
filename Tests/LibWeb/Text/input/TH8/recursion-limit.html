@@ -5,6 +5,7 @@
     interpreter's stack-overflow / recursion-limit error.
 -->
 <body>
+<script src="../include.js"></script>
 <div id="result">pending</div>
 <script type="text/th8">
 set doc [dom::document]
@@ -16,11 +17,13 @@ if {[catch {bomb} err]} {
 }
 </script>
 <script>
-let r = document.getElementById('result').textContent;
-if (r === 'limited') {
-    println("PASS: TH8 recursion limit halts unbounded self-call");
-} else {
-    println("FAIL: " + r);
-}
+test(() => {
+    let r = document.getElementById('result').textContent;
+    if (r === 'limited') {
+        println("PASS: TH8 recursion limit halts unbounded self-call");
+    } else {
+        println("FAIL: " + r);
+    }
+});
 </script>
 </body>

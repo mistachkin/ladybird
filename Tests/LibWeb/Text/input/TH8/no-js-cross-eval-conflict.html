@@ -1,10 +1,28 @@
 <!DOCTYPE html>
-<html>
-<head>
-    <!-- Both no-javascript and cross-eval: mutually exclusive.
-         cross-eval should be silently ignored. -->
-    <meta http-equiv="TH8-Script-Policy" content="no-javascript; cross-eval">
-</head>
+<!--
+    Both no-javascript and cross-eval are requested; they are mutually
+    exclusive and no-javascript takes precedence, so cross-eval is silently
+    ignored and dom::eval_js remains blocked.
+
+    Test-harness note: no-javascript blocks every ordinary <script> once the
+    policy is active, so (as with the CSP tests) the harness + verification
+    are declared BEFORE the <meta> policy tag -- a meta policy only governs
+    content that follows it, and listeners registered beforehand still run.
+    The JS block that must be blocked, and the TH8 block under test, follow
+    the meta.
+-->
+<script src="../include.js"></script>
+<script>
+test(() => {
+    let r = document.getElementById('result').textContent;
+    if (r === 'correct: both blocked') {
+        println("PASS: no-javascript blocks JS and overrides cross-eval");
+    } else {
+        println("FAIL: " + r);
+    }
+});
+</script>
+<meta http-equiv="TH8-Script-Policy" content="no-javascript; cross-eval">
 <body>
 <div id="result">pending</div>
 
@@ -25,4 +43,3 @@ if {[catch {dom::eval_js 1} err]} {
 }
 </script>
 </body>
-</html>

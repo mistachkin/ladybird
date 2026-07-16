@@ -1,1 +1,1 @@
-
+PASS: no-javascript blocks JS and overrides cross-eval

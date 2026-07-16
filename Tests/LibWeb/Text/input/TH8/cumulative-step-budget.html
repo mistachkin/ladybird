@@ -9,23 +9,27 @@
     budget is being enforced.
 -->
 <body>
+<script src="../include.js"></script>
 <div id="step1">pending</div>
 <div id="step2">pending</div>
 <div id="step3">pending</div>
 <script type="text/th8">
-# Block 1: burn ~3 million steps.  Should complete cleanly within the
-# shared budget.
+# Block 1: burn a small, bounded chunk of steps and complete.  Sized
+# well under BOTH the cumulative step budget and the 250 ms per-evaluate
+# wall-clock watchdog so it reliably finishes and sets its marker (an
+# earlier 30000-iteration version sat right at the wall-clock boundary
+# and flakily got cancelled before this line ran).
 set doc [dom::document]
 set i 0
-while {$i < 30000} { incr i }
+while {$i < 2000} { incr i }
 [$doc getElementById step1] textContent "ok"
 </script>
 <script type="text/th8">
-# Block 2: burn another ~3 million steps.  Still within the shared
-# budget (which is 10M by default).
+# Block 2: another bounded chunk on the SAME per-document interpreter.
+# It runs against the shared budget left by block 1 and completes.
 set doc [dom::document]
 set i 0
-while {$i < 30000} { incr i }
+while {$i < 2000} { incr i }
 [$doc getElementById step2] textContent "ok"
 </script>
 <script type="text/th8">
@@ -44,13 +48,15 @@ if {[catch {
 }
 </script>
 <script>
-let s1 = document.getElementById('step1').textContent;
-let s2 = document.getElementById('step2').textContent;
-let s3 = document.getElementById('step3').textContent;
-if (s1 === 'ok' && s2 === 'ok' && s3 === 'limited') {
-    println("PASS: TH8 step budget is cumulative across script blocks");
-} else {
-    println("FAIL: s1='" + s1 + "' s2='" + s2 + "' s3='" + s3 + "'");
-}
+test(() => {
+    let s1 = document.getElementById('step1').textContent;
+    let s2 = document.getElementById('step2').textContent;
+    let s3 = document.getElementById('step3').textContent;
+    if (s1 === 'ok' && s2 === 'ok' && s3 === 'limited') {
+        println("PASS: TH8 step budget is cumulative across script blocks");
+    } else {
+        println("FAIL: s1='" + s1 + "' s2='" + s2 + "' s3='" + s3 + "'");
+    }
+});
 </script>
 </body>

@@ -8,6 +8,7 @@
     the resource-limit machinery is active.
 -->
 <body>
+<script src="../include.js"></script>
 <div id="result">pending</div>
 <script type="text/th8">
 set doc [dom::document]
@@ -28,11 +29,13 @@ if {[catch {
 }
 </script>
 <script>
-let r = document.getElementById('result').textContent;
-if (r === 'limited') {
-    println("PASS: TH8 memory limit halts runaway allocation");
-} else {
-    println("FAIL: " + r);
-}
+test(() => {
+    let r = document.getElementById('result').textContent;
+    if (r === 'limited') {
+        println("PASS: TH8 memory limit halts runaway allocation");
+    } else {
+        println("FAIL: " + r);
+    }
+});
 </script>
 </body>

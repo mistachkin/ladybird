@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <body>
+<script src="../include.js"></script>
 <div id="anchor">anchor</div>
 <div id="result">pending</div>
 <script type="text/th8">
@@ -35,11 +36,13 @@ $doc title "Set By TH8"
     "gebi=$gebi create=$create body=[$body tagName] head=[$head tagName] title=[$doc title]"
 </script>
 <script>
-let result = document.getElementById('result').textContent;
-if (result === 'gebi=1 create=1 body=BODY head=HEAD title=Set By TH8') {
-    println("PASS: document handle resolves document-scoped subcommands");
-} else {
-    println("FAIL: " + result);
-}
+test(() => {
+    let result = document.getElementById('result').textContent;
+    if (result === 'gebi=1 create=1 body=BODY head=HEAD title=Set By TH8') {
+        println("PASS: document handle resolves document-scoped subcommands");
+    } else {
+        println("FAIL: " + result);
+    }
+});
 </script>
 </body>

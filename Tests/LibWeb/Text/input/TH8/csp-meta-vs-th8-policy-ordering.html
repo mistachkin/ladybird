@@ -1,15 +1,31 @@
 <!DOCTYPE html>
 <!--
     [M7d] Verifies that when both CSP and TH8-Script-Policy meta tags
-    are present in `<head>`, BOTH apply and neither bypasses the
-    other.  Here we set:
-        CSP: script-src 'self' 'unsafe-inline'  (TH8 inline allowed)
+    are present, BOTH apply and neither bypasses the other.  Here we set:
+        CSP: script-src 'self' 'unsafe-inline'  (ordinary inline JS allowed)
         TH8: signed-only                        (unsigned TH8 forbidden)
-    The expected behavior is that the unsigned TH8 block is rejected
-    by the signed-only TH8 policy even though CSP would have allowed
-    it.  This pins that "TH8 policy AND CSP both gate" instead of
+    The expected behavior is that the unsigned TH8 block is rejected by the
+    signed-only TH8 policy even though CSP would have allowed an inline
+    script.  This pins "TH8 policy AND CSP both gate" rather than
     "first-checked wins".
+
+    Test-harness note: `script-src 'self'` does not match a file:// external
+    script, so `../include.js` cannot load once CSP is active.  Per the
+    canonical Ladybird CSP text-test pattern, the harness + verification are
+    declared BEFORE the <meta> tags (a meta policy only governs what follows
+    it); the <script type="text/th8"> under test is placed after them.
 -->
+<script src="../include.js"></script>
+<script>
+test(() => {
+    let r = document.getElementById('result').textContent;
+    if (r === 'blocked') {
+        println("PASS: signed-only TH8 policy enforced under permissive CSP");
+    } else {
+        println("FAIL: " + r);
+    }
+});
+</script>
 <meta http-equiv="Content-Security-Policy" content="script-src 'self' 'unsafe-inline'">
 <meta http-equiv="TH8-Script-Policy" content="signed-only">
 <body>
@@ -18,13 +34,5 @@
 set doc [dom::document]
 # Unsigned -- the signed-only policy must reject this.
 [$doc getElementById result] textContent "FAIL"
-</script>
-<script>
-let r = document.getElementById('result').textContent;
-if (r === 'blocked') {
-    println("PASS: signed-only TH8 policy enforced under permissive CSP");
-} else {
-    println("FAIL: " + r);
-}
 </script>
 </body>

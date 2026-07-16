@@ -164,13 +164,17 @@ static void deny_sandbox_unsafe_slots(Th8_Platform& platform, bool has_sidecar_c
 
 Th8_Platform build_web_content_platform_layers()
 {
-    // Start with an empty platform.
-    Th8_Platform platform = {};
-
-    // Layer 1: Null I/O -- blocks all file I/O, stdin/stdout, dynamic loading.
-    // This is the security foundation: scripts cannot access the host filesystem,
-    // load native code, or perform any I/O unless explicitly enabled.
-    Th8_MergePlatform(&platform, Th8_GetNullIoPlatform());
+    // Layer 1 (base): Null I/O -- blocks all file I/O, stdin/stdout, dynamic
+    // loading.  This is the security foundation: scripts cannot access the host
+    // filesystem, load native code, or perform any I/O unless explicitly enabled.
+    //
+    // COPY the NullIO platform as the base rather than merging into a zeroed
+    // struct.  Th8_MergePlatform rejects a version mismatch, and a zero-init
+    // Th8_Platform has nVersion == 0, which never matches the live platform ABI
+    // version -- so every subsequent merge would silently no-op and leave
+    // xMalloc (and every other slot) NULL, crashing Th8_CreateInterp.  Copying a
+    // real platform seeds the correct nVersion, mirroring Th8_GetDefaultPlatform.
+    Th8_Platform platform = *Th8_GetNullIoPlatform();
 
     // Layer 2: Libc -- provides memory allocation (malloc/free/realloc),
     // memcpy, memset, string comparison, formatting, and sorting.

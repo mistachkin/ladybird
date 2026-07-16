@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <body>
+<script src="../include.js"></script>
 <button id="btn">Click me</button>
 <div id="result">pending</div>
 <script type="text/th8">
@@ -16,15 +17,17 @@ set btn [$doc getElementById btn]
 $btn addEventListener click handleClick
 </script>
 <script>
-// Simulate a click to trigger the TH8 event handler.
-document.getElementById('btn').click();
+test(() => {
+    // Simulate a click to trigger the TH8 event handler.
+    document.getElementById('btn').click();
 
-// Verify the TH8 handler ran.
-let result = document.getElementById('result').textContent;
-if (result === 'clicked: click') {
-    println("PASS: TH8 event listener handled click");
-} else {
-    println("FAIL: expected 'clicked: click', got '" + result + "'");
-}
+    // Verify the TH8 handler ran.
+    let result = document.getElementById('result').textContent;
+    if (result === 'clicked: click') {
+        println("PASS: TH8 event listener handled click");
+    } else {
+        println("FAIL: expected 'clicked: click', got '" + result + "'");
+    }
+});
 </script>
 </body>

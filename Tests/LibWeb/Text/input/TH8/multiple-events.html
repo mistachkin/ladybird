@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <body>
+<script src="../include.js"></script>
 <button id="btn">test</button>
 <div id="log"></div>
 <div id="result">pending</div>
@@ -37,11 +38,13 @@ if {$count == 2} {
 }
 </script>
 <script>
-let result = document.getElementById('result').textContent;
-if (result.startsWith('both:')) {
-    println("PASS: multiple event listeners fired");
-} else {
-    println("FAIL: " + result);
-}
+test(() => {
+    let result = document.getElementById('result').textContent;
+    if (result.startsWith('both:')) {
+        println("PASS: multiple event listeners fired");
+    } else {
+        println("FAIL: " + result);
+    }
+});
 </script>
 </body>

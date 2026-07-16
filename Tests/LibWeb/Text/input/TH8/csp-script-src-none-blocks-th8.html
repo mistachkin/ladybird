@@ -3,20 +3,32 @@
     [M7] Verifies a CSP `script-src 'none'` blocks <script type="text/th8">
     just as it blocks <script>.  Without the CSP integration TH8 would
     constitute a scripting bypass.
+
+    Test-harness note: `script-src 'none'` also blocks every ordinary
+    <script> (external AND inline), so the LibWeb text-test harness cannot
+    run once the policy is active.  Following the canonical Ladybird CSP
+    text-test pattern (see ContentSecurityPolicy/script-duplicate-nonce-
+    attribute.html), the harness and the verification are declared BEFORE
+    the <meta> CSP tag -- a meta-delivered policy only governs content that
+    follows it in the document.  The <script type="text/th8"> under test is
+    placed AFTER the meta so the policy applies to it.
 -->
+<script src="../include.js"></script>
+<script>
+test(() => {
+    let r = document.getElementById('result').textContent;
+    if (r === 'unblocked') {
+        println("PASS: CSP script-src 'none' blocked TH8 script");
+    } else {
+        println("FAIL: TH8 script ran under script-src 'none' (" + r + ")");
+    }
+});
+</script>
 <meta http-equiv="Content-Security-Policy" content="script-src 'none'">
 <body>
 <div id="result">unblocked</div>
 <script type="text/th8">
 set doc [dom::document]
 [$doc getElementById result] textContent "FAIL"
-</script>
-<script>
-let r = document.getElementById('result').textContent;
-if (r === 'unblocked') {
-    println("PASS: CSP script-src 'none' blocked TH8 script");
-} else {
-    println("FAIL: TH8 script ran under script-src 'none' (" + r + ")");
-}
 </script>
 </body>

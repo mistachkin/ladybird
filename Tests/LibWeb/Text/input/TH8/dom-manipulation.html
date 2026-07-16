@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <body>
+<script src="../include.js"></script>
 <div id="container"></div>
 <script type="text/th8">
 set doc [dom::document]
@@ -22,14 +23,16 @@ $div innerHTML "<b>Bold text</b>"
 $container appendChild $div
 </script>
 <script>
-let para = document.getElementById('para1');
-let htmlDiv = document.getElementById('html-div');
+test(() => {
+    let para = document.getElementById('para1');
+    let htmlDiv = document.getElementById('html-div');
 
-if (para && para.textContent.includes('First paragraph')
-    && htmlDiv && htmlDiv.innerHTML === '<b>Bold text</b>') {
-    println("PASS: DOM manipulation works");
-} else {
-    println("FAIL: DOM manipulation");
-}
+    if (para && para.textContent.includes('First paragraph')
+        && htmlDiv && htmlDiv.innerHTML === '<b>Bold text</b>') {
+        println("PASS: DOM manipulation works");
+    } else {
+        println("FAIL: DOM manipulation");
+    }
+});
 </script>
 </body>

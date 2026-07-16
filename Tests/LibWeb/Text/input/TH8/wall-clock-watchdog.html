@@ -9,6 +9,7 @@
     fired.
 -->
 <body>
+<script src="../include.js"></script>
 <div id="result">pending</div>
 <script type="text/th8">
 set doc [dom::document]
@@ -24,11 +25,13 @@ if {[catch {
 }
 </script>
 <script>
-let r = document.getElementById('result').textContent;
-if (r === 'limited') {
-    println("PASS: TH8 wall-clock or step limit halts long-running loop");
-} else {
-    println("FAIL: " + r);
-}
+test(() => {
+    let r = document.getElementById('result').textContent;
+    if (r === 'limited') {
+        println("PASS: TH8 wall-clock or step limit halts long-running loop");
+    } else {
+        println("FAIL: " + r);
+    }
+});
 </script>
 </body>

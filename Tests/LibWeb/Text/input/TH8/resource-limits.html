@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <body>
+<script src="../include.js"></script>
 <div id="result">pending</div>
 <script type="text/th8">
 # Test that resource limits prevent runaway scripts.
@@ -20,11 +21,13 @@ if {[catch {
 }
 </script>
 <script>
-let result = document.getElementById('result').textContent;
-if (result.startsWith('limited:')) {
-    println("PASS: step limit stopped infinite loop");
-} else {
-    println("FAIL: expected 'limited:...', got '" + result + "'");
-}
+test(() => {
+    let result = document.getElementById('result').textContent;
+    if (result.startsWith('limited:')) {
+        println("PASS: step limit stopped infinite loop");
+    } else {
+        println("FAIL: expected 'limited:...', got '" + result + "'");
+    }
+});
 </script>
 </body>

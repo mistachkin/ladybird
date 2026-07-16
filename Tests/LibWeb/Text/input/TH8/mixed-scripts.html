@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <body>
+<script src="../include.js"></script>
 <script>
 // JS creates an element
 let jsDiv = document.createElement('div');
@@ -15,13 +16,15 @@ $elem setAttribute data-modified-by th8
 $elem textContent "Modified by TH8"
 </script>
 <script>
-// JS verifies TH8's modification
-let div = document.getElementById('js-created');
-if (div && div.textContent === 'Modified by TH8'
-    && div.getAttribute('data-modified-by') === 'th8') {
-    println("PASS: TH8 and JS can share the DOM");
-} else {
-    println("FAIL: mixed TH8/JS DOM interaction");
-}
+test(() => {
+    // JS verifies TH8's modification
+    let div = document.getElementById('js-created');
+    if (div && div.textContent === 'Modified by TH8'
+        && div.getAttribute('data-modified-by') === 'th8') {
+        println("PASS: TH8 and JS can share the DOM");
+    } else {
+        println("FAIL: mixed TH8/JS DOM interaction");
+    }
+});
 </script>
 </body>
