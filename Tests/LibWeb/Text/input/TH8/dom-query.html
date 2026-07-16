@@ -1,27 +1,32 @@
 <!DOCTYPE html>
 <body>
 <div id="target" class="test-class">Query Target</div>
+<div id="result">pending</div>
 <script type="text/th8">
 set doc [dom::document]
 
-# Test getElementById
+# getElementById + node reads (tagName, textContent, getAttribute).
 set elem [$doc getElementById target]
 set tag [$elem tagName]
 set text [$elem textContent]
+set class_val [$elem getAttribute class]
 
-# Test querySelector
+# querySelector + hasAttribute.
 set elem2 [$doc querySelector .test-class]
 set has_class [$elem2 hasAttribute class]
 
-# Test getAttribute
-set class_val [$elem getAttribute class]
+# Record everything the bridge produced back into the DOM so the JS
+# check below FAILS if any TH8 bridge read did not run.  (Previously
+# this test only checked static markup from JS, so the TH8 side could
+# have errored and the test would still have passed.)
+[$doc getElementById result] textContent "tag=$tag text=$text class=$class_val has=$has_class"
 </script>
 <script>
-let target = document.getElementById('target');
-if (target) {
+let result = document.getElementById('result').textContent;
+if (result === 'tag=DIV text=Query Target class=test-class has=1') {
     println("PASS: DOM query tests");
 } else {
-    println("FAIL: DOM query tests");
+    println("FAIL: " + result);
 }
 </script>
 </body>

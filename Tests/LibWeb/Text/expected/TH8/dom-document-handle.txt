@@ -1,0 +1,1 @@
+PASS: document handle resolves document-scoped subcommands
