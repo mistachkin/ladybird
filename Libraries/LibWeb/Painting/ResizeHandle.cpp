@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, the Ladybird developers.
+ * Copyright (c) 2026-present, the Ladybird developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -7,7 +7,7 @@
 #include <LibGC/WeakInlines.h>
 #include <LibWeb/DOM/Element.h>
 #include <LibWeb/Page/ElementResizeAction.h>
-#include <LibWeb/Painting/PaintableBox.h>
+#include <LibWeb/Painting/Paintable.h>
 #include <LibWeb/Painting/ResizeHandle.h>
 #include <LibWeb/UIEvents/EventNames.h>
 #include <LibWeb/UIEvents/MouseButton.h>
@@ -15,20 +15,20 @@
 
 namespace Web::Painting {
 
-NonnullRefPtr<ResizeHandle> ResizeHandle::create(PaintableBox& paintable_box)
+NonnullRefPtr<ResizeHandle> ResizeHandle::create(Paintable& paintable_box)
 {
     return adopt_ref(*new ResizeHandle(paintable_box));
 }
 
-ResizeHandle::ResizeHandle(PaintableBox& paintable_box)
-    : m_paintable_box(paintable_box)
+ResizeHandle::ResizeHandle(Paintable& paintable_box)
+    : ChromeWidget(paintable_box)
     , m_element(as<DOM::Element>(*paintable_box.dom_node()))
 {
 }
 
 bool ResizeHandle::contains(CSSPixelPoint position, ChromeMetrics const& metrics) const
 {
-    auto paintable_box = m_paintable_box.strong_ref();
+    auto paintable_box = paintable();
     if (!paintable_box)
         return false;
     return paintable_box->resizer_contains(position, metrics);
@@ -36,7 +36,7 @@ bool ResizeHandle::contains(CSSPixelPoint position, ChromeMetrics const& metrics
 
 Optional<CSS::CursorPredefined> ResizeHandle::cursor() const
 {
-    auto paintable_box = m_paintable_box.strong_ref();
+    auto paintable_box = paintable();
     if (!paintable_box)
         return {};
     auto axes = paintable_box->physical_resize_axes();
@@ -51,7 +51,7 @@ Optional<CSS::CursorPredefined> ResizeHandle::cursor() const
     return CSS::CursorPredefined::EwResize;
 }
 
-MouseAction ResizeHandle::handle_pointer_event(FlyString const& type, unsigned button, CSSPixelPoint visual_viewport_position)
+MouseAction ResizeHandle::handle_pointer_event(Utf16FlyString const& type, unsigned button, CSSPixelPoint visual_viewport_position)
 {
     if (type == UIEvents::EventNames::pointermove) {
         if (!m_resize_action)

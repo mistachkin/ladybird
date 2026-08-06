@@ -14,6 +14,8 @@
 #include <LibGfx/Font/Font.h>
 #include <LibGfx/Point.h>
 #include <LibGfx/TextLayout.h>
+#include <LibUnicode/CharacterTypes.h>
+#include <RustFFI.h>
 #include <core/SkFont.h>
 #include <core/SkTextBlob.h>
 #include <harfbuzz/hb.h>
@@ -56,7 +58,11 @@ void GlyphRun::ensure_text_blob(float scale) const
         return;
 
     auto sk_font = m_font->skia_font(scale);
-    auto glyph_count = m_glyphs.size();
+    size_t glyph_count = 0;
+    for (auto const& glyph : m_glyphs) {
+        if (glyph.should_paint)
+            ++glyph_count;
+    }
 
     m_cached_text_blob = make<CachedTextBlob>();
     m_cached_text_blob->scale = scale;
@@ -68,10 +74,14 @@ void GlyphRun::ensure_text_blob(float scale) const
     auto const& run = builder.allocRunPos(sk_font, glyph_count);
 
     float font_ascent = m_font->pixel_metrics().ascent;
-    for (size_t i = 0; i < glyph_count; ++i) {
-        run.glyphs[i] = m_glyphs[i].glyph_id;
-        run.pos[i * 2] = m_glyphs[i].position.x() * scale;
-        run.pos[i * 2 + 1] = (m_glyphs[i].position.y() + font_ascent) * scale;
+    size_t painted_glyph_index = 0;
+    for (auto const& glyph : m_glyphs) {
+        if (!glyph.should_paint)
+            continue;
+        run.glyphs[painted_glyph_index] = glyph.glyph_id;
+        run.pos[painted_glyph_index * 2] = glyph.position.x() * scale;
+        run.pos[painted_glyph_index * 2 + 1] = (glyph.position.y() + font_ascent) * scale;
+        ++painted_glyph_index;
     }
 
     m_cached_text_blob->blob = builder.make();
@@ -227,7 +237,15 @@ static NonnullOwnPtr<ShapedGlyphs> build_origin_relative_shape(Utf16View const& 
         return string.length_in_code_units() - starting_offset;
     };
 
+    auto should_paint_glyph = [&](auto index) {
+        auto starting_offset = glyph_info[index].cluster;
+        if (starting_offset >= string.length_in_code_units())
+            return true;
+        return !Unicode::code_point_has_default_ignorable_code_point_property(string.code_point_at(starting_offset));
+    };
+
     for (size_t i = 0; i < glyph_count; ++i) {
+        bool should_paint = should_paint_glyph(i);
         auto position = point
             - FloatPoint { 0, metrics.ascent }
             + FloatPoint { positions[i].x_offset, positions[i].y_offset } / text_shaping_resolution;
@@ -235,9 +253,13 @@ static NonnullOwnPtr<ShapedGlyphs> build_origin_relative_shape(Utf16View const& 
         glyphs.unchecked_append({
             .position = position,
             .length_in_code_units = glyph_length_in_code_units(i),
-            .glyph_width = positions[i].x_advance / text_shaping_resolution + letter_spacing,
+            .glyph_width = should_paint ? positions[i].x_advance / text_shaping_resolution + letter_spacing : 0,
             .glyph_id = glyph_info[i].codepoint,
+            .should_paint = should_paint,
         });
+
+        if (!should_paint)
+            continue;
 
         point += FloatPoint { positions[i].x_advance, positions[i].y_advance } / text_shaping_resolution;
 
@@ -309,4 +331,60 @@ float measure_text_width(Utf16View const& string, Font const& font, float letter
     return static_cast<float>(point_x / text_shaping_resolution + glyph_count * letter_spacing);
 }
 
+}
+
+static_assert(to_underlying(Gfx::FFI::TextType::Common) == to_underlying(Gfx::GlyphRun::TextType::Common));
+static_assert(to_underlying(Gfx::FFI::TextType::ContextDependent) == to_underlying(Gfx::GlyphRun::TextType::ContextDependent));
+static_assert(to_underlying(Gfx::FFI::TextType::EndPadding) == to_underlying(Gfx::GlyphRun::TextType::EndPadding));
+static_assert(to_underlying(Gfx::FFI::TextType::Ltr) == to_underlying(Gfx::GlyphRun::TextType::Ltr));
+static_assert(to_underlying(Gfx::FFI::TextType::Rtl) == to_underlying(Gfx::GlyphRun::TextType::Rtl));
+static_assert(sizeof(Gfx::FFI::DrawGlyph) == sizeof(Gfx::DrawGlyph));
+static_assert(alignof(Gfx::FFI::DrawGlyph) == alignof(Gfx::DrawGlyph));
+static_assert(IsTriviallyCopyable<Gfx::FFI::DrawGlyph>);
+static_assert(IsTriviallyCopyable<Gfx::DrawGlyph>);
+static_assert(sizeof(Gfx::FloatPoint) == 2 * sizeof(float));
+static_assert(offsetof(Gfx::FFI::DrawGlyph, x) == offsetof(Gfx::DrawGlyph, position));
+static_assert(offsetof(Gfx::FFI::DrawGlyph, y) == offsetof(Gfx::DrawGlyph, position) + sizeof(float));
+static_assert(offsetof(Gfx::FFI::DrawGlyph, length_in_code_units) == offsetof(Gfx::DrawGlyph, length_in_code_units));
+static_assert(offsetof(Gfx::FFI::DrawGlyph, glyph_width) == offsetof(Gfx::DrawGlyph, glyph_width));
+static_assert(offsetof(Gfx::FFI::DrawGlyph, glyph_id) == offsetof(Gfx::DrawGlyph, glyph_id));
+static_assert(offsetof(Gfx::FFI::DrawGlyph, should_paint) == offsetof(Gfx::DrawGlyph, should_paint));
+
+extern "C" {
+Gfx::FFI::ShapedRunView ladybird_gfx_shape_text(void const*, u16 const*, size_t, Gfx::FFI::TextType, float, float);
+void ladybird_gfx_glyph_run_unref(void*);
+}
+
+extern "C" Gfx::FFI::ShapedRunView ladybird_gfx_shape_text(
+    void const* font,
+    u16 const* text_utf16,
+    size_t length_in_code_units,
+    Gfx::FFI::TextType text_type,
+    float baseline_start_x,
+    float letter_spacing)
+{
+    VERIFY(font);
+    VERIFY(text_utf16 || length_in_code_units == 0);
+    auto text = length_in_code_units == 0
+        ? Utf16View {}
+        : Utf16View { reinterpret_cast<char16_t const*>(text_utf16), length_in_code_units };
+    auto run = Gfx::shape_text(
+        { baseline_start_x, 0 },
+        letter_spacing,
+        text,
+        *static_cast<Gfx::Font const*>(font),
+        static_cast<Gfx::GlyphRun::TextType>(text_type));
+    auto* retained = &run.leak_ref();
+    return {
+        .glyphs = reinterpret_cast<Gfx::FFI::DrawGlyph const*>(retained->glyphs().data()),
+        .glyph_count = retained->glyphs().size(),
+        .width = retained->width(),
+        .retained = retained,
+    };
+}
+
+extern "C" void ladybird_gfx_glyph_run_unref(void* retained)
+{
+    VERIFY(retained);
+    static_cast<Gfx::GlyphRun*>(retained)->unref();
 }

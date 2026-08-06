@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, The Ladybird developers
+ * Copyright (c) 2026-present, the Ladybird developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -29,6 +29,40 @@ static void spin_until(Core::EventLoop& loop, Function<bool()> condition, AK::Du
     }
 
     FAIL("Timed out waiting for condition");
+}
+
+TEST_CASE(send_queue_does_not_send_message_bytes_without_fds)
+{
+    auto queue = adopt_ref(*new IPC::SendQueue);
+
+    IPC::MessageDataType first_payload;
+    first_payload.append('A');
+
+    IPC::MessageDataType second_payload;
+    second_payload.append('B');
+
+    Vector<int> first_fds;
+    first_fds.ensure_capacity(Core::LocalSocket::MAX_TRANSFER_FDS);
+    for (size_t i = 0; i < Core::LocalSocket::MAX_TRANSFER_FDS; ++i)
+        first_fds.unchecked_append(static_cast<int>(i));
+
+    Vector<int> second_fds;
+    second_fds.append(999);
+
+    queue->enqueue_message({}, move(first_payload), move(first_fds));
+    queue->enqueue_message({}, move(second_payload), move(second_fds));
+
+    auto first_batch = queue->peek(4096);
+    EXPECT_EQ(first_batch.bytes.size(), sizeof(IPC::SocketMessageHeader) + 1);
+    EXPECT_EQ(first_batch.bytes[sizeof(IPC::SocketMessageHeader)], static_cast<u8>('A'));
+    EXPECT_EQ(first_batch.fds.size(), Core::LocalSocket::MAX_TRANSFER_FDS);
+
+    queue->discard(first_batch.bytes.size(), first_batch.fds.size());
+
+    auto second_batch = queue->peek(4096);
+    EXPECT_EQ(second_batch.bytes.size(), sizeof(IPC::SocketMessageHeader) + 1);
+    EXPECT_EQ(second_batch.bytes[sizeof(IPC::SocketMessageHeader)], static_cast<u8>('B'));
+    EXPECT_EQ(second_batch.fds.size(), 1u);
 }
 
 TEST_CASE(read_hook_is_notified_on_peer_hangup)
@@ -119,7 +153,7 @@ TEST_CASE(message_arriving_just_before_eof_is_not_dropped_on_shutdown)
         IPC::MessageDataType payload;
         payload.append(hello.data(), hello.size());
         Vector<IPC::Attachment> no_attachments;
-        peer.post_message(move(payload), no_attachments);
+        MUST(peer.post_message(move(payload), no_attachments));
         peer.close_after_sending_all_pending_messages();
     }
 
@@ -177,7 +211,7 @@ TEST_CASE(buffered_message_is_drained_when_io_thread_stops_without_reading_it)
         IPC::MessageDataType payload;
         payload.append(hello.data(), hello.size());
         Vector<IPC::Attachment> no_attachments;
-        peer.post_message(move(payload), no_attachments);
+        MUST(peer.post_message(move(payload), no_attachments));
         peer.close_after_sending_all_pending_messages();
     }
 

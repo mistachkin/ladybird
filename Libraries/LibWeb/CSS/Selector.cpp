@@ -10,8 +10,11 @@
 #include <AK/NeverDestroyed.h>
 #include <LibWeb/CSS/AncestorFilter.h>
 #include <LibWeb/CSS/CSSStyleRule.h>
+#include <LibWeb/CSS/CSSStyleSheet.h>
 #include <LibWeb/CSS/Parser/ErrorReporter.h>
+#include <LibWeb/CSS/SelectorRustBridge.h>
 #include <LibWeb/CSS/Serialize.h>
+#include <LibWeb/SelectorRustFFI.h>
 
 namespace Web::CSS {
 
@@ -29,60 +32,10 @@ static bool component_value_contains_nesting_selector(Parser::ComponentValue con
     return false;
 }
 
-static bool can_selector_use_fast_matches(Selector const& selector)
-{
-    for (auto const& compound_selector : selector.compound_selectors()) {
-        if (!first_is_one_of(compound_selector.combinator,
-                Selector::Combinator::None, Selector::Combinator::Descendant, Selector::Combinator::ImmediateChild)) {
-            return false;
-        }
-
-        for (auto const& simple_selector : compound_selector.simple_selectors) {
-            if (simple_selector.type == Selector::SimpleSelector::Type::PseudoClass) {
-                auto const pseudo_class = simple_selector.pseudo_class().type;
-                if (!first_is_one_of(pseudo_class,
-                        PseudoClass::Active,
-                        PseudoClass::AnyLink,
-                        PseudoClass::Autofill,
-                        PseudoClass::Checked,
-                        PseudoClass::Disabled,
-                        PseudoClass::Empty,
-                        PseudoClass::Enabled,
-                        PseudoClass::FirstChild,
-                        PseudoClass::Focus,
-                        PseudoClass::FocusVisible,
-                        PseudoClass::FocusWithin,
-                        PseudoClass::Hover,
-                        PseudoClass::LastChild,
-                        PseudoClass::Link,
-                        PseudoClass::LocalLink,
-                        PseudoClass::OnlyChild,
-                        PseudoClass::Root,
-                        PseudoClass::State,
-                        PseudoClass::Unchecked,
-                        PseudoClass::Visited))
-                    return false;
-            } else if (!first_is_one_of(simple_selector.type,
-                           Selector::SimpleSelector::Type::TagName,
-                           Selector::SimpleSelector::Type::Universal,
-                           Selector::SimpleSelector::Type::Class,
-                           Selector::SimpleSelector::Type::Id,
-                           Selector::SimpleSelector::Type::Attribute)) {
-                return false;
-            }
-        }
-    }
-
-    return true;
-}
-
 Selector::Selector(Vector<CompoundSelector>&& compound_selectors)
     : m_compound_selectors(move(compound_selectors))
 {
     for (auto const& compound_selector : m_compound_selectors) {
-        if (compound_selector.combinator == Combinator::PseudoElement)
-            m_contains_pseudo_element_transition = true;
-
         for (auto const& simple_selector : compound_selector.simple_selectors) {
             if (simple_selector.type != SimpleSelector::Type::PseudoElement)
                 continue;
@@ -91,16 +44,6 @@ Selector::Selector(Vector<CompoundSelector>&& compound_selectors)
                 m_contains_slotted_pseudo_element = true;
             if (simple_selector.pseudo_element().type() == PseudoElement::Part)
                 m_contains_part_pseudo_element = true;
-        }
-    }
-
-    if (!m_compound_selectors.is_empty()) {
-        auto const& rightmost_compound = m_compound_selectors.last();
-        if (!rightmost_compound.simple_selectors.is_empty()
-            && rightmost_compound.simple_selectors.first().type == SimpleSelector::Type::PseudoElement) {
-            auto pseudo_element = rightmost_compound.simple_selectors.first().pseudo_element().type();
-            if (!first_is_one_of(pseudo_element, PseudoElement::Slotted, PseudoElement::Part))
-                m_target_pseudo_element = pseudo_element;
         }
     }
 
@@ -142,8 +85,39 @@ Selector::Selector(Vector<CompoundSelector>&& compound_selectors)
 
     collect_ancestor_hashes();
 
-    m_can_use_fast_matches = can_selector_use_fast_matches(*this);
+    m_rust_selector = compile_selector_for_matching(*this);
+    VERIFY(m_rust_selector);
+    m_target_pseudo_element = pseudo_element_from_ffi(SelectorFFI::rust_selector_target_pseudo_element(m_rust_selector));
 }
+
+Selector::~Selector()
+{
+    SelectorFFI::rust_selector_destroy(m_rust_selector);
+}
+
+static void append_integer(Utf16StringBuilder& builder, i64 value)
+{
+    if (value == 0) {
+        builder.append_ascii('0');
+        return;
+    }
+
+    if (value < 0)
+        builder.append_ascii('-');
+
+    u64 magnitude = value < 0 ? 0 - static_cast<u64>(value) : static_cast<u64>(value);
+    Array<char, 20> digits;
+    size_t digit_count = 0;
+    while (magnitude > 0) {
+        digits[digit_count++] = static_cast<char>('0' + magnitude % 10);
+        magnitude /= 10;
+    }
+
+    while (digit_count > 0)
+        builder.append_ascii(digits[--digit_count]);
+}
+
+static void serialize_a_group_of_selectors_to_builder(Utf16StringBuilder&, SelectorList const&, GC::Ptr<CSSStyleSheet const>);
 
 void Selector::collect_ancestor_hashes()
 {
@@ -207,10 +181,10 @@ void Selector::collect_ancestor_hashes()
             Vector<u32> hashes;
             switch (simple_selector.type) {
             case SimpleSelector::Type::Id:
-                hashes.append(ancestor_filter_hash_for_id(simple_selector.name().hash()));
+                hashes.append(ancestor_filter_hash_for_id(simple_selector.id_name().hash()));
                 break;
             case SimpleSelector::Type::Class:
-                hashes.append(ancestor_filter_hash_for_class(simple_selector.name().hash()));
+                hashes.append(ancestor_filter_hash_for_class(simple_selector.class_name().hash()));
                 break;
             case SimpleSelector::Type::TagName:
                 hashes.append(ancestor_filter_hash_for_tag_name(simple_selector.qualified_name().name.lowercase_name.hash()));
@@ -514,51 +488,87 @@ u32 Selector::specificity() const
     return *m_specificity;
 }
 
-String Selector::PseudoElementSelector::serialize() const
+Utf16String Selector::PseudoElementSelector::serialize() const
 {
-    StringBuilder builder;
-    builder.append("::"sv);
+    Utf16StringBuilder builder;
+    serialize_to(builder);
+    return builder.to_string();
+}
+
+void Selector::PseudoElementSelector::serialize_to(Utf16StringBuilder& builder, GC::Ptr<CSSStyleSheet const> style_sheet) const
+{
+    builder.append_ascii("::"sv);
 
     if (!m_name.is_empty()) {
-        builder.append(m_name);
+        builder.append(m_name.view());
     } else {
-        builder.append(pseudo_element_name(m_type));
+        builder.append_ascii(pseudo_element_name(m_type));
     }
 
     m_value.visit(
-        [&builder](NonnullRefPtr<Selector> const& compound_selector) {
-            builder.append('(');
-            builder.append(compound_selector->serialize());
-            builder.append(')');
+        [&builder, style_sheet](NonnullRefPtr<Selector> const& compound_selector) {
+            builder.append_ascii('(');
+            compound_selector->serialize_to(builder, style_sheet);
+            builder.append_ascii(')');
         },
         [&builder](PTNameSelector const& pt_name_selector) {
-            builder.append('(');
+            builder.append_ascii('(');
             if (pt_name_selector.is_universal)
-                builder.append('*');
+                builder.append_ascii('*');
             else
-                builder.append(pt_name_selector.value);
-            builder.append(')');
+                builder.append(pt_name_selector.value.view());
+            builder.append_ascii(')');
         },
         [&builder](IdentList const& ident_list) {
-            builder.append('(');
+            builder.append_ascii('(');
             bool first = true;
             for (auto const& ident : ident_list) {
                 if (!first)
-                    builder.append(' ');
+                    builder.append_ascii(' ');
                 first = false;
-                builder.append(serialize_an_identifier(ident));
+                serialize_an_identifier(builder, ident);
             }
-            builder.append(')');
+            builder.append_ascii(')');
         },
         [](Empty const&) {});
-
-    return builder.to_string_without_validation();
 }
 
 // https://www.w3.org/TR/cssom/#serialize-a-simple-selector
-String Selector::SimpleSelector::serialize() const
+Utf16String Selector::SimpleSelector::serialize() const
 {
-    StringBuilder s;
+    Utf16StringBuilder builder;
+    serialize_to(builder);
+    return builder.to_string();
+}
+
+static bool should_serialize_any_namespace_prefix(GC::Ptr<CSSStyleSheet const> style_sheet)
+{
+    return style_sheet && style_sheet->default_namespace().has_value();
+}
+
+static bool named_namespace_maps_to_default_namespace(Selector::SimpleSelector::QualifiedName const& qualified_name, GC::Ptr<CSSStyleSheet const> style_sheet)
+{
+    if (!style_sheet || qualified_name.namespace_type != Selector::SimpleSelector::QualifiedName::NamespaceType::Named)
+        return false;
+
+    auto namespace_uri = style_sheet->namespace_uri(qualified_name.namespace_);
+    auto default_namespace = style_sheet->default_namespace();
+    return namespace_uri.has_value() && default_namespace.has_value() && *namespace_uri == *default_namespace;
+}
+
+static bool should_skip_universal_selector(Selector::SimpleSelector::QualifiedName const& qualified_name, GC::Ptr<CSSStyleSheet const> style_sheet)
+{
+    if (qualified_name.namespace_type == Selector::SimpleSelector::QualifiedName::NamespaceType::Default)
+        return true;
+    if (qualified_name.namespace_type == Selector::SimpleSelector::QualifiedName::NamespaceType::Any)
+        return !should_serialize_any_namespace_prefix(style_sheet);
+    if (named_namespace_maps_to_default_namespace(qualified_name, style_sheet))
+        return true;
+    return false;
+}
+
+void Selector::SimpleSelector::serialize_to(Utf16StringBuilder& s, GC::Ptr<CSSStyleSheet const> style_sheet) const
+{
     switch (type) {
     case Selector::SimpleSelector::Type::TagName:
     case Selector::SimpleSelector::Type::Universal: {
@@ -566,15 +576,17 @@ String Selector::SimpleSelector::serialize() const
         // 1. If the namespace prefix maps to a namespace that is not the default namespace and is not the null
         //    namespace (not in a namespace) append the serialization of the namespace prefix as an identifier,
         //    followed by a "|" (U+007C) to s.
-        if (qualified_name.namespace_type == QualifiedName::NamespaceType::Named) {
+        if (qualified_name.namespace_type == QualifiedName::NamespaceType::Named && !named_namespace_maps_to_default_namespace(qualified_name, style_sheet)) {
             serialize_an_identifier(s, qualified_name.namespace_);
-            s.append('|');
+            s.append_ascii('|');
+        } else if (qualified_name.namespace_type == QualifiedName::NamespaceType::Any && should_serialize_any_namespace_prefix(style_sheet)) {
+            s.append_ascii("*|"sv);
         }
 
         // 2. If the namespace prefix maps to a namespace that is the null namespace (not in a namespace)
         //    append "|" (U+007C) to s.
         if (qualified_name.namespace_type == QualifiedName::NamespaceType::None)
-            s.append('|');
+            s.append_ascii('|');
 
         // 3. If this is a type selector append the serialization of the element name as an identifier to s.
         if (type == Selector::SimpleSelector::Type::TagName)
@@ -582,7 +594,7 @@ String Selector::SimpleSelector::serialize() const
 
         // 4. If this is a universal selector append "*" (U+002A) to s.
         if (type == Selector::SimpleSelector::Type::Universal)
-            s.append('*');
+            s.append_ascii('*');
 
         break;
     }
@@ -590,15 +602,15 @@ String Selector::SimpleSelector::serialize() const
         auto& attribute = this->attribute();
 
         // 1. Append "[" (U+005B) to s.
-        s.append('[');
+        s.append_ascii('[');
 
         // 2. If the namespace prefix maps to a namespace that is not the null namespace (not in a namespace)
         //    append the serialization of the namespace prefix as an identifier, followed by a "|" (U+007C) to s.
         if (attribute.qualified_name.namespace_type == QualifiedName::NamespaceType::Named) {
             serialize_an_identifier(s, attribute.qualified_name.namespace_);
-            s.append('|');
+            s.append_ascii('|');
         } else if (attribute.qualified_name.namespace_type == QualifiedName::NamespaceType::Any) {
-            s.append("*|"sv);
+            s.append_ascii("*|"sv);
         }
 
         // 3. Append the serialization of the attribute name as an identifier to s.
@@ -609,22 +621,22 @@ String Selector::SimpleSelector::serialize() const
         if (!attribute.value.is_empty()) {
             switch (attribute.match_type) {
             case Selector::SimpleSelector::Attribute::MatchType::ExactValueMatch:
-                s.append("="sv);
+                s.append_ascii("="sv);
                 break;
             case Selector::SimpleSelector::Attribute::MatchType::ContainsWord:
-                s.append("~="sv);
+                s.append_ascii("~="sv);
                 break;
             case Selector::SimpleSelector::Attribute::MatchType::ContainsString:
-                s.append("*="sv);
+                s.append_ascii("*="sv);
                 break;
             case Selector::SimpleSelector::Attribute::MatchType::StartsWithSegment:
-                s.append("|="sv);
+                s.append_ascii("|="sv);
                 break;
             case Selector::SimpleSelector::Attribute::MatchType::StartsWithString:
-                s.append("^="sv);
+                s.append_ascii("^="sv);
                 break;
             case Selector::SimpleSelector::Attribute::MatchType::EndsWithString:
-                s.append("$="sv);
+                s.append_ascii("$="sv);
                 break;
             default:
                 break;
@@ -638,30 +650,30 @@ String Selector::SimpleSelector::serialize() const
         //    (the line just above is an addition to CSS OM to match Selectors Level 4 last draft)
         switch (attribute.case_type) {
         case Selector::SimpleSelector::Attribute::CaseType::CaseInsensitiveMatch:
-            s.append(" i"sv);
+            s.append_ascii(" i"sv);
             break;
         case Selector::SimpleSelector::Attribute::CaseType::CaseSensitiveMatch:
-            s.append(" s"sv);
+            s.append_ascii(" s"sv);
             break;
         default:
             break;
         }
 
         // 6. Append "]" (U+005D) to s.
-        s.append(']');
+        s.append_ascii(']');
         break;
     }
 
     case Selector::SimpleSelector::Type::Class:
         // Append a "." (U+002E), followed by the serialization of the class name as an identifier to s.
-        s.append('.');
-        serialize_an_identifier(s, name());
+        s.append_ascii('.');
+        serialize_an_identifier(s, class_name().view());
         break;
 
     case Selector::SimpleSelector::Type::Id:
         // Append a "#" (U+0023), followed by the serialization of the ID as an identifier to s.
-        s.append('#');
-        serialize_an_identifier(s, name());
+        s.append_ascii('#');
+        serialize_an_identifier(s, id_name().view());
         break;
 
     case Selector::SimpleSelector::Type::PseudoClass: {
@@ -686,15 +698,15 @@ String Selector::SimpleSelector::serialize() const
 
         // If the pseudo-class does not accept arguments append ":" (U+003A), followed by the name of the pseudo-class, to s.
         if (!accepts_arguments) {
-            s.append(':');
-            s.append(pseudo_class_name(pseudo_class.type));
+            s.append_ascii(':');
+            s.append_ascii(pseudo_class_name(pseudo_class.type));
         }
         // Otherwise, append ":" (U+003A), followed by the name of the pseudo-class, followed by "(" (U+0028),
         // followed by the value of the pseudo-class argument(s) determined as per below, followed by ")" (U+0029), to s.
         else {
-            s.append(':');
-            s.append(pseudo_class_name(pseudo_class.type));
-            s.append('(');
+            s.append_ascii(':');
+            s.append_ascii(pseudo_class_name(pseudo_class.type));
+            s.append_ascii('(');
             // NB: The spec list is incomplete. For ease of maintenance, we use the data from PseudoClasses.json for
             //     this instead of a hard-coded list.
             switch (metadata.parameter_type) {
@@ -703,7 +715,7 @@ String Selector::SimpleSelector::serialize() const
             case PseudoClassMetadata::ParameterType::ANPlusB:
             case PseudoClassMetadata::ParameterType::ANPlusBOf:
                 // The result of serializing the value using the rules to serialize an <an+b> value.
-                s.append(pseudo_class.an_plus_b_pattern.serialize());
+                pseudo_class.an_plus_b_pattern.serialize_to(s);
                 break;
             case PseudoClassMetadata::ParameterType::CompoundSelector:
             case PseudoClassMetadata::ParameterType::ForgivingSelectorList:
@@ -711,61 +723,73 @@ String Selector::SimpleSelector::serialize() const
             case PseudoClassMetadata::ParameterType::RelativeSelectorList:
             case PseudoClassMetadata::ParameterType::SelectorList:
                 // The result of serializing the value using the rules for serializing a group of selectors.
-                s.append(serialize_a_group_of_selectors(pseudo_class.argument_selector_list));
+                serialize_a_group_of_selectors_to_builder(s, pseudo_class.argument_selector_list, style_sheet);
                 break;
             case PseudoClassMetadata::ParameterType::Ident:
-                s.append(serialize_an_identifier(pseudo_class.ident->string_value));
+                serialize_an_identifier(s, pseudo_class.ident->string_value);
                 break;
             case PseudoClassMetadata::ParameterType::LanguageRanges:
                 // The serialization of a comma-separated list of each argument’s serialization as a string, preserving relative order.
-                s.join(", "sv, pseudo_class.languages);
+                for (size_t i = 0; i < pseudo_class.languages.size(); ++i) {
+                    if (i > 0)
+                        s.append_ascii(", "sv);
+                    s.append(pseudo_class.languages[i].view());
+                }
                 break;
             case PseudoClassMetadata::ParameterType::LevelList:
                 // AD-HOC: not in the spec.
-                s.join(", "sv, pseudo_class.levels);
+                for (size_t i = 0; i < pseudo_class.levels.size(); ++i) {
+                    if (i > 0)
+                        s.append_ascii(", "sv);
+                    append_integer(s, pseudo_class.levels[i]);
+                }
                 break;
             }
-            s.append(')');
+            s.append_ascii(')');
         }
         break;
     }
     case Selector::SimpleSelector::Type::PseudoElement:
         // AD-HOC: Spec issue: https://github.com/w3c/csswg-drafts/issues/11997
-        s.append(this->pseudo_element().serialize());
+        this->pseudo_element().serialize_to(s, style_sheet);
         break;
     case Type::Nesting:
         // AD-HOC: Not in spec yet.
-        s.append('&');
+        s.append_ascii('&');
         break;
     case Type::Invalid:
         // AD-HOC: We're not told how to do these. Just serialize their component values.
         auto invalid = value.get<Invalid>();
         for (auto const& component_value : invalid.component_values)
-            s.append(component_value.to_string());
+            component_value.serialize_to(s);
         break;
     }
-    return MUST(s.to_string());
 }
 
 // https://www.w3.org/TR/cssom/#serialize-a-selector
-String Selector::serialize() const
+Utf16String Selector::serialize() const
 {
-    StringBuilder s;
+    Utf16StringBuilder builder;
+    serialize_to(builder);
+    return builder.to_string();
+}
 
+void Selector::serialize_to(Utf16StringBuilder& s, GC::Ptr<CSSStyleSheet const> style_sheet) const
+{
     // AD-HOC: If this is a relative selector, we need to serialize the starting combinator.
     if (!compound_selectors().is_empty()) {
         switch (compound_selectors().first().combinator) {
         case Combinator::ImmediateChild:
-            s.append("> "sv);
+            s.append_ascii("> "sv);
             break;
         case Combinator::NextSibling:
-            s.append("+ "sv);
+            s.append_ascii("+ "sv);
             break;
         case Combinator::SubsequentSibling:
-            s.append("~ "sv);
+            s.append_ascii("~ "sv);
             break;
         case Combinator::Column:
-            s.append("|| "sv);
+            s.append_ascii("|| "sv);
             break;
         case Combinator::PseudoElement:
         default:
@@ -788,13 +812,12 @@ String Selector::serialize() const
                 && i != compound_selectors().size() - 1
                 && compound_selectors()[i + 1].combinator == Combinator::PseudoElement) {
                 auto qualified_name = compound_selector.simple_selectors.first().qualified_name();
-                if (qualified_name.namespace_type == SimpleSelector::QualifiedName::NamespaceType::Default
-                    || qualified_name.namespace_type == SimpleSelector::QualifiedName::NamespaceType::Any) {
+                if (should_skip_universal_selector(qualified_name, style_sheet)) {
                     should_serialize_universal = false;
                 }
             }
             if (should_serialize_universal)
-                s.append(compound_selector.simple_selectors.first().serialize());
+                compound_selector.simple_selectors.first().serialize_to(s, style_sheet);
         }
         // 2. Otherwise, for each simple selector in the compound selectors that is not a universal selector
         //    of which the namespace prefix maps to a namespace that is not the default namespace
@@ -805,18 +828,10 @@ String Selector::serialize() const
                     if (compound_selector.is_implicit_universal_anchor)
                         continue;
                     auto qualified_name = simple_selector.qualified_name();
-                    if (qualified_name.namespace_type == SimpleSelector::QualifiedName::NamespaceType::Default
-                        || qualified_name.namespace_type == SimpleSelector::QualifiedName::NamespaceType::Any)
+                    if (should_skip_universal_selector(qualified_name, style_sheet))
                         continue;
-                    // FIXME: I *think* if we have a namespace prefix that happens to equal the same as the default namespace,
-                    //        we also should skip it. But we don't have access to that here. eg:
-                    // <style>
-                    //   @namespace "http://example";
-                    //   @namespace foo "http://example";
-                    //   foo|*.bar { } /* This would skip the `foo|*` when serializing. */
-                    // </style>
                 }
-                s.append(simple_selector.serialize());
+                simple_selector.serialize_to(s, style_sheet);
             }
         }
 
@@ -828,19 +843,19 @@ String Selector::serialize() const
             //     so we have to check that one.
             switch (compound_selectors()[i + 1].combinator) {
             case Combinator::Descendant:
-                s.append(' ');
+                s.append_ascii(' ');
                 break;
             case Combinator::ImmediateChild:
-                s.append(" > "sv);
+                s.append_ascii(" > "sv);
                 break;
             case Combinator::NextSibling:
-                s.append(" + "sv);
+                s.append_ascii(" + "sv);
                 break;
             case Combinator::SubsequentSibling:
-                s.append(" ~ "sv);
+                s.append_ascii(" ~ "sv);
                 break;
             case Combinator::Column:
-                s.append(" || "sv);
+                s.append_ascii(" || "sv);
                 break;
             case Combinator::PseudoElement:
             default:
@@ -853,8 +868,6 @@ String Selector::serialize() const
             //      serialization of pseudoElements was moved to SimpleSelector::serialize()
         }
     }
-
-    return MUST(s.to_string());
 }
 
 // https://drafts.csswg.org/selectors-4/#single-colon-pseudos
@@ -874,10 +887,23 @@ bool is_legacy_single_colon_pseudo_element(PseudoElement pseudo_element)
 }
 
 // https://www.w3.org/TR/cssom/#serialize-a-group-of-selectors
-String serialize_a_group_of_selectors(SelectorList const& selectors)
+static void serialize_a_group_of_selectors_to_builder(Utf16StringBuilder& builder, SelectorList const& selectors, GC::Ptr<CSSStyleSheet const> style_sheet)
 {
     // To serialize a group of selectors serialize each selector in the group of selectors and then serialize a comma-separated list of these serializations.
-    return MUST(String::join(", "sv, selectors));
+    bool first = true;
+    for (auto const& selector : selectors) {
+        if (!first)
+            builder.append_ascii(", "sv);
+        first = false;
+        selector->serialize_to(builder, style_sheet);
+    }
+}
+
+Utf16String serialize_a_group_of_selectors(SelectorList const& selectors, GC::Ptr<CSSStyleSheet const> style_sheet)
+{
+    Utf16StringBuilder builder;
+    serialize_a_group_of_selectors_to_builder(builder, selectors, style_sheet);
+    return builder.to_string();
 }
 
 NonnullRefPtr<Selector> Selector::relative_to(SimpleSelector const& parent) const
@@ -1013,7 +1039,7 @@ Optional<Selector::SimpleSelector> Selector::SimpleSelector::absolutized(Selecto
             for (auto const& selector : pseudo_class.argument_selector_list) {
                 if (contains_invalid_contents_for_has(selector)) {
                     Parser::ErrorReporter::the().report(Parser::InvalidSelectorError {
-                        .value_string = selector->serialize(),
+                        .value_string = selector->serialize().to_utf8(),
                         .description = "After absolutizing, :has() would contain invalid contents."_string,
                     });
                     return {};
@@ -1039,36 +1065,6 @@ Optional<Selector::SimpleSelector> Selector::SimpleSelector::absolutized(Selecto
     }
 
     VERIFY_NOT_REACHED();
-}
-
-size_t Selector::sibling_invalidation_distance() const
-{
-    if (m_sibling_invalidation_distance.has_value())
-        return *m_sibling_invalidation_distance;
-
-    m_sibling_invalidation_distance = 0;
-    size_t current_distance = 0;
-    for (auto const& compound_selector : compound_selectors()) {
-        if (compound_selector.combinator == Combinator::None || compound_selector.combinator == Combinator::PseudoElement)
-            continue;
-
-        if (compound_selector.combinator == Combinator::SubsequentSibling) {
-            m_sibling_invalidation_distance = NumericLimits<size_t>::max();
-            return *m_sibling_invalidation_distance;
-        }
-
-        if (compound_selector.combinator == Combinator::NextSibling) {
-            current_distance++;
-        } else {
-            m_sibling_invalidation_distance = max(*m_sibling_invalidation_distance, current_distance);
-            current_distance = 0;
-        }
-    }
-
-    if (current_distance > 0) {
-        m_sibling_invalidation_distance = max(*m_sibling_invalidation_distance, current_distance);
-    }
-    return *m_sibling_invalidation_distance;
 }
 
 SelectorList adapt_nested_relative_selector_list(SelectorList const& selectors, StyleNestingParent style_nesting_parent)
@@ -1186,78 +1182,49 @@ SelectorList absolutize_selectors_relative_to(SelectorList const& selectors, GC:
     return absolutized_selectors;
 }
 
-// https://drafts.csswg.org/css-syntax-3/#anb-microsyntax
-bool Selector::SimpleSelector::ANPlusBPattern::matches(int index) const
+// https://drafts.csswg.org/css-syntax-3/#serializing-anb
+Utf16String Selector::SimpleSelector::ANPlusBPattern::serialize() const
 {
-    // "If both a and b are equal to zero, the pseudo-class represents no element in the document tree."
-    if (step_size == 0 && offset == 0)
-        return false;
-
-    // When "step_size == -1", selector represents first "offset" elements in document tree.
-    if (step_size == -1)
-        return !(offset <= 0 || index > offset);
-
-    // When "step_size == 1", selector represents last "offset" elements in document tree.
-    if (step_size == 1)
-        return !(offset < 0 || index < offset);
-
-    // When "step_size == 0", selector picks only the "offset" element.
-    if (step_size == 0)
-        return index == offset;
-
-    // If both are negative, nothing can match.
-    if (step_size < 0 && offset < 0)
-        return false;
-
-    // Like "a % b", but handles negative integers correctly. Done in 64 bits because "index - offset" and "-step_size"
-    // overflow a 32-bit int for an extreme An+B value such as :nth-child(2n-2147483648).
-    auto const canonical_modulo = [](i64 a, i64 b) -> i64 {
-        i64 c = a % b;
-        if ((c < 0 && b > 0) || (c > 0 && b < 0)) {
-            c += b;
-        }
-        return c;
-    };
-
-    // When "step_size < 0", we start at "offset" and count backwards.
-    if (step_size < 0)
-        return index <= offset && canonical_modulo(static_cast<i64>(index) - offset, -static_cast<i64>(step_size)) == 0;
-
-    // Otherwise, we start at "offset" and count forwards.
-    return index >= offset && canonical_modulo(static_cast<i64>(index) - offset, step_size) == 0;
+    Utf16StringBuilder builder;
+    serialize_to(builder);
+    return builder.to_string();
 }
 
-// https://drafts.csswg.org/css-syntax-3/#serializing-anb
-String Selector::SimpleSelector::ANPlusBPattern::serialize() const
+void Selector::SimpleSelector::ANPlusBPattern::serialize_to(Utf16StringBuilder& result) const
 {
     // 1. If A is zero, return the serialization of B.
-    if (step_size == 0)
-        return String::number(offset);
+    if (step_size == 0) {
+        append_integer(result, offset);
+        return;
+    }
 
     // 2. Otherwise, let result initially be an empty string.
-    StringBuilder result;
 
     // 3.
     // - A is 1: Append "n" to result.
     if (step_size == 1)
-        result.append('n');
+        result.append_ascii('n');
     // - A is -1: Append "-n" to result.
     else if (step_size == -1)
-        result.append("-n"sv);
+        result.append_ascii("-n"sv);
     // - A is non-zero: Serialize A and append it to result, then append "n" to result.
-    else if (step_size != 0)
-        result.appendff("{}n", step_size);
+    else if (step_size != 0) {
+        append_integer(result, step_size);
+        result.append_ascii('n');
+    }
 
     // 4.
     // - B is greater than zero: Append "+" to result, then append the serialization of B to result.
-    if (offset > 0)
-        result.appendff("+{}", offset);
+    if (offset > 0) {
+        result.append_ascii('+');
+        append_integer(result, offset);
+    }
     // - B is less than zero: Append the serialization of B to result.
-    else if (offset < 0)
-        result.appendff("{}", offset);
+    else if (offset < 0) {
+        append_integer(result, offset);
+    }
 
     // 5. Return result.
-    return MUST(result.to_string());
 }
 
 }

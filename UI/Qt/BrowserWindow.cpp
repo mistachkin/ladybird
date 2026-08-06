@@ -61,19 +61,16 @@ namespace Ladybird {
 static constexpr auto AUDIO_STATE_BUTTON_POSITION = QTabBar::LeftSide;
 static constexpr auto TAB_CLOSE_BUTTON_POSITION = QTabBar::RightSide;
 static constexpr auto WINDOW_DRAG_REGION_PROPERTY = "LadybirdWindowDragRegion";
-#if defined(AK_OS_MACOS)
-static constexpr qreal WINDOW_CORNER_RADIUS = 12.0;
-#endif
 static constexpr int WINDOW_RESIZE_BORDER_WIDTH = 6;
 static constexpr int WINDOW_RESIZE_CORNER_WIDTH = WINDOW_RESIZE_BORDER_WIDTH * 2;
+#if defined(AK_OS_MACOS)
+static constexpr int NATIVE_WINDOW_CONTROL_X_OFFSET = 6;
+static constexpr int NATIVE_WINDOW_CONTROL_Y_OFFSET = 6;
+#endif
 
 static bool should_use_screen_signal_for_dpi_changes()
 {
-#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
     return QGuiApplication::platformName() != "wayland";
-#else
-    return true;
-#endif
 }
 
 static Optional<u64> display_id_for_screen(QScreen* screen)
@@ -235,19 +232,24 @@ static QIcon const& app_icon()
     return icon;
 }
 
-BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow is_popup_window, Tab* parent_tab, Optional<u64> page_index)
-    : m_tabs_container(new TabWidget(this))
+BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow is_popup_window, WebView::IsPrivate is_private, Tab* parent_tab, Optional<u64> page_index)
+    : m_is_private(is_private)
+    , m_tabs_container(new TabWidget(this))
     , m_is_popup_window(is_popup_window)
 {
     auto& application = WebView::Application::the();
     auto const& browser_options = WebView::Application::browser_options();
 
+#if defined(AK_OS_MACOS)
+    setWindowFlag(Qt::ExpandedClientAreaHint);
+    setWindowFlag(Qt::NoTitleBarBackgroundHint);
+    setAttribute(Qt::WA_ContentsMarginsRespectsSafeArea, false);
+#else
     setWindowFlag(Qt::FramelessWindowHint, uses_client_side_decorations());
+#endif
     setAttribute(Qt::WA_OpaquePaintEvent);
     setWindowIcon(app_icon());
     qApp->installEventFilter(this);
-    update_window_corners();
-    update_appkit_window_resizability();
     update_window_border();
 
     update_tabs_display();
@@ -276,7 +278,7 @@ BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow
     auto* file_menu = menuBar()->addMenu("&File");
 
     m_new_tab_action = new QAction("New &Tab", this);
-    m_new_tab_action->setShortcuts(QKeySequence::keyBindings(QKeySequence::StandardKey::AddTab));
+    m_new_tab_action->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_T));
     m_hamburger_menu->addAction(m_new_tab_action);
     file_menu->addAction(m_new_tab_action);
 
@@ -284,6 +286,11 @@ BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow
     m_new_window_action->setShortcuts(QKeySequence::keyBindings(QKeySequence::StandardKey::New));
     m_hamburger_menu->addAction(m_new_window_action);
     file_menu->addAction(m_new_window_action);
+
+    m_new_private_window_action = new QAction("New Pri&vate Window", this);
+    m_new_private_window_action->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_N));
+    m_hamburger_menu->addAction(m_new_private_window_action);
+    file_menu->addAction(m_new_private_window_action);
 
     m_reopen_recently_closed_tab_action = new QAction("&Reopen Recently Closed Tab", this);
     m_reopen_recently_closed_tab_action->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_T));
@@ -308,6 +315,10 @@ BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow
 
     auto* edit_menu = m_hamburger_menu->addMenu("&Edit");
     menuBar()->addMenu(edit_menu);
+
+    edit_menu->addAction(create_application_action(*this, application.undo_action(), IncludeActionIcon::No));
+    edit_menu->addAction(create_application_action(*this, application.redo_action(), IncludeActionIcon::No));
+    edit_menu->addSeparator();
 
     edit_menu->addAction(create_application_action(*this, application.cut_selection_action(), IncludeActionIcon::No));
     edit_menu->addAction(create_application_action(*this, application.copy_selection_action(), IncludeActionIcon::No));
@@ -385,6 +396,9 @@ BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow
     menuBar()->addMenu(m_bookmarks_menu);
 
     m_history_menu = create_application_menu(*this, application.history_menu());
+    QObject::connect(m_history_menu, &QMenu::aboutToShow, this, [this] {
+        update_history_menu(*m_history_menu, m_current_tab ? &m_current_tab->view() : nullptr);
+    });
     m_hamburger_menu->addMenu(m_history_menu);
     menuBar()->addMenu(m_history_menu);
 
@@ -420,7 +434,10 @@ BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow
         Application::the().open_new_tab();
     });
     QObject::connect(m_new_window_action, &QAction::triggered, this, [] {
-        Application::the().open_new_window();
+        Application::the().open_new_window(WebView::IsPrivate::No);
+    });
+    QObject::connect(m_new_private_window_action, &QAction::triggered, this, [] {
+        Application::the().open_new_window(WebView::IsPrivate::Yes);
     });
     QObject::connect(m_reopen_recently_closed_tab_action, &QAction::triggered, this, [] {
         Application::the().reopen_recently_closed_tab();
@@ -437,14 +454,17 @@ BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow
     QObject::connect(m_tabs_container, &TabWidget::current_tab_changed, this, [this](int index) {
         auto* tab = m_tabs_container->tab(index);
         if (tab)
-            setWindowTitle(QString("%1 - Ladybird").arg(tab->title()));
+            update_window_title(tab->title());
 
         set_current_tab(tab);
         if (tab) {
-            if (auto* focus_widget = tab->focusWidget(); focus_widget && tab->isAncestorOf(focus_widget))
-                focus_widget->setFocus();
-            else
-                tab->view().setFocus();
+            QWidget* focus_widget = &tab->view();
+            if (auto* tab_focus_widget = tab->focusWidget(); tab_focus_widget && tab->isAncestorOf(tab_focus_widget))
+                focus_widget = tab_focus_widget;
+#if defined(AK_OS_MACOS)
+            make_appkit_window_first_responder(*focus_widget);
+#endif
+            focus_widget->setFocus();
         }
         fullscreen_mode().exit(FullscreenMode::ExitInitiatedBy::UI);
     });
@@ -470,9 +490,8 @@ BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow
     if (parent_tab) {
         new_child_tab(Web::HTML::ActivateTab::Yes, *parent_tab, AK::move(page_index));
     } else {
-        for (size_t i = 0; i < initial_urls.size(); ++i) {
-            new_tab_from_url(initial_urls[i], (i == 0) ? Web::HTML::ActivateTab::Yes : Web::HTML::ActivateTab::No);
-        }
+        for (size_t i = 0; i < initial_urls.size(); ++i)
+            create_new_tab((i == 0) ? Web::HTML::ActivateTab::Yes : Web::HTML::ActivateTab::No, TabLocation::end());
     }
 
     m_tabs_container->set_new_tab_action(m_new_tab_action);
@@ -484,6 +503,10 @@ BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow
     main_layout->addWidget(m_tabs_container, 1);
 
     m_devtools_banner = new DevToolsBanner(main_widget);
+    connect(m_devtools_banner, &DevToolsBanner::launch_client_requested, this, [] {
+        if (auto result = WebView::Application::the().launch_devtools_client(); result.is_error())
+            WebView::Application::the().display_error_dialog(MUST(String::formatted("Unable to launch the DevTools client: {}", result.error())));
+    });
     connect(m_devtools_banner, &DevToolsBanner::disable_requested, this, [] {
         MUST(WebView::Application::the().toggle_devtools_enabled());
     });
@@ -541,9 +564,9 @@ void BrowserWindow::on_devtools_disabled()
     m_devtools_banner->hide();
 }
 
-Tab& BrowserWindow::new_tab_from_url(URL::URL const& url, Web::HTML::ActivateTab activate_tab)
+Tab& BrowserWindow::new_tab_from_url(URL::URL const& url, Web::HTML::ActivateTab activate_tab, TabLocation location)
 {
-    auto& tab = create_new_tab(activate_tab);
+    auto& tab = create_new_tab(activate_tab, location);
     tab.navigate(url);
     return tab;
 }
@@ -556,7 +579,7 @@ Tab& BrowserWindow::new_child_tab(Web::HTML::ActivateTab activate_tab, Tab& pare
 Tab& BrowserWindow::create_new_tab(Web::HTML::ActivateTab activate_tab, Tab& parent, Optional<u64> page_index)
 {
     if (!page_index.has_value())
-        return create_new_tab(activate_tab);
+        return create_new_tab(activate_tab, TabLocation::end());
 
     auto* tab = new Tab(this, parent.view().client(), page_index.value());
 
@@ -580,10 +603,15 @@ FullscreenMode& BrowserWindow::fullscreen_mode()
 
 bool BrowserWindow::uses_client_side_decorations()
 {
-    return !WebView::Application::settings().config_variable_as_bool(WebView::ConfigVariableID::UseServerSideWindowDecorations);
+    return !use_native_macos_window_controls() && WebView::Application::settings().config_variable_as_bool(WebView::ConfigVariableID::UseClientSideWindowDecorations);
 }
 
-Tab& BrowserWindow::create_new_tab(Web::HTML::ActivateTab activate_tab)
+bool BrowserWindow::has_chrome_in_titlebar()
+{
+    return use_native_macos_window_controls() || uses_client_side_decorations();
+}
+
+Tab& BrowserWindow::create_new_tab(Web::HTML::ActivateTab activate_tab, TabLocation location)
 {
     auto* tab = new Tab(this);
 
@@ -591,7 +619,25 @@ Tab& BrowserWindow::create_new_tab(Web::HTML::ActivateTab activate_tab)
         set_current_tab(tab);
     }
 
-    m_tabs_container->add_tab(tab, "New Tab");
+    switch (location.kind()) {
+    case TabLocation::Kind::End:
+        m_tabs_container->add_tab(tab, "New Tab");
+        break;
+    case TabLocation::Kind::AfterCurrentTab:
+        m_tabs_container->insert_tab(m_tabs_container->current_index() + 1, tab, "New Tab");
+        break;
+    case TabLocation::Kind::AfterTab: {
+        auto insertion_index = m_tabs_container->count();
+        if (auto* source_tab = location.tab(); source_tab) {
+            auto source_tab_index = tab_index(source_tab);
+            if (source_tab_index != -1)
+                insertion_index = source_tab_index + 1;
+        }
+        m_tabs_container->insert_tab(insertion_index, tab, "New Tab");
+        break;
+    }
+    }
+
     if (activate_tab == Web::HTML::ActivateTab::Yes)
         m_tabs_container->set_current_tab(tab);
 
@@ -611,22 +657,19 @@ void BrowserWindow::initialize_tab(Tab* tab)
         m_current_tab->navigate(ak_url_from_qurl(urls[0]));
 
         for (qsizetype i = 1; i < urls.size(); ++i)
-            new_tab_from_url(ak_url_from_qurl(urls[i]), Web::HTML::ActivateTab::No);
-    });
-
-    QObject::connect(&tab->view(), &WebContentView::native_window_pointer_event, this, [this] {
-        refresh_resize_cursor_at_current_position();
+            new_tab_from_url(ak_url_from_qurl(urls[i]), Web::HTML::ActivateTab::No, TabLocation::end());
     });
 
     tab->view().on_new_web_view = [this, tab](auto activate_tab, Web::HTML::WebViewHints hints, Optional<u64> page_index) {
         if (hints.popup) {
+            auto cascaded_configuration = Application::the().configuration_for_new_window();
             WindowConfiguration configuration {
-                .x = hints.screen_x,
-                .y = hints.screen_y,
+                .x = hints.screen_x.has_value() ? hints.screen_x : cascaded_configuration.x,
+                .y = hints.screen_y.has_value() ? hints.screen_y : cascaded_configuration.y,
                 .width = hints.width,
                 .height = hints.height,
             };
-            auto& window = Application::the().new_window({}, configuration, IsPopupWindow::Yes, tab, AK::move(page_index));
+            auto& window = Application::the().new_window({}, configuration, IsPopupWindow::Yes, m_is_private, tab, AK::move(page_index));
             return window.current_tab()->view().handle();
         }
         auto& new_tab = new_child_tab(activate_tab, *tab, page_index);
@@ -648,6 +691,7 @@ void BrowserWindow::adopt_tab(Tab& tab, int index)
 
     tab.set_window(*this);
     m_tabs_container->insert_tab(index, &tab, "New Tab");
+    tab.view().finish_window_move();
     initialize_tab(&tab);
     tab_title_changed(index, tab.title());
 
@@ -670,7 +714,11 @@ void BrowserWindow::move_tab_to_window(int index, BrowserWindow& target_window, 
         return;
     }
 
+    if (is_private() != target_window.is_private())
+        return;
+
     auto* tab = m_tabs_container->tab(index);
+    tab->view().prepare_for_window_move();
     uninitialize_tab(tab);
     m_tabs_container->take_tab(index);
     if (m_current_tab == tab)
@@ -697,8 +745,16 @@ void BrowserWindow::detach_tab_to_new_window(int index, QPoint global_position)
         .maximized = isMaximized(),
     };
 
-    auto& window = Application::the().new_window({}, configuration);
+    auto& window = Application::the().new_window({}, configuration, IsPopupWindow::No, m_is_private, nullptr, {}, ShowWindow::No);
     move_tab_to_window(index, window, 0);
+
+    if (configuration.maximized == true)
+        window.showMaximized();
+    else
+        window.show();
+
+    window.activateWindow();
+    window.raise();
 }
 
 void BrowserWindow::set_current_tab(Tab* tab)
@@ -715,6 +771,7 @@ void BrowserWindow::set_current_tab(Tab* tab)
         m_current_tab->view().set_system_visibility_state(Web::HTML::VisibilityState::Visible);
 
     WebView::Application::the().update_bookmark_action_for_current_web_view();
+    WebView::Application::the().update_editing_history_actions();
 }
 
 void BrowserWindow::activate_tab(int index)
@@ -744,8 +801,12 @@ bool BrowserWindow::definitely_close_tab(int index)
     auto* tab = m_tabs_container->tab(index);
     auto url = tab->view().url();
     m_tabs_container->remove_tab(index);
-    Application::history_store().record_closed_tab(url);
-    Application::the().update_reopen_recently_closed_actions();
+
+    if (m_is_private == WebView::IsPrivate::No) {
+        Application::history_store(WebView::IsPrivate::No).record_closed_tab(url);
+        Application::the().update_reopen_recently_closed_actions();
+    }
+
     tab->deleteLater();
 
     if (m_tabs_container->count() == 0) {
@@ -761,9 +822,9 @@ void BrowserWindow::update_reopen_recently_closed_action()
     if (!m_reopen_recently_closed_tab_action)
         return;
 
-    auto recently_closed_entry = Application::history_store().most_recently_closed_entry();
+    auto recently_closed_entry = Application::history_store(WebView::IsPrivate::No).most_recently_closed_entry();
     m_reopen_recently_closed_tab_action->setText("&Reopen Recently Closed Tab");
-    m_reopen_recently_closed_tab_action->setEnabled(recently_closed_entry.has_value());
+    m_reopen_recently_closed_tab_action->setEnabled(m_is_private == WebView::IsPrivate::No && recently_closed_entry.has_value());
 }
 
 void BrowserWindow::move_tab(int old_index, int new_index)
@@ -877,17 +938,21 @@ void BrowserWindow::display_metadata_changed(Optional<u64> display_id, qreal ref
     });
 }
 
+void BrowserWindow::update_window_title(QString const& title)
+{
+    char const* format = is_private() == WebView::IsPrivate::Yes
+        ? "%1 - Ladybird (Private Browsing)"
+        : "%1 - Ladybird";
+    setWindowTitle(QString(format).arg(title));
+}
+
 void BrowserWindow::tab_title_changed(int index, QString const& title)
 {
-    // NOTE: Qt uses ampersands for shortcut keys in tab titles, so we need to escape them.
-    QString title_escaped = title;
-    title_escaped.replace("&", "&&");
-
-    m_tabs_container->set_tab_text(index, title_escaped);
+    m_tabs_container->set_tab_text(index, title);
     m_tabs_container->set_tab_tooltip(index, title);
 
     if (m_tabs_container->current_index() == index)
-        setWindowTitle(QString("%1 - Ladybird").arg(title));
+        update_window_title(title);
 }
 
 void BrowserWindow::tab_favicon_changed(int index, QIcon const& icon)
@@ -932,27 +997,26 @@ void BrowserWindow::update_tab_button_icons()
 
 void BrowserWindow::create_menu_bar_window_controls()
 {
-    if (use_left_traffic_light_window_controls())
-        return;
+    if constexpr (!use_native_macos_window_controls()) {
+        auto window_control_buttons = create_window_control_buttons(*menuBar(), "LadybirdMenuBarWindowControls", { 16, 16 }, { 40, 30 });
+        m_menu_bar_window_controls = window_control_buttons.container;
+        m_menu_bar_minimize_window_button = window_control_buttons.minimize;
+        m_menu_bar_maximize_window_button = window_control_buttons.maximize;
+        m_menu_bar_close_window_button = window_control_buttons.close;
+        menuBar()->setCornerWidget(m_menu_bar_window_controls, Qt::TopRightCorner);
 
-    auto window_control_buttons = create_window_control_buttons(*menuBar(), "LadybirdMenuBarWindowControls", { 16, 16 }, { 40, 30 });
-    m_menu_bar_window_controls = window_control_buttons.container;
-    m_menu_bar_minimize_window_button = window_control_buttons.minimize;
-    m_menu_bar_maximize_window_button = window_control_buttons.maximize;
-    m_menu_bar_close_window_button = window_control_buttons.close;
-    menuBar()->setCornerWidget(m_menu_bar_window_controls, Qt::TopRightCorner);
+        connect(m_menu_bar_minimize_window_button, &QToolButton::clicked, this, [this] {
+            showMinimized();
+        });
+        connect(m_menu_bar_maximize_window_button, &QToolButton::clicked, this, [this] {
+            toggle_window_maximized();
+        });
+        connect(m_menu_bar_close_window_button, &QToolButton::clicked, this, [this] {
+            close();
+        });
 
-    connect(m_menu_bar_minimize_window_button, &QToolButton::clicked, this, [this] {
-        showMinimized();
-    });
-    connect(m_menu_bar_maximize_window_button, &QToolButton::clicked, this, [this] {
-        toggle_window_maximized();
-    });
-    connect(m_menu_bar_close_window_button, &QToolButton::clicked, this, [this] {
-        close();
-    });
-
-    update_menu_bar_window_control_icons();
+        update_menu_bar_window_control_icons();
+    }
 }
 
 void BrowserWindow::update_menu_bar_style()
@@ -967,7 +1031,7 @@ void BrowserWindow::update_menu_bar_visibility()
 
     if (m_menu_bar_window_controls)
         m_menu_bar_window_controls->setVisible(show_menu_bar && uses_client_side_decorations());
-    m_tabs_container->set_window_controls_visible(!show_menu_bar && uses_client_side_decorations());
+    m_tabs_container->set_window_controls_visible(!show_menu_bar && has_chrome_in_titlebar());
 }
 
 void BrowserWindow::update_menu_bar_window_control_icons()
@@ -1006,7 +1070,6 @@ void BrowserWindow::update_window_decoration_state()
         }
     }
 
-    update_appkit_window_resizability();
     update_menu_bar_visibility();
     update_window_border();
 }
@@ -1160,12 +1223,10 @@ void BrowserWindow::exit_fullscreen()
 
 bool BrowserWindow::event(QEvent* event)
 {
-#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
     if (event->type() == QEvent::DevicePixelRatioChange) {
         if (m_device_pixel_ratio != devicePixelRatio())
             device_pixel_ratio_changed(devicePixelRatio());
     }
-#endif
     if (event->type() == QEvent::WinIdChange)
         connect_window_screen_changed_signal();
     if (event->type() == QEvent::PlatformSurface) {
@@ -1174,8 +1235,8 @@ bool BrowserWindow::event(QEvent* event)
             connect_window_screen_changed_signal();
 #if defined(AK_OS_MACOS)
             QTimer::singleShot(0, this, [this] {
-                update_window_corners();
-                update_appkit_window_resizability();
+                hide_appkit_window_title(*this);
+                offset_appkit_window_controls(*this, NATIVE_WINDOW_CONTROL_X_OFFSET, NATIVE_WINDOW_CONTROL_Y_OFFSET);
             });
 #endif
         } else if (platform_surface_event->surfaceEventType() == QPlatformSurfaceEvent::SurfaceAboutToBeDestroyed) {
@@ -1202,23 +1263,17 @@ bool BrowserWindow::event(QEvent* event)
 
 bool BrowserWindow::eventFilter(QObject* object, QEvent* event)
 {
+    if (auto* native_window = as_if<QWindow>(object)) {
+        if (filter_native_window_event(*native_window, *event))
+            return true;
+        return QMainWindow::eventFilter(object, event);
+    }
+
     auto* widget = as_if<QWidget>(object);
     if (!widget || widget->window() != this)
         return QMainWindow::eventFilter(object, event);
-    if (!uses_client_side_decorations())
+    if (!has_chrome_in_titlebar())
         return QMainWindow::eventFilter(object, event);
-
-    if (m_is_resizing_window) {
-        if (event->type() == QEvent::MouseMove) {
-            auto* mouse_event = static_cast<QMouseEvent*>(event);
-            update_window_resize(mouse_event->globalPosition().toPoint());
-            return true;
-        }
-        if (event->type() == QEvent::MouseButtonRelease) {
-            finish_window_resize();
-            return true;
-        }
-    }
 
     auto const is_button = qobject_cast<QAbstractButton*>(object) != nullptr;
 
@@ -1250,17 +1305,12 @@ bool BrowserWindow::eventFilter(QObject* object, QEvent* event)
         return QMainWindow::eventFilter(object, event);
 
     auto position = widget->mapTo(this, mouse_event->position().toPoint());
-    auto edges = resize_edges_for_position(position);
+    auto edges = uses_client_side_decorations() ? resize_edges_for_position(position) : Qt::Edges {};
     if (event->type() == QEvent::MouseButtonPress && !isMaximized() && !isFullScreen()) {
         if (edges != Qt::Edges {}) {
-#if defined(AK_OS_MACOS)
-            if (start_window_resize(edges, mouse_event->globalPosition().toPoint()))
-                return true;
-#else
             auto* handle = windowHandle();
             if (handle && handle->startSystemResize(edges))
                 return true;
-#endif
         }
     }
 
@@ -1290,45 +1340,58 @@ bool BrowserWindow::eventFilter(QObject* object, QEvent* event)
     return QMainWindow::eventFilter(object, event);
 }
 
-bool BrowserWindow::position_is_in_rounded_corner_cutout(QPoint const& position) const
+bool BrowserWindow::filter_native_window_event(QWindow& window, QEvent& event)
 {
-#if defined(AK_OS_MACOS)
-    auto should_use_rounded_corners = WebView::Application::settings().config_variable_as_bool(WebView::ConfigVariableID::UseRoundedWindowCorners);
-    if (!should_use_rounded_corners || isFullScreen())
+    if (!uses_client_side_decorations())
         return false;
 
-    auto const radius = WINDOW_CORNER_RADIUS;
-    auto const x = static_cast<qreal>(position.x());
-    auto const y = static_cast<qreal>(position.y());
-    auto const right = static_cast<qreal>(width());
-    auto const bottom = static_cast<qreal>(height());
+    auto* window_handle = windowHandle();
+    if (!window_handle)
+        return false;
 
-    auto is_outside_corner_arc = [radius](qreal dx, qreal dy) {
-        return dx * dx + dy * dy > radius * radius;
-    };
+    bool window_is_embedded_in_this_window = false;
+    for (auto const* ancestor = window.parent(); ancestor; ancestor = ancestor->parent()) {
+        if (ancestor == window_handle) {
+            window_is_embedded_in_this_window = true;
+            break;
+        }
+    }
+    if (!window_is_embedded_in_this_window)
+        return false;
 
-    auto in_cutout = false;
-    if (x < radius && y < radius)
-        in_cutout = is_outside_corner_arc(radius - x, radius - y);
-    else if (x >= right - radius && y < radius)
-        in_cutout = is_outside_corner_arc(x - (right - radius), radius - y);
-    else if (x < radius && y >= bottom - radius)
-        in_cutout = is_outside_corner_arc(radius - x, y - (bottom - radius));
-    else if (x >= right - radius && y >= bottom - radius)
-        in_cutout = is_outside_corner_arc(x - (right - radius), y - (bottom - radius));
+    switch (event.type()) {
+    case QEvent::Enter:
+        update_resize_cursor(mapFromGlobal(QCursor::pos()));
+        return false;
+    case QEvent::MouseMove:
+        update_resize_cursor(mapFromGlobal(static_cast<QMouseEvent const&>(event).globalPosition().toPoint()));
+        return false;
+    case QEvent::Leave: {
+        auto position = mapFromGlobal(QCursor::pos());
+        if (rect().contains(position))
+            update_resize_cursor(position);
+        else
+            clear_resize_cursor();
+        return false;
+    }
+    case QEvent::MouseButtonPress: {
+        auto const& mouse_event = static_cast<QMouseEvent const&>(event);
+        if (mouse_event.button() != Qt::LeftButton || isMaximized() || isFullScreen())
+            return false;
 
-    return in_cutout;
-#else
-    (void)position;
-#endif
-    return false;
+        auto edges = resize_edges_for_position(mapFromGlobal(mouse_event.globalPosition().toPoint()));
+        if (edges == Qt::Edges {})
+            return false;
+
+        return window_handle->startSystemResize(edges);
+    }
+    default:
+        return false;
+    }
 }
 
 Qt::Edges BrowserWindow::resize_edges_for_position(QPoint const& position) const
 {
-    if (position_is_in_rounded_corner_cutout(position))
-        return {};
-
     Qt::Edges edges;
     auto in_left_resize_edge = position.x() <= WINDOW_RESIZE_BORDER_WIDTH;
     auto in_right_resize_edge = position.x() >= width() - WINDOW_RESIZE_BORDER_WIDTH;
@@ -1366,56 +1429,6 @@ Optional<Qt::CursorShape> BrowserWindow::resize_cursor_for_edges(Qt::Edges edges
         return Qt::SizeVerCursor;
 
     return {};
-}
-
-bool BrowserWindow::start_window_resize(Qt::Edges edges, QPoint const& global_position)
-{
-    if (edges == Qt::Edges {} || isMaximized() || isFullScreen())
-        return false;
-
-    m_is_resizing_window = true;
-    m_resize_edges = edges;
-    m_resize_start_global_position = global_position;
-    m_resize_start_geometry = geometry();
-    grabMouse();
-    return true;
-}
-
-void BrowserWindow::update_window_resize(QPoint const& global_position)
-{
-    if (!m_is_resizing_window)
-        return;
-
-    auto delta = global_position - m_resize_start_global_position;
-    auto new_geometry = m_resize_start_geometry;
-
-    if (m_resize_edges & Qt::LeftEdge) {
-        auto new_width = qBound(minimumWidth(), m_resize_start_geometry.width() - delta.x(), maximumWidth());
-        new_geometry.setX(m_resize_start_geometry.right() - new_width + 1);
-    } else if (m_resize_edges & Qt::RightEdge) {
-        auto new_width = qBound(minimumWidth(), m_resize_start_geometry.width() + delta.x(), maximumWidth());
-        new_geometry.setWidth(new_width);
-    }
-
-    if (m_resize_edges & Qt::TopEdge) {
-        auto new_height = qBound(minimumHeight(), m_resize_start_geometry.height() - delta.y(), maximumHeight());
-        new_geometry.setY(m_resize_start_geometry.bottom() - new_height + 1);
-    } else if (m_resize_edges & Qt::BottomEdge) {
-        auto new_height = qBound(minimumHeight(), m_resize_start_geometry.height() + delta.y(), maximumHeight());
-        new_geometry.setHeight(new_height);
-    }
-
-    setGeometry(new_geometry);
-}
-
-void BrowserWindow::finish_window_resize()
-{
-    if (!m_is_resizing_window)
-        return;
-
-    m_is_resizing_window = false;
-    m_resize_edges = {};
-    releaseMouse();
 }
 
 void BrowserWindow::update_resize_cursor(QPoint const& position)
@@ -1470,7 +1483,6 @@ void BrowserWindow::clear_resize_cursor()
 void BrowserWindow::resizeEvent(QResizeEvent* event)
 {
     QWidget::resizeEvent(event);
-    update_window_corners();
 
     for_each_tab([&](auto& tab) {
         tab.view().set_window_size({ width(), height() });
@@ -1486,7 +1498,6 @@ void BrowserWindow::changeEvent(QEvent* event)
     } else if (event->type() == QEvent::WindowStateChange) {
         update_menu_bar_window_control_icons();
         m_tabs_container->update_window_button_icons();
-        update_window_corners();
         update_window_border();
 
         QWindowStateChangeEvent* stateChangeEvent = static_cast<QWindowStateChangeEvent*>(event);
@@ -1511,38 +1522,13 @@ void BrowserWindow::show_menu_bar_changed()
 
 void BrowserWindow::config_variable_changed(WebView::ConfigVariableID variable)
 {
-    if (variable == WebView::ConfigVariableID::UseRoundedWindowCorners)
-        update_window_corners();
-    else if (variable == WebView::ConfigVariableID::UseServerSideWindowDecorations)
+    if (variable == WebView::ConfigVariableID::UseClientSideWindowDecorations)
         update_window_decoration_state();
-}
-
-void BrowserWindow::update_window_corners()
-{
-#if defined(AK_OS_MACOS)
-    auto should_use_rounded_corners = WebView::Application::settings().config_variable_as_bool(WebView::ConfigVariableID::UseRoundedWindowCorners);
-    auto should_round_window = should_use_rounded_corners && !isFullScreen();
-
-    clearMask();
-    set_rounded_window_corners(*this, should_round_window, WINDOW_CORNER_RADIUS, ChromeStyle::chrome_background(palette()));
-#endif
-}
-
-void BrowserWindow::update_appkit_window_resizability()
-{
-#if defined(AK_OS_MACOS)
-    set_appkit_window_resizable(*this, !uses_client_side_decorations());
-#endif
 }
 
 bool BrowserWindow::should_draw_window_border() const
 {
-#if defined(AK_OS_MACOS)
-    // macOS frameless windows already get rounded corners and a native shadow, so a painted border would clash.
-    return false;
-#else
     return windowFlags().testFlag(Qt::FramelessWindowHint) && !isFullScreen() && !isMaximized();
-#endif
 }
 
 void BrowserWindow::update_window_border()
@@ -1605,15 +1591,18 @@ void BrowserWindow::closeEvent(QCloseEvent* event)
 
     Optional<Vector<URL::URL>> recently_closed_window_urls;
     size_t recently_closed_window_active_tab_index { 0 };
-    if (m_should_record_closed_window_on_close && m_tabs_container->count() > 0) {
-        recently_closed_window_urls = recently_closed_urls_for_window(*m_tabs_container);
-        recently_closed_window_active_tab_index = static_cast<size_t>(m_tabs_container->current_index());
-    }
 
-    if (m_is_popup_window == IsPopupWindow::No) {
-        Settings::the()->set_last_position(pos());
-        Settings::the()->set_last_size(size());
-        Settings::the()->set_is_maximized(isMaximized());
+    if (m_is_private == WebView::IsPrivate::No) {
+        if (m_should_record_closed_window_on_close && m_tabs_container->count() > 0) {
+            recently_closed_window_urls = recently_closed_urls_for_window(*m_tabs_container);
+            recently_closed_window_active_tab_index = static_cast<size_t>(m_tabs_container->current_index());
+        }
+
+        if (m_is_popup_window == IsPopupWindow::No) {
+            Settings::the()->set_last_position(pos());
+            Settings::the()->set_last_size(size());
+            Settings::the()->set_is_maximized(isMaximized());
+        }
     }
 
     QObject::deleteLater();
@@ -1621,7 +1610,7 @@ void BrowserWindow::closeEvent(QCloseEvent* event)
     QMainWindow::closeEvent(event);
 
     if (event->isAccepted() && recently_closed_window_urls.has_value()) {
-        Application::history_store().record_closed_window(recently_closed_window_urls.release_value(), recently_closed_window_active_tab_index);
+        Application::history_store(WebView::IsPrivate::No).record_closed_window(recently_closed_window_urls.release_value(), recently_closed_window_active_tab_index);
         Application::the().update_reopen_recently_closed_actions();
     }
 }

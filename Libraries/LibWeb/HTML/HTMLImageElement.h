@@ -9,6 +9,8 @@
 
 #include <AK/ByteBuffer.h>
 #include <AK/OwnPtr.h>
+#include <AK/Utf16String.h>
+#include <AK/Utf16View.h>
 #include <LibGC/Function.h>
 #include <LibGfx/Forward.h>
 #include <LibWeb/DOM/DocumentLoadEventDelayer.h>
@@ -40,16 +42,17 @@ public:
     // ^FormAssociatedElement
     virtual bool is_form_associated_element() const override { return true; }
 
-    virtual void form_associated_element_attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
+    virtual void form_associated_element_attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_) override;
 
-    Optional<String> alternative_text() const override
+    Optional<Utf16String> alternative_text() const override
     {
         if (auto alt = get_attribute(HTML::AttributeNames::alt); alt.has_value())
             return alt.release_value();
         return {};
     }
 
-    String alt() const { return get_attribute_value(HTML::AttributeNames::alt); }
+    Utf16String alt() const { return get_attribute_value(HTML::AttributeNames::alt); }
+    void set_alt(Utf16View alt) { set_attribute_value(HTML::AttributeNames::alt, alt); }
 
     WebIDL::UnsignedLong width() const;
     void set_width(WebIDL::UnsignedLong);
@@ -67,7 +70,7 @@ public:
     bool complete() const;
 
     // https://html.spec.whatwg.org/multipage/embedded-content.html#dom-img-currentsrc
-    String current_src() const;
+    Utf16String current_src() const;
 
     // https://html.spec.whatwg.org/multipage/embedded-content.html#dom-img-decode
     [[nodiscard]] WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> decode() const;
@@ -105,7 +108,11 @@ public:
     bool allows_auto_sizes() const;
 
     // ^Layout::ImageProvider
+    virtual bool is_image_pending() const override;
     virtual GC::Ptr<DecodedImageData> decoded_image_data() const override;
+    virtual Optional<CSSPixels> intrinsic_width() const override;
+    virtual Optional<CSSPixels> intrinsic_height() const override;
+    virtual Optional<CSSPixelFraction> intrinsic_aspect_ratio() const override;
 
     virtual void visit_edges(Cell::Visitor&) override;
 
@@ -121,20 +128,19 @@ private:
 
     virtual void adopted_from(DOM::Document&) override;
 
-    virtual bool is_presentational_hint(FlyString const&) const override;
+    virtual bool is_presentational_hint(Utf16FlyString const&) const override;
     virtual void apply_presentational_hints(Vector<CSS::StyleProperty>&) const override;
 
     // https://html.spec.whatwg.org/multipage/embedded-content.html#the-img-element:dimension-attributes
     virtual bool supports_dimension_attributes() const override { return true; }
 
-    virtual RefPtr<Layout::Node> create_layout_node(CSS::ComputedProperties const&) override;
+    virtual RefPtr<Layout::Node> create_layout_node(NonnullRefPtr<CSS::ComputedValues const>) override;
     virtual void adjust_computed_style(CSS::ComputedProperties::Builder&) override;
 
     virtual void did_set_viewport_rect(CSSPixelRect const&) override;
 
-    void handle_successful_fetch(URL::URL const&, StringView mime_type, ImageRequest&, ByteBuffer, bool maybe_omit_events, URL::URL const& previous_url);
     void handle_failed_fetch();
-    void add_callbacks_to_image_request(GC::Ref<ImageRequest>, bool maybe_omit_events, String const& url_string, String const& previous_url, u64 update_the_image_data_count);
+    void add_callbacks_to_image_request(GC::Ref<ImageRequest>, bool maybe_omit_events, Utf16View url_string, Utf16View previous_url);
 
     virtual void decoded_image_data_did_update() override { set_needs_repaint(); }
 
@@ -146,7 +152,7 @@ private:
 
     // https://html.spec.whatwg.org/multipage/images.html#last-selected-source
     // Each img element has a last selected source, which must initially be null.
-    Optional<String> m_last_selected_source;
+    Optional<Utf16String> m_last_selected_source;
 
     // https://html.spec.whatwg.org/multipage/images.html#current-request
     GC::Ptr<ImageRequest> m_current_request;
@@ -171,5 +177,15 @@ namespace Web::DOM {
 
 template<>
 inline bool Node::fast_is<HTML::HTMLImageElement>() const { return is_html_image_element(); }
+
+}
+
+namespace JS {
+
+template<>
+inline bool Object::fast_is<Web::HTML::HTMLImageElement>() const
+{
+    return is_dom_node() && static_cast<Web::DOM::Node const&>(*this).is_html_image_element();
+}
 
 }

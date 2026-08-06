@@ -8,6 +8,7 @@
 
 #include <AK/ByteString.h>
 #include <AK/Types.h>
+#include <AK/Utf16String.h>
 #include <LibHTTP/Cookie/Cookie.h>
 #include <LibHTTP/HSTS/ParsedHSTSPolicy.h>
 #include <LibIPC/ConnectionToServer.h>
@@ -17,6 +18,7 @@
 #include <LibWeb/Worker/WebWorkerClientEndpoint.h>
 #include <LibWeb/Worker/WebWorkerServerEndpoint.h>
 #include <LibWebView/Export.h>
+#include <LibWebView/PrivateBrowsing.h>
 
 namespace WebView {
 
@@ -28,8 +30,10 @@ class WEBVIEW_API WebWorkerClient final
 public:
     using InitTransport = Messages::WebWorkerServer::InitTransport;
 
-    explicit WebWorkerClient(NonnullOwnPtr<IPC::Transport>, Web::HTML::WorkerAgentId agent_id);
+    WebWorkerClient(NonnullOwnPtr<IPC::Transport>, IsPrivate, Web::HTML::WorkerAgentId agent_id);
     ~WebWorkerClient();
+
+    IsPrivate is_private() const { return m_is_private; }
 
     pid_t pid() const { return m_pid; }
     void set_pid(pid_t pid) { m_pid = pid; }
@@ -37,7 +41,7 @@ public:
     virtual void did_close_worker() override;
     virtual void did_finish_loading_worker_script(bool worker_is_secure_context) override;
     virtual void did_fail_loading_worker_script() override;
-    virtual void did_report_worker_exception(String message, String filename, u32 lineno, u32 colno) override;
+    virtual void did_report_worker_exception(Utf16String message, Utf16String filename, u32 lineno, u32 colno) override;
     virtual Messages::WebWorkerClient::DidRequestCookieResponse did_request_cookie(URL::URL, HTTP::Cookie::Source) override;
     virtual void did_request_file(ByteString path, i32 request_id) override;
     virtual void did_store_hsts_policy(String domain, HTTP::HSTS::ParsedHSTSPolicy policy) override;
@@ -48,6 +52,8 @@ public:
 
 private:
     virtual void die() override;
+
+    IsPrivate m_is_private { IsPrivate::No };
 
     pid_t m_pid { -1 };
     Web::HTML::WorkerAgentId m_agent_id { 0 };

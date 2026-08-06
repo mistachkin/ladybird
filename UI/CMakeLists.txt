@@ -1,3 +1,4 @@
+include(cmake/GUIFramework.cmake)
 include(cmake/ResourceFiles.cmake)
 
 function(create_ladybird_bundle target_name)
@@ -25,16 +26,15 @@ function(create_ladybird_bundle target_name)
             COMMAND "${CMAKE_COMMAND}" -E create_symlink "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}" "${bundle_dir}/Contents/lib"
         )
 
-        if (NOT CMAKE_BUILD_TYPE MATCHES "Release|RelWithDebInfo" AND "arm64" IN_LIST CMAKE_OSX_ARCHITECTURES)
-            add_custom_command(TARGET ${target_name} POST_BUILD
-                COMMAND codesign -s - -v -f --entitlements "${LADYBIRD_SOURCE_DIR}/Meta/debug.plist" "${bundle_dir}"
-            )
+        if (CMAKE_BUILD_TYPE MATCHES "Debug|RelWithDebInfo")
+            set(ENTITLEMENTS_FILE "${LADYBIRD_SOURCE_DIR}/Meta/DebugEntitlements.plist")
         else()
-            add_custom_target(apply-debug-entitlements
-                COMMAND codesign -s - -v -f --entitlements "${LADYBIRD_SOURCE_DIR}/Meta/debug.plist" "${bundle_dir}"
-                USES_TERMINAL
-            )
+            set(ENTITLEMENTS_FILE "${LADYBIRD_SOURCE_DIR}/Meta/Entitlements.plist")
         endif()
+
+        add_custom_command(TARGET ${target_name} POST_BUILD
+            COMMAND codesign -s - -v -f --entitlements "${ENTITLEMENTS_FILE}" "${bundle_dir}"
+        )
     endif()
 
     if (APPLE)
@@ -59,7 +59,7 @@ else()
     set(LADYBIRD_TARGET ladybird PRIVATE)
 endif()
 
-set(LADYBIRD_LIBS AK LibCore LibFileSystem LibGfx LibImageDecoderClient LibIPC LibJS LibMain LibWeb LibWebView LibRequests LibSync LibURL)
+set(LADYBIRD_LIBS AK LibCore LibFileSystem LibGfx LibImageDecoderClient LibIPC LibJS LibMain LibWeb LibWebView LibRequests LibSync LibURL LibWakeLock)
 target_link_libraries(${LADYBIRD_TARGET} PRIVATE ${LADYBIRD_LIBS})
 target_link_libraries(${LADYBIRD_TARGET} PRIVATE OpenSSL::Crypto OpenSSL::SSL)
 

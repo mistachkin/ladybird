@@ -1,13 +1,17 @@
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
-find_package(Qt6 REQUIRED COMPONENTS Core Widgets)
 
-if (APPLE)
-    # The native presentation paths use platform GPU buffer handles directly
-    # instead of copying frames through CPU memory.
+find_package(Qt6 6.9 REQUIRED COMPONENTS Core Widgets)
+
+if (NOT APPLE)
+    find_package(Qt6 6.9 OPTIONAL_COMPONENTS Positioning)
+endif()
+
+if (APPLE OR HAS_DIRECTX)
+    # The native presentation paths use platform GPU buffer handles directly instead of copying frames through CPU memory.
     set(QT_NO_PRIVATE_MODULE_WARNING ON)
-    find_package(Qt6 REQUIRED COMPONENTS GuiPrivate)
+    find_package(Qt6 6.9 REQUIRED COMPONENTS GuiPrivate)
 endif()
 
 qt_add_executable(ladybird main.cpp)
@@ -24,6 +28,7 @@ target_sources(ladybird PRIVATE
     Icon.cpp
     LocationEdit.cpp
     Menu.cpp
+    NativeWindowContainer.cpp
     Settings.cpp
     StringUtils.cpp
     Tab.cpp
@@ -34,12 +39,20 @@ target_sources(ladybird PRIVATE
 )
 target_link_libraries(ladybird PRIVATE Qt::Core Qt::Gui Qt::Widgets)
 
+if (TARGET Qt6::Positioning)
+    target_sources(ladybird PRIVATE GeolocationProviderQt.cpp GeolocationProviderQt.h)
+    target_link_libraries(ladybird PRIVATE Qt::Positioning)
+    target_compile_definitions(ladybird PRIVATE LADYBIRD_QT_HAVE_POSITIONING=1)
+endif()
+
 if (APPLE)
     target_sources(ladybird PRIVATE
+        ../AppKit/Utilities/ApplicationIcon.mm
+        ../AppKit/Utilities/DictionaryLookup.mm
         MacWindow.mm
         WebContentViewMac.mm
     )
-    target_link_libraries(ladybird PRIVATE Qt::GuiPrivate "-framework Cocoa" "-framework IOSurface" "-framework Metal" "-framework QuartzCore")
+    target_link_libraries(ladybird PRIVATE Qt::GuiPrivate "-framework Cocoa" "-framework IOSurface" "-framework Metal")
 endif()
 
 if (NOT APPLE AND USE_VULKAN_DMABUF_IMAGES AND Qt6_VERSION VERSION_GREATER_EQUAL 6.7.0)
@@ -90,6 +103,11 @@ if (NOT APPLE AND USE_VULKAN_DMABUF_IMAGES AND Qt6_VERSION VERSION_GREATER_EQUAL
     target_include_directories(ladybird PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
     target_link_libraries(ladybird PRIVATE Vulkan::Vulkan)
     add_dependencies(ladybird generate_web_content_view_linux_shaders)
+endif()
+
+if (HAS_DIRECTX)
+    target_sources(ladybird PRIVATE WebContentViewWindows.cpp)
+    target_link_libraries(ladybird PRIVATE Qt::GuiPrivate d3d11)
 endif()
 
 create_ladybird_bundle(ladybird)

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, The Ladybird developers
+ * Copyright (c) 2026-present, the Ladybird developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -26,7 +26,7 @@ GC::Ref<MediaStream> MediaStream::create(JS::Realm& realm)
 {
     auto stream = realm.create<MediaStream>(realm);
     // https://w3c.github.io/mediacapture-main/#dom-mediastream-id
-    stream->m_id = Crypto::generate_random_uuid();
+    stream->m_id = Utf16String::from_utf8(Crypto::generate_random_uuid());
     return stream;
 }
 
@@ -95,7 +95,7 @@ Vector<GC::Ref<MediaStreamTrack>> MediaStream::get_tracks() const
 }
 
 // https://w3c.github.io/mediacapture-main/#dom-mediastream-gettrackbyid
-GC::Ptr<MediaStreamTrack> MediaStream::get_track_by_id(String const& track_id) const
+GC::Ptr<MediaStreamTrack> MediaStream::get_track_by_id(Utf16String const& track_id) const
 {
     // The getTrackById method MUST return either a MediaStreamTrack object from this stream's track set whose [[Id]] is equal to trackId, or null.
     for (auto const& track : m_tracks) {

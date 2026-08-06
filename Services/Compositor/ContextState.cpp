@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, the Ladybird developers.
+ * Copyright (c) 2026-present, the Ladybird developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -10,11 +10,12 @@
 #include <Compositor/ContextState.h>
 #include <LibCore/Timer.h>
 #include <LibGfx/Bitmap.h>
-#include <LibGfx/Color.h>
-#include <LibGfx/PainterSkia.h>
 #include <LibGfx/PaintingSurface.h>
+#include <LibGfx/SkiaUtils.h>
 #include <LibWeb/Page/InputEvent.h>
 #include <LibWeb/Painting/DisplayListPlayerSkia.h>
+#include <core/SkCanvas.h>
+#include <core/SkImage.h>
 
 namespace Compositor {
 
@@ -120,10 +121,8 @@ void ContextState::stop_presenting_to_client()
 
 void ContextState::did_stop_presenting_to_client_if_needed(bool was_presenting_to_client, bool will_present_to_client)
 {
-    if (was_presenting_to_client && !will_present_to_client
-        && m_gpu_present_bitmap_id_awaiting_completion.has_value()
-        && m_presented_bitmap_id_awaiting_ack == m_gpu_present_bitmap_id_awaiting_completion)
-        m_presented_bitmap_id_awaiting_ack.clear();
+    (void)was_presenting_to_client;
+    (void)will_present_to_client;
 }
 
 void ContextState::set_parent_context(Optional<Web::Compositor::CompositorContextId> parent_context_id)
@@ -134,6 +133,12 @@ void ContextState::set_parent_context(Optional<Web::Compositor::CompositorContex
 void ContextState::apply_display_list_resource_transaction(Web::Painting::DisplayListResourceTransaction&& resource_transaction)
 {
     m_display_list_resource_storage.apply_transaction(move(resource_transaction));
+}
+
+void ContextState::update_image_frame_resources(Vector<Web::Painting::DisplayListImageFrameResource> image_frames)
+{
+    for (auto& frame : image_frames)
+        m_display_list_resource_storage.set_image_frame(frame.id, move(frame.frame));
 }
 
 void ContextState::install_display_list_update(
@@ -182,8 +187,12 @@ void ContextState::install_display_list_update(
 
 void ContextState::update_visual_context_tree(Web::Painting::AccumulatedVisualContextTree visual_context_tree)
 {
-    VERIFY(m_display_list);
-    VERIFY(m_display_list->compatible_visual_context_tree_version() == visual_context_tree.version());
+    if (!m_display_list || m_display_list->compatible_visual_context_tree_version() != visual_context_tree.version()) {
+        dbgln("Compositor: Dropping stale visual context tree update (tree version {}, display list version {})",
+            visual_context_tree.version(),
+            m_display_list ? m_display_list->compatible_visual_context_tree_version() : 0);
+        return;
+    }
     m_visual_context_tree = move(visual_context_tree);
     m_visual_context_tree_for_compositing.clear();
     if (m_async_visual_viewport_transform.has_value() && visual_viewport_transforms_match(visual_viewport_transform(*m_visual_context_tree), *m_async_visual_viewport_transform))
@@ -208,14 +217,9 @@ void ContextState::update_scroll_state(Web::Painting::ScrollStateSnapshot&& scro
     }
 }
 
-void ContextState::update_video_frame(Web::Painting::VideoFrameResourceId frame_id, NonnullRefPtr<Media::VideoFrame const> frame)
+void ContextState::set_video_sink(Web::Painting::VideoSinkResourceId frame_id, RefPtr<Media::VideoSink> sink)
 {
-    m_display_list_resource_storage.update_video_frame(frame_id, move(frame));
-}
-
-void ContextState::clear_video_frame(Web::Painting::VideoFrameResourceId frame_id)
-{
-    m_display_list_resource_storage.clear_video_frame(frame_id);
+    m_display_list_resource_storage.set_video_sink(frame_id, move(sink));
 }
 
 void ContextState::invalidate_wheel_event_listener_state(u64 generation)
@@ -370,6 +374,8 @@ ContextState::AsyncScrollResult ContextState::async_scroll_by(
     if (scroll_target.node_id->document_id != expected_document_id)
         return {};
 
+    cancel_smooth_scroll_for_node(*scroll_target.node_id);
+
     Optional<Web::Compositor::AsyncScrollOperationID> operation_id;
     if (operation_tracking == Web::Compositor::AsyncScrollOperationTracking::Yes)
         operation_id = ++m_next_async_scroll_operation_id;
@@ -391,6 +397,116 @@ ContextState::AsyncScrollResult ContextState::async_scroll_by(
     store_pending_async_scroll_offsets(scroll_offsets, operation_id);
     m_async_scrolling_viewport_rect = async_scroll_viewport_rect;
     return { .enqueue_result = { true, operation_id }, .frame_to_present = async_scroll_viewport_rect };
+}
+
+ContextState::AsyncScrollResult ContextState::smooth_scroll_to(Web::Compositor::AsyncScrollNodeStableID stable_node_id, Gfx::FloatPoint destination_offset, Gfx::IntRect viewport_rect, double device_pixels_per_css_pixel)
+{
+    if (!m_has_async_scrolling_state)
+        return {};
+
+    auto node_id = m_async_scroll_tree.scroll_node_id_for_stable_id(stable_node_id);
+    if (!node_id.has_value())
+        return {};
+    auto current_offset = m_async_scroll_tree.scroll_offset_for_node(*node_id, m_scroll_state_snapshot);
+    if (!current_offset.has_value())
+        return {};
+
+    cancel_smooth_scroll(stable_node_id);
+
+    auto operation_id = ++m_next_async_scroll_operation_id;
+    Web::Compositor::SmoothScrollAnimation animation { *current_offset, destination_offset, device_pixels_per_css_pixel };
+    if (animation.duration().is_zero()) {
+        m_completed_async_scroll_operation_ids.append(operation_id);
+        request_rendering_update();
+        return {
+            .enqueue_result = { true, operation_id },
+            .frame_to_present = {},
+        };
+    }
+
+    m_smooth_scroll_animations.append({
+        .stable_node_id = stable_node_id,
+        .operation_id = operation_id,
+        .animation = move(animation),
+        .started_at = MonotonicTime::now(),
+    });
+    m_async_scrolling_viewport_rect = viewport_rect;
+    return {
+        .enqueue_result = { true, operation_id },
+        .frame_to_present = viewport_rect,
+    };
+}
+
+void ContextState::cancel_smooth_scroll(Web::Compositor::AsyncScrollNodeStableID stable_node_id)
+{
+    for (size_t index = 0; index < m_smooth_scroll_animations.size(); ++index) {
+        auto const& smooth_scroll_animation = m_smooth_scroll_animations[index];
+        if (smooth_scroll_animation.stable_node_id != stable_node_id)
+            continue;
+        m_completed_async_scroll_operation_ids.append(smooth_scroll_animation.operation_id);
+        m_smooth_scroll_animations.remove(index);
+        request_rendering_update();
+        return;
+    }
+}
+
+Optional<Gfx::IntRect> ContextState::advance_smooth_scroll_animations(MonotonicTime now)
+{
+    Vector<Web::Compositor::AsyncScrollOffset> scroll_offsets;
+    bool changed_scroll_offset = false;
+    bool completed_operation = false;
+
+    for (size_t index = 0; index < m_smooth_scroll_animations.size();) {
+        auto& active_animation = m_smooth_scroll_animations[index];
+        auto node_id = m_async_scroll_tree.scroll_node_id_for_stable_id(active_animation.stable_node_id);
+        if (!node_id.has_value()) {
+            m_completed_async_scroll_operation_ids.append(active_animation.operation_id);
+            completed_operation = true;
+            m_smooth_scroll_animations.remove(index);
+            continue;
+        }
+
+        auto old_offset = m_async_scroll_tree.scroll_offset_for_node(*node_id, m_scroll_state_snapshot);
+        if (!old_offset.has_value()) {
+            m_completed_async_scroll_operation_ids.append(active_animation.operation_id);
+            completed_operation = true;
+            m_smooth_scroll_animations.remove(index);
+            continue;
+        }
+
+        auto sample = active_animation.animation.sample(now - active_animation.started_at);
+        auto new_offset = m_async_scroll_tree.set_scroll_offset(*node_id, sample.offset, m_scroll_state_snapshot);
+        VERIFY(new_offset.has_value());
+        auto scroll_delta = *new_offset - *old_offset;
+        if (!scroll_delta.is_zero()) {
+            scroll_offsets.append({
+                .stable_node_id = active_animation.stable_node_id,
+                .compositor_scroll_offset = *new_offset,
+                .unadopted_scroll_delta = scroll_delta,
+            });
+            changed_scroll_offset = true;
+            if (m_async_scroll_tree.scroll_node_is_viewport(*node_id))
+                m_async_scrolling_viewport_rect.set_location(new_offset->to_type<int>());
+        }
+
+        if (sample.complete) {
+            m_completed_async_scroll_operation_ids.append(active_animation.operation_id);
+            completed_operation = true;
+            m_smooth_scroll_animations.remove(index);
+        } else {
+            ++index;
+        }
+    }
+
+    if (!scroll_offsets.is_empty()) {
+        rebuild_wheel_hit_test_targets();
+        store_pending_async_scroll_offsets(scroll_offsets);
+    }
+    if (changed_scroll_offset || completed_operation)
+        request_rendering_update();
+    if (changed_scroll_offset)
+        return m_async_scrolling_viewport_rect;
+    return {};
 }
 
 ContextState::ContextUpdateResult ContextState::async_scroll_by(Gfx::FloatPoint position, Gfx::FloatPoint delta)
@@ -436,6 +552,8 @@ ContextState::ContextUpdateResult ContextState::async_scroll_by(Gfx::FloatPoint 
         return {};
     }
 
+    cancel_smooth_scroll_for_node(*scroll_target.node_id);
+
     auto async_scroll_viewport_rect = m_async_scrolling_viewport_rect;
     auto scroll_offsets = m_async_scroll_tree.apply_scroll_delta(*scroll_target.node_id, async_scroll_delta, m_scroll_state_snapshot);
     if (scroll_offsets.is_empty())
@@ -458,8 +576,7 @@ bool ContextState::should_defer_main_thread_present_for_async_scroll() const
     if (m_pending_async_scroll_offsets.is_empty())
         return false;
     return m_pending_present_frame.has_value()
-        || m_gpu_present_bitmap_id_awaiting_completion.has_value()
-        || m_presented_bitmap_id_awaiting_ack.has_value();
+        || is_present_blocked();
 }
 
 Web::Compositor::PendingAsyncScrollUpdates ContextState::take_pending_async_scroll_updates()
@@ -496,12 +613,19 @@ void ContextState::finish_window_resize()
     m_window_resize_in_progress = Web::Compositor::WindowResizingInProgress::No;
 }
 
-Optional<BackingStoreManager::Publication> ContextState::resize_backing_stores_if_needed(RefPtr<Gfx::SkiaBackendContext> const& skia_backend_context)
+Optional<BackingStoreManager::Publication> ContextState::resize_backing_stores_if_needed(RefPtr<Gfx::SkiaBackendContext> const& skia_backend_context, BackingStoreManager::GpuSharing gpu_sharing)
 {
+    if (m_gpu_present_bitmap_id_awaiting_completion.has_value())
+        return {};
     auto allocation = m_backing_store_manager.resize_backing_stores_if_needed(m_viewport_size, m_window_resize_in_progress);
     if (!allocation.has_value())
         return {};
-    return m_backing_store_manager.allocate_backing_stores(*allocation, skia_backend_context, presents_to_client());
+    return m_backing_store_manager.allocate_backing_stores(*allocation, skia_backend_context, presents_to_client(), gpu_sharing);
+}
+
+void ContextState::invalidate_backing_stores()
+{
+    m_backing_store_manager.invalidate();
 }
 
 bool ContextState::set_display_metadata(Optional<u64> display_id, double refresh_rate)
@@ -511,9 +635,22 @@ bool ContextState::set_display_metadata(Optional<u64> display_id, double refresh
     return m_pending_present_frame_scheduled;
 }
 
-void ContextState::queue_present_frame(Gfx::IntRect viewport_rect)
+void ContextState::queue_present_frame(PendingFrame pending_frame)
 {
-    m_pending_present_frame = viewport_rect;
+    if (!m_pending_present_frame.has_value()) {
+        m_pending_present_frame = pending_frame;
+        return;
+    }
+
+    if (m_pending_present_frame->viewport_rect != pending_frame.viewport_rect) {
+        m_pending_present_frame = PendingFrame {
+            .viewport_rect = pending_frame.viewport_rect,
+            .damage_rect = { {}, pending_frame.viewport_rect.size() },
+        };
+        return;
+    }
+
+    m_pending_present_frame->damage_rect.unite(pending_frame.damage_rect);
 }
 
 void ContextState::mark_pending_present_frame_scheduled()
@@ -537,11 +674,11 @@ bool ContextState::can_schedule_pending_present_frame_if_unblocked() const
     return true;
 }
 
-Optional<Gfx::IntRect> ContextState::take_pending_present_frame_if_unblocked()
+Optional<ContextState::PendingFrame> ContextState::take_pending_present_frame_if_unblocked()
 {
-    m_pending_present_frame_scheduled = false;
     if (is_present_blocked())
         return {};
+    m_pending_present_frame_scheduled = false;
     if (!m_pending_present_frame.has_value())
         return {};
     return m_pending_present_frame.release_value();
@@ -562,29 +699,40 @@ Optional<Gfx::IntRect> ContextState::current_frame_rect_to_present() const
     return m_presented_frame;
 }
 
-Optional<ContextState::PreparedFrame> ContextState::prepare_frame(Web::Painting::DisplayListPlayerSkia& display_list_player, Gfx::IntRect viewport_rect, CompositedContextResolver const* composited_context_resolver)
+Optional<Gfx::IntRect> ContextState::video_present_rect() const
+{
+    // The viewport to present a hosted video frame into. Unlike current_frame_rect_to_present this is not gated on a
+    // present already being in flight: a new frame must always (re)queue a present so the latest frame lands once the
+    // outstanding one completes.
+    if (m_presented_frame.has_value())
+        return m_presented_frame;
+    if (!m_viewport_size.is_empty())
+        return Gfx::IntRect { {}, m_viewport_size };
+    return {};
+}
+
+Optional<ContextState::PreparedFrame> ContextState::prepare_frame(Web::Painting::DisplayListPlayerSkia& display_list_player, PendingFrame pending_frame, CompositedContextResolver const* composited_context_resolver)
 {
     if (is_present_blocked()) {
-        m_pending_present_frame = viewport_rect;
+        queue_present_frame(pending_frame);
         return {};
     }
 
     if (!can_render_frame()) {
-        m_presented_frame = viewport_rect;
+        m_presented_frame = pending_frame.viewport_rect;
         return {};
     }
 
-    auto& back_store = m_backing_store_manager.back_store();
-    if (!presents_to_client()) {
-        Gfx::PainterSkia painter { NonnullRefPtr<Gfx::PaintingSurface> { back_store } };
-        painter.clear_rect(back_store.rect().to_type<float>(), Gfx::Color::Transparent);
+    auto render_target = m_backing_store_manager.acquire_render_target(pending_frame.damage_rect);
+    if (!render_target.has_value()) {
+        queue_present_frame(pending_frame);
+        return {};
     }
-    paint_current_display_list(display_list_player, back_store, composited_context_resolver);
+    auto& back_store = render_target->surface;
+    paint_current_display_list(display_list_player, back_store, composited_context_resolver, render_target->damage_rect);
 
-    auto rendered_bitmap_id = m_backing_store_manager.back_bitmap_id();
+    auto rendered_bitmap_id = render_target->bitmap_id;
     m_gpu_present_bitmap_id_awaiting_completion = rendered_bitmap_id;
-    if (presents_to_client())
-        m_presented_bitmap_id_awaiting_ack = rendered_bitmap_id;
     return PreparedFrame {
         .rendered_surface = &back_store,
         .bitmap_id = rendered_bitmap_id,
@@ -593,7 +741,6 @@ Optional<ContextState::PreparedFrame> ContextState::prepare_frame(Web::Painting:
 
 void ContextState::did_submit_prepared_frame(Gfx::IntRect viewport_rect)
 {
-    m_backing_store_manager.swap();
     m_presented_frame = viewport_rect;
 }
 
@@ -605,22 +752,25 @@ bool ContextState::present_synchronously(Web::Painting::DisplayListPlayerSkia& d
     if (is_present_blocked())
         return false;
 
-    auto viewport_rect = m_pending_present_frame;
-    if (!viewport_rect.has_value())
-        viewport_rect = m_presented_frame;
-    if (!viewport_rect.has_value())
+    Optional<PendingFrame> pending_frame = m_pending_present_frame;
+    if (!pending_frame.has_value() && m_presented_frame.has_value()) {
+        pending_frame = PendingFrame {
+            .viewport_rect = *m_presented_frame,
+            .damage_rect = { {}, m_presented_frame->size() },
+        };
+    }
+    if (!pending_frame.has_value())
         return false;
 
-    auto& back_store = m_backing_store_manager.back_store();
-    if (!presents_to_client()) {
-        Gfx::PainterSkia painter { NonnullRefPtr<Gfx::PaintingSurface> { back_store } };
-        painter.clear_rect(back_store.rect().to_type<float>(), Gfx::Color::Transparent);
-    }
-    paint_current_display_list(display_list_player, back_store, composited_context_resolver);
+    auto render_target = m_backing_store_manager.acquire_render_target(pending_frame->damage_rect);
+    if (!render_target.has_value())
+        return false;
+    auto& back_store = render_target->surface;
+    paint_current_display_list(display_list_player, back_store, composited_context_resolver, render_target->damage_rect);
     display_list_player.flush(back_store);
-    m_backing_store_manager.swap();
-    m_latest_rendered_surface = m_backing_store_manager.front_store_if_present();
-    m_presented_frame = viewport_rect;
+    m_backing_store_manager.complete_rendering(render_target->bitmap_id, false);
+    m_latest_rendered_surface = m_backing_store_manager.latest_rendered_surface();
+    m_presented_frame = pending_frame->viewport_rect;
     m_pending_present_frame.clear();
     m_pending_present_frame_scheduled = false;
     return true;
@@ -642,18 +792,15 @@ void ContextState::paint_screenshot(Web::Painting::DisplayListPlayerSkia& displa
 
 bool ContextState::acknowledge_presented_bitmap(i32 bitmap_id)
 {
-    if (m_presented_bitmap_id_awaiting_ack != bitmap_id)
-        return false;
-
-    m_presented_bitmap_id_awaiting_ack.clear();
-    return true;
+    return m_backing_store_manager.release_buffer(bitmap_id);
 }
 
 void ContextState::did_finish_gpu_present(i32 bitmap_id)
 {
     VERIFY(m_gpu_present_bitmap_id_awaiting_completion == bitmap_id);
     m_gpu_present_bitmap_id_awaiting_completion.clear();
-    m_latest_rendered_surface = m_backing_store_manager.front_store_if_present();
+    m_backing_store_manager.complete_rendering(bitmap_id, presents_to_client());
+    m_latest_rendered_surface = m_backing_store_manager.latest_rendered_surface();
 }
 
 void ContextState::stop_backing_store_shrink_timer()
@@ -767,12 +914,24 @@ void ContextState::store_pending_async_scroll_offsets(
         m_completed_async_scroll_operation_ids.append(*operation_id);
 }
 
+void ContextState::cancel_smooth_scroll_for_node(Web::Compositor::AsyncScrollNodeID node_id)
+{
+    for (auto const& smooth_scroll_animation : m_smooth_scroll_animations) {
+        auto animated_node_id = m_async_scroll_tree.scroll_node_id_for_stable_id(smooth_scroll_animation.stable_node_id);
+        if (animated_node_id != node_id)
+            continue;
+        cancel_smooth_scroll(smooth_scroll_animation.stable_node_id);
+        return;
+    }
+}
+
 Optional<Gfx::IntRect> ContextState::apply_viewport_scrollbar_drag(ViewportScrollbarController::Drag const& drag)
 {
     auto scroll_delta = m_viewport_scrollbar_controller.scroll_delta_for_drag(m_async_scroll_tree, m_scroll_state_snapshot, drag);
     if (!scroll_delta.has_value())
         return {};
 
+    cancel_smooth_scroll_for_node(scroll_delta->scroll_node_id);
     auto scroll_offsets = m_async_scroll_tree.apply_scroll_delta(scroll_delta->scroll_node_id, scroll_delta->delta, m_scroll_state_snapshot);
     if (scroll_offsets.is_empty())
         return {};
@@ -801,7 +960,7 @@ void ContextState::rebuild_wheel_hit_test_targets()
 bool ContextState::is_present_blocked() const
 {
     return m_gpu_present_bitmap_id_awaiting_completion.has_value()
-        || m_presented_bitmap_id_awaiting_ack.has_value();
+        || !m_backing_store_manager.has_available_buffer();
 }
 
 bool ContextState::can_render_frame() const
@@ -819,18 +978,56 @@ Web::Painting::AccumulatedVisualContextTree const& ContextState::visual_context_
     return *m_visual_context_tree_for_compositing;
 }
 
-void ContextState::paint_current_display_list(Web::Painting::DisplayListPlayerSkia& display_list_player, Gfx::PaintingSurface& surface, CompositedContextResolver const* composited_context_resolver)
+void ContextState::paint_current_display_list(Web::Painting::DisplayListPlayerSkia& display_list_player, Gfx::PaintingSurface& surface, CompositedContextResolver const* composited_context_resolver, Optional<Gfx::IntRect> damage_rect)
 {
     VERIFY(m_display_list);
-    display_list_player.execute(
-        *m_display_list,
-        visual_context_tree_for_compositing(),
-        m_display_list_resource_storage,
-        m_scroll_state_snapshot,
-        surface,
-        &m_canvas_surface_registry,
-        composited_context_resolver);
-    m_viewport_scrollbar_controller.paint(surface, display_list_player, m_scroll_state_snapshot);
+    auto surface_clear_color = Gfx::to_skia_color(m_display_list->surface_clear_color().value_or(Gfx::Color::Transparent));
+    auto paint_display_list = [&](Gfx::PaintingSurface& target_surface) {
+        display_list_player.execute(
+            *m_display_list,
+            visual_context_tree_for_compositing(),
+            m_display_list_resource_storage,
+            m_scroll_state_snapshot,
+            target_surface,
+            &m_canvas_surface_registry,
+            composited_context_resolver);
+        m_viewport_scrollbar_controller.paint(target_surface, display_list_player, m_scroll_state_snapshot);
+    };
+
+    if (damage_rect.has_value() && !damage_rect->is_empty() && presents_to_client() && damage_rect->size() != surface.size() && surface.skia_backend_context()) {
+        if (!m_damage_surface || m_damage_surface->size() != damage_rect->size()) {
+            m_damage_surface = Gfx::PaintingSurface::create_with_size(
+                damage_rect->size(), Gfx::BitmapFormat::BGRA8888, Gfx::AlphaType::Premultiplied, surface.skia_backend_context());
+        }
+
+        auto& damage_canvas = m_damage_surface->canvas();
+        damage_canvas.clear(surface_clear_color);
+        damage_canvas.save();
+        damage_canvas.translate(-damage_rect->x(), -damage_rect->y());
+        paint_display_list(*m_damage_surface);
+        damage_canvas.restore();
+
+        auto image = m_damage_surface->sk_image_snapshot<sk_sp<SkImage>>();
+        SkPaint paint;
+        paint.setBlendMode(SkBlendMode::kSrc);
+        surface.canvas().drawImageRect(
+            image.get(),
+            SkRect::MakeWH(damage_rect->width(), damage_rect->height()),
+            SkRect::MakeXYWH(damage_rect->x(), damage_rect->y(), damage_rect->width(), damage_rect->height()),
+            SkSamplingOptions {},
+            &paint,
+            SkCanvas::kStrict_SrcRectConstraint);
+        return;
+    }
+
+    auto& canvas = surface.canvas();
+    auto save_count = canvas.save();
+    if (damage_rect.has_value()) {
+        canvas.clipIRect(SkIRect::MakeXYWH(damage_rect->x(), damage_rect->y(), damage_rect->width(), damage_rect->height()));
+        canvas.clear(surface_clear_color);
+    }
+    paint_display_list(surface);
+    canvas.restoreToCount(save_count);
 }
 
 }

@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <AK/Utf16FlyString.h>
 #include <LibWeb/CSS/CSSDescriptors.h>
 #include <LibWeb/CSS/CSSRule.h>
 
@@ -16,67 +17,71 @@ class CSSCounterStyleRule : public CSSRule {
     GC_DECLARE_ALLOCATOR(CSSCounterStyleRule);
 
 public:
-    static GC::Ref<CSSCounterStyleRule> create(JS::Realm&, FlyString name, RefPtr<StyleValue const> system, RefPtr<StyleValue const> negative, RefPtr<StyleValue const> prefix, RefPtr<StyleValue const> suffix, RefPtr<StyleValue const> range, RefPtr<StyleValue const> pad, RefPtr<StyleValue const> fallback, RefPtr<StyleValue const> symbols, RefPtr<StyleValue const> additive_symbols, RefPtr<StyleValue const> speak_as);
+    static GC::Ref<CSSCounterStyleRule> create(JS::Realm&, Utf16FlyString name, RefPtr<StyleValue const> system, RefPtr<StyleValue const> negative, RefPtr<StyleValue const> prefix, RefPtr<StyleValue const> suffix, RefPtr<StyleValue const> range, RefPtr<StyleValue const> pad, RefPtr<StyleValue const> fallback, RefPtr<StyleValue const> symbols, RefPtr<StyleValue const> additive_symbols, RefPtr<StyleValue const> speak_as);
     virtual ~CSSCounterStyleRule() = default;
 
-    virtual String serialized() const override;
+    virtual Utf16String serialized() const override;
 
-    FlyString name() const { return m_name; }
-    void set_name(FlyString name);
+    Utf16FlyString name() const { return m_name; }
+    void set_name(Utf16String const& name);
+    void set_name(Utf16FlyString name);
 
-    FlyString system() const;
-    void set_system(FlyString const& system);
+    Utf16String system() const;
+    void set_system(Utf16String const& system);
     RefPtr<StyleValue const> const& system_style_value() const { return m_system; }
 
-    FlyString negative() const;
-    void set_negative(FlyString const& negative);
+    Utf16String negative() const;
+    void set_negative(Utf16String const& negative);
     RefPtr<StyleValue const> const& negative_style_value() const { return m_negative; }
 
-    FlyString prefix() const;
-    void set_prefix(FlyString const& prefix);
+    Utf16String prefix() const;
+    void set_prefix(Utf16String const& prefix);
     RefPtr<StyleValue const> const& prefix_style_value() const { return m_prefix; }
 
-    FlyString suffix() const;
-    void set_suffix(FlyString const& suffix);
+    Utf16String suffix() const;
+    void set_suffix(Utf16String const& suffix);
     RefPtr<StyleValue const> const& suffix_style_value() const { return m_suffix; }
 
-    FlyString range() const;
-    void set_range(FlyString const& range);
+    Utf16String range() const;
+    void set_range(Utf16String const& range);
     RefPtr<StyleValue const> const& range_style_value() const { return m_range; }
 
-    FlyString pad() const;
-    void set_pad(FlyString const& pad);
+    Utf16String pad() const;
+    void set_pad(Utf16String const& pad);
     RefPtr<StyleValue const> const& pad_style_value() const { return m_pad; }
 
-    FlyString fallback() const;
-    void set_fallback(FlyString const& fallback);
+    Utf16String fallback() const;
+    void set_fallback(Utf16String const& fallback);
     RefPtr<StyleValue const> const& fallback_style_value() const { return m_fallback; }
 
-    FlyString symbols() const;
-    void set_symbols(FlyString const& symbols);
+    Utf16String symbols() const;
+    void set_symbols(Utf16String const& symbols);
     RefPtr<StyleValue const> const& symbols_style_value() const { return m_symbols; }
 
-    FlyString additive_symbols() const;
-    void set_additive_symbols(FlyString const& additive_symbols);
+    Utf16String additive_symbols() const;
+    void set_additive_symbols(Utf16String const& additive_symbols);
     RefPtr<StyleValue const> const& additive_symbols_style_value() const { return m_additive_symbols; }
 
-    FlyString speak_as() const;
-    void set_speak_as(FlyString const& speak_as);
-    RefPtr<StyleValue const> const& speak_as_style_value() const { return m_speak_as; }
-
+    Utf16String speak_as() const;
+    void set_speak_as(Utf16String const& speak_as);
     // https://drafts.csswg.org/css-counter-styles-3/#non-overridable-counter-style-names
-    static bool matches_non_overridable_counter_style_name(FlyString const& name)
+    static bool matches_non_overridable_counter_style_name(Utf16View name)
     {
         // The non-overridable counter-style names are the keywords decimal, disc, square, circle, disclosure-open, and disclosure-closed.
-        return name.is_one_of_ignoring_ascii_case("decimal"sv, "disc"sv, "square"sv, "circle"sv, "disclosure-open"sv, "disclosure-closed"sv);
+        return name.equals_ignoring_ascii_case("decimal"sv)
+            || name.equals_ignoring_ascii_case("disc"sv)
+            || name.equals_ignoring_ascii_case("square"sv)
+            || name.equals_ignoring_ascii_case("circle"sv)
+            || name.equals_ignoring_ascii_case("disclosure-open"sv)
+            || name.equals_ignoring_ascii_case("disclosure-closed"sv);
     }
 
     virtual void clear_caches() override;
 
 protected:
-    CSSCounterStyleRule(JS::Realm&, FlyString name, RefPtr<StyleValue const> system, RefPtr<StyleValue const> negative, RefPtr<StyleValue const> prefix, RefPtr<StyleValue const> suffix, RefPtr<StyleValue const> range, RefPtr<StyleValue const> pad, RefPtr<StyleValue const> fallback, RefPtr<StyleValue const> symbols, RefPtr<StyleValue const> additive_symbols, RefPtr<StyleValue const> speak_as);
+    CSSCounterStyleRule(JS::Realm&, Utf16FlyString name, RefPtr<StyleValue const> system, RefPtr<StyleValue const> negative, RefPtr<StyleValue const> prefix, RefPtr<StyleValue const> suffix, RefPtr<StyleValue const> range, RefPtr<StyleValue const> pad, RefPtr<StyleValue const> fallback, RefPtr<StyleValue const> symbols, RefPtr<StyleValue const> additive_symbols, RefPtr<StyleValue const> speak_as);
 
-    FlyString m_name;
+    Utf16FlyString m_name;
     RefPtr<StyleValue const> m_system;
     RefPtr<StyleValue const> m_negative;
     RefPtr<StyleValue const> m_prefix;

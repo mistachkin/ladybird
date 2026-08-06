@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<script src="../include.js"></script>
+<div id="parent"><div id="child">hello</div></div>
+<script>
+    test(() => {
+        const child = document.getElementById("child");
+        internals.updateStyle();
+
+        let info = internals.styleGroupSharingInfo(child);
+        for (const group of ["animation", "grid", "svgReset", "mask", "anchor", "content", "transform", "effects", "inheritedTable", "inheritedList", "inheritedSVG"])
+            println(`unstyled child ${group} at default: ${info[group].isDefault}`);
+
+        child.style.color = "red";
+        internals.updateStyle();
+        info = internals.styleGroupSharingInfo(child);
+        println(`color-styled child inheritedText at default: ${info.inheritedText.isDefault}`);
+        println(`color-styled child inheritedText shared with parent: ${info.inheritedText.sharedWithParent}`);
+        println(`color-styled child grid still at default: ${info.grid.isDefault}`);
+
+        child.style.gridTemplateColumns = "1fr 2fr";
+        internals.updateStyle();
+        info = internals.styleGroupSharingInfo(child);
+        println(`grid-styled child grid at default: ${info.grid.isDefault}`);
+
+        child.style.color = "";
+        internals.updateStyle();
+        info = internals.styleGroupSharingInfo(child);
+        for (const group of ["inheritedList", "inheritedText", "font", "inheritedBox", "inheritedUI"])
+            println(`unstyled-again child ${group} shared with parent: ${info[group].sharedWithParent}`);
+
+        // A non-default inherited box on the parent must end up shared with the
+        // child, which inherits every field unchanged.
+        const parent = document.getElementById("parent");
+        parent.style.writingMode = "vertical-rl";
+        parent.style.visibility = "hidden";
+        internals.updateStyle();
+        info = internals.styleGroupSharingInfo(child);
+        println(`writing-mode parent: child inheritedBox at default: ${info.inheritedBox.isDefault}`);
+        println(`writing-mode parent: child inheritedBox shared with parent: ${info.inheritedBox.sharedWithParent}`);
+
+        // A child that overrides one inherited box field must stop sharing.
+        child.style.visibility = "visible";
+        internals.updateStyle();
+        info = internals.styleGroupSharingInfo(child);
+        println(`visibility-overriding child inheritedBox shared with parent: ${info.inheritedBox.sharedWithParent}`);
+    });
+</script>

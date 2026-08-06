@@ -32,7 +32,7 @@ void OptionConstructor::initialize(JS::Realm& realm)
 
     define_direct_property(vm.names.length, JS::Value(0), JS::Attribute::Configurable);
     define_direct_property(vm.names.name, JS::PrimitiveString::create(vm, "Option"_utf16_fly_string), JS::Attribute::Configurable);
-    define_direct_property(vm.names.prototype, &ensure_web_prototype<Bindings::HTMLOptionElementPrototype>(realm, "HTMLOptionElement"_fly_string), 0);
+    define_direct_property(vm.names.prototype, &ensure_web_prototype<Bindings::HTMLOptionElementPrototype>(realm, "HTMLOptionElement"_utf16_fly_string), 0);
 }
 
 JS::ThrowCompletionOr<JS::Value> OptionConstructor::call()
@@ -61,7 +61,7 @@ JS::ThrowCompletionOr<GC::Ref<JS::Object>> OptionConstructor::construct(Function
     GC::Ref<HTML::HTMLOptionElement> option_element = as<HTML::HTMLOptionElement>(*element);
 
     // https://webidl.spec.whatwg.org/#internally-create-a-new-object-implementing-the-interface
-    TRY(WebIDL::set_prototype_from_new_target<HTMLOptionElementPrototype>(vm, new_target, "HTMLOptionElement"_fly_string, *option_element));
+    TRY(WebIDL::set_prototype_from_new_target<HTMLOptionElementPrototype>(vm, new_target, "HTMLOptionElement"_utf16_fly_string, *option_element));
 
     // 3. If text is not the empty string, then append to option a new Text node whose data is text.
     auto text = TRY(text_value.to_utf16_string(vm));
@@ -72,7 +72,7 @@ JS::ThrowCompletionOr<GC::Ref<JS::Object>> OptionConstructor::construct(Function
 
     // 4. If value is given, then set an attribute value for option using "value" and value.
     if (!vm.argument(1).is_undefined()) {
-        auto value = TRY(vm.argument(1).to_utf16_string(vm)).to_utf8_but_should_be_ported_to_utf16();
+        auto value = TRY(vm.argument(1).to_utf16_string(vm));
         option_element->set_attribute_value(HTML::AttributeNames::value, value);
     }
 
@@ -80,7 +80,7 @@ JS::ThrowCompletionOr<GC::Ref<JS::Object>> OptionConstructor::construct(Function
     if (vm.argument_count() > 2) {
         auto default_selected = vm.argument(2).to_boolean();
         if (default_selected) {
-            option_element->set_attribute_value(HTML::AttributeNames::selected, String {});
+            option_element->set_attribute_value(HTML::AttributeNames::selected, Utf16String {});
         }
     }
 

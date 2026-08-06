@@ -7,7 +7,6 @@
 #pragma once
 
 #include <AK/Array.h>
-#include <AK/Badge.h>
 #include <AK/HashMap.h>
 #include <AK/HashTable.h>
 #include <AK/JsonValue.h>
@@ -65,8 +64,7 @@ enum class ConfigVariableID : u8 {
     ShowWebContentProcessIDInTabTitle,
     ShowAdvancedDebugMenu,
     ContentBlockerListPaths,
-    UseRoundedWindowCorners,
-    UseServerSideWindowDecorations,
+    UseClientSideWindowDecorations,
 
     Count,
 };
@@ -103,11 +101,12 @@ public:
     virtual void global_privacy_control_changed() { }
     virtual void dns_settings_changed() { }
     virtual void config_variable_changed(ConfigVariableID) { }
+    virtual void geolocation_settings_changed() { }
 };
 
 class WEBVIEW_API Settings {
 public:
-    static Settings create(Badge<Application>);
+    static Settings create(ByteString settings_path);
 
     JsonValue serialize_json() const;
 
@@ -162,6 +161,9 @@ public:
     GlobalPrivacyControl global_privacy_control() const { return m_global_privacy_control; }
     void set_global_privacy_control(GlobalPrivacyControl);
 
+    bool geolocation_enabled() const { return m_geolocation_enabled; }
+    void set_geolocation_enabled(bool);
+
     static DNSSettings parse_dns_settings(JsonValue const&);
     DNSSettings const& dns_settings() const { return m_dns_settings; }
     void set_dns_settings(DNSSettings const&, bool override_by_command_line = false);
@@ -197,6 +199,7 @@ private:
     Optional<AutocompleteEngine> m_autocomplete_engine;
     AutoplaySiteSetting m_autoplay;
     BrowsingDataSettings m_browsing_data_settings;
+    bool m_geolocation_enabled { false };
     GlobalPrivacyControl m_global_privacy_control { GlobalPrivacyControl::No };
     DNSSettings m_dns_settings { SystemDNS() };
     bool m_dns_override_by_command_line { false };

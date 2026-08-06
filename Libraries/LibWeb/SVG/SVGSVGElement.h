@@ -6,11 +6,12 @@
 
 #pragma once
 
+#include <LibWeb/CSS/Length.h>
 #include <LibWeb/CSS/Sizing.h>
+#include <LibWeb/CSS/StyleValues/NumberStyleValue.h>
 #include <LibWeb/Geometry/DOMMatrix.h>
 #include <LibWeb/Geometry/DOMPoint.h>
 #include <LibWeb/SVG/AttributeParser.h>
-#include <LibWeb/SVG/SVGAnimatedLength.h>
 #include <LibWeb/SVG/SVGFitToViewBox.h>
 #include <LibWeb/SVG/SVGGraphicsElement.h>
 #include <LibWeb/SVG/SVGLength.h>
@@ -25,7 +26,7 @@ class SVGSVGElement final : public SVGGraphicsElement
     GC_DECLARE_ALLOCATOR(SVGSVGElement);
 
 public:
-    virtual RefPtr<Layout::Node> create_layout_node(CSS::ComputedProperties const&) override;
+    virtual RefPtr<Layout::Node> create_layout_node(NonnullRefPtr<CSS::ComputedValues const>) override;
 
     virtual bool requires_svg_container() const override { return false; }
     virtual bool is_svg_container() const override { return true; }
@@ -36,10 +37,21 @@ public:
 
     void set_fallback_view_box_for_svg_as_image(Optional<ViewBox>);
 
-    GC::Ref<SVGAnimatedLength> x() const;
-    GC::Ref<SVGAnimatedLength> y() const;
-    GC::Ref<SVGAnimatedLength> width() const;
-    GC::Ref<SVGAnimatedLength> height() const;
+    // AD-HOC: The spec states that the x, y, width and height IDL attributes reflect the respective computed values and their
+    //         corresponding presentation attributes but other browsers reflect the attribute values instead - see
+    //         https://github.com/w3c/svgwg/issues/1153
+
+    // https://w3c.github.io/svgwg/svg2-draft/struct.html#__svg__SVGSVGElement__x
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(x, Horizontal, CSS::NumberStyleValue::create(0));
+
+    // https://w3c.github.io/svgwg/svg2-draft/struct.html#__svg__SVGSVGElement__y
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(y, Vertical, CSS::NumberStyleValue::create(0));
+
+    // https://w3c.github.io/svgwg/svg2-draft/struct.html#__svg__SVGSVGElement__width
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(width, Horizontal, CSS::PercentageStyleValue::create(CSS::Percentage { 100 }));
+
+    // https://w3c.github.io/svgwg/svg2-draft/struct.html#__svg__SVGSVGElement__height
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(height, Vertical, CSS::PercentageStyleValue::create(CSS::Percentage { 100 }));
 
     float current_scale() const;
     void set_current_scale(float);
@@ -53,6 +65,7 @@ public:
 
     void deselect_all() const;
 
+    GC::Ref<SVGNumber> create_svg_number() const;
     GC::Ref<SVGLength> create_svg_length() const;
     GC::Ref<Geometry::DOMPoint> create_svg_point() const;
     GC::Ref<Geometry::DOMMatrix> create_svg_matrix() const;
@@ -76,7 +89,7 @@ public:
     [[nodiscard]] RefPtr<CSS::StyleValue const> width_style_value_from_attribute() const;
     [[nodiscard]] RefPtr<CSS::StyleValue const> height_style_value_from_attribute() const;
 
-    static CSS::SizeWithAspectRatio negotiate_natural_metrics(SVGSVGElement const&);
+    static CSS::SizeWithAspectRatio negotiate_natural_metrics(SVGSVGElement const&, CSS::Length::ResolutionContext const&);
 
 private:
     SVGSVGElement(DOM::Document&, DOM::QualifiedName);
@@ -88,7 +101,7 @@ private:
 
     GC::Ptr<SVGViewElement> active_view_element() const { return m_active_view_element; }
 
-    virtual void attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
+    virtual void attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_) override;
     virtual void children_changed(ChildrenChangedMetadata const&) override;
 
     void update_fallback_view_box_for_svg_as_image();

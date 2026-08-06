@@ -7,10 +7,10 @@
 #pragma once
 
 #include <LibGC/Ptr.h>
+#include <LibWeb/CSS/StyleValues/NumberStyleValue.h>
 #include <LibWeb/DOM/DocumentLoadEventDelayer.h>
 #include <LibWeb/HTML/DecodedImageData.h>
 #include <LibWeb/Layout/ImageProvider.h>
-#include <LibWeb/SVG/SVGAnimatedLength.h>
 #include <LibWeb/SVG/SVGGraphicsElement.h>
 
 namespace Web::SVG {
@@ -28,12 +28,23 @@ public:
 
     virtual ~SVGImageElement() override;
 
-    virtual void attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
+    virtual void attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_) override;
 
-    GC::Ref<SVG::SVGAnimatedLength> x();
-    GC::Ref<SVG::SVGAnimatedLength> y();
-    GC::Ref<SVG::SVGAnimatedLength> width();
-    GC::Ref<SVG::SVGAnimatedLength> height();
+    // AD-HOC: The spec states that the x, y, width and height IDL attributes reflect the respective computed values and their
+    //         corresponding presentation attributes but other browsers reflect the attribute values instead - see
+    //         https://github.com/w3c/svgwg/issues/1153
+
+    // https://w3c.github.io/svgwg/svg2-draft/embedded.html#__svg__SVGImageElement__x
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(x, Horizontal, CSS::NumberStyleValue::create(0));
+
+    // https://w3c.github.io/svgwg/svg2-draft/embedded.html#__svg__SVGImageElement__y
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(y, Vertical, CSS::NumberStyleValue::create(0));
+
+    // https://w3c.github.io/svgwg/svg2-draft/embedded.html#__svg__SVGImageElement__width
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(width, Horizontal, CSS::NumberStyleValue::create(0));
+
+    // https://w3c.github.io/svgwg/svg2-draft/embedded.html#__svg__SVGImageElement__height
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(height, Vertical, CSS::NumberStyleValue::create(0));
 
     Gfx::FloatRect bounding_box(CSSPixelSize viewport_size) const;
 
@@ -47,13 +58,15 @@ protected:
     virtual void visit_edges(Cell::Visitor&) override;
     virtual void adopted_from(DOM::Document&) override;
 
-    void process_the_url(Optional<String> const& href);
+    void process_the_url(Optional<Utf16String> const& href);
     void fetch_the_document(URL::URL const& url);
 
 private:
     virtual void finalize() override;
 
-    virtual RefPtr<Layout::Node> create_layout_node(CSS::ComputedProperties const&) override;
+    virtual bool is_svg_image_element() const override { return true; }
+
+    virtual RefPtr<Layout::Node> create_layout_node(NonnullRefPtr<CSS::ComputedValues const>) override;
     virtual void decoded_image_data_did_update() override { set_needs_repaint(); }
 
     Optional<NumberPercentage> m_x;
@@ -66,5 +79,22 @@ private:
     GC::Ptr<HTML::SharedResourceRequest> m_resource_request;
     Optional<DOM::DocumentLoadEventDelayer> m_load_event_delayer;
 };
+
+}
+
+namespace Web::DOM {
+
+template<>
+inline bool Node::fast_is<SVG::SVGImageElement>() const { return is_svg_image_element(); }
+
+}
+
+namespace JS {
+
+template<>
+inline bool Object::fast_is<Web::SVG::SVGImageElement>() const
+{
+    return is_dom_node() && static_cast<Web::DOM::Node const&>(*this).is_svg_image_element();
+}
 
 }

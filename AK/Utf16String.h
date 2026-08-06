@@ -70,6 +70,26 @@ public:
 
     static Utf16String from_utf16(Utf16View const& utf16_string);
 
+    // NB: These round-trip the one-word raw representation through FFI bridges (e.g. the LibWeb
+    //     Rust style value data); the bridge releases its reference through
+    //     Utf16FlyString::unref_raw(), which handles any Utf16StringBase-backed string.
+    [[nodiscard]] FlatPtr to_raw_leaked() const
+    {
+        if (has_long_storage())
+            data_without_union_member_assertion()->ref();
+        return raw();
+    }
+
+    [[nodiscard]] static Utf16String from_raw(FlatPtr raw)
+    {
+        Utf16String string;
+        auto const** data = __builtin_launder(&string.m_value.data);
+        *data = bit_cast<Detail::Utf16StringData const*>(raw);
+        if (string.has_long_storage())
+            string.data_without_union_member_assertion()->ref();
+        return string;
+    }
+
     template<typename T>
     requires(IsOneOf<RemoveCVReference<T>, Utf16String, Utf16FlyString>)
     static Utf16String from_utf16(T&&) = delete;
@@ -152,9 +172,9 @@ public:
     String to_well_formed_utf8() const;
 
     // These methods require linking LibUnicode.
-    Utf16String to_lowercase(Optional<StringView> const& locale = {}) const;
-    Utf16String to_uppercase(Optional<StringView> const& locale = {}) const;
-    Utf16String to_titlecase(Optional<StringView> const& locale = {}, TrailingCodePointTransformation trailing_code_point_transformation = TrailingCodePointTransformation::Lowercase) const;
+    Utf16String to_lowercase(Optional<Utf16View> const& locale = {}) const;
+    Utf16String to_uppercase(Optional<Utf16View> const& locale = {}) const;
+    Utf16String to_titlecase(Optional<Utf16View> const& locale = {}, TrailingCodePointTransformation trailing_code_point_transformation = TrailingCodePointTransformation::Lowercase) const;
     Utf16String to_casefold() const;
     Utf16String to_fullwidth() const;
 

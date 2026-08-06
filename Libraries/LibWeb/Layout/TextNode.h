@@ -14,11 +14,10 @@
 #include <LibUnicode/Segmenter.h>
 #include <LibWeb/CSS/Enums.h>
 #include <LibWeb/DOM/Text.h>
-#include <LibWeb/Layout/Node.h>
+#include <LibWeb/Layout/Box.h>
 
 namespace Web::Layout {
 
-class LineBoxFragment;
 class GeneratedTextNode;
 class TextSliceNode;
 
@@ -40,70 +39,16 @@ public:
 
     Utf16String const& text_for_rendering() const;
 
-    struct Chunk {
-        Utf16View view;
-        NonnullRefPtr<Gfx::Font const> font;
-        size_t start { 0 };
-        size_t length { 0 };
-        bool has_breaking_newline { false };
-        bool has_breaking_tab { false };
-        bool is_all_whitespace { false };
-        bool can_break_after { false };
-        Gfx::GlyphRun::TextType text_type;
-    };
-
-    class ChunkIterator {
-    public:
-        ChunkIterator(TextNode const&, bool should_wrap_lines, bool should_respect_linebreaks);
-        ChunkIterator(TextNode const&, Utf16View const&, Unicode::Segmenter& grapheme_segmenter, Unicode::Segmenter& line_segmenter, CSS::WordBreak, bool should_wrap_lines, bool should_respect_linebreaks);
-
-        bool should_wrap_lines() const { return m_should_wrap_lines; }
-        bool should_respect_linebreaks() const { return m_should_respect_linebreaks; }
-        bool should_collapse_whitespace() const { return m_should_collapse_whitespace; }
-
-        Optional<Chunk> next();
-        Optional<Chunk> peek(size_t);
-
-        Chunk create_empty_chunk();
-
-    private:
-        Optional<Chunk> next_without_peek();
-        Optional<Chunk> try_commit_chunk(size_t start, size_t end, bool has_breaking_newline, bool has_breaking_tab, bool can_break_after, Gfx::Font const&, Gfx::GlyphRun::TextType) const;
-
-        [[nodiscard]] bool is_at_line_break_opportunity() const;
-        [[nodiscard]] Gfx::Font const& font_for_space(size_t at_index, u32 space_code_point) const;
-        [[nodiscard]] Gfx::EmojiPresentationResult emoji_presentation_at(size_t code_unit_offset, u32 code_point) const;
-
-        bool const m_should_wrap_lines;
-        bool const m_should_respect_linebreaks;
-        bool m_should_collapse_whitespace;
-        Utf16View m_view;
-        Gfx::FontCascadeList const& m_font_cascade_list;
-
-        Unicode::Segmenter& m_grapheme_segmenter;
-        Unicode::Segmenter& m_line_segmenter;
-        CSS::WordBreak m_word_break;
-        CSS::FontVariantEmoji m_font_variant_emoji;
-        size_t m_current_index { 0 };
-
-        Vector<Chunk> m_peek_queue;
-
-        mutable RefPtr<Gfx::Font const> m_last_non_whitespace_font;
-    };
-
-    struct ChunkList {
-        Vector<Chunk> chunks;
-        bool should_collapse_whitespace { false };
-    };
-
-    ChunkList const& chunks_for_layout(bool should_wrap_lines, bool should_respect_linebreaks) const;
-
     void invalidate_text_for_rendering();
 
+    void enroll_for_arena_text_content_sync() const;
+    void sync_text_content_to_arena() const;
+
     Unicode::Segmenter& grapheme_segmenter() const;
-    Unicode::Segmenter& line_segmenter() const;
 
     void set_needs_repaint(InvalidateDisplayList = InvalidateDisplayList::Yes) const;
+
+    bool update_produces_line_box_fragment_when_empty_flag();
 
 protected:
     TextNode(DOM::Document&, DOM::Text&, AttachToDOMNode);
@@ -118,7 +63,7 @@ private:
     struct TextForRenderingCacheKey {
         CSS::TextTransform text_transform { CSS::TextTransform::None };
         CSS::WhiteSpaceCollapse white_space_collapse { CSS::WhiteSpaceCollapse::Collapse };
-        Optional<String> lang;
+        Optional<Utf16String> lang;
         bool is_password_input { false };
         size_t dom_start_offset { 0 };
         size_t dom_length { 0 };
@@ -126,28 +71,10 @@ private:
         bool operator==(TextForRenderingCacheKey const&) const = default;
     };
 
-    struct ChunkCacheKey {
-        bool should_wrap_lines { false };
-        bool should_respect_linebreaks { false };
-        CSS::WhiteSpaceCollapse white_space_collapse { CSS::WhiteSpaceCollapse::Collapse };
-        CSS::WordBreak word_break { CSS::WordBreak::Normal };
-        CSS::FontVariantEmoji font_variant_emoji { CSS::FontVariantEmoji::Normal };
-        RefPtr<Gfx::FontCascadeList const> font_cascade_list;
-
-        bool operator==(ChunkCacheKey const&) const = default;
-    };
-
-    struct ChunkCacheEntry {
-        ChunkCacheKey key;
-        ChunkList chunk_list;
-    };
-
     struct TextDependentCache {
         TextForRenderingCacheKey key;
         Utf16String text_for_rendering;
         mutable OwnPtr<Unicode::Segmenter> grapheme_segmenter;
-        mutable OwnPtr<Unicode::Segmenter> line_segmenter;
-        mutable Optional<ChunkCacheEntry> chunk_cache;
     };
 
     TextForRenderingCacheKey create_text_for_rendering_cache_key() const;
@@ -155,6 +82,8 @@ private:
     TextDependentCache const& ensure_text_dependent_cache() const;
 
     mutable Optional<TextDependentCache> m_text_dependent_cache;
+    mutable bool m_arena_text_content_in_sync { false };
+    mutable bool m_enrolled_for_arena_text_content_sync { false };
 };
 
 class GeneratedTextNode final : public TextNode {
@@ -198,6 +127,11 @@ private:
     size_t m_dom_length_in_code_units { 0 };
     WeakPtr<TextSliceNode> m_first_letter_slice;
 };
+
+// Classifies a code point for direction-run splitting during text chunking:
+// strong LTR/RTL, direction-neutral Common, or ContextDependent (resolved
+// from surrounding runs).
+Gfx::GlyphRun::TextType text_type_for_code_point(u32 code_point);
 
 template<>
 inline bool Node::fast_is<TextNode>() const { return is_text_node(); }

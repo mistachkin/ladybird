@@ -9,7 +9,6 @@
  */
 
 #include <AK/CharacterTypes.h>
-#include <AK/FlyString.h>
 #include <AK/GenericLexer.h>
 #include <AK/String.h>
 #include <AK/Utf16String.h>
@@ -22,29 +21,6 @@
 namespace Web::Infra {
 
 // https://infra.spec.whatwg.org/#normalize-newlines
-String normalize_newlines(String const& string)
-{
-    // To normalize newlines in a string, replace every U+000D CR U+000A LF code point pair with a single U+000A LF
-    // code point, and then replace every remaining U+000D CR code point with a U+000A LF code point.
-    if (!string.contains('\r'))
-        return string;
-
-    StringBuilder builder;
-    GenericLexer lexer { string };
-
-    while (!lexer.is_eof()) {
-        builder.append(lexer.consume_until('\r'));
-
-        if (lexer.peek() == '\r') {
-            lexer.ignore(1 + static_cast<size_t>(lexer.peek(1) == '\n'));
-            builder.append('\n');
-        }
-    }
-
-    return MUST(builder.to_string());
-}
-
-// https://infra.spec.whatwg.org/#normalize-newlines
 Utf16String normalize_newlines(Utf16String const& string)
 {
     // To normalize newlines in a string, replace every U+000D CR U+000A LF code point pair with a single U+000A LF
@@ -52,16 +28,26 @@ Utf16String normalize_newlines(Utf16String const& string)
     if (!string.contains('\r'))
         return string;
 
-    // FIXME: Implement a UTF-16 GenericLexer.
-    Utf16StringBuilder builder(string.length_in_code_units());
+    return normalize_newlines(string.utf16_view());
+}
 
-    for (size_t i = 0; i < string.length_in_code_units(); ++i) {
-        if (auto code_unit = string.code_unit_at(i); code_unit == '\r') {
-            if (i + 1 < string.length_in_code_units() && string.code_unit_at(i + 1) == '\n')
-                ++i;
+// https://infra.spec.whatwg.org/#normalize-newlines
+Utf16String normalize_newlines(Utf16View string)
+{
+    // To normalize newlines in a string, replace every U+000D CR U+000A LF code point pair with a single U+000A LF
+    // code point, and then replace every remaining U+000D CR code point with a U+000A LF code point.
+    if (!string.contains('\r'))
+        return Utf16String::from_utf16(string);
+
+    Utf16StringBuilder builder(string.length_in_code_units());
+    Utf16GenericLexer lexer { string };
+
+    while (!lexer.is_eof()) {
+        builder.append(lexer.consume_until('\r'));
+
+        if (lexer.peek() == '\r') {
+            lexer.ignore(1 + static_cast<size_t>(lexer.peek(1) == '\n'));
             builder.append_ascii('\n');
-        } else {
-            builder.append_code_unit(code_unit);
         }
     }
 
@@ -93,6 +79,13 @@ Utf16String strip_and_collapse_whitespace(Utf16String const& string)
     if (!string.contains_any_of(Infra::ASCII_WHITESPACE_CODE_POINTS))
         return string;
 
+    return strip_and_collapse_whitespace(string.utf16_view());
+}
+
+// https://infra.spec.whatwg.org/#strip-and-collapse-ascii-whitespace
+Utf16String strip_and_collapse_whitespace(Utf16View string)
+{
+    // Replace any sequence of one or more consecutive code points that are ASCII whitespace in the string with a single U+0020 SPACE code point.
     Utf16StringBuilder builder;
 
     for (auto code_point : string) {
@@ -110,11 +103,8 @@ Utf16String strip_and_collapse_whitespace(Utf16String const& string)
 }
 
 // https://infra.spec.whatwg.org/#code-unit-prefix
-bool is_code_unit_prefix(StringView potential_prefix_utf8, StringView input_utf8)
+bool is_code_unit_prefix(Utf16View potential_prefix, Utf16View input)
 {
-    auto potential_prefix = Utf16String::from_utf8(potential_prefix_utf8);
-    auto input = Utf16String::from_utf8(input_utf8);
-
     // 1. Let i be 0.
     size_t i = 0;
 
@@ -144,12 +134,11 @@ bool is_code_unit_prefix(StringView potential_prefix_utf8, StringView input_utf8
 }
 
 // https://infra.spec.whatwg.org/#scalar-value-string
-ErrorOr<String> convert_to_scalar_value_string(StringView string)
+ErrorOr<Utf16String> convert_to_scalar_value_string(Utf16View string)
 {
     // To convert a string into a scalar value string, replace any surrogates with U+FFFD.
-    StringBuilder scalar_value_builder;
-    auto utf8_view = Utf8View { string };
-    for (u32 code_point : utf8_view) {
+    Utf16StringBuilder scalar_value_builder;
+    for (u32 code_point : string) {
         if (is_unicode_surrogate(code_point))
             code_point = 0xFFFD;
         scalar_value_builder.append_code_point(code_point);
@@ -158,18 +147,9 @@ ErrorOr<String> convert_to_scalar_value_string(StringView string)
 }
 
 // https://infra.spec.whatwg.org/#code-unit-less-than
-bool code_unit_less_than(StringView a, StringView b)
+bool code_unit_less_than(Utf16View a, Utf16View b)
 {
-    // FIXME: Perhaps there is a faster way to do this?
-
-    // Fastpath for ASCII-only strings.
-    if (a.is_ascii() && b.is_ascii())
-        return a < b;
-
-    auto a_utf16 = Utf16String::from_utf8(a);
-    auto b_utf16 = Utf16String::from_utf8(b);
-
-    return a_utf16.utf16_view().is_code_unit_less_than(b_utf16);
+    return a.is_code_unit_less_than(b);
 }
 
 }

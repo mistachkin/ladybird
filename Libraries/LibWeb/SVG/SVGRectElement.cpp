@@ -28,22 +28,22 @@ void SVGRectElement::initialize(JS::Realm& realm)
     Base::initialize(realm);
 }
 
-void SVGRectElement::attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
+void SVGRectElement::attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_)
 {
     Base::attribute_changed(name, old_value, value, namespace_);
 
     if (name == SVG::AttributeNames::x) {
-        m_x = AttributeParser::parse_number_percentage(value.value_or(String {}));
+        m_x = AttributeParser::parse_number_percentage(value.value_or({}));
     } else if (name == SVG::AttributeNames::y) {
-        m_y = AttributeParser::parse_number_percentage(value.value_or(String {}));
+        m_y = AttributeParser::parse_number_percentage(value.value_or({}));
     } else if (name == SVG::AttributeNames::width) {
-        m_width = AttributeParser::parse_number_percentage(value.value_or(String {}));
+        m_width = AttributeParser::parse_number_percentage(value.value_or({}));
     } else if (name == SVG::AttributeNames::height) {
-        m_height = AttributeParser::parse_number_percentage(value.value_or(String {}));
+        m_height = AttributeParser::parse_number_percentage(value.value_or({}));
     } else if (name == SVG::AttributeNames::rx) {
-        m_radius_x = AttributeParser::parse_number_percentage(value.value_or(String {}));
+        m_radius_x = AttributeParser::parse_number_percentage(value.value_or({}));
     } else if (name == SVG::AttributeNames::ry) {
-        m_radius_y = AttributeParser::parse_number_percentage(value.value_or(String {}));
+        m_radius_y = AttributeParser::parse_number_percentage(value.value_or({}));
     }
 }
 
@@ -151,66 +151,6 @@ Gfx::FloatSize SVGRectElement::calculate_used_corner_radius_values(CSSPixelSize 
 
     // 8. The effective values of ‘rx’ and ‘ry’ are rx and ry, respectively.
     return { rx, ry };
-}
-
-// https://www.w3.org/TR/SVG11/shapes.html#RectElementXAttribute
-GC::Ref<SVGAnimatedLength> SVGRectElement::x() const
-{
-    // FIXME: Populate the unit type when it is parsed (0 here is "unknown").
-    // FIXME: Create a proper animated value when animations are supported.
-    auto base_length = SVGLength::create(realm(), 0, m_x.value_or(NumberPercentage::create_number(0)).value(), SVGLength::ReadOnly::No);
-    auto anim_length = SVGLength::create(realm(), 0, m_x.value_or(NumberPercentage::create_number(0)).value(), SVGLength::ReadOnly::Yes);
-    return SVGAnimatedLength::create(realm(), base_length, anim_length);
-}
-
-// https://www.w3.org/TR/SVG11/shapes.html#RectElementYAttribute
-GC::Ref<SVGAnimatedLength> SVGRectElement::y() const
-{
-    // FIXME: Populate the unit type when it is parsed (0 here is "unknown").
-    // FIXME: Create a proper animated value when animations are supported.
-    auto base_length = SVGLength::create(realm(), 0, m_y.value_or(NumberPercentage::create_number(0)).value(), SVGLength::ReadOnly::No);
-    auto anim_length = SVGLength::create(realm(), 0, m_y.value_or(NumberPercentage::create_number(0)).value(), SVGLength::ReadOnly::Yes);
-    return SVGAnimatedLength::create(realm(), base_length, anim_length);
-}
-
-// https://www.w3.org/TR/SVG11/shapes.html#RectElementWidthAttribute
-GC::Ref<SVGAnimatedLength> SVGRectElement::width() const
-{
-    // FIXME: Populate the unit type when it is parsed (0 here is "unknown").
-    // FIXME: Create a proper animated value when animations are supported.
-    auto base_length = SVGLength::create(realm(), 0, m_width.value_or(NumberPercentage::create_number(0)).value(), SVGLength::ReadOnly::No);
-    auto anim_length = SVGLength::create(realm(), 0, m_width.value_or(NumberPercentage::create_number(0)).value(), SVGLength::ReadOnly::Yes);
-    return SVGAnimatedLength::create(realm(), base_length, anim_length);
-}
-
-// https://www.w3.org/TR/SVG11/shapes.html#RectElementHeightAttribute
-GC::Ref<SVGAnimatedLength> SVGRectElement::height() const
-{
-    // FIXME: Populate the unit type when it is parsed (0 here is "unknown").
-    // FIXME: Create a proper animated value when animations are supported.
-    auto base_length = SVGLength::create(realm(), 0, m_height.value_or(NumberPercentage::create_number(0)).value(), SVGLength::ReadOnly::No);
-    auto anim_length = SVGLength::create(realm(), 0, m_height.value_or(NumberPercentage::create_number(0)).value(), SVGLength::ReadOnly::Yes);
-    return SVGAnimatedLength::create(realm(), base_length, anim_length);
-}
-
-// https://www.w3.org/TR/SVG11/shapes.html#RectElementRXAttribute
-GC::Ref<SVGAnimatedLength> SVGRectElement::rx() const
-{
-    // FIXME: Populate the unit type when it is parsed (0 here is "unknown").
-    // FIXME: Create a proper animated value when animations are supported.
-    auto base_length = SVGLength::create(realm(), 0, m_radius_x.value_or(NumberPercentage::create_number(0)).value(), SVGLength::ReadOnly::No);
-    auto anim_length = SVGLength::create(realm(), 0, m_radius_x.value_or(NumberPercentage::create_number(0)).value(), SVGLength::ReadOnly::Yes);
-    return SVGAnimatedLength::create(realm(), base_length, anim_length);
-}
-
-// https://www.w3.org/TR/SVG11/shapes.html#RectElementRYAttribute
-GC::Ref<SVGAnimatedLength> SVGRectElement::ry() const
-{
-    // FIXME: Populate the unit type when it is parsed (0 here is "unknown").
-    // FIXME: Create a proper animated value when animations are supported.
-    auto base_length = SVGLength::create(realm(), 0, m_radius_y.value_or(NumberPercentage::create_number(0)).value(), SVGLength::ReadOnly::No);
-    auto anim_length = SVGLength::create(realm(), 0, m_radius_y.value_or(NumberPercentage::create_number(0)).value(), SVGLength::ReadOnly::Yes);
-    return SVGAnimatedLength::create(realm(), base_length, anim_length);
 }
 
 }

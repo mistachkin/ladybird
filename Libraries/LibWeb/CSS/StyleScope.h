@@ -13,6 +13,7 @@
 #include <AK/Optional.h>
 #include <AK/RefCounted.h>
 #include <AK/RefPtr.h>
+#include <AK/Utf16FlyString.h>
 #include <AK/Vector.h>
 #include <LibGC/Ptr.h>
 #include <LibWeb/Animations/KeyframeEffect.h>
@@ -34,7 +35,7 @@ struct MatchingRule {
     GC::Ptr<CSSStyleSheet const> sheet;
     GC::Ptr<CSSContainerRule const> container_rule;
     GC::Ptr<CSSRule const> scope_rule; // Either CSSScopeRule or CSSImportRule
-    Optional<FlyString> default_namespace;
+    Optional<Utf16FlyString> element_namespace_filter;
     Selector const& selector;
     size_t selector_index { 0 };
     size_t style_sheet_index { 0 };
@@ -50,7 +51,7 @@ struct MatchingRule {
     // Helpers to deal with the fact that `rule` might be a CSSStyleRule or a CSSNestedDeclarations
     CSSStyleProperties const& declaration() const;
     SelectorList const& absolutized_selectors() const;
-    FlyString const& qualified_layer_name() const;
+    Utf16FlyString const& qualified_layer_name() const;
 
     void visit_edges(GC::Cell::Visitor&) const;
 };
@@ -66,10 +67,10 @@ enum class AncestorHashBuckets {
 };
 
 struct RuleCache {
-    HashMap<FlyString, Vector<MatchingRule>> rules_by_id;
-    HashMap<FlyString, Vector<MatchingRule>> rules_by_class;
-    HashMap<FlyString, Vector<MatchingRule>> rules_by_tag_name;
-    HashMap<FlyString, Vector<MatchingRule>, AK::ASCIICaseInsensitiveFlyStringTraits> rules_by_attribute_name;
+    HashMap<Utf16FlyString, Vector<MatchingRule>> rules_by_id;
+    HashMap<Utf16FlyString, Vector<MatchingRule>> rules_by_class;
+    HashMap<Utf16FlyString, Vector<MatchingRule>> rules_by_tag_name;
+    HashMap<Utf16FlyString, Vector<MatchingRule>> rules_by_attribute_name;
     Array<Vector<MatchingRule>, to_underlying(PseudoClass::__Count)> rules_by_subject_pseudo_class;
     HashMap<u32, Vector<MatchingRule>> rules_by_ancestor_hash;
     Vector<MatchingRule> root_rules;
@@ -78,18 +79,19 @@ struct RuleCache {
     Vector<MatchingRule> other_rules;
 
     struct PseudoElementRules {
-        HashMap<FlyString, Vector<MatchingRule>> rules_by_id;
-        HashMap<FlyString, Vector<MatchingRule>> rules_by_class;
-        HashMap<FlyString, Vector<MatchingRule>> rules_by_tag_name;
-        HashMap<FlyString, Vector<MatchingRule>, AK::ASCIICaseInsensitiveFlyStringTraits> rules_by_attribute_name;
+        HashMap<Utf16FlyString, Vector<MatchingRule>> rules_by_id;
+        HashMap<Utf16FlyString, Vector<MatchingRule>> rules_by_class;
+        HashMap<Utf16FlyString, Vector<MatchingRule>> rules_by_tag_name;
+        HashMap<Utf16FlyString, Vector<MatchingRule>> rules_by_attribute_name;
         Array<Vector<MatchingRule>, to_underlying(PseudoClass::__Count)> rules_by_subject_pseudo_class;
         HashMap<u32, Vector<MatchingRule>> rules_by_ancestor_hash;
         Vector<MatchingRule> root_rules;
         Vector<MatchingRule> other_rules;
     };
     Array<PseudoElementRules, to_underlying(CSS::PseudoElement::KnownPseudoElementCount)> rules_by_pseudo_element;
+    u64 pseudo_element_rules_mask { 0 };
 
-    HashMap<FlyString, NonnullRefPtr<Animations::KeyframeEffect::KeyFrameSet>> rules_by_animation_keyframes;
+    HashMap<Utf16FlyString, NonnullRefPtr<Animations::KeyframeEffect::KeyFrameSet>> rules_by_animation_keyframes;
 
     u32 next_multi_bucket_rule_index { 0 };
 
@@ -102,7 +104,7 @@ struct RuleCache {
 
 struct RuleCaches {
     RuleCache main;
-    HashMap<FlyString, NonnullOwnPtr<RuleCache>> by_layer;
+    HashMap<Utf16FlyString, NonnullOwnPtr<RuleCache>> by_layer;
 
     void visit_edges(GC::Cell::Visitor&);
 };
@@ -110,7 +112,7 @@ struct RuleCaches {
 struct StyleRuleCache {
     StyleRuleCache();
 
-    Vector<FlyString> qualified_layer_names_in_order;
+    Vector<Utf16FlyString> qualified_layer_names_in_order;
     SelectorInsights selector_insights;
     Array<OwnPtr<RuleCache>, to_underlying(PseudoClass::__Count)> pseudo_class_rule_cache;
     RuleCaches author_rule_cache;
@@ -130,14 +132,47 @@ struct StyleCache : public RefCounted<StyleCache> {
     void visit_edges(GC::Cell::Visitor&);
 };
 
+// Shared style caches for shadow-root scopes whose active stylesheets are the same ordered set of constructed
+// sheets. The cache contents only depend on the sheets and document-wide state, so all such scopes can use one
+// cache. Entries are validated against each sheet's shared-style-cache generation at lookup, so rule mutations and
+// media match-state flips (which bump the generation) make stale entries fall away lazily. Entries whose cache no
+// scope uses anymore get purged on insert, so abandoned sheet sets don't pin their caches for the document's
+// lifetime.
+class SheetSetStyleCacheRegistry {
+public:
+    NonnullRefPtr<StyleCache> ensure_style_cache_for_sheet_set(Vector<GC::Ref<CSSStyleSheet>> const& sheets);
+
+    void visit_edges(GC::Cell::Visitor&);
+
+private:
+    struct Entry {
+        Vector<GC::Ref<CSSStyleSheet>> sheets;
+        Vector<u64> sheet_generations;
+        NonnullRefPtr<StyleCache> style_cache;
+    };
+
+    static bool entry_is_current(Entry const&);
+
+    HashMap<u32, Vector<Entry>> m_entries_by_hash;
+};
+
+// A pure insertion cannot change interaction pseudo-class matching (:hover, :focus, etc): freshly inserted nodes
+// never carry such state, and inserting a node cannot flip it on existing elements. Removals and moves can relocate
+// interaction state, so they stay conservative.
+enum class HasMutationKind : u8 {
+    Insertion,
+    Other,
+};
+
 struct PendingHasInvalidationMutationFeatures {
     bool is_conservative { false };
     bool may_affect_sibling_relationships { false };
     bool may_affect_pseudo_classes { false };
-    HashTable<FlyString> tag_names;
-    HashTable<FlyString> ids;
-    HashTable<FlyString> class_names;
-    HashTable<FlyString> attribute_names;
+    bool may_affect_interaction_pseudo_classes { false };
+    HashTable<Utf16FlyString> tag_names;
+    HashTable<Utf16FlyString> ids;
+    HashTable<Utf16FlyString> class_names;
+    HashTable<Utf16FlyString> attribute_names;
     HashTable<PseudoClass> pseudo_classes;
 };
 
@@ -183,21 +218,25 @@ public:
     [[nodiscard]] bool may_have_has_selectors() const;
     [[nodiscard]] bool may_have_user_has_selectors() const;
     [[nodiscard]] bool may_have_user_pseudo_class_selectors(PseudoClass) const;
-    [[nodiscard]] bool have_has_selectors() const;
     [[nodiscard]] bool may_have_has_selectors_with_relative_selector_that_has_sibling_combinator() const;
-    [[nodiscard]] bool have_has_selectors_with_relative_selector_that_has_sibling_combinator() const;
-    [[nodiscard]] bool have_size_container_queries() const;
 
     void for_each_active_css_style_sheet(Function<void(CSS::CSSStyleSheet&)> const& callback) const;
 
     void invalidate_counter_style_cache();
     void build_counter_style_cache();
-    RefPtr<CSS::CounterStyle const> get_registered_counter_style(FlyString const& name) const;
+    RefPtr<CSS::CounterStyle const> get_registered_counter_style(Utf16FlyString const& name) const;
+
+    struct FunctionDefinitionAndScope {
+        GC::Ref<CSSFunctionRule const> function;
+        StyleScope const& scope;
+    };
+    Optional<FunctionDefinitionAndScope> get_function_definition(Utf16FlyString const& name) const;
 
     void schedule_ancestors_style_invalidation_due_to_presence_of_has(GC::Ref<DOM::Node>);
-    void record_conservative_pending_has_invalidation(GC::Ref<DOM::Node>, bool may_affect_sibling_relationships);
-    void record_pending_has_invalidation_mutation_features(GC::Ref<DOM::Node>, GC::Ref<DOM::Node>, bool includes_descendants);
+    void record_pending_has_invalidation_mutation_features(GC::Ref<DOM::Node>, GC::Ref<DOM::Node>, bool includes_descendants, HasMutationKind);
     void record_pending_has_invalidation_mutation_features(GC::Ref<DOM::Node>, Vector<CSS::InvalidationSet::Property> const&);
+    void did_schedule_pending_has_invalidation(size_t previous_size);
+    void node_was_adopted_from(DOM::Document& old_document);
 
     template<typename T>
     Optional<T> dereference_global_tree_scoped_reference(Function<Optional<T>(StyleScope const&)> const& callback) const;
@@ -215,7 +254,7 @@ public:
 
     bool m_needs_counter_style_cache_update : 1 { true };
     bool m_is_doing_counter_style_cache_update : 1 { false };
-    HashMap<FlyString, NonnullRefPtr<CSS::CounterStyle const>> m_registered_counter_styles;
+    HashMap<Utf16FlyString, NonnullRefPtr<CSS::CounterStyle const>> m_registered_counter_styles;
 
     GC::Ref<DOM::Node> m_node;
 };

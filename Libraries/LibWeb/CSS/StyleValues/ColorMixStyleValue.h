@@ -23,29 +23,32 @@ public:
 
     static ValueComparingNonnullRefPtr<ColorMixStyleValue const> create(RefPtr<StyleValue const> color_interpolation_method, ColorMixComponent first_component, ColorMixComponent second_component);
 
-    virtual bool equals(StyleValue const&) const override;
-    virtual Optional<Color> to_color(ColorResolutionContext) const override;
-    virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const override;
-    virtual void serialize(StringBuilder&, SerializationMode) const override;
-
-    virtual bool is_computationally_independent() const override
-    {
-        return (!m_properties.color_interpolation_method || m_properties.color_interpolation_method->is_computationally_independent())
-            && m_properties.first_component.color->is_computationally_independent()
-            && m_properties.second_component.color->is_computationally_independent()
-            && (!m_properties.first_component.percentage || m_properties.first_component.percentage->is_computationally_independent())
-            && (!m_properties.second_component.percentage || m_properties.second_component.percentage->is_computationally_independent());
-    }
+    bool equals(StyleValue const&) const;
+    Optional<Color> to_color(ColorResolutionContext) const;
+    ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const;
+    void serialize(StringBuilder&, SerializationMode) const;
 
 private:
-    struct Properties {
-        ValueComparingRefPtr<StyleValue const> color_interpolation_method;
-        ColorMixComponent first_component;
-        ColorMixComponent second_component;
-        bool operator==(Properties const&) const = default;
-    };
+    friend class StyleValue;
 
     ColorMixStyleValue(RefPtr<StyleValue const> color_interpolation_method, ColorMixComponent first_component, ColorMixComponent second_component);
+    explicit ColorMixStyleValue(StyleValueFFI::StyleValueData const*);
+
+    static StyleValueFFI::StyleValueData const* make_color_mix_data(RefPtr<StyleValue const> const& color_interpolation_method, ColorMixComponent const& first_component, ColorMixComponent const& second_component)
+    {
+        auto retain = [](StyleValue const* value) {
+            return value ? StyleValueFFI::rust_style_value_retain(value->rust_style_value_data()) : nullptr;
+        };
+        return StyleValueFFI::rust_style_value_create_color_mix(
+            false, 0, to_underlying(ColorSyntax::Modern),
+            retain(color_interpolation_method.ptr()),
+            retain(first_component.color.ptr()), retain(first_component.percentage.ptr()),
+            retain(second_component.color.ptr()), retain(second_component.percentage.ptr()));
+    }
+
+    ValueComparingRefPtr<StyleValue const> color_interpolation_method_value() const { return m_color_interpolation_method; }
+    ColorMixComponent first_component() const { return m_first_component; }
+    ColorMixComponent second_component() const { return m_second_component; }
 
     struct NormalizedPercentages {
         Percentage first_percentage;
@@ -61,7 +64,9 @@ private:
     };
     PercentageNormalizationResult normalize_percentages(ComputationContext const&) const;
 
-    Properties m_properties;
+    ValueComparingRefPtr<StyleValue const> m_color_interpolation_method;
+    ColorMixComponent m_first_component;
+    ColorMixComponent m_second_component;
 };
 
 }

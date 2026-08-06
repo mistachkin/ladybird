@@ -29,18 +29,20 @@ GC::Ref<DOMStringMap> HTMLOrSVGOrMathMLElement<ElementBase>::dataset()
 
 // https://html.spec.whatwg.org/multipage/interaction.html#dom-focus
 template<typename ElementBase>
-void HTMLOrSVGOrMathMLElement<ElementBase>::focus()
+void HTMLOrSVGOrMathMLElement<ElementBase>::focus(Bindings::FocusOptions const& options)
 {
     // 1. If the allow focus steps given this's node document return false, then return.
     if (!static_cast<ElementBase*>(this)->document().allow_focus())
         return;
 
     // 2. Run the focusing steps for this.
-    run_focusing_steps(static_cast<ElementBase*>(this), nullptr, FocusTrigger::Script);
+    // 4. If options["preventScroll"] is false, then scroll a target into view given this, "auto", "center", and
+    //    "center".
+    // NB: The scroll into view of step 4 is performed by the focus update steps, which scroll the newly focused
+    //     element into  view for every way of focusing it.
+    run_focusing_steps(static_cast<ElementBase*>(this), nullptr, FocusTrigger::Script, options.prevent_scroll ? ScrollIntoView::No : ScrollIntoView::Yes);
 
     // FIXME: 3. If options["focusVisible"] is true, or does not exist but in an implementation-defined way the user agent determines it would be best to do so, then indicate focus.
-
-    // FIXME: 4. If options["preventScroll"] is false, then scroll a target into view given this, "auto", "center", and "center".
 }
 
 // https://html.spec.whatwg.org/multipage/interaction.html#dom-blur
@@ -54,7 +56,7 @@ void HTMLOrSVGOrMathMLElement<ElementBase>::blur()
 
 // https://html.spec.whatwg.org/multipage/urls-and-fetching.html#dom-noncedelement-nonce
 template<typename ElementBase>
-void HTMLOrSVGOrMathMLElement<ElementBase>::attribute_changed(FlyString const& local_name, Optional<String> const&, Optional<String> const& value, Optional<FlyString> const& namespace_)
+void HTMLOrSVGOrMathMLElement<ElementBase>::attribute_changed(Utf16FlyString const& local_name, Optional<Utf16String> const&, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_)
 {
     // 1. If element does not include HTMLOrSVGOrMathMLElement, then return.
     // 2. If localName is not nonce or namespace is not null, then return.
@@ -68,7 +70,7 @@ void HTMLOrSVGOrMathMLElement<ElementBase>::attribute_changed(FlyString const& l
 
     // 4. Otherwise, set element's [[CryptographicNonce]] to value.
     else {
-        m_cryptographic_nonce = value.value();
+        m_cryptographic_nonce = *value;
     }
 }
 
@@ -106,7 +108,7 @@ void HTMLOrSVGOrMathMLElement<ElementBase>::inserted()
         auto nonce = m_cryptographic_nonce;
 
         // 2.2. Set an attribute value for element using "nonce" and the empty string.
-        element.set_attribute_value(HTML::AttributeNames::nonce, {});
+        element.set_attribute_value(HTML::AttributeNames::nonce, Utf16String {});
 
         // 2.3. Set element's [[CryptographicNonce]] to nonce.
         m_cryptographic_nonce = nonce;

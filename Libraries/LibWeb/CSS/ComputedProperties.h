@@ -19,13 +19,14 @@
 #include <LibWeb/CSS/ComputedValues.h>
 #include <LibWeb/CSS/EasingFunction.h>
 #include <LibWeb/CSS/FontFeatureData.h>
+#include <LibWeb/CSS/GridTrackPlacement.h>
+#include <LibWeb/CSS/GridTrackSize.h>
 #include <LibWeb/CSS/LengthBox.h>
 #include <LibWeb/CSS/PropertyID.h>
 #include <LibWeb/CSS/PseudoClass.h>
 #include <LibWeb/CSS/PseudoClassBitmap.h>
 #include <LibWeb/CSS/PseudoElement.h>
 #include <LibWeb/CSS/StyleProperty.h>
-#include <LibWeb/Export.h>
 
 namespace Web::CSS {
 
@@ -37,6 +38,12 @@ class StyleComputer;
 namespace Web::DOM {
 
 class Element;
+
+}
+
+namespace Web::Layout {
+
+class NodeWithStyle;
 
 }
 
@@ -55,10 +62,8 @@ enum class AnimatedPropertyResultOfTransition : u8 {
     Yes
 };
 
-class WEB_API ComputedProperties final : public RefCounted<ComputedProperties> {
+class ComputedProperties final : public RefCounted<ComputedProperties> {
 public:
-    static constexpr double normal_line_height_scale = 1.15;
-
     ~ComputedProperties();
 
     enum class WithAnimationsApplied {
@@ -87,7 +92,7 @@ public:
         bool font_metrics_depend_on_viewport_metrics() const { return m_font_metrics_depend_on_viewport_metrics; }
         Display display() const { return style().display(); }
         StyleValue const& property(PropertyID property_id, WithAnimationsApplied with_animations_applied = WithAnimationsApplied::Yes) const { return style().property(property_id, with_animations_applied); }
-        [[nodiscard]] CSSPixels line_height() const { return style().line_height(); }
+        [[nodiscard]] CSSPixels line_height(FontComputer const& font_computer) const { return style().line_height(font_computer); }
         ValueComparingNonnullRefPtr<Gfx::Font const> first_available_computed_font(FontComputer const& font_computer) const { return style().first_available_computed_font(font_computer); }
 
         void set_has_pseudo_element_styles(u64);
@@ -95,13 +100,16 @@ public:
         void set_property_inherited(PropertyID, Inherited);
         void set_depends_on_viewport_metrics();
         void set_font_metrics_depend_on_viewport_metrics();
+        void set_in_display_none_subtree();
         void set_has_pseudo_element_style(PseudoElement);
 
         void set_property(PropertyID, NonnullRefPtr<StyleValue const> value, Inherited = Inherited::No, Important = Important::No);
         void set_property_without_modifying_flags(PropertyID, NonnullRefPtr<StyleValue const> value);
-        void revert_property(PropertyID, ComputedProperties const& style_for_revert);
-
         void set_display_before_box_type_transformation(Display);
+
+        bool has_effective_color_scheme() const { return m_data->effective_color_scheme.has_value(); }
+        void set_effective_color_scheme(PreferredColorScheme color_scheme) { m_data->effective_color_scheme = color_scheme; }
+        void clear_effective_color_scheme() { m_data->effective_color_scheme.clear(); }
 
         HashMap<PropertyID, NonnullRefPtr<StyleValue const>> const& inheritance_dependent_specified_values() const { return m_data->inheritance_dependent_specified_values; }
         void add_inheritance_dependent_specified_value(PropertyID property_id, NonnullRefPtr<StyleValue const> value) { m_data->inheritance_dependent_specified_values.set(property_id, move(value)); }
@@ -120,6 +128,7 @@ public:
         NonnullRefPtr<ComputedProperties> m_style;
         bool m_depends_on_viewport_metrics { false };
         bool m_font_metrics_depend_on_viewport_metrics { false };
+        bool m_in_display_none_subtree { false };
     };
 
     static NonnullRefPtr<ComputedProperties> create(Builder&&);
@@ -135,8 +144,6 @@ public:
         }
     }
 
-    void for_each_anchor_name(Function<void(FlyString const&)>) const;
-
     HashMap<PropertyID, NonnullRefPtr<StyleValue const>> const& animated_property_values() const;
     RefPtr<AnimatedProperties const> animated_properties_snapshot() const;
     bool has_animated_property(PropertyID property_id) const;
@@ -148,6 +155,10 @@ public:
     bool is_animated_property_result_of_transition(PropertyID property_id) const;
     bool depends_on_viewport_metrics() const { return m_depends_on_viewport_metrics; }
     bool font_metrics_depend_on_viewport_metrics() const { return m_font_metrics_depend_on_viewport_metrics; }
+    // Whether the element this style was computed for has computed display none, or is a descendant of one that does.
+    bool in_display_none_subtree() const { return m_in_display_none_subtree; }
+    void set_in_display_none_subtree(Badge<DOM::Element>) { m_in_display_none_subtree = true; }
+    void set_in_display_none_subtree(Badge<DOM::SyntheticPseudoElement>) { m_in_display_none_subtree = true; }
     bool has_pseudo_element_style(PseudoElement) const;
     void set_depends_on_viewport_metrics(Badge<StyleComputer>);
     void set_font_metrics_depend_on_viewport_metrics(Badge<StyleComputer>);
@@ -164,7 +175,7 @@ public:
     HashMap<PropertyID, StyleValueVector> assemble_coordinated_value_list(PropertyID base_property_id, Vector<PropertyID> const& property_ids) const;
     ColorInterpolation color_interpolation() const;
     ColorInterpolation color_interpolation_filters() const;
-    PreferredColorScheme color_scheme(PreferredColorScheme, Optional<Vector<String> const&> document_supported_schemes) const;
+    PreferredColorScheme color_scheme(PreferredColorScheme, Optional<Vector<Utf16FlyString> const&> document_supported_schemes) const;
     TextAnchor text_anchor() const;
     Optional<BaselineMetric> dominant_baseline() const;
     TextAlign text_align() const;
@@ -175,6 +186,7 @@ public:
     TextUnderlinePosition text_underline_position() const;
     Vector<BackgroundLayerData> background_layers() const;
     Vector<BackgroundLayerData> mask_layers() const;
+    BorderImageData border_image() const;
     BackgroundBox background_color_clip() const;
     CSSPixels border_spacing_horizontal() const;
     CSSPixels border_spacing_vertical() const;
@@ -182,13 +194,9 @@ public:
     Clip clip() const;
     Display display() const;
     Float float_() const;
-    Color caret_color(Layout::NodeWithStyle const&) const;
+    Color caret_color(ColorResolutionContext const&) const;
     Clear clear() const;
     ColumnSpan column_span() const;
-    struct ContentDataAndQuoteNestingLevel {
-        ContentData content_data;
-        u32 final_quote_nesting_level { 0 };
-    };
     ContentDataAndQuoteNestingLevel content(DOM::AbstractElement&, u32 initial_quote_nesting_level) const;
     ContentVisibility content_visibility() const;
     Vector<CursorData> cursor() const;
@@ -205,7 +213,7 @@ public:
     TextDecorationStyle text_decoration_style() const;
     TextDecorationThickness text_decoration_thickness() const;
     TextTransform text_transform() const;
-    Vector<ShadowData> text_shadow(Layout::Node const&) const;
+    Vector<ShadowData> text_shadow(ColorResolutionContext const&) const;
     TextIndentData text_indent() const;
     TextWrapMode text_wrap_mode() const;
     ListStyleType list_style_type(StyleScope const&) const;
@@ -213,9 +221,9 @@ public:
     FlexDirection flex_direction() const;
     FlexWrap flex_wrap() const;
     FlexBasis flex_basis() const;
-    float flex_grow() const;
-    float flex_shrink() const;
-    int order() const;
+    double flex_grow() const;
+    double flex_shrink() const;
+    i32 order() const;
     Color accent_color(ColorResolutionContext const&) const;
     AlignContent align_content() const;
     AlignItems align_items() const;
@@ -231,7 +239,7 @@ public:
     JustifySelf justify_self() const;
     Overflow overflow_x() const;
     Overflow overflow_y() const;
-    Vector<ShadowData> box_shadow(Layout::Node const&) const;
+    Vector<ShadowData> box_shadow(ColorResolutionContext const&) const;
     BoxSizing box_sizing() const;
     PointerEvents pointer_events() const;
     Variant<VerticalAlign, LengthPercentage> vertical_align() const;
@@ -244,9 +252,9 @@ public:
     Optional<FontVariantNumeric> font_variant_numeric() const;
     FontVariantPosition font_variant_position() const;
     FontKerning font_kerning() const;
-    Optional<FlyString> font_language_override() const;
-    HashMap<FlyString, u8> font_feature_settings() const;
-    HashMap<FlyString, double> font_variation_settings() const;
+    Optional<Utf16FlyString> font_language_override() const;
+    HashMap<Utf16FlyString, u8> font_feature_settings() const;
+    HashMap<Utf16FlyString, double> font_variation_settings() const;
     GridTrackSizeList grid_auto_columns() const;
     GridTrackSizeList grid_auto_rows() const;
     GridTrackSizeList grid_template_columns() const;
@@ -268,11 +276,12 @@ public:
     UserSelect user_select() const;
     Isolation isolation() const;
     TouchActionData touch_action() const;
+    AspectRatio aspect_ratio() const;
     Containment contain() const;
-    Vector<FlyString> container_name() const;
+    Vector<Utf16FlyString> container_name() const;
     ContainerType container_type() const;
     MixBlendMode mix_blend_mode() const;
-    Optional<FlyString> view_transition_name() const;
+    Optional<Utf16FlyString> view_transition_name() const;
     Vector<AnimationProperties> animations(DOM::AbstractElement const&) const;
     Vector<TransitionProperties> transitions() const;
 
@@ -283,6 +292,7 @@ public:
     TransformBox transform_box() const;
     TransformOrigin transform_origin() const;
     TransformStyle transform_style() const;
+    BackfaceVisibility backface_visibility() const;
     RefPtr<TransformationStyleValue const> rotate() const;
     RefPtr<TransformationStyleValue const> translate() const;
     RefPtr<TransformationStyleValue const> scale() const;
@@ -295,8 +305,11 @@ public:
     float fill_opacity() const;
     Optional<SVGPaint> stroke(ColorResolutionContext const&) const;
     Vector<Variant<LengthPercentage, float>> stroke_dasharray() const;
+    LengthPercentage stroke_dashoffset() const;
     StrokeLinecap stroke_linecap() const;
     StrokeLinejoin stroke_linejoin() const;
+    LengthPercentage stroke_width() const;
+    VectorEffect vector_effect() const;
     double stroke_miterlimit() const;
     float stroke_opacity() const;
     FillRule fill_rule() const;
@@ -307,13 +320,14 @@ public:
 
     WillChange will_change() const;
 
-    ValueComparingRefPtr<Gfx::FontCascadeList const> cached_computed_font_list() const { return m_cached_computed_font_list; }
     ValueComparingNonnullRefPtr<Gfx::FontCascadeList const> computed_font_list(FontComputer const&) const;
     ValueComparingNonnullRefPtr<Gfx::Font const> first_available_computed_font(FontComputer const&) const;
 
     MathStyle math_style() const;
     int math_depth() const;
-    [[nodiscard]] CSSPixels line_height() const;
+    [[nodiscard]] static CSSPixels normal_line_height(Gfx::FontPixelMetrics const&);
+    [[nodiscard]] CSSPixels line_height(FontComputer const&) const;
+    [[nodiscard]] LineHeightData line_height_data() const;
     [[nodiscard]] CSSPixels font_size() const;
     double font_weight() const;
     Percentage font_width() const;
@@ -328,7 +342,7 @@ public:
     QuotesData quotes() const;
     Vector<CounterData> counter_data(PropertyID) const;
 
-    ScrollbarColorData scrollbar_color(Layout::NodeWithStyle const& layout_node) const;
+    ScrollbarColorData scrollbar_color(ColorResolutionContext const&) const;
     ScrollbarWidth scrollbar_width() const;
     Resize resize() const;
 
@@ -339,6 +353,11 @@ public:
     RefPtr<StyleValue const> raw_cascaded_font_size() const { return m_data->raw_cascaded_font_size; }
 
 private:
+    friend class Layout::NodeWithStyle;
+    friend class StyleComputer;
+
+    NonnullRefPtr<ComputedProperties> copy_without_animations() const;
+
     class Data final : public RefCounted<Data> {
     public:
         Data() = default;
@@ -351,6 +370,7 @@ private:
         u64 pseudo_element_styles { 0 };
 
         Optional<CSSPixels> line_height;
+        Optional<PreferredColorScheme> effective_color_scheme;
 
         HashMap<PropertyID, NonnullRefPtr<StyleValue const>> inheritance_dependent_specified_values;
         RefPtr<StyleValue const> raw_cascaded_font_size;
@@ -359,18 +379,18 @@ private:
     ComputedProperties(NonnullRefPtr<Data const>, bool depends_on_viewport_metrics, bool font_metrics_depend_on_viewport_metrics);
 
     Overflow overflow(PropertyID) const;
-    Vector<ShadowData> shadow(PropertyID, Layout::Node const&) const;
+    Vector<ShadowData> shadow(PropertyID, ColorResolutionContext const&) const;
     Position position_value(PropertyID) const;
 
     Data const& data() const { return *m_data; }
     AnimatedProperties const& animated_properties() const;
     AnimatedProperties& mutable_animated_properties();
     void set_animated_property_internal(PropertyID, NonnullRefPtr<StyleValue const>, AnimatedPropertyResultOfTransition, Inherited);
-
     NonnullRefPtr<Data const> m_data;
     RefPtr<AnimatedProperties> m_animated_properties;
     bool m_depends_on_viewport_metrics { false };
     bool m_font_metrics_depend_on_viewport_metrics { false };
+    bool m_in_display_none_subtree { false };
 
     mutable RefPtr<Gfx::FontCascadeList const> m_cached_computed_font_list;
     mutable RefPtr<Gfx::Font const> m_cached_first_available_computed_font;

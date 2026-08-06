@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# Copyright (c) 2025, The Ladybird contributors
+# Copyright (c) 2026-present, the Ladybird developers.
 #
 # SPDX-License-Identifier: BSD-2-Clause
 
@@ -43,7 +43,7 @@ flatpak_runtime_libs = [
     "harfbuzz",
     "libjpeg-turbo",
     "libproxy",
-    "nghttp2",  # FIXME: This can be removed when the vcpkg overlay is no longer needed.
+    "nghttp2",
     "qtbase",
     "qtmultimedia",
     "sqlite3",
@@ -58,15 +58,6 @@ vcpkg_not_linux = [
     "dirent",
     "mman",
     "pthread",
-]
-
-# List of libraries that are behind vcpkg manifest features and only
-# installed for specific GUI frameworks (e.g. GTK), not the Qt flatpak.
-vcpkg_feature_only = [
-    "gtk",
-    "libadwaita",
-    "wayland",
-    "wayland-protocols",
 ]
 
 
@@ -204,7 +195,7 @@ def check_vcpkg_vs_flatpak_versioning():
                     flatpak.append(name)
 
         # Remove excluded dependencies from the vcpkg list
-        for name in flatpak_runtime_libs + vcpkg_not_linux + vcpkg_feature_only:
+        for name in flatpak_runtime_libs + vcpkg_not_linux:
             if name in vcpkg:
                 del vcpkg[name]
 

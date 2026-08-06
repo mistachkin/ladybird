@@ -21,29 +21,38 @@ public:
     }
     virtual ~ContentStyleValue() override = default;
 
-    StyleValueList const& content() const { return *m_properties.content; }
-    StyleValueList const* alt_text() const { return m_properties.alt_text; }
+    StyleValueList const& content() const { return m_content; }
+    StyleValueList const* alt_text() const { return m_alt_text.ptr(); }
 
-    virtual void serialize(StringBuilder&, SerializationMode) const override;
+    void serialize(StringBuilder&, SerializationMode) const;
 
-    bool properties_equal(ContentStyleValue const& other) const { return m_properties == other.m_properties; }
+    bool properties_equal(ContentStyleValue const& other) const;
 
-    virtual bool is_computationally_independent() const override;
-
-    virtual void set_style_sheet(GC::Ptr<CSSStyleSheet>) override;
+    void set_style_sheet(GC::Ptr<CSSStyleSheet>);
 
 private:
+    friend class StyleValue;
+
     ContentStyleValue(ValueComparingNonnullRefPtr<StyleValueList const> content, ValueComparingRefPtr<StyleValueList const> alt_text)
-        : StyleValueWithDefaultOperators(Type::Content)
-        , m_properties { .content = move(content), .alt_text = move(alt_text) }
+        : StyleValueWithDefaultOperators(Type::Content, make_content_data(content, alt_text))
+        , m_content(move(content))
+        , m_alt_text(move(alt_text))
     {
     }
 
-    struct Properties {
-        ValueComparingNonnullRefPtr<StyleValueList const> content;
-        ValueComparingRefPtr<StyleValueList const> alt_text;
-        bool operator==(Properties const&) const = default;
-    } m_properties;
+    explicit ContentStyleValue(StyleValueFFI::StyleValueData const* data)
+        : StyleValueWithDefaultOperators(Type::Content, data)
+        , m_content(StyleValue::adopt_rust_style_value_data(StyleValueFFI::rust_style_value_retain(static_cast<StyleValueFFI::StyleValueData const*>(data->content.content.pointer)))->as_value_list())
+    {
+        auto const* alt_text_data = static_cast<StyleValueFFI::StyleValueData const*>(data->content.alt_text.pointer);
+        if (alt_text_data)
+            m_alt_text = StyleValue::adopt_rust_style_value_data(StyleValueFFI::rust_style_value_retain(alt_text_data))->as_value_list();
+    }
+
+    static StyleValueFFI::StyleValueData const* make_content_data(ValueComparingNonnullRefPtr<StyleValueList const> const&, ValueComparingRefPtr<StyleValueList const> const&);
+
+    ValueComparingNonnullRefPtr<StyleValueList const> m_content;
+    ValueComparingRefPtr<StyleValueList const> m_alt_text;
 };
 
 }

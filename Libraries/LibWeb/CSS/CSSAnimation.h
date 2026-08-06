@@ -21,17 +21,22 @@ class CSSAnimation : public Animations::Animation {
 public:
     static GC::Ref<CSSAnimation> create(JS::Realm&);
 
-    FlyString const& animation_name() const { return m_animation_name; }
-    void set_animation_name(FlyString const& animation_name) { m_animation_name = animation_name; }
+    Utf16FlyString const& animation_name() const { return m_animation_name; }
+    void set_animation_name(Utf16FlyString const& animation_name) { m_animation_name = animation_name; }
 
     virtual Animations::AnimationClass animation_class() const override;
     virtual int class_specific_composite_order(GC::Ref<Animations::Animation> other) const override;
 
     void apply_css_properties(AnimationProperties const&);
 
+    void set_animation_name_index(size_t index) { m_animation_name_index = index; }
+
     EasingFunction const& default_easing() const { return m_default_easing; }
 
     virtual void set_timeline_for_bindings(GC::Ptr<Animations::AnimationTimeline> timeline) override;
+
+    Optional<CSS::AnimationPlayState> last_css_animation_play_state() const { return m_last_css_animation_play_state; }
+    void set_last_css_animation_play_state(CSS::AnimationPlayState state) { m_last_css_animation_play_state = state; }
 
 private:
     explicit CSSAnimation(JS::Realm&);
@@ -41,13 +46,17 @@ private:
     virtual bool is_css_animation() const override { return true; }
 
     // https://drafts.csswg.org/css-animations-2/#dom-cssanimation-animationname
-    FlyString m_animation_name;
+    Utf16FlyString m_animation_name;
 
     // https://drafts.csswg.org/css-animations-1/#animation-timing-function
     // The default per-keyframe easing, from the animation-timing-function property on the element.
     EasingFunction m_default_easing { EasingFunction::ease() };
 
     HashTable<CSS::PropertyID> m_ignored_css_properties;
+
+    Optional<CSS::AnimationPlayState> m_last_css_animation_play_state;
+
+    size_t m_animation_name_index { 0 };
 };
 
 }

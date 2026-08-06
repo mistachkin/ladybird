@@ -13,6 +13,8 @@
 #include <LibWeb/Bindings/AnalyserNode.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/WebAudio/AnalyserNode.h>
+#include <LibWeb/WebAudio/BaseAudioContext.h>
+#include <LibWeb/WebAudio/Rendering/RenderNodes.h>
 #include <LibWeb/WebIDL/Buffers.h>
 #include <LibWeb/WebIDL/DOMException.h>
 
@@ -146,11 +148,11 @@ WebIDL::ExceptionOr<void> AnalyserNode::get_float_frequency_data(GC::Ref<JS::Flo
     // quantum as a previous call, the current frequency data is not updated with the same data. Instead, the
     // previously computed data is returned.
 
-    auto output_data = array->data();
-    size_t floats_to_write = min(output_data.size(), static_cast<size_t>(frequency_bin_count()));
-    for (size_t i = 0; i < floats_to_write; i++) {
-        output_data[i] = frequency_data[i];
-    }
+    auto record = JS::make_typed_array_with_buffer_witness_record(*array, JS::ArrayBuffer::Order::SeqCst);
+    if (JS::is_typed_array_out_of_bounds(record))
+        return {};
+    auto floats_to_write = min(static_cast<size_t>(JS::typed_array_length(record)), static_cast<size_t>(frequency_bin_count()));
+    array->viewed_array_buffer()->overwrite(array->byte_offset(), frequency_data.data(), floats_to_write * sizeof(float));
 
     return {};
 }
@@ -188,11 +190,11 @@ WebIDL::ExceptionOr<void> AnalyserNode::get_byte_frequency_data(GC::Ref<JS::Uint
     // Write the current frequency data into array. If array’s byte length is less than frequencyBinCount,
     // the excess elements will be dropped. If array’s byte length is greater than the frequencyBinCount ,
     // the excess elements will be ignored. The most recent fftSize frames are used in computing the frequency data.
-    auto output_data = array->data();
-    size_t bytes_to_write = min(output_data.size(), static_cast<size_t>(frequency_bin_count()));
-
-    for (size_t i = 0; i < bytes_to_write; i++)
-        output_data[i] = byte_data[i];
+    auto record = JS::make_typed_array_with_buffer_witness_record(*array, JS::ArrayBuffer::Order::SeqCst);
+    if (JS::is_typed_array_out_of_bounds(record))
+        return {};
+    auto bytes_to_write = min(static_cast<size_t>(JS::typed_array_length(record)), static_cast<size_t>(frequency_bin_count()));
+    array->viewed_array_buffer()->overwrite(array->byte_offset(), byte_data.data(), bytes_to_write);
 
     return {};
 }
@@ -206,11 +208,11 @@ WebIDL::ExceptionOr<void> AnalyserNode::get_float_time_domain_data(GC::Ref<JS::F
 
     Vector<f32> time_domain_data = current_time_domain_data();
 
-    auto output_data = array->data();
-    size_t floats_to_write = min(output_data.size(), static_cast<size_t>(fft_size()));
-    for (size_t i = 0; i < floats_to_write; i++) {
-        output_data[i] = time_domain_data[i];
-    }
+    auto record = JS::make_typed_array_with_buffer_witness_record(*array, JS::ArrayBuffer::Order::SeqCst);
+    if (JS::is_typed_array_out_of_bounds(record))
+        return {};
+    auto floats_to_write = min(static_cast<size_t>(JS::typed_array_length(record)), static_cast<size_t>(fft_size()));
+    array->viewed_array_buffer()->overwrite(array->byte_offset(), time_domain_data.data(), floats_to_write * sizeof(float));
 
     return {};
 }
@@ -236,11 +238,11 @@ WebIDL::ExceptionOr<void> AnalyserNode::get_byte_time_domain_data(GC::Ref<JS::Ui
         byte_data.unchecked_append(static_cast<u8>(x));
     }
 
-    auto output_data = array->data();
-    size_t bytes_to_write = min(output_data.size(), static_cast<size_t>(fft_size()));
-
-    for (size_t i = 0; i < bytes_to_write; i++)
-        output_data[i] = byte_data[i];
+    auto record = JS::make_typed_array_with_buffer_witness_record(*array, JS::ArrayBuffer::Order::SeqCst);
+    if (JS::is_typed_array_out_of_bounds(record))
+        return {};
+    auto bytes_to_write = min(static_cast<size_t>(JS::typed_array_length(record)), static_cast<size_t>(fft_size()));
+    array->viewed_array_buffer()->overwrite(array->byte_offset(), byte_data.data(), bytes_to_write);
 
     return {};
 }
@@ -314,6 +316,8 @@ WebIDL::ExceptionOr<GC::Ref<AnalyserNode>> AnalyserNode::construct_impl(JS::Real
     // FIXME: Set tail-time to no
 
     TRY(node->initialize_audio_node_options(options, default_options));
+
+    node->queue_render_node_creation(make<Rendering::PassthroughRenderNode>(node->node_id(), BaseAudioContext::render_quantum_size()));
 
     return node;
 }

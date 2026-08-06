@@ -30,7 +30,7 @@ void HTMLMarqueeElement::initialize(JS::Realm& realm)
     Base::initialize(realm);
 }
 
-bool HTMLMarqueeElement::is_presentational_hint(FlyString const& name) const
+bool HTMLMarqueeElement::is_presentational_hint(Utf16FlyString const& name) const
 {
     if (Base::is_presentational_hint(name))
         return true;
@@ -46,7 +46,7 @@ bool HTMLMarqueeElement::is_presentational_hint(FlyString const& name) const
 void HTMLMarqueeElement::apply_presentational_hints(Vector<CSS::StyleProperty>& properties) const
 {
     HTMLElement::apply_presentational_hints(properties);
-    for_each_attribute([&](auto& name, auto& value) {
+    for_each_attribute([&](Utf16FlyString const& name, Utf16View value) {
         if (name == HTML::AttributeNames::bgcolor) {
             // https://html.spec.whatwg.org/multipage/rendering.html#the-marquee-element-2:rules-for-parsing-a-legacy-colour-value
             auto color = parse_legacy_color_value(value);
@@ -91,7 +91,7 @@ void HTMLMarqueeElement::set_scroll_amount(WebIDL::UnsignedLong value)
 {
     if (value > 2147483647)
         value = 6;
-    set_attribute_value(HTML::AttributeNames::scrollamount, String::number(value));
+    set_attribute_value(HTML::AttributeNames::scrollamount, Utf16String::number(value));
 }
 
 // https://html.spec.whatwg.org/multipage/obsolete.html#dom-marquee-scrolldelay
@@ -110,7 +110,7 @@ void HTMLMarqueeElement::set_scroll_delay(WebIDL::UnsignedLong value)
 {
     if (value > 2147483647)
         value = 85;
-    set_attribute_value(HTML::AttributeNames::scrolldelay, String::number(value));
+    set_attribute_value(HTML::AttributeNames::scrolldelay, Utf16String::number(value));
 }
 
 }

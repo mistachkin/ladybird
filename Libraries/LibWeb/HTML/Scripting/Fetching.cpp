@@ -8,7 +8,6 @@
 
 #include <AK/Array.h>
 #include <AK/NumericLimits.h>
-#include <AK/StringBuilder.h>
 #include <AK/Utf16String.h>
 #include <LibCore/EventLoop.h>
 #include <LibCore/ImmutableBytes.h>
@@ -48,6 +47,7 @@
 #endif
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/HTML/Window.h>
+#include <LibWeb/Infra/SerializedURL.h>
 #include <LibWeb/Infra/Strings.h>
 #include <LibWeb/Loader/ResourceLoader.h>
 #include <LibWeb/MimeSniff/MimeType.h>
@@ -129,16 +129,6 @@ static BytecodeCacheSourceHash bytecode_cache_source_hash(ReadonlyBytes source_b
     hasher->update(encoded_length.span());
     hasher->update(standardized_encoding);
     return hasher->digest();
-}
-
-static ErrorOr<String> decode_source_text(TextCodec::Decoder& fallback_decoder, StringView input)
-{
-    return TextCodec::convert_input_to_utf8_using_given_decoder_unless_there_is_a_byte_order_mark(fallback_decoder, input);
-}
-
-static ErrorOr<String> decode_source_text(TextCodec::Decoder& fallback_decoder, ReadonlyBytes bytes)
-{
-    return decode_source_text(fallback_decoder, StringView { bytes });
 }
 
 static ErrorOr<Utf16String> decode_source_text_to_utf16(TextCodec::Decoder& fallback_decoder, StringView input)
@@ -420,10 +410,10 @@ ScriptFetchOptions default_script_fetch_options()
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#module-type-from-module-request
-String module_type_from_module_request(JS::ModuleRequest const& module_request)
+Utf16String module_type_from_module_request(JS::ModuleRequest const& module_request)
 {
     // 1. Let moduleType be "javascript-or-wasm".
-    String module_type = "javascript-or-wasm"_string;
+    auto module_type = "javascript-or-wasm"_utf16;
 
     // 2. If moduleRequest.[[Attributes]] has a Record entry such that entry.[[Key]] is "type", then:
     for (auto const& entry : module_request.attributes) {
@@ -431,11 +421,11 @@ String module_type_from_module_request(JS::ModuleRequest const& module_request)
             continue;
 
         // 1. If entry.[[Value]] is "javascript-or-wasm", then set moduleType to null.
-        if (entry.value == "javascript-or-wasm"_string)
-            module_type = ""_string; // FIXME: This should be null!
+        if (entry.value == u"javascript-or-wasm"sv)
+            module_type = ""_utf16; // FIXME: This should be null!
         // 2. Otherwise, set moduleType to entry.[[Value]].
         else
-            module_type = entry.value.to_utf8_but_should_be_ported_to_utf16();
+            module_type = entry.value;
     }
 
     // 3. Return moduleType.
@@ -443,7 +433,7 @@ String module_type_from_module_request(JS::ModuleRequest const& module_request)
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#resolve-a-module-specifier
-WebIDL::ExceptionOr<URL::URL> resolve_module_specifier(Optional<Script&> referring_script, String const& specifier)
+WebIDL::ExceptionOr<URL::URL> resolve_module_specifier(Optional<Script&> referring_script, Utf16View specifier)
 {
     auto& vm = Bindings::main_thread_vm();
 
@@ -479,13 +469,13 @@ WebIDL::ExceptionOr<URL::URL> resolve_module_specifier(Optional<Script&> referri
         import_map = window->import_map();
 
     // 6. Let serializedBaseURL be baseURL, serialized.
-    auto serialized_base_url = base_url->serialize();
+    auto serialized_base_url = utf16_string_from_url_ascii(base_url->serialize());
 
     // 7. Let asURL be the result of resolving a URL-like module specifier given specifier and baseURL.
-    auto as_url = resolve_url_like_module_specifier(specifier.to_byte_string(), *base_url);
+    auto as_url = resolve_url_like_module_specifier(specifier, *base_url);
 
     // 8. Let normalizedSpecifier be the serialization of asURL, if asURL is non-null; otherwise, specifier.
-    auto normalized_specifier = as_url.has_value() ? as_url->serialize() : specifier;
+    auto normalized_specifier = as_url.has_value() ? utf16_string_from_url_ascii(as_url->serialize()) : Utf16String::from_utf16(specifier);
 
     // 9. Let result be a URL-or-null, initially null.
     Optional<URL::URL> result;
@@ -494,13 +484,15 @@ WebIDL::ExceptionOr<URL::URL> resolve_module_specifier(Optional<Script&> referri
     for (auto const& entry : import_map.scopes()) {
         // FIXME: Clarify if the serialization steps need to be run here. The steps below assume
         //        scopePrefix to be a string.
-        auto const& scope_prefix = entry.key.serialize();
+        auto scope_prefix = utf16_string_from_url_ascii(entry.key.serialize());
         auto const& scope_imports = entry.value;
 
         // 1. If scopePrefix is serializedBaseURL, or if scopePrefix ends with U+002F (/) and scopePrefix is a code unit prefix of serializedBaseURL, then:
-        if (scope_prefix == serialized_base_url || (scope_prefix.ends_with('/') && Infra::is_code_unit_prefix(scope_prefix, serialized_base_url))) {
+        if (scope_prefix == serialized_base_url
+            || (scope_prefix.utf16_view().ends_with('/')
+                && Infra::is_code_unit_prefix(scope_prefix.utf16_view(), serialized_base_url.utf16_view()))) {
             // 1. Let scopeImportsMatch be the result of resolving an imports match given normalizedSpecifier, asURL, and scopeImports.
-            auto scope_imports_match = TRY(resolve_imports_match(normalized_specifier.to_byte_string(), as_url, scope_imports));
+            auto scope_imports_match = TRY(resolve_imports_match(normalized_specifier.utf16_view(), as_url, scope_imports));
 
             // 2. If scopeImportsMatch is not null, then set result to scopeImportsMatch, and break.
             if (scope_imports_match.has_value()) {
@@ -512,7 +504,7 @@ WebIDL::ExceptionOr<URL::URL> resolve_module_specifier(Optional<Script&> referri
 
     // 11. If result is null, set result to the result of resolving an imports match given normalizedSpecifier, asURL, and importMap's imports.
     if (!result.has_value())
-        result = TRY(resolve_imports_match(normalized_specifier.to_byte_string(), as_url, import_map.imports()));
+        result = TRY(resolve_imports_match(normalized_specifier.utf16_view(), as_url, import_map.imports()));
 
     // 12. If result is null, set it to asURL.
     // NOTE: By this point, if result was null, specifier wasn't remapped to anything by importMap, but it might have
@@ -530,19 +522,19 @@ WebIDL::ExceptionOr<URL::URL> resolve_module_specifier(Optional<Script&> referri
     }
 
     // 14. Throw a TypeError indicating that specifier was a bare specifier, but was not remapped to anything by importMap.
-    return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, MUST(String::formatted("Failed to resolve non relative module specifier '{}' from an import map.", specifier)) };
+    return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, Utf16String::formatted("Failed to resolve non relative module specifier '{}' from an import map.", specifier) };
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#resolving-an-imports-match
-WebIDL::ExceptionOr<Optional<URL::URL>> resolve_imports_match(ByteString const& normalized_specifier, Optional<URL::URL> as_url, ModuleSpecifierMap const& specifier_map)
+WebIDL::ExceptionOr<Optional<URL::URL>> resolve_imports_match(Utf16View normalized_specifier, Optional<URL::URL> as_url, ModuleSpecifierMap const& specifier_map)
 {
     // 1. For each specifierKey → resolutionResult of specifierMap:
     for (auto const& [specifier_key, resolution_result] : specifier_map) {
         // 1. If specifierKey is normalizedSpecifier, then:
-        if (specifier_key.bytes_as_string_view() == normalized_specifier) {
+        if (specifier_key.utf16_view() == normalized_specifier) {
             // 1. If resolutionResult is null, then throw a TypeError indicating that resolution of specifierKey was blocked by a null entry.
             if (!resolution_result.has_value())
-                return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, String::formatted("Import resolution of '{}' was blocked by a null entry.", specifier_key).release_value_but_fixme_should_propagate_errors() };
+                return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, Utf16String::formatted("Import resolution of '{}' was blocked by a null entry.", specifier_key) };
 
             // 2. Assert: resolutionResult is a URL.
             // 3. Return resolutionResult.
@@ -552,21 +544,21 @@ WebIDL::ExceptionOr<Optional<URL::URL>> resolve_imports_match(ByteString const& 
         // 2. If all of the following are true:
         if (
             // - specifierKey ends with U+002F (/);
-            specifier_key.bytes_as_string_view().ends_with("/"sv) &&
+            specifier_key.utf16_view().ends_with('/') &&
             // - specifierKey is a code unit prefix of normalizedSpecifier; and
-            Infra::is_code_unit_prefix(specifier_key, normalized_specifier) &&
+            Infra::is_code_unit_prefix(specifier_key.utf16_view(), normalized_specifier) &&
             // - either asURL is null, or asURL is special,
             (!as_url.has_value() || as_url->is_special())
             // then:
         ) {
             // 1. If resolutionResult is null, then throw a TypeError indicating that the resolution of specifierKey was blocked by a null entry.
             if (!resolution_result.has_value())
-                return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, String::formatted("Import resolution of '{}' was blocked by a null entry.", specifier_key).release_value_but_fixme_should_propagate_errors() };
+                return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, Utf16String::formatted("Import resolution of '{}' was blocked by a null entry.", specifier_key) };
 
             // 2. Assert: resolutionResult is a URL.
             // 3. Let afterPrefix be the portion of normalizedSpecifier after the initial specifierKey prefix.
             // FIXME: Clarify if this is meant by the portion after the initial specifierKey prefix.
-            auto after_prefix = normalized_specifier.substring(specifier_key.bytes_as_string_view().length());
+            auto after_prefix = normalized_specifier.substring_view(specifier_key.length_in_code_units());
 
             // 4. Assert: resolutionResult, serialized, ends with U+002F (/), as enforced during parsing.
             VERIFY(resolution_result->serialize().ends_with('/'));
@@ -577,15 +569,17 @@ WebIDL::ExceptionOr<Optional<URL::URL>> resolve_imports_match(ByteString const& 
             // 6. If url is failure, then throw a TypeError indicating that resolution of normalizedSpecifier was blocked since the afterPrefix portion
             //    could not be URL-parsed relative to the resolutionResult mapped to by the specifierKey prefix.
             if (!url.has_value())
-                return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, String::formatted("Could not resolve '{}' as the after prefix portion could not be URL-parsed.", normalized_specifier).release_value_but_fixme_should_propagate_errors() };
+                return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, Utf16String::formatted("Could not resolve '{}' as the after prefix portion could not be URL-parsed.", normalized_specifier) };
 
             // 7. Assert: url is a URL.
             VERIFY(url.has_value());
 
             // 8. If the serialization of resolutionResult is not a code unit prefix of the serialization of url, then throw a TypeError indicating
             //    that the resolution of normalizedSpecifier was blocked due to it backtracking above its prefix specifierKey.
-            if (!Infra::is_code_unit_prefix(resolution_result->serialize(), url->serialize()))
-                return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, String::formatted("Could not resolve '{}' as it backtracks above its prefix specifierKey.", normalized_specifier).release_value_but_fixme_should_propagate_errors() };
+            auto serialized_resolution_result = utf16_string_from_url_ascii(resolution_result->serialize());
+            auto serialized_url = utf16_string_from_url_ascii(url->serialize());
+            if (!Infra::is_code_unit_prefix(serialized_resolution_result.utf16_view(), serialized_url.utf16_view()))
+                return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, Utf16String::formatted("Could not resolve '{}' as it backtracks above its prefix specifierKey.", normalized_specifier) };
 
             // 9. Return url.
             return url;
@@ -597,7 +591,7 @@ WebIDL::ExceptionOr<Optional<URL::URL>> resolve_imports_match(ByteString const& 
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#resolving-a-url-like-module-specifier
-Optional<URL::URL> resolve_url_like_module_specifier(StringView specifier, URL::URL const& base_url)
+Optional<URL::URL> resolve_url_like_module_specifier(Utf16View specifier, URL::URL const& base_url)
 {
     // 1. If specifier starts with "/", "./", or "../", then:
     if (specifier.starts_with("/"sv) || specifier.starts_with("./"sv) || specifier.starts_with("../"sv)) {
@@ -660,7 +654,7 @@ ScriptFetchOptions get_descendant_script_fetch_options(ScriptFetchOptions const&
     auto new_options = original_options;
 
     // 2. Let integrity be the result of resolving a module integrity metadata with url and settingsObject.
-    String integrity = resolve_a_module_integrity_metadata(url, settings_object);
+    auto integrity = resolve_a_module_integrity_metadata(url, settings_object);
 
     // 3. Set newOptions's integrity metadata to integrity.
     new_options.integrity_metadata = integrity;
@@ -673,18 +667,18 @@ ScriptFetchOptions get_descendant_script_fetch_options(ScriptFetchOptions const&
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#resolving-a-module-integrity-metadata
-String resolve_a_module_integrity_metadata(URL::URL const& url, EnvironmentSettingsObject& settings_object)
+Utf16String resolve_a_module_integrity_metadata(URL::URL const& url, EnvironmentSettingsObject& settings_object)
 {
     // 1. Let map be settingsObject's global object's import map.
     auto map = settings_object.universal_global_scope().import_map();
 
     // 2. If map's integrity[url] does not exist, then return the empty string.
     // 3. Return map's integrity[url].
-    return map.integrity().get(url).value_or(""_string);
+    return map.integrity().get(url).value_or(""_utf16);
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#fetch-a-classic-script
-void fetch_classic_script(GC::Ref<HTMLScriptElement> element, URL::URL const& url, EnvironmentSettingsObject& settings_object, ScriptFetchOptions options, CORSSettingAttribute cors_setting, String character_encoding, OnFetchScriptComplete on_complete)
+void fetch_classic_script(GC::Ref<HTMLScriptElement> element, URL::URL const& url, EnvironmentSettingsObject& settings_object, ScriptFetchOptions options, CORSSettingAttribute cors_setting, Utf16String character_encoding, OnFetchScriptComplete on_complete)
 {
     auto& realm = element->realm();
     auto& vm = realm.vm();
@@ -722,7 +716,9 @@ void fetch_classic_script(GC::Ref<HTMLScriptElement> element, URL::URL const& ur
 
         // 4. Set character encoding to the result of legacy extracting an encoding given potentialMIMETypeForEncoding
         //    and character encoding.
-        auto extracted_character_encoding = Fetch::Infrastructure::legacy_extract_an_encoding(potential_mime_type_for_encoding, character_encoding);
+        auto fallback_character_encoding = TextCodec::get_standardized_encoding(character_encoding);
+        VERIFY(fallback_character_encoding.has_value());
+        auto extracted_character_encoding = Fetch::Infrastructure::legacy_extract_an_encoding(potential_mime_type_for_encoding, *fallback_character_encoding);
 
         // 5. Let source text be the result of decoding bodyBytes to Unicode, using character encoding as the fallback
         //    encoding.
@@ -766,7 +762,7 @@ void fetch_classic_script(GC::Ref<HTMLScriptElement> element, URL::URL const& ur
                     Optional<NonnullRefPtr<JS::SourceCode const>> source_code;
                     if (bytecode_cache) {
                         source_code = JS::SourceCode::create(
-                            Utf16String::from_utf8(response_url_string.view()),
+                            utf16_string_from_url_ascii(response_url_string.view()),
                             source_length,
                             source_encoding,
                             source_byte_storage);
@@ -782,7 +778,7 @@ void fetch_classic_script(GC::Ref<HTMLScriptElement> element, URL::URL const& ur
                         auto fallback_decoder = TextCodec::decoder_for(source_encoding.view());
                         VERIFY(fallback_decoder.has_value());
                         source_code = JS::SourceCode::create(
-                            Utf16String::from_utf8(response_url_string.view()),
+                            utf16_string_from_url_ascii(response_url_string.view()),
                             decode_source_text_to_utf16(*fallback_decoder, source_byte_storage.bytes()).release_value_but_fixme_should_propagate_errors());
                     }
 
@@ -818,7 +814,7 @@ void fetch_classic_script(GC::Ref<HTMLScriptElement> element, URL::URL const& ur
 
         if (!source_code.has_value()) {
             source_code = JS::SourceCode::create(
-                Utf16String::from_utf8(response_url_string.view()),
+                utf16_string_from_url_ascii(response_url_string.view()),
                 decode_source_text_to_utf16(*fallback_decoder, source_bytes).release_value_but_fixme_should_propagate_errors());
         }
 
@@ -867,7 +863,7 @@ void fetch_classic_script(GC::Ref<HTMLScriptElement> element, URL::URL const& ur
 // Failure of the sidecar fetch (404, network error, etc.) yields a TH8Script
 // with no attached sidecar -- verification will fail-closed inside the TH8
 // policy chain.
-void fetch_th8_script(GC::Ref<HTMLScriptElement> element, URL::URL const& url, EnvironmentSettingsObject& settings_object, ScriptFetchOptions options, CORSSettingAttribute cors_setting, String character_encoding, OnFetchScriptComplete on_complete)
+void fetch_th8_script(GC::Ref<HTMLScriptElement> element, URL::URL const& url, EnvironmentSettingsObject& settings_object, ScriptFetchOptions options, CORSSettingAttribute cors_setting, Utf16String character_encoding, OnFetchScriptComplete on_complete)
 {
     auto& realm = element->realm();
     auto& vm = realm.vm();
@@ -1000,7 +996,7 @@ WebIDL::ExceptionOr<void> fetch_classic_worker_script(URL::URL const& url, Envir
         // 4. Let sourceText be the result of UTF-8 decoding bodyBytes.
         auto decoder = TextCodec::decoder_for("UTF-8"sv);
         VERIFY(decoder.has_value());
-        auto source_text = TextCodec::convert_input_to_utf8_using_given_decoder_unless_there_is_a_byte_order_mark(*decoder, body_bytes_view(body_bytes)).release_value_but_fixme_should_propagate_errors();
+        auto source_text = decode_source_text_to_utf16(*decoder, body_bytes_view(body_bytes)).release_value_but_fixme_should_propagate_errors();
 
         // 5. Let script be the result of creating a classic script using sourceText, settingsObject,
         //    response's URL, and the default classic script fetch options.
@@ -1090,7 +1086,7 @@ WebIDL::ExceptionOr<GC::Ref<ClassicScript>> fetch_a_classic_worker_imported_scri
     // 8. Let sourceText be the result of UTF-8 decoding bodyBytes.
     auto decoder = TextCodec::decoder_for("UTF-8"sv);
     VERIFY(decoder.has_value());
-    auto source_text = TextCodec::convert_input_to_utf8_using_given_decoder_unless_there_is_a_byte_order_mark(*decoder, body_bytes_view(body_bytes)).release_value_but_fixme_should_propagate_errors();
+    auto source_text = decode_source_text_to_utf16(*decoder, body_bytes_view(body_bytes)).release_value_but_fixme_should_propagate_errors();
 
     // 9. Let mutedErrors be true if response was CORS-cross-origin, and false otherwise.
     auto muted_errors = response->is_cors_cross_origin() ? ClassicScript::MutedErrors::Yes : ClassicScript::MutedErrors::No;
@@ -1120,8 +1116,8 @@ WebIDL::ExceptionOr<void> fetch_worklet_module_worker_script_graph(URL::URL cons
     //    credentials mode is credentialsMode, referrer policy is the empty string, and fetch priority is "auto".
     // FIXME: credentialsMode
     auto options = ScriptFetchOptions {
-        .cryptographic_nonce = String {},
-        .integrity_metadata = String {},
+        .cryptographic_nonce = {},
+        .integrity_metadata = {},
         .parser_metadata = Fetch::Infrastructure::Request::ParserMetadata::NotParserInserted,
         .credentials_mode = Fetch::Infrastructure::Request::CredentialsMode::SameOrigin,
         .referrer_policy = ReferrerPolicy::ReferrerPolicy::EmptyString,
@@ -1149,7 +1145,7 @@ WebIDL::ExceptionOr<void> fetch_worklet_module_worker_script_graph(URL::URL cons
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#fetch-destination-from-module-type
-Fetch::Infrastructure::Request::Destination fetch_destination_from_module_type(Fetch::Infrastructure::Request::Destination default_destination, ByteString const& module_type)
+Fetch::Infrastructure::Request::Destination fetch_destination_from_module_type(Fetch::Infrastructure::Request::Destination default_destination, Utf16View module_type)
 {
     // 1. If moduleType is "json", then return "json".
     if (module_type == "json"sv)
@@ -1177,7 +1173,7 @@ void fetch_single_module_script(JS::Realm& realm,
     OnFetchScriptComplete on_complete)
 {
     // 1. Let moduleType be "javascript-or-wasm".
-    String module_type = "javascript-or-wasm"_string;
+    Utf16String module_type = "javascript-or-wasm"_utf16;
 
     // 2. If moduleRequest was given, then set moduleType to the result of running the module type from module request steps given moduleRequest.
     if (module_request.has_value())
@@ -1193,8 +1189,8 @@ void fetch_single_module_script(JS::Realm& realm,
 
     // 5. If moduleMap[(url, moduleType)] is "fetching", wait in parallel until that entry's value changes,
     //    then queue a task on the networking task source to proceed with running the following steps.
-    if (module_map.is_fetching(url, module_type.to_byte_string())) {
-        module_map.wait_for_change(realm.heap(), url, module_type.to_byte_string(), [on_complete, &realm](auto entry) -> void {
+    if (module_map.is_fetching(url, module_type)) {
+        module_map.wait_for_change(realm.heap(), url, module_type, [on_complete, &realm](auto entry) -> void {
             HTML::queue_global_task(HTML::Task::Source::Networking, realm.global_object(), GC::create_function(realm.heap(), [on_complete, entry] {
                 // FIXME: This should run other steps, for now we just assume the script loaded.
                 VERIFY(entry.type == ModuleMap::EntryType::ModuleScript || entry.type == ModuleMap::EntryType::Failed);
@@ -1207,14 +1203,14 @@ void fetch_single_module_script(JS::Realm& realm,
     }
 
     // 6. If moduleMap[(url, moduleType)] exists, run onComplete given moduleMap[(url, moduleType)], and return.
-    auto entry = module_map.get(url, module_type.to_byte_string());
+    auto entry = module_map.get(url, module_type);
     if (entry.has_value()) {
         on_complete->function()(entry->module_script);
         return;
     }
 
     // 7. Set moduleMap[(url, moduleType)] to "fetching".
-    module_map.set(url, module_type.to_byte_string(), { ModuleMap::EntryType::Fetching, nullptr });
+    module_map.set(url, module_type, { ModuleMap::EntryType::Fetching, nullptr });
 
     // 8. Let request be a new request whose URL is url, mode is "cors", referrer is referrer, and client is fetchClient.
     auto request = Fetch::Infrastructure::Request::create(realm.vm());
@@ -1224,7 +1220,7 @@ void fetch_single_module_script(JS::Realm& realm,
     request->set_client(&fetch_client);
 
     // 9. Set request's destination to the result of running the fetch destination from module type steps given destination and moduleType.
-    request->set_destination(fetch_destination_from_module_type(destination, module_type.to_byte_string()));
+    request->set_destination(fetch_destination_from_module_type(destination, module_type.utf16_view()));
 
     // 10. If destination is "worker", "sharedworker", or "serviceworker", and isTopLevel is true, then set request's mode to "same-origin".
     if ((destination == Fetch::Infrastructure::Request::Destination::Worker || destination == Fetch::Infrastructure::Request::Destination::SharedWorker || destination == Fetch::Infrastructure::Request::Destination::ServiceWorker) && is_top_level == TopLevelModule::Yes)
@@ -1247,7 +1243,7 @@ void fetch_single_module_script(JS::Realm& realm,
         //    - response's status is not an ok status,
         if (body_bytes.has<Empty>() || body_bytes.has<Fetch::Infrastructure::FetchAlgorithms::ConsumeBodyFailureTag>() || !Fetch::Infrastructure::is_ok_status(response->status())) {
             // then set moduleMap[(url, moduleType)] to null, run onComplete given null, and abort these steps.
-            module_map.set(url, module_type.to_byte_string(), { ModuleMap::EntryType::Failed, nullptr });
+            module_map.set(url, module_type, { ModuleMap::EntryType::Failed, nullptr });
             on_complete->function()(nullptr);
             return;
         }
@@ -1265,7 +1261,7 @@ void fetch_single_module_script(JS::Realm& realm,
         //     to the result of creating a WebAssembly module script given bodyBytes, moduleMapRealm, response's URL, and
         //     options.
         // FIXME: Pass options.
-        if (mime_type.has_value() && mime_type->essence() == "application/wasm"sv && module_type == "javascript-or-wasm") {
+        if (mime_type.has_value() && mime_type->essence() == "application/wasm"sv && module_type == "javascript-or-wasm"sv) {
             module_script = ModuleScript::create_a_webassembly_module_script(url.to_byte_string(), take_body_bytes_as_byte_buffer(body_bytes), settings_object, response->url().value_or({})).release_value_but_fixme_should_propagate_errors();
         }
 
@@ -1275,14 +1271,14 @@ void fetch_single_module_script(JS::Realm& realm,
             //    the result of creating a JavaScript module script given sourceText, moduleMapRealm, response's URL,
             //    and options.
             // FIXME: Pass options.
-            if (mime_type.has_value() && mime_type->is_javascript() && module_type == "javascript-or-wasm") {
+            if (mime_type.has_value() && mime_type->is_javascript() && module_type == "javascript-or-wasm"sv) {
                 auto decoder = TextCodec::decoder_for("UTF-8"sv);
                 VERIFY(decoder.has_value());
                 auto on_complete_root = GC::make_root(on_complete);
                 auto settings_root = GC::make_root(settings_object);
                 auto url_string = url.to_byte_string();
                 auto response_url = response->url().value_or({});
-                auto module_type_string = module_type.to_byte_string();
+                auto module_type_string = module_type;
                 auto source_byte_storage = body_bytes.get<Core::ImmutableBytes>();
                 auto source_bytes = source_byte_storage.bytes();
                 auto const& bytecode = internal_response->javascript_bytecode_cache();
@@ -1305,7 +1301,7 @@ void fetch_single_module_script(JS::Realm& realm,
                             Optional<NonnullRefPtr<JS::SourceCode const>> source_code;
                             if (bytecode_cache) {
                                 source_code = JS::SourceCode::create(
-                                    Utf16String::from_utf8(url_string.view()),
+                                    utf16_string_from_url_ascii(url_string.view()),
                                     source_length,
                                     "UTF-8"sv,
                                     source_byte_storage);
@@ -1322,7 +1318,7 @@ void fetch_single_module_script(JS::Realm& realm,
                                 auto fallback_decoder = TextCodec::decoder_for("UTF-8"sv);
                                 VERIFY(fallback_decoder.has_value());
                                 source_code = JS::SourceCode::create(
-                                    Utf16String::from_utf8(url_string.view()),
+                                    utf16_string_from_url_ascii(url_string.view()),
                                     decode_source_text_to_utf16(*fallback_decoder, source_byte_storage.bytes()).release_value_but_fixme_should_propagate_errors());
                             }
 
@@ -1362,7 +1358,7 @@ void fetch_single_module_script(JS::Realm& realm,
 
                 if (!source_code.has_value()) {
                     source_code = JS::SourceCode::create(
-                        Utf16String::from_utf8(url_string.view()),
+                        utf16_string_from_url_ascii(url_string.view()),
                         decode_source_text_to_utf16(*decoder, source_bytes).release_value_but_fixme_should_propagate_errors());
                 }
 
@@ -1404,16 +1400,16 @@ void fetch_single_module_script(JS::Realm& realm,
 
             // 4. If the MIME type essence of mimeType is "text/css" and moduleType is "css", then set moduleScript to
             //    the result of creating a CSS module script given sourceText and settingsObject.
-            if (mime_type.has_value() && mime_type->essence() == "text/css"sv && module_type == "css") {
+            if (mime_type.has_value() && mime_type->essence() == "text/css"sv && module_type == "css"sv) {
                 auto decoder = TextCodec::decoder_for("UTF-8"sv);
                 VERIFY(decoder.has_value());
-                auto source_text = decode_source_text(*decoder, body_bytes_view(body_bytes)).release_value_but_fixme_should_propagate_errors();
-                module_script = ModuleScript::create_a_css_module_script(url.to_byte_string(), source_text, settings_object).release_value_but_fixme_should_propagate_errors();
+                auto source_text = decode_source_text_to_utf16(*decoder, body_bytes_view(body_bytes)).release_value_but_fixme_should_propagate_errors();
+                module_script = ModuleScript::create_a_css_module_script(url.to_byte_string(), source_text.utf16_view(), settings_object).release_value_but_fixme_should_propagate_errors();
             }
 
             // 4. If mimeType is a JSON MIME type and moduleType is "json", then set moduleScript to the result of
             //    creating a JSON module script given sourceText and settingsObject.
-            if (mime_type.has_value() && mime_type->is_json() && module_type == "json") {
+            if (mime_type.has_value() && mime_type->is_json() && module_type == "json"sv) {
                 auto decoder = TextCodec::decoder_for("UTF-8"sv);
                 VERIFY(decoder.has_value());
                 auto source_text = decode_source_text_to_utf16(*decoder, body_bytes_view(body_bytes)).release_value_but_fixme_should_propagate_errors();
@@ -1422,7 +1418,7 @@ void fetch_single_module_script(JS::Realm& realm,
         }
 
         // 8. Set moduleMap[(url, moduleType)] to moduleScript, and run onComplete given moduleScript.
-        module_map.set(url, module_type.to_byte_string(), { ModuleMap::EntryType::ModuleScript, module_script });
+        module_map.set(url, module_type, { ModuleMap::EntryType::ModuleScript, module_script });
         on_complete->function()(module_script);
     };
 

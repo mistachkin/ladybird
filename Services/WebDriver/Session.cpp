@@ -20,8 +20,10 @@
 #    include <LibIPC/TransportBootstrapMach.h>
 #    include <LibWebView/Utilities.h>
 #endif
+#include <LibCore/Process.h>
 #include <LibCore/System.h>
 #include <LibCore/Timer.h>
+#include <LibFileSystem/FileSystem.h>
 #include <LibIPC/Transport.h>
 #include <LibWeb/Crypto/Crypto.h>
 #include <LibWeb/WebDriver/Proxy.h>
@@ -173,6 +175,10 @@ void Session::close_all()
 // https://w3c.github.io/webdriver/#dfn-close-the-session
 void Session::close()
 {
+    // NB: Step 2 removes this session from the active-sessions map — usually dropping the last reference to it. So hold
+    //     a strong reference across close() — so removal can't destroy the session while the steps below still use it.
+    auto protector = NonnullRefPtr { *this };
+
     // 1. If session's HTTP flag is set, remove session from active HTTP sessions.
     if (has_flag(session_flags(), Web::WebDriver::SessionFlags::Http))
         s_http_sessions.remove(m_session_id);
@@ -223,13 +229,13 @@ void Session::close()
     m_pending_connections.clear();
 
     if (m_browser_process.has_value())
-        MUST(Core::System::kill(m_browser_process->pid(), SIGTERM));
+        MUST(Core::Process::terminate_process(m_browser_process->pid(), Core::Process::TerminationMode::Graceful));
 
 #if defined(AK_OS_MACOS)
     m_web_content_mach_port_server = nullptr;
 #else
     if (!m_web_content_endpoint.is_empty())
-        MUST(Core::System::unlink(m_web_content_endpoint));
+        MUST(FileSystem::remove(m_web_content_endpoint, FileSystem::RecursionMode::Disallowed));
 #endif
     m_web_content_endpoint = {};
 
@@ -427,7 +433,7 @@ ErrorOr<void> Session::create_server(NonnullRefPtr<ServerPromise> promise)
 
     return {};
 #else
-    (void)Core::System::unlink(m_web_content_endpoint);
+    (void)FileSystem::remove(m_web_content_endpoint, FileSystem::RecursionMode::Disallowed);
 
     auto server = Core::LocalServer::construct();
     server->listen(m_web_content_endpoint);

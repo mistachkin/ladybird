@@ -6,11 +6,12 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Utf16StringBuilder.h>
 #include <LibJS/Runtime/ExternalMemory.h>
-#include <LibURL/Parser.h>
 #include <LibWeb/Bindings/CSSStyleSheet.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CSS/CSSCounterStyleRule.h>
+#include <LibWeb/CSS/CSSFunctionRule.h>
 #include <LibWeb/CSS/CSSImportRule.h>
 #include <LibWeb/CSS/CSSKeyframesRule.h>
 #include <LibWeb/CSS/CSSNestedDeclarations.h>
@@ -25,6 +26,7 @@
 #include <LibWeb/CSS/StyleSheetList.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/StyleElementBase.h>
+#include <LibWeb/DOMURL/DOMURL.h>
 #include <LibWeb/HTML/HTMLLinkElement.h>
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/HTML/Window.h>
@@ -57,7 +59,7 @@ WebIDL::ExceptionOr<GC::Ref<CSSStyleSheet>> CSSStyleSheet::construct_impl(JS::Re
             sheet_location_url = sheet->location().release_value();
 
         // AD-HOC: This isn't explicitly mentioned in the specification, but multiple modern browsers do this.
-        Optional<::URL::URL> url = sheet->location().has_value() ? sheet_location_url->complete_url(options->base_url.value()) : ::URL::Parser::basic_parse(options->base_url.value());
+        auto url = DOMURL::parse(options->base_url->utf16_view(), sheet_location_url);
         if (!url.has_value())
             return WebIDL::NotAllowedError::create(realm, "Constructed style sheets must have a valid base URL"_utf16);
 
@@ -74,7 +76,7 @@ WebIDL::ExceptionOr<GC::Ref<CSSStyleSheet>> CSSStyleSheet::construct_impl(JS::Re
     sheet->set_owner_css_rule(nullptr);
 
     // 7. Set sheet’s title to the empty string.
-    sheet->set_title(String {});
+    sheet->set_title({});
 
     // 8. Unset sheet’s alternate flag.
     sheet->set_alternate(false);
@@ -91,8 +93,8 @@ WebIDL::ExceptionOr<GC::Ref<CSSStyleSheet>> CSSStyleSheet::construct_impl(JS::Re
     // 12. If the media attribute of options is a string, create a MediaList object from the string and assign it as sheet’s media.
     //     Otherwise, serialize a media query list from the attribute and then create a MediaList object from the resulting string and set it as sheet’s media.
     if (options.has_value()) {
-        if (options->media.has<String>()) {
-            sheet->set_media(options->media.get<String>());
+        if (options->media.has<Utf16String>()) {
+            sheet->set_media(options->media.get<Utf16String>());
         } else {
             sheet->m_media = *options->media.get<GC::Ref<MediaList>>();
         }
@@ -143,6 +145,8 @@ void CSSStyleSheet::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_owning_documents_or_shadow_roots);
     if (m_shared_single_constructed_sheet_style_cache)
         m_shared_single_constructed_sheet_style_cache->visit_edges(visitor);
+    if (m_cached_style_sheet_invalidation_set)
+        m_cached_style_sheet_invalidation_set->invalidation_set.visit_edges(visitor);
     for (auto& subresource : m_critical_subresources)
         subresource.visit_edges(visitor);
 }
@@ -151,7 +155,7 @@ size_t CSSStyleSheet::external_memory_size() const
 {
     auto size = Base::external_memory_size();
     if (m_source_text.has_value())
-        size = JS::saturating_add_external_memory_size(size, JS::string_external_memory_size(*m_source_text));
+        size = JS::saturating_add_external_memory_size(size, JS::utf16_string_external_memory_size(*m_source_text));
     size = JS::saturating_add_external_memory_size(size, JS::hash_map_external_memory_size(m_namespace_rules));
     size = JS::saturating_add_external_memory_size(size, JS::vector_external_memory_size(m_import_rules));
     size = JS::saturating_add_external_memory_size(size, JS::hash_table_external_memory_size(m_owning_documents_or_shadow_roots));
@@ -161,7 +165,7 @@ size_t CSSStyleSheet::external_memory_size() const
 }
 
 // https://www.w3.org/TR/cssom/#dom-cssstylesheet-insertrule
-WebIDL::ExceptionOr<unsigned> CSSStyleSheet::insert_rule(StringView rule, unsigned index)
+WebIDL::ExceptionOr<unsigned> CSSStyleSheet::insert_rule(Utf16View rule, unsigned index)
 {
     // FIXME: 1. If the origin-clean flag is unset, throw a SecurityError exception.
 
@@ -188,7 +192,7 @@ WebIDL::ExceptionOr<unsigned> CSSStyleSheet::insert_rule(StringView rule, unsign
         parsed_rule->set_parent_style_sheet(this);
 
         if (!constructed() && owner_node() && owner_node()->is_html_style_element() && parsed_rule->type() == CSSRule::Type::Keyframes)
-            invalidate_owners_for_inserted_keyframes_rule(*this, as<CSSKeyframesRule>(*parsed_rule));
+            invalidate_owners_for_modified_keyframes_rule(*this, as<CSSKeyframesRule>(*parsed_rule));
         else if (!constructed() && owner_node() && owner_node()->is_html_style_element() && parsed_rule->type() == CSSRule::Type::Style)
             invalidate_owners_for_inserted_style_rule(*this, as<CSSStyleRule>(*parsed_rule), DOM::StyleInvalidationReason::StyleSheetInsertRule);
         else
@@ -217,7 +221,7 @@ WebIDL::ExceptionOr<void> CSSStyleSheet::delete_rule(unsigned index)
 }
 
 // https://drafts.csswg.org/cssom/#dom-cssstylesheet-replace
-GC::Ref<WebIDL::Promise> CSSStyleSheet::replace(String text)
+GC::Ref<WebIDL::Promise> CSSStyleSheet::replace(Utf16String text)
 {
     auto& realm = this->realm();
 
@@ -272,7 +276,7 @@ GC::Ref<WebIDL::Promise> CSSStyleSheet::replace(String text)
 }
 
 // https://drafts.csswg.org/cssom/#dom-cssstylesheet-replacesync
-WebIDL::ExceptionOr<void> CSSStyleSheet::replace_sync(StringView text)
+WebIDL::ExceptionOr<void> CSSStyleSheet::replace_sync(Utf16View text)
 {
     // 1. If the constructed flag is not set, or the disallow modification flag is set, throw a NotAllowedError DOMException.
     if (!constructed())
@@ -304,28 +308,31 @@ WebIDL::ExceptionOr<void> CSSStyleSheet::replace_sync(StringView text)
 }
 
 // https://drafts.csswg.org/cssom/#dom-cssstylesheet-addrule
-WebIDL::ExceptionOr<WebIDL::Long> CSSStyleSheet::add_rule(Optional<String> selector, Optional<String> style, Optional<WebIDL::UnsignedLong> index)
+WebIDL::ExceptionOr<WebIDL::Long> CSSStyleSheet::add_rule(Optional<Utf16String> selector, Optional<Utf16String> style, Optional<WebIDL::UnsignedLong> index)
 {
     // 1. Let rule be an empty string.
-    StringBuilder rule;
+    Utf16StringBuilder rule;
 
     // 2. Append selector to rule.
     if (selector.has_value())
         rule.append(selector.release_value());
 
     // 3. Append " { " to rule.
-    rule.append('{');
+    rule.append_code_unit(u'{');
 
     // 4. If block is not empty, append block, followed by a space, to rule.
-    if (style.has_value() && !style->is_empty())
-        rule.appendff("{} ", style.release_value());
+    if (style.has_value() && !style->is_empty()) {
+        rule.append(style.release_value());
+        rule.append_code_unit(u' ');
+    }
 
     // 5. Append "}" to rule.
-    rule.append('}');
+    rule.append_code_unit(u'}');
 
     // 6. Let index be optionalIndex if provided, or the number of CSS rules in the stylesheet otherwise.
     // 7. Call insertRule(), with rule and index as arguments.
-    TRY(insert_rule(rule.string_view(), index.value_or(rules().length())));
+    auto rule_text = rule.to_string();
+    TRY(insert_rule(rule_text, index.value_or(rules().length())));
 
     // 8. Return -1.
     return -1;
@@ -368,16 +375,26 @@ void CSSStyleSheet::for_each_effective_counter_style_at_rule(Function<void(CSSCo
     });
 }
 
+void CSSStyleSheet::for_each_effective_function_at_rule(Function<void(CSSFunctionRule const&)> const& callback) const
+{
+    for_each_effective_rule(TraversalOrder::Preorder, [&](CSSRule const& rule) {
+        if (rule.type() == CSSRule::Type::Function)
+            callback(static_cast<CSSFunctionRule const&>(rule));
+    });
+}
+
 void CSSStyleSheet::add_owning_document_or_shadow_root(DOM::Node& document_or_shadow_root)
 {
     VERIFY(document_or_shadow_root.is_document() || document_or_shadow_root.is_shadow_root());
     m_owning_documents_or_shadow_roots.set(document_or_shadow_root);
 
     // CSSOM's "add a CSS style sheet" steps bail out once the disabled flag is set, so ownership alone should not
-    // make a disabled sheet observable in the destination document. Delay CSS-connected font activation until the
-    // sheet actually becomes enabled.
-    if (!disabled() && this->owning_documents_or_shadow_roots().size() == 1)
+    // make a disabled sheet observable in the destination document. Delay its media-query evaluation and
+    // CSS-connected font activation until the sheet actually becomes enabled.
+    if (!disabled() && this->owning_documents_or_shadow_roots().size() == 1) {
+        evaluate_media_queries(document_or_shadow_root.document());
         document_or_shadow_root.document().font_computer().load_fonts_from_sheet(*this);
+    }
 
     for (auto const& import_rule : m_import_rules) {
         if (import_rule->loaded_style_sheet())
@@ -449,7 +466,9 @@ NonnullRefPtr<StyleCache> CSSStyleSheet::shared_single_constructed_sheet_style_c
 void CSSStyleSheet::invalidate_shared_style_cache()
 {
     m_selector_insights = {};
+    m_cached_style_sheet_invalidation_set = nullptr;
     m_shared_single_constructed_sheet_style_cache = nullptr;
+    ++m_shared_style_cache_generation;
 
     // Imported rules contribute to their parent sheet's effective rules.
     if (auto* import_rule = as_if<CSSImportRule>(owner_rule().ptr())) {
@@ -505,16 +524,28 @@ SelectorInsights const& CSSStyleSheet::selector_insights() const
 
 void CSSStyleSheet::invalidate_owners(DOM::StyleInvalidationReason reason, ShadowRootStylesheetEffects const* previous_sheet_effects)
 {
+    auto previously_matched = m_did_match;
     m_did_match = {};
     invalidate_shared_style_cache();
 
     // The MediaList may have been mutated (e.g. via MediaList::set_media_text), and owner invalidation computes
     // shadow-root effects from effective rules. Refresh the media state first so host-side shadow invalidation
     // sees the updated definitions.
-    if (auto document = owning_document())
+    if (auto document = owning_document()) {
         evaluate_media_queries(*document);
+        if (previously_matched.has_value() && previously_matched.value() != m_did_match.value())
+            reload_fonts_after_media_query_change();
+    }
 
     invalidate_style_for_style_sheet_owners(*this, reason, ShouldInvalidateRuleCache::Yes, previous_sheet_effects);
+}
+
+void CSSStyleSheet::reload_fonts_after_media_query_change()
+{
+    if (auto document = owning_document()) {
+        document->font_computer().unload_fonts_from_sheet(*this);
+        document->font_computer().load_fonts_from_sheet(*this);
+    }
 }
 
 GC::Ptr<DOM::Document> CSSStyleSheet::owning_document() const
@@ -576,7 +607,7 @@ bool CSSStyleSheet::evaluate_media_queries(DOM::Document const& document, Functi
     return any_media_queries_changed_match_state;
 }
 
-Optional<FlyString> CSSStyleSheet::default_namespace() const
+Optional<Utf16FlyString> CSSStyleSheet::default_namespace() const
 {
     if (m_default_namespace_rule)
         return m_default_namespace_rule->namespace_uri();
@@ -584,9 +615,9 @@ Optional<FlyString> CSSStyleSheet::default_namespace() const
     return {};
 }
 
-HashTable<FlyString> CSSStyleSheet::declared_namespaces() const
+HashTable<Utf16FlyString> CSSStyleSheet::declared_namespaces() const
 {
-    HashTable<FlyString> declared_namespaces;
+    HashTable<Utf16FlyString> declared_namespaces;
 
     for (auto namespace_ : m_namespace_rules.keys()) {
         declared_namespaces.set(namespace_);
@@ -595,7 +626,7 @@ HashTable<FlyString> CSSStyleSheet::declared_namespaces() const
     return declared_namespaces;
 }
 
-Optional<FlyString> CSSStyleSheet::namespace_uri(StringView namespace_prefix) const
+Optional<Utf16FlyString> CSSStyleSheet::namespace_uri(Utf16View namespace_prefix) const
 {
     return m_namespace_rules.get(namespace_prefix)
         .map([](GC::Ptr<CSSNamespaceRule> namespace_) {
@@ -632,7 +663,7 @@ void CSSStyleSheet::recalculate_rule_caches()
         }
         case CSSRule::Type::Namespace: {
             auto& namespace_rule = as<CSSNamespaceRule>(*rule);
-            if (!namespace_rule.namespace_uri().is_empty() && namespace_rule.prefix().is_empty())
+            if (namespace_rule.prefix().is_empty())
                 m_default_namespace_rule = namespace_rule;
 
             m_namespace_rules.set(namespace_rule.prefix(), namespace_rule);

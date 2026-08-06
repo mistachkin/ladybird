@@ -8,7 +8,9 @@
 
 #include <AK/FlyString.h>
 #include <AK/RefPtr.h>
+#include <AK/Utf16FlyString.h>
 #include <AK/Vector.h>
+#include <LibGC/Cell.h>
 #include <LibGC/Ptr.h>
 #include <LibWeb/CSS/Selector.h>
 #include <LibWeb/CSS/StyleInvalidationData.h>
@@ -26,6 +28,15 @@ struct StyleSheetInvalidationSet {
     bool may_match_light_dom_under_shadow_host { false };
     bool may_match_light_dom_outside_shadow_host { false };
 
+    // The broad add/remove invalidation path only consults the shadow-escape flags, so it merges just these into a
+    // fresh set instead of copying (or mutating) a whole cached set.
+    void merge_shadow_escape_flags_from(StyleSheetInvalidationSet const& other)
+    {
+        may_match_shadow_host |= other.may_match_shadow_host;
+        may_match_light_dom_under_shadow_host |= other.may_match_light_dom_under_shadow_host;
+        may_match_light_dom_outside_shadow_host |= other.may_match_light_dom_outside_shadow_host;
+    }
+
     struct PseudoElementInvalidationRule {
         InvalidationSet anchor_set;
         RefPtr<Selector> anchor_selector;
@@ -39,6 +50,17 @@ struct StyleSheetInvalidationSet {
     };
     Vector<PseudoElementInvalidationRule> pseudo_element_rules;
     Vector<TrailingUniversalInvalidationRule> trailing_universal_rules;
+
+    void visit_edges(GC::Cell::Visitor&) const;
+};
+
+// Cached result of walking a sheet's effective rules to derive its add/remove invalidation behavior. It depends only
+// on the sheet's own effective rules, so it lives on the CSSStyleSheet and is dropped alongside the sheet's other
+// shared caches when rules mutate or media match states change.
+struct CachedStyleSheetInvalidationSet {
+    StyleSheetInvalidationSet invalidation_set;
+    bool contains_broad_invalidation_rule { false };
+    Vector<Utf16FlyString> keyframes_names;
 };
 
 struct ShadowRootStylesheetEffects {
@@ -116,19 +138,12 @@ void invalidate_style_for_style_sheet_owners(CSSStyleSheet const& style_sheet, D
 // `style_rule` into it.
 void invalidate_owners_for_inserted_style_rule(CSSStyleSheet const& style_sheet, CSSStyleRule const& style_rule, DOM::StyleInvalidationReason);
 
-// Apply a targeted invalidation to all documents and shadow roots that own `style_sheet` in response to inserting
-// `keyframes_rule` into it. Only elements already referencing the inserted animation-name are dirtied.
-void invalidate_owners_for_inserted_keyframes_rule(CSSStyleSheet const& style_sheet, CSSKeyframesRule const& keyframes_rule);
-
-// For every @keyframes rule contained in `sheet`, dirty only the elements (and pseudo-elements) under `root` that
-// already reference the keyframes name. When `root` is a shadow root, the walk also fans out to the shadow host (and
-// host-side light DOM) if any active rule in the same scope can match those nodes via :host or ::slotted(...). Used
-// by the sheet add/remove paths so a sheet that contains @keyframes does not have to fall back to a whole-subtree
-// invalidation.
-void invalidate_root_for_keyframes_rules_in_sheet(DOM::Node& root, CSSStyleSheet const& sheet);
+// Apply a targeted invalidation to all documents and shadow roots that own `style_sheet` in response to inserting or
+// modifying `keyframes_rule` which it owns. Only elements already referencing the inserted animation-name are dirtied.
+void invalidate_owners_for_modified_keyframes_rule(CSSStyleSheet const& style_sheet, CSSKeyframesRule const& keyframes_rule);
 
 // Dirty only the elements (and pseudo-elements) under `root` that already reference `animation_name`. When `root` is
 // a shadow root, the walk also fans out to the shadow host side if active rules in the same scope can match there.
-void invalidate_root_for_keyframes_rule(DOM::Node& root, FlyString const& animation_name);
+void invalidate_root_for_keyframes_rule(DOM::Node& root, Utf16FlyString const& animation_name);
 
 }

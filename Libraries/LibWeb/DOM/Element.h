@@ -9,6 +9,9 @@
 #include <AK/Badge.h>
 #include <AK/Concepts.h>
 #include <AK/Optional.h>
+#include <AK/Utf16FlyString.h>
+#include <AK/Utf16StringBuilder.h>
+#include <AK/Utf16View.h>
 #include <LibGfx/DecodedImageFrame.h>
 #include <LibWeb/ARIA/ARIAMixin.h>
 #include <LibWeb/Animations/Animatable.h>
@@ -104,84 +107,86 @@ public:
 
     virtual Node& slottable_as_node() override { return *this; }
 
-    FlyString const& qualified_name() const { return m_qualified_name.as_string(); }
-    FlyString const& html_uppercased_qualified_name() const;
+    Utf16FlyString const& qualified_name() const { return m_qualified_name.as_string(); }
+    Utf16FlyString const& html_uppercased_qualified_name() const;
 
-    virtual FlyString node_name() const final { return html_uppercased_qualified_name(); }
-    FlyString const& local_name() const { return m_qualified_name.local_name(); }
+    virtual Utf16FlyString node_name() const final { return html_uppercased_qualified_name(); }
+    Utf16FlyString const& local_name() const { return m_qualified_name.local_name(); }
 
-    FlyString const& lowercased_local_name() const { return m_qualified_name.lowercased_local_name(); }
-
-    // NOTE: This is for the JS bindings
-    FlyString const& tag_name() const { return html_uppercased_qualified_name(); }
-
-    Optional<FlyString> const& prefix() const { return m_qualified_name.prefix(); }
-
-    void set_prefix(Optional<FlyString> value);
-
-    Optional<String> locate_a_namespace_prefix(Optional<String> const& namespace_) const;
+    Utf16FlyString const& lowercased_local_name() const { return m_qualified_name.lowercased_local_name(); }
 
     // NOTE: This is for the JS bindings
-    Optional<FlyString> const& namespace_uri() const { return m_qualified_name.namespace_(); }
+    Utf16FlyString const& tag_name() const { return html_uppercased_qualified_name(); }
 
-    bool has_attribute(FlyString const& name) const;
-    bool has_attribute_ns(Optional<FlyString> const& namespace_, FlyString const& name) const;
+    Optional<Utf16FlyString> const& prefix() const { return m_qualified_name.prefix(); }
+
+    void set_prefix(Optional<Utf16FlyString> value);
+
+    Optional<Utf16String> locate_a_namespace_prefix(Optional<Utf16View> namespace_) const;
+
+    // NOTE: This is for the JS bindings
+    Optional<Utf16FlyString> const& namespace_uri() const { return m_qualified_name.namespace_(); }
+
+    bool has_attribute(Utf16FlyString const& name) const;
+    bool has_attribute_ns(Optional<Utf16FlyString> const& namespace_, Utf16FlyString const& name) const;
     bool has_attributes() const;
 
-    Optional<String> attribute(FlyString const& name) const { return get_attribute(name); }
+    Optional<Utf16String> attribute(Utf16FlyString const& name) const { return get_attribute(name); }
 
-    Optional<String> get_attribute(FlyString const& name) const;
-    Optional<String> get_attribute_ns(Optional<FlyString> const& namespace_, FlyString const& name) const;
-    String get_attribute_value(FlyString const& local_name, Optional<FlyString> const& namespace_ = {}) const;
+    Optional<Utf16String> get_attribute(Utf16FlyString const& name) const;
+    Optional<Utf16String> get_attribute_ns(Optional<Utf16FlyString> const& namespace_, Utf16FlyString const& name) const;
+    Utf16String get_attribute_value(Utf16FlyString const& local_name, Optional<Utf16FlyString> const& namespace_ = {}) const;
+    Optional<Utf16View> get_attribute_value_view(Utf16FlyString const& name) const;
 
-    String get_an_elements_target(Optional<String> target = {}) const;
-    HTML::TokenizedFeature::NoOpener get_an_elements_noopener(URL::URL const& url, StringView target) const;
+    Utf16String get_an_elements_target(Optional<Utf16String> target = {}) const;
+    HTML::TokenizedFeature::NoOpener get_an_elements_noopener(URL::URL const& url, Utf16View target) const;
 
     bool cannot_navigate() const;
 
-    void follow_the_hyperlink(Optional<String> hyperlink_suffix, HTML::UserNavigationInvolvement = HTML::UserNavigationInvolvement::None);
+    void follow_the_hyperlink(Optional<Utf16String> hyperlink_suffix, HTML::UserNavigationInvolvement = HTML::UserNavigationInvolvement::None);
+    void download_the_hyperlink(Optional<Utf16String> hyperlink_suffix, HTML::UserNavigationInvolvement = HTML::UserNavigationInvolvement::None);
 
-    Optional<String> lang() const;
+    Optional<Utf16String> lang() const;
+    Optional<Utf16View> lang_view() const;
     void invalidate_lang_value();
 
-    WebIDL::ExceptionOr<void> set_attribute_for_bindings(FlyString qualified_name, Variant<GC::Ref<TrustedTypes::TrustedHTML>, GC::Ref<TrustedTypes::TrustedScript>, GC::Ref<TrustedTypes::TrustedScriptURL>, Utf16String> const& value);
-    WebIDL::ExceptionOr<void> set_attribute_for_bindings(FlyString qualified_name, Variant<GC::Ref<TrustedTypes::TrustedHTML>, GC::Ref<TrustedTypes::TrustedScript>, GC::Ref<TrustedTypes::TrustedScriptURL>, String> const& value);
+    WebIDL::ExceptionOr<void> set_attribute_for_bindings(Utf16FlyString qualified_name, Variant<GC::Ref<TrustedTypes::TrustedHTML>, GC::Ref<TrustedTypes::TrustedScript>, GC::Ref<TrustedTypes::TrustedScriptURL>, Utf16String> const& value);
 
-    WebIDL::ExceptionOr<void> set_attribute_ns_for_bindings(Optional<FlyString> const& namespace_, FlyString const& qualified_name, Variant<GC::Ref<TrustedTypes::TrustedHTML>, GC::Ref<TrustedTypes::TrustedScript>, GC::Ref<TrustedTypes::TrustedScriptURL>, Utf16String> const& value);
-    void set_attribute_value(FlyString const& local_name, String const& value, Optional<FlyString> const& prefix = {}, Optional<FlyString> const& namespace_ = {});
+    WebIDL::ExceptionOr<void> set_attribute_ns_for_bindings(Optional<Utf16FlyString> namespace_, Utf16FlyString const& qualified_name, Variant<GC::Ref<TrustedTypes::TrustedHTML>, GC::Ref<TrustedTypes::TrustedScript>, GC::Ref<TrustedTypes::TrustedScriptURL>, Utf16String> const& value);
+    void set_attribute_value(Utf16FlyString const& local_name, Utf16View value, Optional<Utf16FlyString> const& prefix = {}, Optional<Utf16FlyString> const& namespace_ = {});
+    void set_attribute_value(Utf16FlyString const& local_name, Utf16String value, Optional<Utf16FlyString> const& prefix = {}, Optional<Utf16FlyString> const& namespace_ = {});
     WebIDL::ExceptionOr<GC::Ptr<Attr>> set_attribute_node_for_bindings(Attr&);
     WebIDL::ExceptionOr<GC::Ptr<Attr>> set_attribute_node_ns_for_bindings(Attr&);
 
-    void append_attribute(FlyString const& name, String const& value);
     void append_attribute(Attr&);
-    void remove_attribute(FlyString const& name);
-    void remove_attribute_ns(Optional<FlyString> const& namespace_, FlyString const& name);
+    void remove_attribute(Utf16FlyString const& name);
+    void remove_attribute_ns(Optional<Utf16FlyString> const& namespace_, Utf16FlyString const& name);
     WebIDL::ExceptionOr<GC::Ref<Attr>> remove_attribute_node(GC::Ref<Attr>);
 
-    WebIDL::ExceptionOr<bool> toggle_attribute(FlyString const& name, Optional<bool> force);
+    WebIDL::ExceptionOr<bool> toggle_attribute(Utf16FlyString const& name, Optional<bool> force);
     size_t attribute_list_size() const;
 
     GC::Ptr<NamedNodeMap const> attributes() const;
     GC::Ptr<NamedNodeMap> attributes();
 
-    Vector<String> get_attribute_names() const;
+    Vector<Utf16FlyString> get_attribute_names() const;
 
-    GC::Ptr<Attr> get_attribute_node(FlyString const& name) const;
-    GC::Ptr<Attr> get_attribute_node_ns(Optional<FlyString> const& namespace_, FlyString const& name) const;
+    GC::Ptr<Attr> get_attribute_node(Utf16FlyString const& name) const;
+    GC::Ptr<Attr> get_attribute_node_ns(Optional<Utf16FlyString> const& namespace_, Utf16FlyString const& name) const;
 
-    GC::Ptr<DOM::Element> get_the_attribute_associated_element(FlyString const& content_attribute, GC::Ptr<DOM::Element> explicitly_set_attribute_element) const;
-    Optional<GC::RootVector<GC::Ref<DOM::Element>>> get_the_attribute_associated_elements(FlyString const& content_attribute, Optional<Vector<GC::Weak<DOM::Element>> const&> explicitly_set_attribute_elements) const;
+    GC::Ptr<DOM::Element> get_the_attribute_associated_element(Utf16FlyString const& content_attribute, GC::Ptr<DOM::Element> explicitly_set_attribute_element) const;
+    Optional<GC::RootVector<GC::Ref<DOM::Element>>> get_the_attribute_associated_elements(Utf16FlyString const& content_attribute, Optional<Vector<GC::Weak<DOM::Element>> const&> explicitly_set_attribute_elements) const;
 
     GC::Ref<DOMTokenList> class_list();
     GC::Ref<DOMTokenList> part_list();
-    ReadonlySpan<FlyString> part_names() const { return m_parts; }
+    ReadonlySpan<Utf16FlyString> part_names() const { return m_parts; }
 
     WebIDL::ExceptionOr<GC::Ref<ShadowRoot>> attach_shadow(Bindings::ShadowRootInit const&);
     WebIDL::ExceptionOr<void> attach_a_shadow_root(Bindings::ShadowRootMode mode, bool clonable, bool serializable, bool delegates_focus, Bindings::SlotAssignmentMode slot_assignment, GC::Ptr<HTML::CustomElementRegistry> registry);
     GC::Ptr<ShadowRoot> shadow_root_for_bindings() const;
 
-    WebIDL::ExceptionOr<bool> matches(StringView selectors) const;
-    WebIDL::ExceptionOr<DOM::Element const*> closest(StringView selectors) const;
+    WebIDL::ExceptionOr<bool> matches(Utf16View selectors) const;
+    WebIDL::ExceptionOr<DOM::Element const*> closest(Utf16View selectors) const;
 
     int client_top() const;
     int client_left() const;
@@ -192,21 +197,25 @@ public:
     void for_each_attribute(Function<void(Attr&)>);
     void for_each_attribute(Function<void(Attr const&)>) const;
 
-    void for_each_attribute(Function<void(FlyString const&, String const&)>) const;
+    void for_each_attribute(Function<void(Utf16FlyString const&, Utf16View)>) const;
 
-    bool has_class(FlyString const&, CaseSensitivity = CaseSensitivity::CaseSensitive) const;
-    Vector<FlyString> const& class_names() const { return m_classes; }
+    bool has_class(Utf16View, CaseSensitivity = CaseSensitivity::CaseSensitive) const;
+    bool has_class(Utf16FlyString const&, CaseSensitivity = CaseSensitivity::CaseSensitive) const;
+    Vector<Utf16FlyString> const& class_names() const { return m_classes; }
 
     // https://html.spec.whatwg.org/multipage/embedded-content-other.html#dimension-attributes
     virtual bool supports_dimension_attributes() const { return false; }
 
-    virtual bool is_presentational_hint(FlyString const&) const { return false; }
+    virtual bool is_presentational_hint(Utf16FlyString const&) const { return false; }
     virtual void apply_presentational_hints(Vector<CSS::StyleProperty>&) const;
 
-    void run_attribute_change_steps(FlyString const& local_name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_);
+    void run_attribute_change_steps(Utf16FlyString const& local_name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_);
 
     CSS::RequiredInvalidationAfterStyleChange recompute_style(bool& did_change_custom_properties);
     CSS::RequiredInvalidationAfterStyleChange recompute_inherited_style(ScheduleAnimationUpdate = ScheduleAnimationUpdate::No);
+    CSS::RequiredInvalidationAfterStyleChange recompute_pseudo_element_styles_after_animation_update(Badge<Web::Animations::AnimationUpdateContext>);
+
+    void set_needs_layout_tree_rebuild(SetNeedsLayoutTreeUpdateReason);
 
     Optional<CSS::PseudoElement> associated_shadow_host_pseudo_element() const { return m_associated_shadow_host_pseudo_element; }
     void set_associated_shadow_host_pseudo_element(CSS::PseudoElement pseudo_element);
@@ -217,8 +226,9 @@ public:
     Layout::NodeWithStyle* unsafe_layout_node();
     Layout::NodeWithStyle const* unsafe_layout_node() const;
 
-    RefPtr<CSS::ComputedProperties const> computed_properties(Optional<CSS::PseudoElement> = {}) const;
-    void set_computed_properties(Optional<CSS::PseudoElement>, RefPtr<CSS::ComputedProperties>);
+    RefPtr<CSS::ComputedValues const> computed_values(Optional<CSS::PseudoElement> = {}) const;
+    void set_computed_style(Optional<CSS::PseudoElement>, RefPtr<CSS::ComputedValues const>);
+    void refresh_computed_values(Optional<CSS::PseudoElement>, NonnullRefPtr<CSS::ComputedValues const>);
     void update_animated_properties(Badge<Web::Animations::KeyframeEffect> const&, Optional<CSS::PseudoElement>, Web::Animations::KeyframeEffect&, Web::Animations::AnimationUpdateContext&);
     void update_animated_properties_for_abstract_element(Badge<Web::Animations::KeyframeEffect> const&, DOM::AbstractElement, Web::Animations::KeyframeEffect&, Web::Animations::AnimationUpdateContext&);
 
@@ -281,7 +291,7 @@ public:
     CSS::StyleSheetList& document_or_shadow_root_style_sheets();
     ElementByIdMap& document_or_shadow_root_element_by_id_map();
 
-    WebIDL::ExceptionOr<GC::Ref<DOM::DocumentFragment>> parse_fragment(StringView markup, HTML::ParserScriptingMode = HTML::ParserScriptingMode::Inert);
+    static WebIDL::ExceptionOr<GC::Ref<DOM::DocumentFragment>> parse_fragment(Variant<GC::Ref<Element>, GC::Ref<DocumentFragment>> target, Utf16View markup, HTML::ParserScriptingMode = HTML::ParserScriptingMode::Inert);
 
     [[nodiscard]] GC::Ptr<Element const> element_to_inherit_style_from(Optional<CSS::PseudoElement>) const;
 
@@ -290,9 +300,9 @@ public:
 
     WebIDL::ExceptionOr<void> set_html_unsafe(TrustedTypes::TrustedHTMLOrString const&);
 
-    WebIDL::ExceptionOr<String> get_html(Bindings::GetHTMLOptions const&) const;
+    WebIDL::ExceptionOr<Utf16String> get_html(Bindings::GetHTMLOptions const&) const;
 
-    WebIDL::ExceptionOr<void> insert_adjacent_html(String const& position, TrustedTypes::TrustedHTMLOrString const&);
+    WebIDL::ExceptionOr<void> insert_adjacent_html(Utf16View position, TrustedTypes::TrustedHTMLOrString const&);
 
     enum class FullscreenRequester {
         Bindings,
@@ -352,6 +362,9 @@ public:
     void set_style_uses_inherit_css_function() { m_style_uses_inherit_css_function = true; }
     bool style_depends_on_size_container_query() const { return m_style_depends_on_size_container_query; }
     void set_style_depends_on_size_container_query() { m_style_depends_on_size_container_query = true; }
+    bool style_depends_on_style_container_query() const { return m_style_depends_on_style_container_query; }
+    void set_style_depends_on_style_container_query() { m_style_depends_on_style_container_query = true; }
+    void invalidate_descendant_styles_depending_on_style_container_query();
 
     bool child_style_uses_tree_counting_function() const { return m_child_style_uses_tree_counting_function; }
     void set_child_style_uses_tree_counting_function() { m_child_style_uses_tree_counting_function = true; }
@@ -371,7 +384,7 @@ public:
     [[nodiscard]] Vector<CSSPixelRect> client_rects_assuming_layout_clean() const;
     [[nodiscard]] CSSPixelRect bounding_client_rect_assuming_layout_clean() const;
 
-    virtual RefPtr<Layout::Node> create_layout_node(CSS::ComputedProperties const&);
+    virtual RefPtr<Layout::Node> create_layout_node(NonnullRefPtr<CSS::ComputedValues const>);
     virtual void adjust_computed_style(CSS::ComputedProperties::Builder&) { }
 
     virtual void did_receive_focus() { }
@@ -379,28 +392,28 @@ public:
     bool should_indicate_focus() const;
     virtual bool is_focusable() const override;
 
-    static RefPtr<Layout::NodeWithStyle> create_layout_node_for_display_type(DOM::Document&, CSS::Display const&, CSS::ComputedProperties const&, Element*);
+    static RefPtr<Layout::NodeWithStyle> create_layout_node_for_display_type(DOM::Document&, CSS::Display const&, NonnullRefPtr<CSS::ComputedValues const>, Element*);
 
     void clear_removed_attributes_for_style_invalidation() { m_removed_attributes_for_style_invalidation.clear(); }
-    bool has_removed_attribute_for_style_invalidation(FlyString const& attribute_name) const
+    bool has_removed_attribute_for_style_invalidation(Utf16FlyString const& attribute_name) const
     {
         return m_removed_attributes_for_style_invalidation.contains_slow(attribute_name);
     }
-    void remember_removed_attribute_for_style_invalidation(FlyString const& attribute_name)
+    void remember_removed_attribute_for_style_invalidation(Utf16FlyString const& attribute_name)
     {
         if (!m_removed_attributes_for_style_invalidation.contains_slow(attribute_name))
             m_removed_attributes_for_style_invalidation.append(attribute_name);
     }
 
-    void set_synthetic_pseudo_element_node(Badge<Layout::TreeBuilder>, CSS::PseudoElement, Layout::NodeWithStyle*);
+    void set_synthetic_pseudo_element_node(Badge<Layout::LayoutTreeBuilderAccess>, CSS::PseudoElement, Layout::NodeWithStyle*);
 
     Layout::NodeWithStyle* pseudo_element_layout_node(CSS::PseudoElement) const;
     Layout::NodeWithStyle* pseudo_element_unsafe_layout_node(CSS::PseudoElement) const;
 
     bool has_synthetic_pseudo_elements() const;
-    void clear_synthetic_pseudo_element_layout_nodes(Badge<Layout::TreeBuilder, Node>) { clear_synthetic_pseudo_element_layout_nodes(); }
+    void clear_synthetic_pseudo_element_layout_nodes(Badge<Layout::LayoutTreeBuilderAccess, Node>) { clear_synthetic_pseudo_element_layout_nodes(); }
 
-    void serialize_children_as_json(JsonObjectSerializer<StringBuilder>&) const;
+    void serialize_children_as_json(JsonObjectSerializer<Utf16StringBuilder>&) const;
 
     i32 tab_index() const;
     void set_tab_index(i32 tab_index);
@@ -422,16 +435,16 @@ public:
 
     bool is_actually_disabled() const;
 
-    WebIDL::ExceptionOr<GC::Ptr<Element>> insert_adjacent_element(String const& where, GC::Ref<Element> element);
-    WebIDL::ExceptionOr<void> insert_adjacent_text(String const& where, Utf16String const& data);
+    WebIDL::ExceptionOr<GC::Ptr<Element>> insert_adjacent_element(Utf16View where, GC::Ref<Element> element);
+    WebIDL::ExceptionOr<void> insert_adjacent_text(Utf16View where, Utf16View data);
 
     // https://w3c.github.io/csswg-drafts/cssom-view-1/#dom-element-scrollintoview
     GC::Ref<WebIDL::Promise> scroll_into_view(Optional<Variant<bool, Bindings::ScrollIntoViewOptions>> = {});
 
     // https://www.w3.org/TR/wai-aria-1.2/#ARIAMixin
-#define __ENUMERATE_ARIA_ATTRIBUTE(name, attribute) \
-    virtual Optional<String> name() const override; \
-    virtual void set_##name(Optional<String> const& value) override;
+#define __ENUMERATE_ARIA_ATTRIBUTE(name, attribute)      \
+    virtual Optional<Utf16String> name() const override; \
+    virtual void set_##name(Optional<Utf16String> const& value) override;
     ENUMERATE_ARIA_ATTRIBUTES
 #undef __ENUMERATE_ARIA_ATTRIBUTE
 
@@ -449,7 +462,7 @@ public:
     bool has_referenced_and_hidden_ancestor() const;
 
     void enqueue_a_custom_element_upgrade_reaction(HTML::CustomElementDefinition& custom_element_definition);
-    void enqueue_a_custom_element_callback_reaction(FlyString const& callback_name, GC::RootVector<JS::Value> arguments);
+    void enqueue_a_custom_element_callback_reaction(Utf16FlyString const& callback_name, GC::RootVector<JS::Value> arguments);
 
     using CustomElementReactionQueue = Vector<Variant<CustomElementUpgradeReaction, CustomElementCallbackReaction>>;
     CustomElementReactionQueue* custom_element_reaction_queue() { return m_custom_element_reaction_queue; }
@@ -465,11 +478,11 @@ public:
     bool is_defined() const;
     bool is_custom() const;
 
-    Optional<String> const& is_value() const { return m_is_value; }
-    void set_is_value(Optional<String> const& is) { m_is_value = is; }
+    Optional<Utf16FlyString> const& is_value() const { return m_is_value; }
+    void set_is_value(Optional<Utf16FlyString> const& is) { m_is_value = is; }
 
     void set_custom_element_state(CustomElementState);
-    void setup_custom_element_from_constructor(HTML::CustomElementDefinition& custom_element_definition, Optional<String> const& is_value);
+    void setup_custom_element_from_constructor(HTML::CustomElementDefinition& custom_element_definition, Optional<Utf16FlyString> const& is_value);
 
     GC::Ref<WebIDL::Promise> scroll(Bindings::ScrollToOptions);
     GC::Ref<WebIDL::Promise> scroll(double x, double y);
@@ -504,8 +517,8 @@ public:
     Directionality directionality() const;
     bool is_auto_directionality_form_associated_element() const;
 
-    Optional<FlyString> const& id() const { return m_id; }
-    Optional<FlyString> const& name() const { return m_name; }
+    Optional<Utf16FlyString> const& id() const { return m_id; }
+    Optional<Utf16FlyString> const& name() const { return m_name; }
 
     virtual GC::Ptr<GC::Function<void()>> take_lazy_load_resumption_steps(Badge<DOM::Document>)
     {
@@ -609,10 +622,7 @@ public:
         return affected_by_last_child_pseudo_class() || affected_by_backward_positional_pseudo_class();
     }
 
-    i32 number_of_owned_list_items() const;
-    GC::Ptr<Element> list_owner() const;
-    void maybe_invalidate_ordinals_for_list_owner(Optional<Element*> skip_node = {});
-    i32 ordinal_value();
+    void invalidate_list_item_counters_for_list_owner();
 
     bool captured_in_a_view_transition() const { return m_captured_in_a_view_transition; }
     void set_captured_in_a_view_transition(bool value) { m_captured_in_a_view_transition = value; }
@@ -623,7 +633,7 @@ public:
     bool meets_focusable_area_rendering_requirements() const;
 
     // https://drafts.csswg.org/css-view-transitions-1/#document-scoped-view-transition-name
-    Optional<FlyString> document_scoped_view_transition_name();
+    Optional<Utf16FlyString> document_scoped_view_transition_name();
 
     // https://drafts.csswg.org/css-view-transitions-1/#capture-the-image
     Optional<Gfx::DecodedImageFrame> capture_the_image();
@@ -667,13 +677,13 @@ protected:
     virtual i32 default_tab_index_value() const;
 
     // https://dom.spec.whatwg.org/#concept-element-attributes-change-ext
-    MUST_UPCALL virtual void attribute_changed(FlyString const& local_name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_);
+    MUST_UPCALL virtual void attribute_changed(Utf16FlyString const& local_name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_);
 
     virtual void computed_properties_changed() { }
 
     virtual void visit_edges(Cell::Visitor&) override;
 
-    virtual bool id_reference_exists(String const&) const override;
+    virtual bool id_reference_exists(Utf16View) const override;
 
     CustomElementState custom_element_state() const { return m_custom_element_state; }
     GC::Ptr<HTML::CustomElementDefinition> custom_element_definition() const { return m_custom_element_definition; }
@@ -682,13 +692,16 @@ protected:
     void clear_element_reference_pseudo_elements();
 
 private:
-    FlyString make_html_uppercased_qualified_name() const;
+    Utf16FlyString make_html_uppercased_qualified_name() const;
 
     void exit_fullscreen_on_element_removal();
-    CSS::RequiredInvalidationAfterStyleChange recompute_pseudo_element_styles(bool& did_change_custom_properties, bool had_list_marker, CSS::ComputedProperties const* old_originating_style);
+    CSS::RequiredInvalidationAfterStyleChange recompute_pseudo_element_styles(bool& did_change_custom_properties, bool had_list_marker, CSS::ComputedValues const* old_originating_style);
     void apply_computed_style_to_layout_node_if_needed(CSS::RequiredInvalidationAfterStyleChange const&);
+    void apply_computed_pseudo_element_styles_to_layout_nodes_if_needed(CSS::RequiredInvalidationAfterStyleChange const&);
+    void set_in_display_none_subtree_on_descendant_styles();
+    void mark_descendants_with_stale_styles_for_style_update();
 
-    WebIDL::ExceptionOr<GC::Ptr<Node>> insert_adjacent(StringView where, GC::Ref<Node> node);
+    WebIDL::ExceptionOr<GC::Ptr<Node>> insert_adjacent(Utf16View where, GC::Ref<Node> node);
 
     void enqueue_an_element_on_the_appropriate_element_queue();
 
@@ -696,17 +709,8 @@ private:
     Optional<Directionality> contained_text_auto_directionality(bool can_exclude_root) const;
     Directionality parent_directionality() const;
 
-    template<typename Callback>
-    void for_each_numbered_item_owned_by_list_owner(Callback callback) const
-    {
-        const_cast<Element*>(this)->for_each_numbered_item_owned_by_list_owner(move(callback));
-    }
-
-    template<typename Callback>
-    void for_each_numbered_item_owned_by_list_owner(Callback callback);
-
     QualifiedName m_qualified_name;
-    mutable Optional<FlyString> m_html_uppercased_qualified_name;
+    mutable Optional<Utf16FlyString> m_html_uppercased_qualified_name;
 
     GC::Ptr<NamedNodeMap> m_attributes;
     GC::Ptr<CSS::CSSStyleProperties> m_inline_style;
@@ -715,7 +719,7 @@ private:
     GC::Ptr<ShadowRoot> m_shadow_root;
     GC::Ptr<DOMTokenList> m_part_list;
 
-    RefPtr<CSS::ComputedProperties> m_computed_properties;
+    RefPtr<CSS::ComputedValues const> m_computed_values;
     RefPtr<CSS::CustomPropertyData const> m_custom_property_data;
 
     using PseudoElementData = HashMap<CSS::PseudoElement, GC::Ref<PseudoElement>>;
@@ -726,12 +730,12 @@ private:
 
     Optional<CSS::PseudoElement> m_associated_shadow_host_pseudo_element;
 
-    Vector<FlyString> m_classes;
-    Vector<FlyString> m_parts;
+    Vector<Utf16FlyString> m_classes;
+    Vector<Utf16FlyString> m_parts;
     Optional<Dir> m_dir;
 
-    Optional<FlyString> m_id;
-    Optional<FlyString> m_name;
+    Optional<Utf16FlyString> m_id;
+    Optional<Utf16FlyString> m_name;
 
     // https://html.spec.whatwg.org/multipage/custom-elements.html#custom-element-reaction-queue
     // All elements have an associated custom element reaction queue, initially empty. Each item in the custom element reaction queue is of one of two types:
@@ -745,7 +749,7 @@ private:
     GC::Ptr<HTML::CustomElementDefinition> m_custom_element_definition;
 
     // https://dom.spec.whatwg.org/#concept-element-is-value
-    Optional<String> m_is_value;
+    Optional<Utf16FlyString> m_is_value;
 
     // https://html.spec.whatwg.org/multipage/custom-elements.html#states-set
     GC::Ptr<HTML::CustomStateSet> m_custom_state_set;
@@ -760,7 +764,7 @@ private:
     GC::Ptr<CSS::StylePropertyMapReadOnly> m_computed_style_map_cache;
 
     CSSPixelPoint m_scroll_offset;
-    Vector<FlyString, 1> m_removed_attributes_for_style_invalidation;
+    Vector<Utf16FlyString, 1> m_removed_attributes_for_style_invalidation;
 
     bool m_is_being_activated : 1 { false };
     bool m_in_top_layer : 1 { false };
@@ -771,6 +775,7 @@ private:
     bool m_style_uses_if_css_function : 1 { false };
     bool m_style_uses_inherit_css_function : 1 { false };
     bool m_style_depends_on_size_container_query : 1 { false };
+    bool m_style_depends_on_style_container_query : 1 { false };
     bool m_child_style_uses_tree_counting_function : 1 { false };
     bool m_affected_by_has_pseudo_class_in_subject_position : 1 { false };
     bool m_affected_by_has_pseudo_class_in_non_subject_position : 1 { false };
@@ -791,10 +796,7 @@ private:
 
     OwnPtr<CSS::CountersSet> m_counters_set;
 
-    // https://html.spec.whatwg.org/multipage/grouping-content.html#ordinal-value
-    Optional<i32> m_ordinal_value;
-
-    mutable Optional<String> m_lang_value;
+    mutable Optional<Utf16String> m_lang_value;
 
     // https://w3c.github.io/webappsec-csp/#is-element-nonceable
     // AD-HOC: We need to know the element had a duplicate attribute when it was created from the HTML parser.
@@ -811,8 +813,6 @@ private:
 
     // https://drafts.csswg.org/css-view-transitions-1/#captured-in-a-view-transition
     bool m_captured_in_a_view_transition { false };
-
-    bool m_is_contained_in_list_subtree { false };
 
     // https://drafts.csswg.org/css-values-5/#random-caching
     HashMap<CSS::RandomCachingKey, double> m_element_specific_css_random_base_value_cache;
@@ -831,7 +831,7 @@ inline GC::Ptr<Element const> Node::parent_element() const
     return as_if<Element>(this->parent());
 }
 
-inline bool Element::has_class(FlyString const& class_name, CaseSensitivity case_sensitivity) const
+inline bool Element::has_class(Utf16View class_name, CaseSensitivity case_sensitivity) const
 {
     if (case_sensitivity == CaseSensitivity::CaseSensitive) {
         return any_of(m_classes, [&](auto& it) {
@@ -843,15 +843,28 @@ inline bool Element::has_class(FlyString const& class_name, CaseSensitivity case
     });
 }
 
-bool is_valid_namespace_prefix(FlyString const&);
-bool is_valid_attribute_local_name(FlyString const&);
-bool is_valid_element_local_name(FlyString const&);
+inline bool Element::has_class(Utf16FlyString const& class_name, CaseSensitivity case_sensitivity) const
+{
+    if (case_sensitivity == CaseSensitivity::CaseSensitive) {
+        // NB: Comparing two interned strings is a pointer comparison.
+        return any_of(m_classes, [&](auto& it) {
+            return it == class_name;
+        });
+    }
+    return any_of(m_classes, [&](auto& it) {
+        return it.equals_ignoring_ascii_case(class_name);
+    });
+}
+
+bool is_valid_namespace_prefix(Utf16View);
+bool is_valid_attribute_local_name(Utf16View);
+bool is_valid_element_local_name(Utf16View const&);
 
 enum class ValidationContext {
     Attribute,
     Element,
 };
-WebIDL::ExceptionOr<QualifiedName> validate_and_extract(JS::Realm&, Optional<FlyString> namespace_, FlyString const& qualified_name, ValidationContext context);
+WebIDL::ExceptionOr<QualifiedName> validate_and_extract(JS::Realm&, Optional<Utf16FlyString> namespace_, Utf16FlyString const& qualified_name, ValidationContext context);
 
 }
 

@@ -6,7 +6,6 @@
 
 #pragma once
 
-#include <AK/ByteBuffer.h>
 #include <AK/Function.h>
 #include <AK/HashMap.h>
 #include <AK/HashTable.h>
@@ -18,6 +17,7 @@
 #include <LibGC/CellAllocator.h>
 #include <LibGC/ConservativeRangeProvider.h>
 #include <LibGC/Heap.h>
+#include <LibGC/PrimitiveStorage.h>
 #include <LibWasm/Export.h>
 #include <LibWasm/TypeSystem.h>
 #include <LibWasm/Types.h>
@@ -384,6 +384,11 @@ using ExternValue = Variant<FunctionAddress, TableAddress, MemoryAddress, Global
 
 class Store;
 class ModuleInstance;
+class MemoryInstance;
+class GlobalInstance;
+
+using MemoryInstanceTable = MemoryInstance**;
+using GlobalInstanceTable = GlobalInstance**;
 
 struct CompiledFunctionEntry {
     FlatPtr handler_ptr { 0 };    // 0 = not compiled, use slow path
@@ -459,6 +464,8 @@ public:
 
     size_t cached_minimum_call_record_allocation_size { 0 };
 
+    MemoryInstanceTable resolved_memories(Store&) const;
+    GlobalInstanceTable resolved_globals(Store&) const;
     Vector<CompiledFunctionEntry> const& compiled_fn_table(Store&) const;
 
 private:
@@ -474,6 +481,10 @@ private:
     Vector<TagAddress> m_tags;
     Vector<ExportInstance> m_exports;
 
+    mutable Vector<MemoryInstance*> m_resolved_memories;
+    mutable bool m_resolved_memories_built { false };
+    mutable Vector<GlobalInstance*> m_resolved_globals;
+    mutable bool m_resolved_globals_built { false };
     mutable Vector<CompiledFunctionEntry> m_compiled_fn_table;
     mutable bool m_compiled_fn_table_built { false };
 };
@@ -598,39 +609,50 @@ public:
     MemoryBuffer(MemoryBuffer const&) = delete;
     MemoryBuffer& operator=(MemoryBuffer const&) = delete;
 
-    void reserve_wasm32_address_space();
+    ErrorOr<void> try_reserve(size_t capacity, size_t guard_size = 0);
     ErrorOr<void> try_resize(size_t new_size);
+    ErrorOr<void> try_resize(size_t new_size, size_t reserved_capacity);
 
     auto size() const { return m_size; }
-    auto data() const { return m_data ? m_data : m_fallback.data(); }
-    auto data() { return m_data ? m_data : m_fallback.data(); }
+    auto capacity() const { return m_reserved_capacity; }
+    auto data() const { return GC::PrimitiveStorage::the().data(m_handle); }
+    auto data() { return GC::PrimitiveStorage::the().data(m_handle); }
+    auto storage_offset() const { return m_storage_offset; }
+    GC::PrimitiveStorageHandle primitive_storage_handle() const { return m_handle; }
     Bytes bytes() { return { data(), size() }; }
     ReadonlyBytes bytes() const { return { data(), size() }; }
     Bytes span() { return bytes(); }
     ReadonlyBytes span() const { return bytes(); }
-    u8* offset_pointer(size_t offset) { return data() + offset; }
-    u8 const* offset_pointer(size_t offset) const { return data() + offset; }
-    u8& operator[](size_t index) { return data()[index]; }
-    u8 const& operator[](size_t index) const { return data()[index]; }
-    void overwrite(size_t offset, void const* source, size_t count)
+    u8* offset_pointer(size_t offset)
     {
-        VERIFY(offset <= size());
-        VERIFY(count <= size() - offset);
-        __builtin_memcpy(offset_pointer(offset), source, count);
+        if (m_storage_offset == GC::PrimitiveStorage::invalid_offset)
+            return nullptr;
+        auto* cage_base = GC::PrimitiveStorage::the().cage_base();
+        VERIFY(cage_base);
+        return cage_base + GC::PrimitiveStorage::mask_offset(m_storage_offset + offset);
     }
-    bool is_virtual() const { return m_data != nullptr; }
+    u8 const* offset_pointer(size_t offset) const { return const_cast<MemoryBuffer&>(*this).offset_pointer(offset); }
+    u8& operator[](size_t index) { return *offset_pointer(index); }
+    u8 const& operator[](size_t index) const { return *offset_pointer(index); }
+    size_t contiguous_bytes_from(size_t offset, size_t count) const;
+    size_t contiguous_bytes_before(size_t offset, size_t count) const;
+    void copy_to(size_t offset, Bytes destination) const;
+    void copy_from(MemoryBuffer const& source, size_t source_offset, size_t destination_offset, size_t count);
+    void fill(size_t offset, u8 value, size_t count);
+    void overwrite(size_t offset, void const* source, size_t count);
+    void move_data(size_t destination_offset, size_t source_offset, size_t count);
     bool contains_virtual_address(void const* address) const;
+
+    static constexpr size_t storage_offset_offset() { return __builtin_offsetof(MemoryBuffer, m_storage_offset); }
 
 private:
     void clear();
+    void update_storage_offset();
 
     size_t m_size { 0 };
     size_t m_reserved_capacity { 0 };
-    size_t m_mapping_size { 0 };
-    size_t m_host_page_size { 0 };
-    void* m_mapping_base { nullptr };
-    u8* m_data { nullptr };
-    ByteBuffer m_fallback;
+    GC::PrimitiveStorageHandle m_handle;
+    size_t m_storage_offset { GC::PrimitiveStorage::invalid_offset };
 };
 
 class WASM_API MemoryInstance {
@@ -657,6 +679,8 @@ public:
 
     Function<void()> successful_grow_hook;
 
+    static constexpr size_t data_offset() { return __builtin_offsetof(MemoryInstance, m_data); }
+
 private:
     explicit MemoryInstance(MemoryType const& type);
 
@@ -681,6 +705,8 @@ public:
         VERIFY(is_mutable());
         m_value = move(value);
     }
+
+    static constexpr size_t value_offset() { return __builtin_offsetof(GlobalInstance, m_value); }
 
 private:
     bool m_mutable { false };
@@ -829,6 +855,7 @@ public:
 
     ALWAYS_INLINE FunctionInstance* unsafe_get(FunctionAddress address) { return &m_functions.data()[address.value()]; }
     ALWAYS_INLINE MemoryInstance* unsafe_get(MemoryAddress address) { return m_memories.data()[address.value()].ptr(); }
+    ALWAYS_INLINE GlobalInstance* unsafe_get(GlobalAddress address) { return m_globals.data()[address.value()].ptr(); }
 
     GC::Heap& heap() { return *m_heap; }
     void set_heap(GC::Heap& heap) { m_heap = &heap; }
@@ -846,7 +873,7 @@ private:
     Vector<FunctionInstance> m_functions;
     Vector<TableInstance> m_tables;
     Vector<NonnullOwnPtr<MemoryInstance>> m_memories;
-    Vector<GlobalInstance> m_globals;
+    Vector<NonnullOwnPtr<GlobalInstance>> m_globals;
     Vector<ElementInstance> m_elements;
     Vector<DataInstance> m_datas;
     Vector<TagInstance> m_tags;
@@ -881,30 +908,19 @@ private:
 
 class Frame {
 public:
-    // Owning constructor (slow path).
-    explicit Frame(ModuleInstance const& module, Vector<Value, ArgumentsStaticSize> locals, Expression const& expression, size_t arity)
-        : m_module(module)
-        , m_owned_locals(move(locals))
-        , m_locals_ptr(m_owned_locals.data())
-        , m_expression(expression)
-        , m_arity(arity)
-        , m_owns_locals(true)
-    {
-    }
-
-    // Non-owning constructor (fast path).
-    explicit Frame(ModuleInstance const& module, Value* locals_ptr, Expression const& expression, size_t arity)
+    // An owning frame's pointer can be invalidated when m_owned_locals_stack grows, so re-derive teh pointer from the stack's data() when needed.
+    explicit Frame(ModuleInstance const& module, Value* locals_ptr, Expression const& expression, size_t arity, bool owns_locals = false)
         : m_module(module)
         , m_locals_ptr(locals_ptr)
         , m_expression(expression)
         , m_arity(arity)
+        , m_owns_locals(owns_locals)
     {
     }
 
     Frame(Frame&& other)
         : m_module(other.m_module)
-        , m_owned_locals(move(other.m_owned_locals))
-        , m_locals_ptr(other.m_owns_locals ? m_owned_locals.data() : other.m_locals_ptr)
+        , m_locals_ptr(other.m_locals_ptr)
         , m_expression(other.m_expression)
         , m_arity(other.m_arity)
         , m_label_index(other.m_label_index)
@@ -921,7 +937,6 @@ public:
     auto& module() const { return m_module; }
     Value* locals_data() const { return m_locals_ptr; }
     bool owns_locals() const { return m_owns_locals; }
-    Vector<Value, ArgumentsStaticSize>& owned_locals() { return m_owned_locals; }
     auto& expression() const { return m_expression; }
     auto arity() const { return m_arity; }
     auto label_index() const { return m_label_index; }
@@ -932,7 +947,6 @@ public:
 
 private:
     ModuleInstance const& m_module;
-    Vector<Value, ArgumentsStaticSize> m_owned_locals;
     Value* m_locals_ptr { nullptr };
     Expression const& m_expression;
     size_t m_arity { 0 };

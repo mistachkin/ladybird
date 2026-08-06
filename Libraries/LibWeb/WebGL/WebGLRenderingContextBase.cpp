@@ -12,6 +12,7 @@ extern "C" {
 }
 
 #include <LibGfx/DecodedImageFrame.h>
+#include <LibJS/Runtime/Object.h>
 #include <LibWeb/HTML/DecodedImageData.h>
 #include <LibWeb/HTML/EventLoop/Task.h>
 #include <LibWeb/HTML/HTMLCanvasElement.h>
@@ -38,6 +39,7 @@ extern "C" {
 #include <LibWeb/WebGL/Extensions/WebGLDrawBuffers.h>
 #include <LibWeb/WebGL/TextureUpload.h>
 #include <LibWeb/WebGL/WebGLContextProxy.h>
+#include <LibWeb/WebGL/WebGLObject.h>
 #include <LibWeb/WebGL/WebGLRenderingContext.h>
 #include <LibWeb/WebGL/WebGLRenderingContextBase.h>
 
@@ -54,6 +56,13 @@ struct Extension {
     Optional<WebGLVersion> only_for_webgl_version { OptionalNone {} };
 };
 
+static JS::ThrowCompletionOr<GC::Ref<JS::Object>> create_empty_extension_object(JS::Realm& realm, GC::Ref<WebGLRenderingContextBase>)
+{
+    // WebGL 1.0: "A returned object may have no constants or functions if the extension does not define any, but a unique
+    //            object must still be returned. That object is used to indicate that the extension has been enabled."
+    return JS::Object::create(realm, realm.intrinsics().object_prototype());
+}
+
 static HashMap<String, Extension, AK::ASCIICaseInsensitiveStringTraits> const& available_webgl_extensions()
 {
     static auto const& extensions = *new HashMap<String, Extension, AK::ASCIICaseInsensitiveStringTraits> {
@@ -66,7 +75,7 @@ static HashMap<String, Extension, AK::ASCIICaseInsensitiveStringTraits> const& a
         { "OES_element_index_uint"_string, { { "GL_OES_element_index_uint"sv }, OESElementIndexUint::create, WebGLVersion::WebGL1 } },
         { "OES_standard_derivatives"_string, { { "GL_OES_standard_derivatives"sv }, OESStandardDerivatives::create, WebGLVersion::WebGL1 } },
         { "OES_texture_float"_string, { { "GL_OES_texture_float"sv }, nullptr, WebGLVersion::WebGL1 } },
-        { "OES_texture_float_linear"_string, { { "GL_OES_texture_float_linear"sv }, nullptr } },
+        { "OES_texture_float_linear"_string, { { "GL_OES_texture_float_linear"sv }, create_empty_extension_object } },
         { "OES_texture_half_float"_string, { { "GL_OES_texture_half_float"sv }, nullptr, WebGLVersion::WebGL1 } },
         { "OES_texture_half_float_linear"_string, { { "GL_OES_texture_half_float_linear"sv }, nullptr, WebGLVersion::WebGL1 } },
         { "OES_vertex_array_object"_string, { { "GL_OES_vertex_array_object"sv }, OESVertexArrayObject::create, WebGLVersion::WebGL1 } },
@@ -85,7 +94,7 @@ static HashMap<String, Extension, AK::ASCIICaseInsensitiveStringTraits> const& a
         { "EXT_depth_clamp"_string, { { "GL_EXT_depth_clamp"sv }, nullptr } },
         { "EXT_disjoint_timer_query"_string, { { "GL_EXT_disjoint_timer_query"sv }, nullptr, WebGLVersion::WebGL1 } },
         { "EXT_disjoint_timer_query_webgl2"_string, { { "GL_EXT_disjoint_timer_query"sv }, nullptr, WebGLVersion::WebGL2 } },
-        { "EXT_float_blend"_string, { { "GL_EXT_float_blend"sv }, nullptr } },
+        { "EXT_float_blend"_string, { { "GL_EXT_float_blend"sv }, create_empty_extension_object } },
         { "EXT_polygon_offset_clamp"_string, { { "GL_EXT_polygon_offset_clamp"sv }, nullptr } },
         { "EXT_render_snorm"_string, { { "GL_EXT_render_snorm"sv }, EXTRenderSnorm::create, WebGLVersion::WebGL2 } },
         { "EXT_sRGB"_string, { { "GL_EXT_sRGB"sv }, nullptr, WebGLVersion::WebGL1 } },
@@ -117,10 +126,10 @@ static HashMap<String, Extension, AK::ASCIICaseInsensitiveStringTraits> const& a
     return extensions;
 }
 
-Optional<Vector<String>> WebGLRenderingContextBase::get_supported_extensions()
+Optional<Vector<Utf16String>> WebGLRenderingContextBase::get_supported_extensions()
 {
     auto const& opengl_extensions = context().get_supported_opengl_extensions();
-    Vector<String> webgl_extensions;
+    Vector<Utf16String> webgl_extensions;
 
     for (auto const& [available_extension_name, available_extension_info] : available_webgl_extensions()) {
         bool supported = !available_extension_info.only_for_webgl_version.has_value()
@@ -140,32 +149,36 @@ Optional<Vector<String>> WebGLRenderingContextBase::get_supported_extensions()
         }
 
         if (supported)
-            webgl_extensions.append(available_extension_name);
+            webgl_extensions.append(Utf16String::from_ascii_without_validation(available_extension_name.bytes_as_string_view().bytes()));
     }
 
     return webgl_extensions;
 }
 
-JS::Object* WebGLRenderingContextBase::get_extension(String const& name)
+JS::Object* WebGLRenderingContextBase::get_extension(Utf16String const& name)
 {
     // Returns an object if, and only if, name is an ASCII case-insensitive match [HTML] for one of the names returned
     // from getSupportedExtensions; otherwise, returns null. The object returned from getExtension contains any constants
     // or functions provided by the extension. A returned object may have no constants or functions if the extension does
     // not define any, but a unique object must still be returned. That object is used to indicate that the extension has
     // been enabled.
+    if (!name.is_ascii())
+        return nullptr;
+
+    auto name_string = MUST(String::from_byte_string(name.to_byte_string()));
     auto supported_extensions = get_supported_extensions();
-    auto supported_extension_iterator = supported_extensions->find_if([&name](String const& supported_extension) {
+    auto supported_extension_iterator = supported_extensions->find_if([&name](Utf16String const& supported_extension) {
         return supported_extension.equals_ignoring_ascii_case(name);
     });
     if (supported_extension_iterator == supported_extensions->end())
         return nullptr;
 
-    auto maybe_extension = m_enabled_extensions.get(name);
+    auto maybe_extension = m_enabled_extensions.get(name_string);
     if (maybe_extension.has_value())
         return maybe_extension.release_value();
 
     // If we pass the check above this will always return a value
-    auto const& extension_info = available_webgl_extensions().get(name).release_value();
+    auto const& extension_info = available_webgl_extensions().get(name_string).release_value();
 
     if (!extension_info.factory)
         return nullptr;
@@ -175,7 +188,7 @@ JS::Object* WebGLRenderingContextBase::get_extension(String const& name)
     }
 
     auto extension = MUST(extension_info.factory(realm(), *this));
-    m_enabled_extensions.set(name, extension);
+    m_enabled_extensions.set(move(name_string), extension);
     return extension;
 }
 
@@ -187,6 +200,7 @@ void WebGLRenderingContextBase::enable_compressed_texture_format(WebIDL::Unsigne
 void WebGLRenderingContextBase::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
+    visitor.visit(m_current_vertex_array);
     visitor.visit(m_enabled_extensions);
 }
 
@@ -227,8 +241,14 @@ Optional<WebGLRenderingContextBase::TexImageSourceFrame> WebGLRenderingContextBa
         [](GC::Ref<HTML::ImageBitmap> source) -> Optional<Gfx::DecodedImageFrame> {
             return Gfx::DecodedImageFrame { *source->bitmap() };
         },
-        [](GC::Ref<HTML::ImageData> source) -> Optional<Gfx::DecodedImageFrame> {
-            return Gfx::DecodedImageFrame { source->bitmap() };
+        [this](GC::Ref<HTML::ImageData> source) -> Optional<Gfx::DecodedImageFrame> {
+            auto bitmap = source->bitmap();
+            if (bitmap.is_error()) {
+                set_error(GL_INVALID_VALUE);
+                return OptionalNone {};
+            }
+            NonnullRefPtr<Gfx::Bitmap const> bitmap_ref = bitmap.release_value();
+            return Gfx::DecodedImageFrame { move(bitmap_ref) };
         });
     if (!frame.has_value())
         return OptionalNone {};

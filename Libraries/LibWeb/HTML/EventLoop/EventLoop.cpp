@@ -27,7 +27,7 @@
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
 #include <LibWeb/IndexedDB/Internal/Algorithms.h>
 #include <LibWeb/Page/Page.h>
-#include <LibWeb/Painting/PaintableBox.h>
+#include <LibWeb/Painting/Paintable.h>
 #include <LibWeb/Painting/ViewportPaintable.h>
 #include <LibWeb/Platform/EventLoopPlugin.h>
 #include <LibWeb/Platform/Timer.h>
@@ -124,6 +124,8 @@ void EventLoop::process()
     // 1. Let oldestTask and taskStartTime be null.
     GC::Ptr<Task> oldest_task;
     [[maybe_unused]] double task_start_time = 0;
+
+    m_task_generation++;
 
     // Some algorithms request that steps or states only occur once the event loop has reached step 1.
     // Invoke a set of tasks that these algorithms request us to in order to achieve this.
@@ -279,6 +281,7 @@ void EventLoop::process_input_events() const
 
             for (size_t i = 0; i < event.coalesced_event_count; ++i)
                 page_client.report_finished_handling_input_event(event.page_id, EventResult::Dropped);
+            page_client.did_handle_input_event(event.page_id, event.event);
             page_client.report_finished_handling_input_event(event.page_id, result);
         }
 
@@ -354,10 +357,6 @@ void EventLoop::update_the_rendering()
         return true;
     });
 
-    // AD-HOC: Update all the displayed video frames on HTMLMediaElements in documents' pages.
-    for (auto& document : docs)
-        document->page().update_all_media_element_video_sinks();
-
     // FIXME: 4. Unnecessary rendering: Remove from docs any Document object doc for which all of the following are true:
 
     // FIXME: 5. Remove from docs all Document objects for which the user agent believes that it's preferable to skip updating the rendering for other reasons.
@@ -378,8 +377,10 @@ void EventLoop::update_the_rendering()
 
     // 9. For each doc of docs, run the scroll steps for doc. [CSSOMVIEW]
     for (auto& document : docs) {
-        if (auto navigable = document->navigable())
+        if (auto navigable = document->navigable()) {
+            navigable->process_main_thread_smooth_scrolls();
             navigable->adopt_pending_async_scroll_offsets();
+        }
         document->run_the_scroll_steps();
     }
 
@@ -418,6 +419,13 @@ void EventLoop::update_the_rendering()
             // 1. Recalculate styles and update layout for doc.
             // NOTE: Recalculation of styles is handled by update_layout()
             document->update_layout(DOM::UpdateLayoutReason::HTMLEventLoopRenderingUpdate);
+
+            // AD-HOC: Script that ran earlier in this rendering update may have spun the event loop (e.g. with a
+            //         synchronous XHR) and run tasks that stopped document from being actively rendered, for example
+            //         by detaching it from its navigable after its iframe was removed. update_layout() is a no-op for
+            //         such documents, which can leave them without a paint tree, so skip the rest of this step.
+            if (!document->navigable() || document->navigable()->active_document() != document)
+                break;
 
             // Clamp viewport scroll offset to valid range after layout, in case the
             // scrollable overflow area has shrunk (e.g. after a viewport size change).
@@ -532,7 +540,9 @@ void EventLoop::update_the_rendering()
     // 22. For each doc of docs, update the rendering or user interface of doc and its node navigable to reflect the current state.
     for (auto& doc : docs.in_reverse()) {
         auto navigable = doc->navigable();
-        if (!navigable->needs_repaint())
+        // AD-HOC: Script that ran earlier in this rendering update may have spun the event loop and run tasks that
+        //         detached doc from its navigable (e.g. after its iframe was removed).
+        if (!navigable || !navigable->needs_repaint())
             continue;
         // OPTIMIZATION: Don't paint navigables hidden by an ancestor iframe with visibility: hidden.
         //               needs_repaint() stays true — so, once the navigable becomes visible, it's painted.

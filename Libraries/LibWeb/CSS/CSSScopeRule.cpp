@@ -40,17 +40,16 @@ void CSSScopeRule::initialize(JS::Realm& realm)
 void CSSScopeRule::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
-    visitor.visit(m_cached_nearest_ancestor_scope_rule);
 }
 
-Optional<String> CSSScopeRule::start() const
+Optional<Utf16String> CSSScopeRule::start() const
 {
     if (m_start_selectors.has_value())
         return serialize_a_group_of_selectors(*m_start_selectors);
     return {};
 }
 
-Optional<String> CSSScopeRule::end() const
+Optional<Utf16String> CSSScopeRule::end() const
 {
     if (m_end_selectors.has_value())
         return serialize_a_group_of_selectors(*m_end_selectors);
@@ -150,36 +149,19 @@ GC::Ptr<CSSRule const> nearest_ancestor_scope_rule_for_matching(CSSRule const& s
     return nearest_scoped_owner_import(scope_rule.parent_style_sheet());
 }
 
-GC::Ptr<CSSScopeRule const> CSSScopeRule::nearest_ancestor_scope_rule() const
-{
-    if (m_cached_nearest_ancestor_scope_rule.has_value())
-        return m_cached_nearest_ancestor_scope_rule.value();
-
-    for (auto const* parent = parent_rule(); parent; parent = parent->parent_rule()) {
-        if (auto const* scope_rule = as_if<CSSScopeRule const>(parent)) {
-            m_cached_nearest_ancestor_scope_rule = scope_rule;
-            return m_cached_nearest_ancestor_scope_rule.value();
-        }
-    }
-
-    m_cached_nearest_ancestor_scope_rule = nullptr;
-    return m_cached_nearest_ancestor_scope_rule.value();
-}
-
 void CSSScopeRule::clear_caches()
 {
     Base::clear_caches();
     m_cached_start_selectors_for_matching.clear();
     m_cached_end_selectors_for_matching.clear();
-    m_cached_nearest_ancestor_scope_rule.clear();
 }
 
 // https://drafts.csswg.org/cssom-1/#serialize-a-css-rule
-String CSSScopeRule::serialized() const
+Utf16String CSSScopeRule::serialized() const
 {
     // AD-HOC: There is no spec for this yet.
-    StringBuilder builder;
-    builder.append("@scope"sv);
+    Utf16StringBuilder builder;
+    builder.append_ascii("@scope"sv);
 
     if (auto start = this->start(); start.has_value())
         builder.appendff(" ({})", *start);
@@ -187,23 +169,23 @@ String CSSScopeRule::serialized() const
     if (auto end = this->end(); end.has_value())
         builder.appendff(" to ({})", *end);
 
-    builder.append(" {\n"sv);
+    builder.append_ascii(" {\n"sv);
 
     for (size_t i = 0; i < css_rules().length(); i++) {
         auto rule = css_rules().item(i);
-        auto result = rule->css_text();
+        auto result = rule->serialized();
 
         if (result.is_empty())
             continue;
 
-        builder.append("  "sv);
+        builder.append_ascii("  "sv);
         builder.append(result);
-        builder.append('\n');
+        builder.append_ascii('\n');
     }
 
-    builder.append('}');
+    builder.append_ascii('}');
 
-    return builder.to_string_without_validation();
+    return builder.to_string();
 }
 
 void CSSScopeRule::dump(StringBuilder& builder, int indent_levels) const

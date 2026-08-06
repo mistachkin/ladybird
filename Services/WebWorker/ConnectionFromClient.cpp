@@ -8,6 +8,8 @@
 #include <LibCore/System.h>
 #include <LibWeb/HTML/BroadcastChannel.h>
 #include <LibWeb/HTML/WorkerAgentParent.h>
+#include <LibWeb/Platform/FontPlugin.h>
+#include <LibWebView/CompositorConnection.h>
 #include <WebWorker/ConnectionFromClient.h>
 #include <WebWorker/PageHost.h>
 #include <WebWorker/WorkerHost.h>
@@ -33,6 +35,35 @@ void ConnectionFromClient::connect_to_image_decoder(IPC::TransportHandle handle)
 {
     if (on_image_decoder_connection)
         on_image_decoder_connection(handle);
+}
+
+void ConnectionFromClient::connect_to_compositor(IPC::TransportHandle handle)
+{
+    auto transport = MUST(handle.create_transport());
+    m_compositor_connection = adopt_ref(*new WebView::CompositorConnection(move(transport)));
+    m_compositor_connection->on_compositor_lost = [this] {
+        m_page_host->compositor_process_lost();
+    };
+
+#ifdef AK_OS_WINDOWS
+    // Perform Windows peer PID handshake before any other IPC
+    if constexpr (requires { m_compositor_connection->transport().set_peer_pid(0); }) {
+        auto response = m_compositor_connection->send_sync<Messages::CompositorWebContentServer::InitTransport>(Core::System::getpid());
+        m_compositor_connection->transport().set_peer_pid(response->compositor_pid());
+    }
+#endif
+}
+
+WebView::CompositorConnection* ConnectionFromClient::compositor_process_connection() const
+{
+    if (!m_compositor_connection || !m_compositor_connection->is_open())
+        return nullptr;
+    return m_compositor_connection.ptr();
+}
+
+void ConnectionFromClient::set_system_font_family(String family)
+{
+    Web::Platform::FontPlugin::the().set_system_font_family(FlyString { family });
 }
 
 void ConnectionFromClient::close_worker()
@@ -79,8 +110,9 @@ Web::Page const& ConnectionFromClient::page() const
     return m_page_host->page();
 }
 
-void ConnectionFromClient::start_worker(URL::URL url, Web::Bindings::WorkerType type, Web::Bindings::RequestCredentials credentials, String name, Web::HTML::TransferDataEncoder implicit_port, Web::HTML::SerializedEnvironmentSettingsObject outside_settings, Web::Bindings::AgentType agent_type)
+void ConnectionFromClient::start_worker(URL::URL url, Web::Bindings::WorkerType type, Web::Bindings::RequestCredentials credentials, Utf16String name, Web::HTML::TransferDataEncoder implicit_port, Web::HTML::SerializedEnvironmentSettingsObject outside_settings, Web::Bindings::AgentType agent_type, double maximum_frames_per_second)
 {
+    m_page_host->set_maximum_frames_per_second(maximum_frames_per_second);
     m_worker_host = make_ref_counted<WorkerHost>(move(url), type, move(name));
 
     bool const is_shared = agent_type == Web::Bindings::AgentType::SharedWorker;
@@ -118,7 +150,7 @@ void ConnectionFromClient::did_worker_agent_fail_loading_script(Web::HTML::Worke
     Web::HTML::WorkerAgentParent::did_fail_loading_worker_script(owner_token);
 }
 
-void ConnectionFromClient::did_worker_agent_report_exception(Web::HTML::WorkerAgentOwnerToken owner_token, String message, String filename, u32 lineno, u32 colno)
+void ConnectionFromClient::did_worker_agent_report_exception(Web::HTML::WorkerAgentOwnerToken owner_token, Utf16String message, Utf16String filename, u32 lineno, u32 colno)
 {
     Web::HTML::WorkerAgentParent::did_report_worker_exception(owner_token, move(message), move(filename), lineno, colno);
 }

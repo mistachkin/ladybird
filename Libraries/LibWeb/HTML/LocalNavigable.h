@@ -10,11 +10,14 @@
 #include <AK/Assertions.h>
 #include <AK/HashTable.h>
 #include <AK/OwnPtr.h>
-#include <AK/String.h>
 #include <AK/Tuple.h>
+#include <AK/Utf16String.h>
+#include <AK/Utf16View.h>
 #include <LibCore/Forward.h>
 #include <LibWeb/Bindings/Navigation.h>
+#include <LibWeb/Bindings/Window.h>
 #include <LibWeb/Compositor/CompositorHost.h>
+#include <LibWeb/Compositor/SmoothScrollAnimation.h>
 #include <LibWeb/DOM/DocumentLoadEventDelayer.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
@@ -25,8 +28,10 @@
 #include <LibWeb/HTML/Navigable.h>
 #include <LibWeb/HTML/NavigationObserver.h>
 #include <LibWeb/HTML/NavigationParams.h>
+#include <LibWeb/HTML/NavigationSourceSnapshot.h>
 #include <LibWeb/HTML/POSTResource.h>
 #include <LibWeb/HTML/PaintConfig.h>
+#include <LibWeb/HTML/ReplicatedNavigableState.h>
 #include <LibWeb/HTML/SandboxingFlagSet.h>
 #include <LibWeb/HTML/SourceSnapshotParams.h>
 #include <LibWeb/HTML/StructuredSerializeTypes.h>
@@ -34,7 +39,9 @@
 #include <LibWeb/HTML/WindowType.h>
 #include <LibWeb/InvalidateDisplayList.h>
 #include <LibWeb/Page/EventHandler.h>
+#include <LibWeb/Painting/AccumulatedVisualContext.h>
 #include <LibWeb/Painting/DisplayListResourceStorage.h>
+#include <LibWeb/Painting/ScrollState.h>
 #include <LibWeb/PixelUnits.h>
 #include <LibWeb/XHR/FormDataEntry.h>
 
@@ -42,10 +49,18 @@ namespace Web::HTML {
 
 struct PopulateSessionHistoryEntryDocumentOutput;
 
+// https://html.spec.whatwg.org/multipage/browsing-the-web.html#apply-the-history-step
+// They return "initiator-disallowed", "canceled-by-beforeunload", "canceled-by-navigate", or
+// "applied".
 enum class HistoryStepResult {
     InitiatorDisallowed,
     CanceledByBeforeUnload,
     CanceledByNavigate,
+    // AD-HOC: This is an internal result used when WebContent no longer has the requested page.
+    CanceledByMissingPage,
+    // INTEROP: This is an internal result for browser UI handling and is not one of the results
+    //          returned by the HTML Standard's apply the history step algorithm.
+    CanceledPendingNavigation,
     Applied,
 };
 using OnApplyHistoryStepComplete = GC::Function<void(HistoryStepResult)>;
@@ -69,10 +84,11 @@ public:
 
     virtual ~LocalNavigable() override;
 
-    using NullOrError = Optional<String>;
+    using NullOrError = Optional<Utf16String>;
     using NavigationParamsVariant = Variant<NullOrError, GC::Ref<NavigationParams>, GC::Ref<NonFetchSchemeNavigationParams>>;
 
     void initialize_navigable(NonnullRefPtr<DocumentState> document_state, GC::Ptr<LocalNavigable> parent, GC::Ref<DOM::Document> document);
+    void set_id_for_session_history_reconstruction(CrossProcessId id) { set_id(id); }
 
     void register_navigation_observer(Badge<NavigationObserver>, NavigationObserver&);
     void unregister_navigation_observer(Badge<NavigationObserver>, NavigationObserver&);
@@ -111,6 +127,7 @@ public:
 
     virtual Optional<URL::URL> active_document_url() const override;
     virtual Optional<URL::Origin> active_document_origin() const override;
+    ReplicatedNavigableState replicated_state() const;
 
     RefPtr<SessionHistoryEntry> get_the_target_history_entry(int target_step) const;
     RefPtr<SessionHistoryEntry> get_the_target_history_entry_if_present(int target_step) const;
@@ -119,7 +136,7 @@ public:
     void restore_persisted_state_from_session_history_entry(SessionHistoryEntry const&);
     void restore_scroll_position_data(SessionHistoryEntry const&);
 
-    virtual String target_name() const override;
+    virtual Utf16String const& target_name() const override;
 
     GC::Ptr<NavigableContainer> container() const;
     GC::Ptr<DOM::Document> container_document() const;
@@ -135,9 +152,13 @@ public:
         WindowType window_type;
     };
 
-    ChosenNavigable choose_a_navigable(StringView name, TokenizedFeature::NoOpener no_opener, ActivateTab = ActivateTab::Yes, Optional<TokenizedFeature::Map const&> window_features = {});
+    ChosenNavigable choose_a_navigable(Utf16View name, TokenizedFeature::NoOpener no_opener, ActivateTab = ActivateTab::Yes, Optional<TokenizedFeature::Map const&> window_features = {});
 
-    GC::Ptr<LocalNavigable> find_a_navigable_by_target_name(StringView name);
+    GC::Ptr<LocalNavigable> find_a_navigable_by_target_name(Utf16View name);
+
+    void handle_as_a_download(GC::Ref<Fetch::Infrastructure::Response>, URL::URL const& fallback_url, GC::Ptr<Fetch::Infrastructure::FetchController>, Optional<ByteString> proposed_filename, Optional<URL::Origin> interface_origin);
+
+    void inform_the_navigation_api_about_aborting_navigation();
 
     enum class Traversal {
         Tag
@@ -148,8 +169,8 @@ public:
         Preserve
     };
 
-    Variant<Empty, Traversal, String> ongoing_navigation() const { return m_ongoing_navigation; }
-    void set_ongoing_navigation(Variant<Empty, Traversal, String> ongoing_navigation, NavigationAPIAbortBehavior = NavigationAPIAbortBehavior::Abort);
+    Variant<Empty, Traversal, Utf16String> ongoing_navigation() const { return m_ongoing_navigation; }
+    void set_ongoing_navigation(Variant<Empty, Traversal, Utf16String> ongoing_navigation, NavigationAPIAbortBehavior = NavigationAPIAbortBehavior::Abort);
 
     // Test-only (Internals.clobberNextNavigationWithATraversal): make the next navigation's unload check be interrupted
     // by a synthetic session-history traversal that re-stamps the ongoing navigation.
@@ -157,20 +178,21 @@ public:
 
     void populate_session_history_entry_document(
         URL::URL url,
-        Variant<Empty, String, POSTResource> document_resource,
+        DocumentResource document_resource,
         Fetch::Infrastructure::Request::ReferrerType request_referrer,
         ReferrerPolicy::ReferrerPolicy request_referrer_policy,
         Optional<URL::Origin> initiator_origin,
+        Optional<URL::Origin> cross_process_initiator_origin,
         Optional<URL::Origin> origin,
         Variant<SerializedPolicyContainer, DocumentState::Client> history_policy_container,
         Optional<URL::URL> about_base_url,
-        String navigable_target_name,
+        Utf16String navigable_target_name,
         bool reload_pending,
         bool ever_populated,
         GC::Ref<SourceSnapshotParams> source_snapshot_params,
         TargetSnapshotParams const& target_snapshot_params,
         UserNavigationInvolvement user_involvement,
-        Optional<String> navigation_id,
+        Optional<Utf16String> navigation_id,
         NavigationParamsVariant navigation_params,
         ContentSecurityPolicy::Directives::Directive::NavigationType csp_navigation_type,
         bool allow_POST,
@@ -180,27 +202,31 @@ public:
         URL::URL url;
         // FIXME: source_document should now be nullable, and default to nullptr.
         GC::Ref<DOM::Document> source_document;
-        Variant<Empty, String, POSTResource> document_resource = Empty {};
+        DocumentResource document_resource = Empty {};
         GC::Ptr<Fetch::Infrastructure::Response> response = nullptr;
         bool exceptions_enabled = false;
         Bindings::NavigationHistoryBehavior history_handling = Bindings::NavigationHistoryBehavior::Auto;
-        Optional<SerializationRecord> navigation_api_state = {};
+        Optional<StorageSerializationRecord> navigation_api_state = {};
         Optional<Vector<XHR::FormDataEntry>> form_data_entry_list = {};
         ReferrerPolicy::ReferrerPolicy referrer_policy = ReferrerPolicy::ReferrerPolicy::EmptyString;
         UserNavigationInvolvement user_involvement = UserNavigationInvolvement::None;
         GC::Ptr<DOM::Element> source_element = nullptr;
         InitialInsertion initial_insertion = InitialInsertion::No;
+        // AD-HOC: Set when this navigation was started in another WebContent process and handed off to this one. The
+        //         source document only exists in the process where the navigation started, so this carries the state
+        //         the navigate algorithm would otherwise snapshot from it.
+        Optional<NavigationSourceSnapshot> cross_process_source_snapshot = {};
 
         void visit_edges(Cell::Visitor& visitor);
     };
 
     WebIDL::ExceptionOr<void> navigate(NavigateParams);
 
-    GC::Ptr<DOM::Document> evaluate_javascript_url(URL::URL const&, URL::Origin const& new_document_origin, UserNavigationInvolvement, String navigation_id);
+    GC::Ptr<DOM::Document> evaluate_javascript_url(URL::URL const&, URL::Origin const& new_document_origin, UserNavigationInvolvement, Utf16String navigation_id);
 
     bool allowed_by_sandboxing_to_navigate(LocalNavigable const& target, SourceSnapshotParams const&);
 
-    void reload(Optional<SerializationRecord> navigation_api_state = {}, UserNavigationInvolvement = UserNavigationInvolvement::None);
+    void reload(Optional<StorageSerializationRecord> navigation_api_state = {}, UserNavigationInvolvement = UserNavigationInvolvement::None);
 
     // https://github.com/whatwg/html/issues/9690
     [[nodiscard]] bool has_been_destroyed() const { return m_has_been_destroyed; }
@@ -216,6 +242,7 @@ public:
     void set_viewport_size(CSSPixelSize, InvalidateDisplayList = InvalidateDisplayList::No);
     void perform_scroll_of_viewport_scrolling_box(CSSPixelPoint position);
     void adopt_pending_async_scroll_offsets();
+    void process_main_thread_smooth_scrolls();
     void wait_for_async_scroll_operation(Compositor::AsyncScrollOperationID, GC::Ref<WebIDL::Promise>);
     void clamp_viewport_scroll_offset();
 
@@ -227,12 +254,15 @@ public:
     Page& page() { return m_page; }
     Page const& page() const { return m_page; }
 
-    String selected_text() const;
-    String cut_selected_text() const;
+    Utf16String selected_text() const;
+    Utf16String selected_html_for_clipboard() const;
+    Utf16String cut_selected_text() const;
     void select_all();
-    void paste(Utf16String const&);
-    void set_marked_text_from_input_method(Utf16String const& text);
-    void commit_text_from_input_method(Utf16String const& text);
+    void paste(Utf16View);
+    void undo();
+    void redo();
+    void set_marked_text_from_input_method(Utf16View text);
+    void commit_text_from_input_method(Utf16View text, i32 replacement_start = 0, i32 replacement_length = 0);
     void unmark_text_from_input_method();
 
     Web::EventHandler& event_handler() { return m_event_handler; }
@@ -251,7 +281,7 @@ public:
     bool has_pending_navigations() const { return !m_pending_navigations.is_empty(); }
     void clear_pending_navigations() { m_pending_navigations.clear(); }
 
-    bool record_display_list_and_scroll_state(PaintConfig);
+    bool record_display_list_and_scroll_state(PaintConfig, Gfx::IntRect* damage_rect = nullptr);
     void paint_next_frame();
     void render_screenshot(Gfx::PaintingSurface&, PaintConfig, Function<void()>&& callback);
     Painting::DisplayListResourceStorage& display_list_resource_storage() { return m_display_list_resource_storage; }
@@ -259,6 +289,7 @@ public:
 
     bool needs_repaint() const { return m_needs_repaint; }
     void set_needs_repaint() { m_needs_repaint = true; }
+    bool needs_to_record_display_list() const { return m_needs_to_record_display_list; }
     void set_needs_to_record_display_list() { m_needs_to_record_display_list = true; }
     void repaint_after_compositor_process_reconnect();
 
@@ -288,8 +319,18 @@ public:
     template<typename T>
     bool fast_is() const = delete;
 
-    GC::Ref<WebIDL::Promise> scroll_viewport_by_delta(CSSPixelPoint delta);
-    GC::Ref<WebIDL::Promise> perform_a_scroll_of_the_viewport(CSSPixelPoint position);
+    enum class ScrollTrigger {
+        Programmatic,
+        UserInput,
+    };
+
+    GC::Ref<WebIDL::Promise> scroll_viewport_by_delta(CSSPixelPoint delta, Bindings::ScrollBehavior = Bindings::ScrollBehavior::Instant);
+    GC::Ref<WebIDL::Promise> perform_a_scroll_of_the_viewport(CSSPixelPoint position, Bindings::ScrollBehavior = Bindings::ScrollBehavior::Auto, ScrollTrigger = ScrollTrigger::Programmatic);
+    GC::Ref<WebIDL::Promise> perform_a_scroll_of_an_element(DOM::Element&, CSSPixelPoint position, Bindings::ScrollBehavior);
+    void queue_scrollend_event_after_user_scroll(GC::Ref<DOM::EventTarget>);
+    void defer_user_scroll_settlement();
+    void begin_user_scroll_gesture_hold(Badge<UserScrollGestureHold>);
+    void end_user_scroll_gesture_hold(Badge<UserScrollGestureHold>);
     void reset_zoom();
 
 protected:
@@ -302,7 +343,7 @@ protected:
     virtual void finalize() override;
 
     // https://html.spec.whatwg.org/multipage/browsing-the-web.html#ongoing-navigation
-    Variant<Empty, Traversal, String> m_ongoing_navigation;
+    Variant<Empty, Traversal, Utf16String> m_ongoing_navigation;
 
 private:
     enum class PendingNavigationBehavior {
@@ -313,8 +354,8 @@ private:
     void begin_navigation(NavigateParams);
     void queue_pending_navigation(NavigateParams, PendingNavigationBehavior);
     void process_pending_navigations();
-    void navigate_to_a_fragment(URL::URL const&, HistoryHandlingBehavior, UserNavigationInvolvement, GC::Ptr<DOM::Element> source_element, Optional<SerializationRecord> navigation_api_state, String navigation_id);
-    void navigate_to_a_javascript_url(URL::URL const&, HistoryHandlingBehavior, GC::Ref<SourceSnapshotParams>, URL::Origin const& initiator_origin, UserNavigationInvolvement, ContentSecurityPolicy::Directives::Directive::NavigationType csp_navigation_type, InitialInsertion, String navigation_id);
+    void navigate_to_a_fragment(URL::URL const&, HistoryHandlingBehavior, UserNavigationInvolvement, GC::Ptr<DOM::Element> source_element, Optional<StorageSerializationRecord> navigation_api_state, Utf16String navigation_id);
+    void navigate_to_a_javascript_url(URL::URL const&, HistoryHandlingBehavior, GC::Ref<SourceSnapshotParams>, URL::Origin const& initiator_origin, UserNavigationInvolvement, ContentSecurityPolicy::Directives::Directive::NavigationType csp_navigation_type, InitialInsertion, Utf16String navigation_id);
 
     void reset_cursor_blink_cycle();
 
@@ -322,9 +363,20 @@ private:
     void clear_parent_compositor_context();
     void destroy_compositor_context();
 
-    void inform_the_navigation_api_about_aborting_navigation();
+    void start_download_for_response(GC::Ref<Fetch::Infrastructure::Response>, URL::URL const& download_url, ByteString suggested_filename, GC::Ptr<Fetch::Infrastructure::FetchController>);
+
     void resolve_async_scroll_operation(Compositor::AsyncScrollOperationID);
     void resolve_all_pending_async_scroll_operations();
+    void resolve_pending_smooth_scrolls(Compositor::AsyncScrollNodeStableID);
+    GC::Ref<WebIDL::Promise> perform_a_scroll_of_a_scrolling_box(Compositor::AsyncScrollNodeStableID, CSSPixelPoint position, Bindings::ScrollBehavior, GC::Ptr<DOM::Element> associated_element, ScrollTrigger);
+    Optional<CSSPixelPoint> scroll_offset_for(Compositor::AsyncScrollNodeStableID) const;
+    bool set_scroll_offset_for(Compositor::AsyncScrollNodeStableID, CSSPixelPoint);
+    void queue_scrollend_event(Compositor::AsyncScrollNodeStableID, ScrollTrigger);
+    void queue_scrollend_event(DOM::Document&, GC::Ref<DOM::EventTarget>, ScrollTrigger);
+    void queue_scrollend_event_for_finished_scroll(Compositor::AsyncScrollNodeStableID, ScrollTrigger);
+    bool has_in_flight_user_scroll_operation() const;
+    void user_scroll_did_settle();
+    void cancel_user_scroll_settlement();
     void schedule_hover_update_after_async_scroll();
     void update_hover_after_async_scroll_stops();
     void cancel_hover_update_after_async_scroll();
@@ -342,7 +394,8 @@ private:
     // AD-HOC: Active IME composition state. While a composition is in progress, m_input_method_composition_node and
     //         m_input_method_composition_offset record the start of the marked (preedit) text; the marked text spans
     //         from there to the caret. A null node means no composition is in progress.
-    void replace_input_method_marked_text(Utf16String const& text);
+    void replace_input_method_marked_text(Utf16View text);
+    bool apply_input_method_commit_replacement(Utf16View text, i32 replacement_start, i32 replacement_length);
     GC::Ptr<DOM::Node> m_input_method_composition_node;
     size_t m_input_method_composition_offset { 0 };
 
@@ -380,16 +433,49 @@ private:
     bool m_should_show_line_box_borders { false };
     bool m_should_show_caret_hit_test_debug_overlay { false };
     Optional<PaintConfig> m_compositor_display_list_paint_config;
+    u64 m_compositor_display_list_visual_context_tree_version { 0 };
+    RefPtr<Painting::DisplayList> m_compositor_display_list;
+    Optional<Painting::AccumulatedVisualContextTree> m_compositor_visual_context_tree;
+    Optional<Painting::ScrollStateSnapshot> m_compositor_scroll_state_snapshot;
     Painting::DisplayListResourceStorage m_display_list_resource_storage;
     Painting::DisplayListResourceSet m_compositor_display_list_resources;
     OwnPtr<Compositor::CompositorContextHandle> m_compositor_context;
     RefPtr<Core::Timer> m_async_scroll_hover_update_timer;
+    Vector<GC::Ref<DOM::EventTarget>> m_pending_user_scrollend_targets;
+    RefPtr<Core::Timer> m_user_scroll_settle_timer;
+    size_t m_user_scroll_gesture_hold_count { 0 };
 
     struct PendingAsyncScrollOperation {
         Compositor::AsyncScrollOperationID operation_id { 0 };
         GC::Ref<WebIDL::Promise> promise;
+        Optional<Compositor::AsyncScrollNodeStableID> stable_node_id;
+        Optional<CSSPixelPoint> initial_scroll_offset;
+        ScrollTrigger trigger { ScrollTrigger::Programmatic };
     };
     Vector<PendingAsyncScrollOperation> m_pending_async_scroll_operations;
+
+    struct MainThreadSmoothScroll {
+        Compositor::AsyncScrollNodeStableID stable_node_id;
+        Compositor::SmoothScrollAnimation animation;
+        MonotonicTime last_tick;
+        AK::Duration elapsed;
+        CSSPixelPoint initial_scroll_offset;
+        GC::Ref<WebIDL::Promise> promise;
+        ScrollTrigger trigger { ScrollTrigger::Programmatic };
+    };
+    Vector<MainThreadSmoothScroll> m_main_thread_smooth_scrolls;
+};
+
+class WEB_API UserScrollGestureHold {
+    AK_MAKE_NONCOPYABLE(UserScrollGestureHold);
+    AK_MAKE_NONMOVABLE(UserScrollGestureHold);
+
+public:
+    explicit UserScrollGestureHold(LocalNavigable&);
+    ~UserScrollGestureHold();
+
+private:
+    GC::Weak<LocalNavigable> m_navigable;
 };
 
 struct PopulateSessionHistoryEntryDocumentOutput final : public JS::Cell {
@@ -404,7 +490,7 @@ public:
     bool download_handled = false;
 
     Optional<URL::URL> redirected_url;
-    Optional<SerializationRecord> classic_history_api_state;
+    Optional<StorageSerializationRecord> classic_history_api_state;
     RefPtr<DocumentState> replacement_document_state;
     bool resource_cleared = false;
 
@@ -419,7 +505,7 @@ WEB_API HashTable<GC::RawRef<LocalNavigable>>& all_local_navigables();
 Vector<NonnullRefPtr<SessionHistoryEntry>>* append_nested_history_for_child_navigable(
     LocalNavigable& parent_navigable, LocalNavigable& child_navigable, SessionHistoryEntry& history_entry);
 bool navigation_must_be_a_replace(URL::URL const& url, DOM::Document const& document);
-void finalize_a_cross_document_navigation(GC::Ref<LocalNavigable>, HistoryHandlingBehavior, UserNavigationInvolvement, NonnullRefPtr<SessionHistoryEntry>, GC::Ptr<DOM::Document> pending_document, Optional<String> expected_ongoing_navigation_id, GC::Ref<OnApplyHistoryStepComplete> on_complete);
-void perform_url_and_history_update_steps(DOM::Document& document, URL::URL new_url, Optional<SerializationRecord> = {}, HistoryHandlingBehavior history_handling = HistoryHandlingBehavior::Replace);
+void finalize_a_cross_document_navigation(GC::Ref<LocalNavigable>, HistoryHandlingBehavior, UserNavigationInvolvement, NonnullRefPtr<SessionHistoryEntry>, GC::Ptr<DOM::Document> pending_document, Optional<Utf16String> expected_ongoing_navigation_id, GC::Ref<OnApplyHistoryStepComplete> on_complete);
+void perform_url_and_history_update_steps(DOM::Document& document, URL::URL new_url, Optional<StorageSerializationRecord> = {}, HistoryHandlingBehavior history_handling = HistoryHandlingBehavior::Replace);
 
 }

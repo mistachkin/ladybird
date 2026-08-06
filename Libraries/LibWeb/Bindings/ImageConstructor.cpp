@@ -30,7 +30,7 @@ void ImageConstructor::initialize(JS::Realm& realm)
 
     define_direct_property(vm.names.length, JS::Value(0), JS::Attribute::Configurable);
     define_direct_property(vm.names.name, JS::PrimitiveString::create(vm, "Image"_utf16_fly_string), JS::Attribute::Configurable);
-    define_direct_property(vm.names.prototype, &ensure_web_prototype<Bindings::HTMLImageElementPrototype>(realm, "HTMLImageElement"_fly_string), 0);
+    define_direct_property(vm.names.prototype, &ensure_web_prototype<Bindings::HTMLImageElementPrototype>(realm, "HTMLImageElement"_utf16_fly_string), 0);
 }
 
 JS::ThrowCompletionOr<JS::Value> ImageConstructor::call()
@@ -52,18 +52,18 @@ JS::ThrowCompletionOr<GC::Ref<JS::Object>> ImageConstructor::construct(FunctionO
     auto image_element = TRY(Bindings::throw_dom_exception_if_needed(vm, [&]() { return DOM::create_element(document, HTML::TagNames::img, Namespace::HTML); }));
 
     // https://webidl.spec.whatwg.org/#internally-create-a-new-object-implementing-the-interface
-    TRY(WebIDL::set_prototype_from_new_target<HTMLImageElementPrototype>(vm, new_target, "HTMLImageElement"_fly_string, *image_element));
+    TRY(WebIDL::set_prototype_from_new_target<HTMLImageElementPrototype>(vm, new_target, "HTMLImageElement"_utf16_fly_string, *image_element));
 
     // 3. If width is given, then set an attribute value for img using "width" and width.
     if (vm.argument_count() > 0) {
         u32 width = TRY(vm.argument(0).to_u32(vm));
-        image_element->set_attribute_value(HTML::AttributeNames::width, MUST(String::formatted("{}", width)));
+        image_element->set_attribute_value(HTML::AttributeNames::width, Utf16String::formatted("{}", width));
     }
 
     // 4. If height is given, then set an attribute value for img using "height" and height.
     if (vm.argument_count() > 1) {
         u32 height = TRY(vm.argument(1).to_u32(vm));
-        image_element->set_attribute_value(HTML::AttributeNames::height, MUST(String::formatted("{}", height)));
+        image_element->set_attribute_value(HTML::AttributeNames::height, Utf16String::formatted("{}", height));
     }
 
     // 5. Return img.

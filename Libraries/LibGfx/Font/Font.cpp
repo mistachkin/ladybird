@@ -15,12 +15,23 @@
 #include <LibGfx/Font/TypefaceSkia.h>
 #include <LibGfx/TextLayout.h>
 
+#if defined(USE_FONTCONFIG)
+#    include <LibGfx/Font/GlobalFontConfig.h>
+#endif
+
 #include <core/SkFont.h>
 #include <core/SkFontMetrics.h>
 #include <core/SkFontTypes.h>
 
 #include <harfbuzz/hb-ot.h>
 #include <harfbuzz/hb.h>
+
+extern "C" {
+float ladybird_gfx_font_glyph_width(void const*, u32);
+u32 ladybird_gfx_font_glyph_id(void const*, u32);
+bool ladybird_gfx_font_contains_glyph(void const*, u32);
+bool ladybird_gfx_font_is_emoji_font(void const*);
+}
 
 namespace Gfx {
 
@@ -130,11 +141,57 @@ hb_font_t* Font::harfbuzz_font() const
     return m_harfbuzz_font;
 }
 
+#if defined(USE_FONTCONFIG)
+static Optional<FontHintingStyle> s_hinting_override_for_testing;
+
+static SkFontHinting to_skia_hinting(FontHintingStyle style)
+{
+    switch (style) {
+    case FontHintingStyle::None:
+        return SkFontHinting::kNone;
+    case FontHintingStyle::Slight:
+        return SkFontHinting::kSlight;
+    case FontHintingStyle::Normal:
+        return SkFontHinting::kNormal;
+    case FontHintingStyle::Full:
+        return SkFontHinting::kFull;
+    }
+    VERIFY_NOT_REACHED();
+}
+#endif
+
+void force_hinting_for_testing([[maybe_unused]] Optional<FontHintingStyle> style)
+{
+#if defined(USE_FONTCONFIG)
+    s_hinting_override_for_testing = style;
+#endif
+}
+
+#if defined(USE_FONTCONFIG)
+FontHintingOptions Font::hinting_options(float scale) const
+{
+    if (!m_hinting_options.has_value() || m_hinting_options->scale != scale)
+        m_hinting_options = ScaledFontHintingOptions { scale, GlobalFontConfig::the().hinting_for_font(family(), pixel_size() * scale, weight(), slope()) };
+    return m_hinting_options->options;
+}
+#endif
+
 SkFont Font::skia_font(float scale) const
 {
     auto const& sk_typeface = as<TypefaceSkia>(*m_typeface).sk_typeface();
     auto sk_font = SkFont { sk_ref_sp(sk_typeface), pixel_size() * scale };
     sk_font.setSubpixel(true);
+
+#if defined(USE_FONTCONFIG)
+    if (s_hinting_override_for_testing.has_value()) {
+        sk_font.setHinting(to_skia_hinting(*s_hinting_override_for_testing));
+    } else {
+        auto options = hinting_options(scale);
+        sk_font.setHinting(to_skia_hinting(options.style));
+        sk_font.setForceAutoHinting(options.force_autohinting);
+    }
+#endif
+
     return sk_font;
 }
 
@@ -192,4 +249,28 @@ bool Font::is_emoji_font() const
     return m_is_emoji_font == TriState::True;
 }
 
+}
+
+extern "C" float ladybird_gfx_font_glyph_width(void const* font, u32 code_point)
+{
+    VERIFY(font);
+    return static_cast<Gfx::Font const*>(font)->glyph_width(code_point);
+}
+
+extern "C" u32 ladybird_gfx_font_glyph_id(void const* font, u32 code_point)
+{
+    VERIFY(font);
+    return static_cast<Gfx::Font const*>(font)->glyph_id_for_code_point(code_point);
+}
+
+extern "C" bool ladybird_gfx_font_contains_glyph(void const* font, u32 code_point)
+{
+    VERIFY(font);
+    return static_cast<Gfx::Font const*>(font)->contains_glyph(code_point);
+}
+
+extern "C" bool ladybird_gfx_font_is_emoji_font(void const* font)
+{
+    VERIFY(font);
+    return static_cast<Gfx::Font const*>(font)->is_emoji_font();
 }

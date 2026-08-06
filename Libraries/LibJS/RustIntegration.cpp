@@ -22,6 +22,7 @@
 #include <LibJS/Bytecode/RegexTable.h>
 #include <LibJS/Bytecode/StringTable.h>
 #include <LibJS/Bytecode/Validator.h>
+#include <LibJS/Debugger.h>
 #include <LibJS/Runtime/BigInt.h>
 #include <LibJS/Runtime/Intrinsics.h>
 #include <LibJS/Runtime/NativeJavaScriptBackedFunction.h>
@@ -32,6 +33,8 @@
 #include <LibJS/RustFFI.h>
 #include <LibJS/Script.h>
 #include <LibJS/SourceCode.h>
+
+extern "C" JS::FFI::FFIInterpreterHandlerRange const js_interpreter_handler_ranges[256];
 
 extern bool JS::g_dump_ast;
 extern bool JS::g_dump_ast_use_color;
@@ -226,6 +229,8 @@ void dump_bytecode(StringBuilder& output, Bytecode::Executable const& executable
         .argument_index_base = executable.argument_index_base,
         .constants = reinterpret_cast<uint64_t const*>(executable.constants.data()),
         .constant_count = executable.constants.size(),
+        .interpreter_handler_ranges = js_interpreter_handler_ranges,
+        .dump_interpreter = Bytecode::should_dump_interpreter_assembly(),
     };
 
     FFI::rust_dump_bytecode(
@@ -1458,6 +1463,9 @@ extern "C" void* rust_create_executable(
         }
     }
 
+    if (auto* debugger = vm.debugger())
+        debugger->register_executable(*executable);
+
     return executable.ptr();
 }
 
@@ -1589,7 +1597,7 @@ extern "C" void rust_sfd_set_precompiled_executable(
     shared.m_contains_direct_call_to_eval = contains_direct_call_to_eval;
     shared.set_executable(executable);
     executable.name = shared.m_name;
-    if (Bytecode::g_dump_bytecode)
+    if (Bytecode::should_dump_bytecode())
         executable.dump();
     shared.clear_compile_inputs();
 }
@@ -1724,7 +1732,7 @@ extern "C" void rust_sfd_install_bytecode_cache_executable(
     shared.m_contains_direct_call_to_eval = contains_direct_call_to_eval;
     shared.set_executable(executable);
     executable.name = shared.m_name;
-    if (Bytecode::g_dump_bytecode)
+    if (Bytecode::should_dump_bytecode())
         executable.dump();
     shared.clear_compile_inputs();
 }

@@ -89,7 +89,11 @@ void ReadLoopReadRequest::on_chunk(JS::Value chunk)
     auto const& array = static_cast<JS::Uint8Array const&>(chunk.as_object());
 
     // 2. Append the bytes represented by chunk to bytes.
-    m_bytes.append(array.data());
+    auto record = JS::make_typed_array_with_buffer_witness_record(array, JS::ArrayBuffer::Order::SeqCst);
+    if (!JS::is_typed_array_out_of_bounds(record)) {
+        auto bytes = MUST(array.viewed_array_buffer()->copy_to_byte_buffer(array.byte_offset(), JS::typed_array_byte_length(record)));
+        m_bytes.append(bytes);
+    }
 
     // FIXME: As the spec suggests, implement this non-recursively - instead of directly. It is not too big of a deal currently
     //        as we enqueue the entire blob buffer in one go, meaning that we only recurse a single time. Once we begin queuing
@@ -160,7 +164,7 @@ GC::Ref<WebIDL::Promise> ReadableStreamDefaultReader::read()
 
     // 1. If this.[[stream]] is undefined, return a promise rejected with a TypeError exception.
     if (!m_stream) {
-        WebIDL::SimpleException exception { WebIDL::SimpleExceptionType::TypeError, "Cannot read from an empty stream"sv };
+        WebIDL::SimpleException exception { WebIDL::SimpleExceptionType::TypeError, "Cannot read from an empty stream"_utf16 };
         return WebIDL::create_rejected_promise_from_exception(realm, move(exception));
     }
 

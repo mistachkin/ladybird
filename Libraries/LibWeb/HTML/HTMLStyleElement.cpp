@@ -57,37 +57,10 @@ void HTMLStyleElement::removed_from(IsSubtreeRoot is_subtree_root, Node* old_anc
     update_a_style_block_for_dynamic_change();
 }
 
-void HTMLStyleElement::attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
+void HTMLStyleElement::attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_)
 {
     Base::attribute_changed(name, old_value, value, namespace_);
     style_element_attribute_changed(name, value);
-}
-
-// https://html.spec.whatwg.org/multipage/semantics.html#dom-style-disabled
-bool HTMLStyleElement::disabled()
-{
-    // 1. If this does not have an associated CSS style sheet, return false.
-    if (!sheet())
-        return false;
-
-    // 2. If this's associated CSS style sheet's disabled flag is set, return true.
-    if (sheet()->disabled())
-        return true;
-
-    // 3. Return false.
-    return false;
-}
-
-// https://html.spec.whatwg.org/multipage/semantics.html#dom-style-disabled
-void HTMLStyleElement::set_disabled(bool disabled)
-{
-    // 1. If this does not have an associated CSS style sheet, return.
-    if (!sheet())
-        return;
-
-    // 2. If the given value is true, set this's associated CSS style sheet's disabled flag.
-    //    Otherwise, unset this's associated CSS style sheet's disabled flag.
-    sheet()->set_disabled(disabled);
 }
 
 // https://html.spec.whatwg.org/multipage/semantics.html#contributes-a-script-blocking-style-sheet

@@ -59,7 +59,7 @@ bool HTMLFieldSetElement::is_disabled() const
     return false;
 }
 
-void HTMLFieldSetElement::attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
+void HTMLFieldSetElement::attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_)
 {
     Base::attribute_changed(name, old_value, value, namespace_);
 
@@ -92,7 +92,7 @@ Layout::FieldSetBox* HTMLFieldSetElement::layout_node()
     return static_cast<Layout::FieldSetBox*>(Node::layout_node());
 }
 
-RefPtr<Layout::Node> HTMLFieldSetElement::create_layout_node(CSS::ComputedProperties const& style)
+RefPtr<Layout::Node> HTMLFieldSetElement::create_layout_node(NonnullRefPtr<CSS::ComputedValues const> style)
 {
     return make_ref_counted<Layout::FieldSetBox>(document(), *this, style);
 }

@@ -6,7 +6,7 @@
 
 #pragma once
 
-#include <LibWeb/SVG/SVGAnimatedLength.h>
+#include <LibWeb/CSS/StyleValues/NumberStyleValue.h>
 #include <LibWeb/SVG/SVGGeometryElement.h>
 
 namespace Web::SVG {
@@ -18,14 +18,21 @@ class SVGLineElement final : public SVGGeometryElement {
 public:
     virtual ~SVGLineElement() override = default;
 
-    virtual void attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
+    virtual void attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_) override;
 
     virtual Gfx::Path get_path(CSSPixelSize viewport_size) override;
 
-    GC::Ref<SVGAnimatedLength> x1() const;
-    GC::Ref<SVGAnimatedLength> y1() const;
-    GC::Ref<SVGAnimatedLength> x2() const;
-    GC::Ref<SVGAnimatedLength> y2() const;
+    // https://w3c.github.io/svgwg/svg2-draft/shapes.html#__svg__SVGLineElement__x1
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(x1, Horizontal, CSS::NumberStyleValue::create(0));
+
+    // https://w3c.github.io/svgwg/svg2-draft/shapes.html#__svg__SVGLineElement__y1
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(y1, Vertical, CSS::NumberStyleValue::create(0));
+
+    // https://w3c.github.io/svgwg/svg2-draft/shapes.html#__svg__SVGLineElement__x2
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(x2, Horizontal, CSS::NumberStyleValue::create(0));
+
+    // https://w3c.github.io/svgwg/svg2-draft/shapes.html#__svg__SVGLineElement__y2
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(y2, Vertical, CSS::NumberStyleValue::create(0));
 
 private:
     SVGLineElement(DOM::Document&, DOM::QualifiedName);

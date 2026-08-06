@@ -37,15 +37,15 @@ void SVGFEDropShadowElement::visit_edges(Cell::Visitor& visitor)
 // https://www.w3.org/TR/filter-effects-1/#FloodColorProperty
 Gfx::Color SVGFEDropShadowElement::flood_color()
 {
-    VERIFY(computed_properties());
-    return computed_properties()->color(CSS::PropertyID::FloodColor, CSS::ColorResolutionContext::for_element({ *this }));
+    VERIFY(computed_values());
+    return computed_values()->flood_color();
 }
 
 // https://www.w3.org/TR/filter-effects-1/#FloodOpacityProperty
 float SVGFEDropShadowElement::flood_opacity() const
 {
-    VERIFY(computed_properties());
-    return computed_properties()->flood_opacity();
+    VERIFY(computed_values());
+    return computed_values()->flood_opacity();
 }
 
 // https://drafts.csswg.org/filter-effects-1/#dom-svgfedropshadowelement-in1
@@ -114,7 +114,7 @@ void SVGFEDropShadowElement::set_std_deviation(float std_deviation_x, float std_
     //
     // stdDeviationY
     //     The Y component of attribute stdDeviation.
-    set_attribute_value(AttributeNames::stdDeviation, MUST(String::formatted("{} {}", std_deviation_x, std_deviation_y)));
+    set_attribute_value(AttributeNames::stdDeviation, Utf16String::formatted("{} {}", std_deviation_x, std_deviation_y));
 }
 
 }

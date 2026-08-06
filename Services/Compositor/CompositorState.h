@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, the Ladybird developers.
+ * Copyright (c) 2026-present, the Ladybird developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -22,12 +22,15 @@
 #include <LibGfx/Size.h>
 #include <LibGfx/SkiaBackendContext.h>
 #include <LibMedia/Forward.h>
+#include <LibMedia/VideoFramePool.h>
+#include <LibMedia/VideoSinkHandle.h>
 #include <LibWeb/Compositor/Types.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/Painting/AccumulatedVisualContext.h>
 #include <LibWeb/Painting/CanvasSurfaceRegistry.h>
 #include <LibWeb/Painting/DisplayList.h>
 #include <LibWeb/Painting/DisplayListPlayerSkia.h>
+#include <LibWeb/Painting/DisplayListResourceStorage.h>
 #include <LibWeb/Painting/ScrollState.h>
 
 namespace Web {
@@ -43,8 +46,8 @@ class CompositorStateClient {
 public:
     virtual ~CompositorStateClient() = default;
 
-    virtual void did_allocate_backing_stores(Web::Compositor::CompositorContextId, i32 front_bitmap_id, Gfx::SharedImage&& front_backing_store, i32 back_bitmap_id, Gfx::SharedImage&& back_backing_store) = 0;
-    virtual void did_present_frame(Web::Compositor::CompositorContextId, Gfx::IntRect content_rect, i32 bitmap_id) = 0;
+    virtual void did_allocate_backing_stores(Web::Compositor::CompositorContextId, Vector<i32> bitmap_ids, Vector<Gfx::SharedImage>&& backing_stores) = 0;
+    virtual void did_present_frame(Web::Compositor::CompositorContextId, Gfx::IntRect content_rect, Gfx::IntRect damage_rect, i32 bitmap_id) = 0;
 };
 
 class CompositorStateWebContentClient {
@@ -53,6 +56,9 @@ public:
 
     virtual void dispatch_mouse_event_to_web_content(u64 page_id, Web::MouseEvent const&) = 0;
     virtual void request_rendering_update() = 0;
+    virtual void create_video_edge(Media::VideoSinkHandle) = 0;
+    virtual void release_video_edge(Media::VideoSinkHandle) = 0;
+    virtual void set_video_sink_ticking(Media::VideoSinkHandle, bool ticking) = 0;
 };
 
 class CompositorState final : public RefCounted<CompositorState> {
@@ -80,37 +86,44 @@ public:
     void set_parent_context(Web::Compositor::CompositorContextId, Optional<Web::Compositor::CompositorContextId> parent_context_id);
     void stop_presenting_to_client(Web::Compositor::CompositorContextId);
     void update_display_list(Web::Compositor::CompositorContextId, NonnullRefPtr<Web::Painting::DisplayList>, Web::Painting::AccumulatedVisualContextTree, Web::Painting::DisplayListResourceTransaction&&, Web::Painting::ScrollStateSnapshot&&);
+    void update_image_frame_resources(Web::Compositor::CompositorContextId, Vector<Web::Painting::DisplayListImageFrameResource>);
     void update_visual_context_tree(Web::Compositor::CompositorContextId, Web::Painting::AccumulatedVisualContextTree);
     void update_scroll_state(Web::Compositor::CompositorContextId, Web::Painting::ScrollStateSnapshot&&);
-    void update_video_frame(Web::Compositor::CompositorContextId, Web::Painting::VideoFrameResourceId, NonnullRefPtr<Media::VideoFrame const>);
-    void clear_video_frame(Web::Compositor::CompositorContextId, Web::Painting::VideoFrameResourceId);
+    void add_video_sink(CompositorStateWebContentClient&, Media::VideoSinkHandle);
+    void remove_video_sink(CompositorStateWebContentClient&, Media::VideoSinkHandle);
+    void set_video_update_flags(CompositorStateWebContentClient&, Media::VideoSinkHandle, Web::Compositor::VideoUpdateFlags);
+    void on_video_sink_ready(CompositorStateWebContentClient&, Media::VideoSinkHandle, NonnullRefPtr<Media::DisplayingVideoSink> const&);
     void invalidate_wheel_event_listener_state(Web::Compositor::CompositorContextId, u64 generation);
     bool handle_mouse_event(Web::Compositor::CompositorContextId, Web::MouseEvent const&);
     bool dispatch_mouse_event_to_web_content(Web::Compositor::CompositorContextId, Web::MouseEvent const&);
     bool handle_pinch_event(Web::Compositor::CompositorContextId, Web::PinchEvent const&);
     Web::Compositor::AsyncScrollEnqueueResult async_scroll_by(Web::Compositor::CompositorContextId, Web::UniqueNodeID document_id, Gfx::FloatPoint position, Gfx::FloatPoint delta, Gfx::IntRect viewport_rect, Web::Compositor::AsyncScrollOperationTracking);
+    Web::Compositor::AsyncScrollEnqueueResult smooth_scroll_to(Web::Compositor::CompositorContextId, Web::Compositor::AsyncScrollNodeStableID, Gfx::FloatPoint offset, Gfx::IntRect viewport_rect, double device_pixels_per_css_pixel);
+    void cancel_smooth_scroll(Web::Compositor::CompositorContextId, Web::Compositor::AsyncScrollNodeStableID);
     bool async_scroll_by(Web::Compositor::CompositorContextId, Gfx::FloatPoint position, Gfx::FloatPoint delta);
-    bool should_defer_main_thread_present_for_async_scroll(Web::Compositor::CompositorContextId) const;
     Web::Compositor::PendingAsyncScrollUpdates take_pending_async_scroll_updates(Web::Compositor::CompositorContextId);
     void viewport_size_updated(Web::Compositor::CompositorContextId, Gfx::IntSize, Web::Compositor::WindowResizingInProgress);
     void set_display_metadata(Web::Compositor::CompositorContextId, Optional<u64> display_id, double refresh_rate);
-    void present_frame(Web::Compositor::CompositorContextId, Gfx::IntRect);
+    void present_frame(Web::Compositor::CompositorContextId, Gfx::IntRect viewport_rect, Gfx::IntRect damage_rect);
     bool request_screenshot(Web::Compositor::CompositorContextId, Gfx::ShareableBitmap&);
     void presented_bitmap_ready_to_paint(Web::Compositor::CompositorContextId, i32 bitmap_id);
+    void set_client_gpu_presentation_capability(bool supported, u64 adapter_luid);
 
 private:
     CompositorState(RefPtr<Gfx::SkiaBackendContext>, bool async_scrolling_enabled);
 
     struct PendingAsyncPresent {
-        PendingAsyncPresent(Web::Compositor::CompositorContextId context_id, Gfx::IntRect viewport_rect, i32 bitmap_id)
+        PendingAsyncPresent(Web::Compositor::CompositorContextId context_id, Gfx::IntRect viewport_rect, Gfx::IntRect damage_rect, i32 bitmap_id)
             : context_id(context_id)
             , viewport_rect(viewport_rect)
+            , damage_rect(damage_rect)
             , bitmap_id(bitmap_id)
         {
         }
 
         Web::Compositor::CompositorContextId context_id;
         Gfx::IntRect viewport_rect;
+        Gfx::IntRect damage_rect;
         i32 bitmap_id { 0 };
         bool was_cancelled { false };
     };
@@ -124,12 +137,25 @@ private:
     void shrink_backing_stores_after_resize(Web::Compositor::CompositorContextId);
     void resize_backing_stores_if_needed(Web::Compositor::CompositorContextId, ContextState&);
     void present_current_frame(Web::Compositor::CompositorContextId, ContextState&);
+    void resolve_video_sinks(ContextState&);
+    enum class VideoSinkUpdateResult : u8 {
+        NoUnpaintedSinkRequiresUpdates,
+        UnpaintedSinkRequiresUpdates,
+    };
+    VideoSinkUpdateResult update_all_video_sinks();
+    void update_video_sinks_for_display(Optional<u64> display_id);
+    void update_unpainted_video_sinks();
+    void schedule_unpainted_video_updates();
+    int unpainted_video_update_interval_ms() const;
+    HashMap<CompositorStateWebContentClient*, HashTable<Media::VideoSinkHandle>> const& painted_video_sink_handles_by_client() const;
+    void present_contexts_drawing_video_sink(CompositorStateWebContentClient&, Media::VideoSinkHandle);
     bool apply_context_update_result(
         Web::Compositor::CompositorContextId,
         ContextState&,
         ContextState::ContextUpdateResult const&);
-    void present_frame(Web::Compositor::CompositorContextId, ContextState&, Gfx::IntRect);
-    void schedule_present_frame(Web::Compositor::CompositorContextId, ContextState&, Gfx::IntRect);
+    void present_frame(Web::Compositor::CompositorContextId, ContextState&, ContextState::PendingFrame);
+    void schedule_present_frame(Web::Compositor::CompositorContextId, ContextState&, ContextState::PendingFrame);
+    void schedule_present_frame(Web::Compositor::CompositorContextId, ContextState&, Gfx::IntRect viewport_rect);
     void schedule_pending_present_frame(Web::Compositor::CompositorContextId, ContextState&);
     void schedule_pending_present_frame_on_vsync(Web::Compositor::CompositorContextId, ContextState&);
     void schedule_containing_context_present(ContextState&);
@@ -137,12 +163,14 @@ private:
     VSyncScheduler& vsync_scheduler_for_display(Optional<u64> display_id);
     void present_pending_frames_on_vsync(Optional<u64> display_id);
     void publish_backing_stores(Web::Compositor::CompositorContextId, ContextState&, BackingStoreManager::Publication&&);
+    BackingStoreManager::GpuSharing gpu_sharing_for_client() const;
     void did_finish_async_present(PendingAsyncPresent&);
     void cancel_pending_async_presents_for_context(Web::Compositor::CompositorContextId);
     void schedule_gpu_completion_check();
     void check_gpu_completions();
 
     HashMap<Web::Compositor::CompositorContextId, OwnPtr<ContextState>> m_contexts;
+
     DoublyLinkedList<PendingAsyncPresent> m_pending_async_presents;
     RefPtr<Gfx::SkiaBackendContext> m_skia_backend_context;
     Web::Painting::CanvasSurfaceRegistry m_canvas_surface_registry;
@@ -151,6 +179,24 @@ private:
     RefPtr<Core::Timer> m_gpu_completion_timer;
     CompositorStateClient* m_client { nullptr };
     bool m_async_scrolling_enabled { true };
+
+    // LUID of the GPU adapter the client can present shared GPU textures on, if any.
+    Optional<u64> m_client_gpu_presentation_adapter_luid;
+
+    struct VideoSinkState {
+        RefPtr<Media::DisplayingVideoSink> sink;
+        Web::Compositor::VideoUpdateFlags update_flags { Web::Compositor::VideoUpdateFlags::None };
+        // Initialized to match PlaybackManager's assumption for a fresh sink, so the first
+        // notification is only sent once this diverges from it.
+        bool ticking { true };
+        bool requires_updates { false };
+    };
+    VideoSinkState* video_sink_state(CompositorStateWebContentClient&, Media::VideoSinkHandle);
+    static bool video_sink_updates_are_admitted(VideoSinkState const&, bool painted);
+    void update_video_sink_ticking_states();
+    HashMap<CompositorStateWebContentClient*, HashMap<Media::VideoSinkHandle, VideoSinkState>> m_video_sink_states;
+    RefPtr<Core::Timer> m_unpainted_video_update_timer;
+    mutable HashMap<CompositorStateWebContentClient*, HashTable<Media::VideoSinkHandle>> m_painted_video_sink_handles_by_client;
 };
 
 }

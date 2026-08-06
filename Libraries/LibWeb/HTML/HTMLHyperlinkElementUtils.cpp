@@ -9,6 +9,7 @@
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/HTML/AttributeNames.h>
 #include <LibWeb/HTML/HTMLHyperlinkElementUtils.h>
+#include <LibWeb/Infra/SerializedURL.h>
 
 namespace Web::HTML {
 
@@ -42,7 +43,7 @@ void HTMLHyperlinkElementUtils::set_the_url()
 }
 
 // https://html.spec.whatwg.org/multipage/links.html#dom-hyperlink-href
-String HTMLHyperlinkElementUtils::href() const
+Utf16String HTMLHyperlinkElementUtils::href() const
 {
     // 1. Reinitialize url.
     reinitialize_url();
@@ -53,21 +54,21 @@ String HTMLHyperlinkElementUtils::href() const
     // 3. If url is null and this element has no href content attribute, return the empty string.
     auto href_content_attribute = hyperlink_element_utils_element().attribute(HTML::AttributeNames::href);
     if (!url.has_value() && !href_content_attribute.has_value())
-        return String {};
+        return {};
 
     // 4. Otherwise, if url is null, return this element's href content attribute's value.
     if (!url.has_value())
         return href_content_attribute.release_value();
 
     // 5. Return url, serialized.
-    return url->serialize();
+    return utf16_string_from_url_ascii(url->serialize());
 }
 
 // https://html.spec.whatwg.org/multipage/links.html#dom-hyperlink-href
-void HTMLHyperlinkElementUtils::set_href(String href)
+void HTMLHyperlinkElementUtils::set_href(Utf16View href)
 {
     // The href attribute's setter must set this element's href content attribute's value to the given value.
-    hyperlink_element_utils_element().set_attribute_value(HTML::AttributeNames::href, move(href));
+    hyperlink_element_utils_element().set_attribute_value(HTML::AttributeNames::href, href);
 }
 
 // https://html.spec.whatwg.org/multipage/links.html#update-href
@@ -75,19 +76,19 @@ void HTMLHyperlinkElementUtils::update_href()
 {
     // To update href for an HTMLAnchorElement or HTMLAreaElement element, set the element's href content attribute's
     // value to the element's url, serialized.
-    hyperlink_element_utils_element().set_attribute_value(HTML::AttributeNames::href, m_url->serialize());
+    hyperlink_element_utils_element().set_attribute_value(HTML::AttributeNames::href, utf16_string_from_url_ascii(m_url->serialize()));
 }
 
 // https://html.spec.whatwg.org/multipage/links.html#dom-a-target
-String HTMLHyperlinkElementUtils::target() const
+Utf16String HTMLHyperlinkElementUtils::target() const
 {
     return hyperlink_element_utils_element().get_attribute_value(HTML::AttributeNames::target);
 }
 
 // https://html.spec.whatwg.org/multipage/links.html#dom-a-target
-void HTMLHyperlinkElementUtils::set_target(String value)
+void HTMLHyperlinkElementUtils::set_target(Utf16String value)
 {
-    hyperlink_element_utils_element().set_attribute_value(HTML::AttributeNames::target, value);
+    hyperlink_element_utils_element().set_attribute_value(HTML::AttributeNames::target, move(value));
 }
 
 }

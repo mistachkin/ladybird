@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Utf16StringBuilder.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/PropertyID.h>
 #include <LibWeb/HTML/Parser/HTMLParser.h>
@@ -19,7 +20,7 @@ MathMLMspaceElement::MathMLMspaceElement(DOM::Document& document, DOM::Qualified
 {
 }
 
-bool MathMLMspaceElement::is_presentational_hint(FlyString const& name) const
+bool MathMLMspaceElement::is_presentational_hint(Utf16FlyString const& name) const
 {
     if (Base::is_presentational_hint(name))
         return true;
@@ -32,7 +33,7 @@ void MathMLMspaceElement::apply_presentational_hints(Vector<CSS::StyleProperty>&
     // https://w3c.github.io/mathml-core/#attribute-mspace-width
     // The width, height, depth, if present, must have a value that is a valid <length-percentage>.
     CSS::Parser::ParsingParams parsing_params { document() };
-    auto parse_non_percentage_value = [&](FlyString const& attribute_name) -> RefPtr<CSS::StyleValue const> {
+    auto parse_non_percentage_value = [&](Utf16FlyString const& attribute_name) -> RefPtr<CSS::StyleValue const> {
         if (auto attribute = this->attribute(attribute_name); attribute.has_value()) {
             if (auto value = parse_css_type(parsing_params, attribute.value(), CSS::ValueType::Length))
                 return value;
@@ -60,7 +61,13 @@ void MathMLMspaceElement::apply_presentational_hints(Vector<CSS::StyleProperty>&
     auto depth_value = parse_non_percentage_value(AttributeNames::depth);
 
     if (height_value && depth_value) {
-        auto height_string = MUST(String::formatted("calc({} + {})", attribute(AttributeNames::height).value(), attribute(AttributeNames::depth).value()));
+        Utf16StringBuilder builder;
+        builder.append("calc("sv);
+        builder.append(attribute(AttributeNames::height).value());
+        builder.append(" + "sv);
+        builder.append(attribute(AttributeNames::depth).value());
+        builder.append(")"sv);
+        auto height_string = builder.to_string();
         if (auto height_value = parse_css_type(parsing_params, height_string, CSS::ValueType::Length))
             properties.append({ .property_id = CSS::PropertyID::Height, .value = height_value.release_nonnull() });
     } else if (height_value) {

@@ -10,6 +10,7 @@
 #include <LibWeb/CSS/CSSStyleSheet.h>
 #include <LibWeb/CSS/StyleSheet.h>
 #include <LibWeb/DOM/Element.h>
+#include <LibWeb/Infra/SerializedURL.h>
 
 namespace Web::CSS {
 
@@ -31,8 +32,7 @@ void StyleSheet::visit_edges(Cell::Visitor& visitor)
 size_t StyleSheet::external_memory_size() const
 {
     auto size = Base::external_memory_size();
-    size = JS::saturating_add_external_memory_size(size, JS::string_external_memory_size(m_title));
-    size = JS::saturating_add_external_memory_size(size, JS::string_external_memory_size(m_type_string));
+    size = JS::saturating_add_external_memory_size(size, JS::utf16_string_external_memory_size(m_title));
     return size;
 }
 
@@ -40,6 +40,13 @@ Optional<String> StyleSheet::href() const
 {
     if (m_location.has_value())
         return m_location->to_string();
+    return {};
+}
+
+Optional<Utf16String> StyleSheet::href_for_bindings() const
+{
+    if (auto href = this->href(); href.has_value())
+        return utf16_string_from_url_ascii(*href);
     return {};
 }
 
@@ -54,7 +61,7 @@ void StyleSheet::set_parent_css_style_sheet(CSSStyleSheet* parent)
 }
 
 // https://drafts.csswg.org/cssom/#dom-stylesheet-title
-Optional<String> StyleSheet::title_for_bindings() const
+Optional<Utf16String> StyleSheet::title_for_bindings() const
 {
     // The title attribute must return the title or null if title is the empty string.
     if (m_title.is_empty())

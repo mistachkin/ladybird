@@ -8,30 +8,21 @@
 
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Element.h>
-#include <LibWeb/Layout/InlineFormattingContext.h>
 #include <LibWeb/Layout/InlineNode.h>
-#include <LibWeb/Painting/PaintableWithLines.h>
+#include <LibWeb/Painting/InlinePaintable.h>
 
 namespace Web::Layout {
 
-InlineNode::InlineNode(DOM::Document& document, DOM::Element* element, CSS::ComputedProperties const& style)
+InlineNode::InlineNode(DOM::Document& document, DOM::Element* element, NonnullRefPtr<CSS::ComputedValues const> style)
     : Layout::NodeWithStyleAndBoxModelMetrics(document, element, style)
 {
 }
 
 InlineNode::~InlineNode() = default;
 
-NonnullRefPtr<Painting::PaintableWithLines> InlineNode::create_paintable_for_line_with_index(size_t line_index) const
+RefPtr<Painting::Paintable> InlineNode::create_paintable() const
 {
-    for (auto const& paintable : paintables()) {
-        if (is<Painting::PaintableWithLines>(*paintable)) {
-            auto const& paintable_with_lines = static_cast<Painting::PaintableWithLines const&>(*paintable);
-            if (paintable_with_lines.line_index() == line_index) {
-                return const_cast<Painting::PaintableWithLines&>(paintable_with_lines);
-            }
-        }
-    }
-    return Painting::PaintableWithLines::create(*this, line_index);
+    return Painting::InlinePaintable::create(*this);
 }
 
 }

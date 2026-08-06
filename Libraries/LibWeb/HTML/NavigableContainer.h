@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <AK/Utf16String.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/HTML/HTMLElement.h>
 #include <LibWeb/HTML/InitialInsertion.h>
@@ -24,8 +25,8 @@ public:
 
     static HashTable<NavigableContainer*>& all_instances();
 
-    GC::Ptr<LocalNavigable> content_navigable() { return m_content_navigable; }
-    GC::Ptr<LocalNavigable const> content_navigable() const { return m_content_navigable.ptr(); }
+    GC::Ptr<Navigable> content_navigable() { return m_content_navigable; }
+    GC::Ptr<Navigable const> content_navigable() const { return m_content_navigable; }
 
     DOM::Document const* content_document() const;
     DOM::Document const* content_document_without_origin_check() const;
@@ -52,12 +53,12 @@ protected:
     Optional<URL::URL> shared_attribute_processing_steps_for_iframe_and_frame(InitialInsertion initial_insertion);
 
     // https://html.spec.whatwg.org/multipage/iframe-embed-object.html#navigate-an-iframe-or-frame
-    void navigate_an_iframe_or_frame(URL::URL url, ReferrerPolicy::ReferrerPolicy referrer_policy, Optional<String> srcdoc_string = {}, InitialInsertion = InitialInsertion::No);
+    void navigate_an_iframe_or_frame(URL::URL url, ReferrerPolicy::ReferrerPolicy referrer_policy, Optional<Utf16String> srcdoc_string = {}, InitialInsertion = InitialInsertion::No);
 
     void create_new_child_navigable();
 
     // https://html.spec.whatwg.org/multipage/document-sequences.html#content-navigable
-    GC::Ptr<LocalNavigable> m_content_navigable { nullptr };
+    GC::Ptr<Navigable> m_content_navigable { nullptr };
 
     void set_potentially_delays_the_load_event(bool value);
 

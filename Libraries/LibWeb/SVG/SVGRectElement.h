@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <LibWeb/CSS/StyleValues/NumberStyleValue.h>
 #include <LibWeb/SVG/SVGGeometryElement.h>
 
 namespace Web::SVG {
@@ -18,16 +19,31 @@ class SVGRectElement final : public SVGGeometryElement {
 public:
     virtual ~SVGRectElement() override = default;
 
-    virtual void attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
+    virtual void attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_) override;
 
     virtual Gfx::Path get_path(CSSPixelSize viewport_size) override;
 
-    GC::Ref<SVGAnimatedLength> x() const;
-    GC::Ref<SVGAnimatedLength> y() const;
-    GC::Ref<SVGAnimatedLength> width() const;
-    GC::Ref<SVGAnimatedLength> height() const;
-    GC::Ref<SVGAnimatedLength> rx() const;
-    GC::Ref<SVGAnimatedLength> ry() const;
+    // AD-HOC: The spec states that the x, y, width, height, rx and ry IDL attributes reflect the respective computed values
+    //         and their corresponding presentation attributes but other browsers reflect the attribute values instead - see
+    //         https://github.com/w3c/svgwg/issues/1153
+
+    // https://w3c.github.io/svgwg/svg2-draft/shapes.html#__svg__SVGRectElement__x
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(x, Horizontal, CSS::NumberStyleValue::create(0));
+
+    // https://w3c.github.io/svgwg/svg2-draft/shapes.html#__svg__SVGRectElement__y
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(y, Vertical, CSS::NumberStyleValue::create(0));
+
+    // https://w3c.github.io/svgwg/svg2-draft/shapes.html#__svg__SVGRectElement__width
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(width, Horizontal, CSS::NumberStyleValue::create(0));
+
+    // https://w3c.github.io/svgwg/svg2-draft/shapes.html#__svg__SVGRectElement__height
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(height, Vertical, CSS::NumberStyleValue::create(0));
+
+    // https://w3c.github.io/svgwg/svg2-draft/shapes.html#__svg__SVGRectElement__rx
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(rx, Horizontal, CSS::NumberStyleValue::create(0));
+
+    // https://w3c.github.io/svgwg/svg2-draft/shapes.html#__svg__SVGRectElement__ry
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(ry, Vertical, CSS::NumberStyleValue::create(0));
 
 private:
     SVGRectElement(DOM::Document&, DOM::QualifiedName);

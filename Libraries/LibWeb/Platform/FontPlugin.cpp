@@ -37,6 +37,9 @@ void FontPlugin::install(FontPlugin& plugin)
 FontPlugin::FontPlugin(bool is_layout_test_mode, Gfx::SystemFontProvider* font_provider)
     : m_is_layout_test_mode(is_layout_test_mode)
 {
+    if (is_layout_test_mode)
+        Gfx::force_hinting_for_testing(Gfx::FontHintingStyle::Normal);
+
     if (!font_provider)
         font_provider = &static_cast<Gfx::PathFontProvider&>(Gfx::FontDatabase::the().install_system_font_provider(make<Gfx::PathFontProvider>()));
     if (is<Gfx::PathFontProvider>(*font_provider)) {
@@ -72,6 +75,14 @@ Gfx::Font& FontPlugin::default_fixed_width_font()
 Vector<FlyString> FontPlugin::symbol_font_names()
 {
     return m_symbol_font_names;
+}
+
+void FontPlugin::set_system_font_family(FlyString system_font_family)
+{
+    if (m_system_font_family == system_font_family)
+        return;
+    m_system_font_family = move(system_font_family);
+    m_generic_font_cache.clear();
 }
 
 void FontPlugin::update_generic_fonts()
@@ -148,6 +159,15 @@ FlyString FontPlugin::compute_generic_font_name(GenericFont generic_font, int we
         break;
     default:
         VERIFY_NOT_REACHED();
+    }
+
+    if (generic_font == GenericFont::UiSansSerif && m_system_font_family.has_value()) {
+        auto system_font_family_is_available = false;
+        Gfx::FontDatabase::the().for_each_typeface_with_family_name(m_system_font_family.value(), [&](Gfx::Typeface const&) {
+            system_font_family_is_available = true;
+        });
+        if (system_font_family_is_available)
+            return m_system_font_family.value();
     }
 
     auto name = Gfx::TypefaceSkia::resolve_generic_family(generic_family_name, weight, slope);

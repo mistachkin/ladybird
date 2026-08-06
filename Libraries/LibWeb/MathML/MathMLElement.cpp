@@ -28,7 +28,7 @@ MathMLElement::MathMLElement(DOM::Document& document, DOM::QualifiedName qualifi
 {
 }
 
-void MathMLElement::attribute_changed(FlyString const& local_name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
+void MathMLElement::attribute_changed(Utf16FlyString const& local_name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_)
 {
     Base::attribute_changed(local_name, old_value, value, namespace_);
     HTMLOrSVGOrMathMLElement::attribute_changed(local_name, old_value, value, namespace_);
@@ -67,7 +67,7 @@ void MathMLElement::visit_edges(JS::Cell::Visitor& visitor)
     HTMLOrSVGOrMathMLElement::visit_edges(visitor);
 }
 
-bool MathMLElement::is_presentational_hint(FlyString const& name) const
+bool MathMLElement::is_presentational_hint(Utf16FlyString const& name) const
 {
     return first_is_one_of(name, AttributeNames::dir, AttributeNames::mathcolor, AttributeNames::mathbackground,
         AttributeNames::mathsize, AttributeNames::displaystyle, AttributeNames::scriptlevel);
@@ -76,7 +76,7 @@ bool MathMLElement::is_presentational_hint(FlyString const& name) const
 void MathMLElement::apply_presentational_hints(Vector<CSS::StyleProperty>& properties) const
 {
     Base::apply_presentational_hints(properties);
-    for_each_attribute([&](auto& name, auto& value) {
+    for_each_attribute([&](Utf16FlyString const& name, Utf16View value) {
         if (name == AttributeNames::dir) {
             // https://w3c.github.io/mathml-core/#attributes-common-to-html-and-mathml-elements
             // The dir attribute, if present, must be an ASCII case-insensitive match to ltr or rtl. In that case, the
@@ -123,12 +123,12 @@ void MathMLElement::apply_presentational_hints(Vector<CSS::StyleProperty>& prope
             // In that case the user agent is expected to treat the scriptlevel attribute as a presentational hint
             // setting the element's math-depth property to the corresponding value. More precisely, +<U>, -<U> and <U>
             // are respectively mapped to add(<U>) add(<-U>) and <U>.
-            if (Optional<StringView> parsed_value = HTML::parse_integer_digits(value); parsed_value.has_value()) {
+            if (Optional<Utf16View> parsed_value = HTML::parse_integer_digits(value); parsed_value.has_value()) {
                 auto string_value = parsed_value.value();
                 if (auto integer_value = parsed_value->to_number<i32>(TrimWhitespace::No); integer_value.has_value()) {
                     auto style_value = [&]() -> NonnullRefPtr<CSS::StyleValue const> {
-                        if (string_value[0] == '+' || string_value[0] == '-')
-                            return CSS::FunctionStyleValue::create("add"_fly_string, CSS::IntegerStyleValue::create(integer_value.release_value()));
+                        if (string_value.code_unit_at(0) == '+' || string_value.code_unit_at(0) == '-')
+                            return CSS::FunctionStyleValue::create("add"_utf16_fly_string, CSS::IntegerStyleValue::create(integer_value.release_value()));
 
                         return CSS::IntegerStyleValue::create(integer_value.release_value());
                     }();

@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Utf16View.h>
 #include <LibWeb/Bindings/HTMLDetailsElement.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CSS/Invalidation/ElementStateInvalidator.h>
@@ -57,7 +58,7 @@ void HTMLDetailsElement::inserted()
 }
 
 // https://html.spec.whatwg.org/multipage/interactive-elements.html#the-details-element:concept-element-attributes-change-ext
-void HTMLDetailsElement::attribute_changed(FlyString const& local_name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
+void HTMLDetailsElement::attribute_changed(Utf16FlyString const& local_name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_)
 {
     Base::attribute_changed(local_name, old_value, value, namespace_);
 
@@ -80,11 +81,11 @@ void HTMLDetailsElement::attribute_changed(FlyString const& local_name, Optional
         if (old_value.has_value() != value.has_value()) {
             // 1. If oldValue is null, queue a details toggle event task given the details element, "closed", and "open".
             if (!old_value.has_value()) {
-                queue_a_details_toggle_event_task("closed"_string, "open"_string);
+                queue_a_details_toggle_event_task("closed"_utf16_fly_string, "open"_utf16_fly_string);
             }
             // 2. Otherwise, queue a details toggle event task given the details element, "open", and "closed".
             else {
-                queue_a_details_toggle_event_task("open"_string, "closed"_string);
+                queue_a_details_toggle_event_task("open"_utf16_fly_string, "closed"_utf16_fly_string);
             }
         }
 
@@ -105,7 +106,7 @@ void HTMLDetailsElement::children_changed(ChildrenChangedMetadata const& metadat
 }
 
 // https://html.spec.whatwg.org/multipage/interactive-elements.html#queue-a-details-toggle-event-task
-void HTMLDetailsElement::queue_a_details_toggle_event_task(String old_state, String new_state)
+void HTMLDetailsElement::queue_a_details_toggle_event_task(Utf16FlyString old_state, Utf16FlyString new_state)
 {
     // 1. If element's details toggle task tracker is not null, then:
     if (m_details_toggle_task_tracker.has_value()) {
@@ -144,7 +145,7 @@ void HTMLDetailsElement::queue_a_details_toggle_event_task(String old_state, Str
 
 // https://html.spec.whatwg.org/multipage/interactive-elements.html#details-name-group
 template<typename Callback>
-void for_each_element_in_details_name_group(HTMLDetailsElement& details, FlyString const& name, Callback&& callback)
+void for_each_element_in_details_name_group(HTMLDetailsElement& details, Utf16View name, Callback&& callback)
 {
     // The details name group that contains a details element a also contains all the other details elements b that
     // fulfill all of the following conditions:
@@ -307,12 +308,12 @@ void HTMLDetailsElement::update_shadow_tree_style()
     if (has_attribute(HTML::AttributeNames::open)) {
         m_descendants_slot->set_attribute_value(HTML::AttributeNames::style, R"~~~(
             display: block;
-        )~~~"_string);
+        )~~~"_utf16);
     } else {
         m_descendants_slot->set_attribute_value(HTML::AttributeNames::style, R"~~~(
             display: block;
             content-visibility: hidden;
-        )~~~"_string);
+        )~~~"_utf16);
     }
 
     shadow_root()->set_needs_layout_tree_update(true, DOM::SetNeedsLayoutTreeUpdateReason::DetailsElementOpenedOrClosed);

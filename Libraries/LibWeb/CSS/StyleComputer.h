@@ -11,6 +11,8 @@
 #include <AK/JsonArray.h>
 #include <AK/Optional.h>
 #include <AK/OwnPtr.h>
+#include <AK/Utf16String.h>
+#include <AK/Utf16View.h>
 #include <LibWeb/Animations/KeyframeEffect.h>
 #include <LibWeb/CSS/CSSFontFaceRule.h>
 #include <LibWeb/CSS/CSSKeyframesRule.h>
@@ -18,7 +20,7 @@
 #include <LibWeb/CSS/CascadeOrigin.h>
 #include <LibWeb/CSS/ComputedValues.h>
 #include <LibWeb/CSS/Selector.h>
-#include <LibWeb/CSS/SelectorEngine.h>
+#include <LibWeb/CSS/SelectorMatching.h>
 #include <LibWeb/CSS/StyleInvalidationData.h>
 #include <LibWeb/CSS/StyleScope.h>
 #include <LibWeb/Export.h>
@@ -88,7 +90,7 @@ public:
     };
     static Optional<AnimatedInheritValue> get_animated_inherit_value(PropertyID, DOM::AbstractElement);
 
-    static Optional<String> user_agent_style_sheet_source(StringView name);
+    static Optional<Utf16String> user_agent_style_sheet_source(Utf16View name);
 
     explicit StyleComputer(DOM::Document&);
     ~StyleComputer();
@@ -101,11 +103,14 @@ public:
     void push_ancestor(DOM::Element const&);
     void pop_ancestor(DOM::Element const&);
 
-    [[nodiscard]] NonnullRefPtr<ComputedProperties> create_document_style() const;
+    [[nodiscard]] NonnullRefPtr<ComputedValues const> create_document_style() const;
 
-    [[nodiscard]] NonnullRefPtr<ComputedProperties> compute_style(DOM::AbstractElement, Optional<bool&> did_change_custom_properties = {}) const;
-    [[nodiscard]] NonnullRefPtr<ComputedProperties> compute_style_with_seeded_ancestors(DOM::AbstractElement);
-    [[nodiscard]] RefPtr<ComputedProperties> compute_pseudo_element_style_if_needed(DOM::AbstractElement, Optional<bool&> did_change_custom_properties) const;
+    [[nodiscard]] NonnullRefPtr<ComputedValues const> compute_style(DOM::AbstractElement, Optional<bool&> did_change_custom_properties = {}) const;
+    // Compute the cascade supplied by rules, presentational hints, and inheritance while excluding the element's
+    // inline declaration. Editing uses this to identify transport-only style without mutating the live element.
+    [[nodiscard]] NonnullRefPtr<ComputedProperties> compute_properties_without_inline_style(DOM::AbstractElement) const;
+    [[nodiscard]] NonnullRefPtr<ComputedValues const> compute_style_with_seeded_ancestors(DOM::AbstractElement);
+    [[nodiscard]] RefPtr<ComputedValues const> compute_pseudo_element_style_if_needed(DOM::AbstractElement, Optional<bool&> did_change_custom_properties) const;
     [[nodiscard]] JsonArray collect_devtools_applied_style_rules(DOM::AbstractElement, bool include_inherited, bool include_user_agent_styles);
 
     struct ScopedMatchingRule {
@@ -121,14 +126,16 @@ public:
     Vector<HasInvalidationMetadata> const* has_invalidation_metadata_for_property(InvalidationSet::Property const&, StyleScope const&) const;
 
     static CSSPixels default_user_font_size();
+    static void ensure_style_metadata_tables_installed();
     static CSSPixels absolute_size_mapping(AbsoluteSize, CSSPixels default_font_size);
-    static CSSPixels relative_size_mapping(RelativeSize, CSSPixels inherited_font_size);
     [[nodiscard]] RefPtr<StyleValue const> recascade_font_size_if_needed(DOM::AbstractElement, CascadedProperties&, bool& depends_on_viewport_metrics) const;
 
     void set_viewport_rect(Badge<DOM::Document>, CSSPixelRect const& viewport_rect) { m_viewport_rect = viewport_rect; }
 
     void collect_animation_into(DOM::AbstractElement, GC::Ref<Animations::KeyframeEffect> animation, ComputedProperties&) const;
     void collect_animation_into(DOM::AbstractElement, GC::Ref<Animations::KeyframeEffect> animation, ComputedProperties::Builder&) const;
+    void collect_animations_into(DOM::AbstractElement, ReadonlySpan<GC::Ref<Animations::KeyframeEffect>>, ComputedProperties&) const;
+    void collect_animations_into(DOM::AbstractElement, ReadonlySpan<GC::Ref<Animations::KeyframeEffect>>, ComputedProperties::Builder&) const;
 
     [[nodiscard]] NonnullRefPtr<ComputedProperties> compute_properties(DOM::AbstractElement, CascadedProperties&, u64 matching_pseudo_element_styles) const;
 
@@ -137,8 +144,8 @@ public:
 
     [[nodiscard]] inline bool should_reject_with_ancestor_filter(Selector const&) const;
 
-    static NonnullRefPtr<StyleValue const> compute_value_of_custom_property(DOM::AbstractElement, Utf16FlyString const& custom_property, Optional<Parser::GuardedSubstitutionContexts&> = {});
-    NonnullRefPtr<StyleValue const> compute_value_of_custom_property(ComputedProperties const&, DOM::AbstractElement, Utf16FlyString const& custom_property, Optional<Parser::GuardedSubstitutionContexts&> = {}) const;
+    NonnullRefPtr<StyleValue const> compute_value_of_custom_property(ComputedProperties const*, AbstractOrHypotheticalElement const&, Utf16FlyString const& name, Optional<Parser::GuardedSubstitutionContexts&> = {}) const;
+    ComputationContext fallback_computation_context_for_custom_property(AbstractOrHypotheticalElement const&) const;
 
     static NonnullRefPtr<StyleValue const> compute_value_of_property(PropertyID, NonnullRefPtr<StyleValue const> const& specified_value, Function<NonnullRefPtr<StyleValue const>(PropertyID)> const& get_property_specified_value, ComputationContext const&, double device_pixels_per_css_pixel);
     static NonnullRefPtr<StyleValue const> compute_animation_name(NonnullRefPtr<StyleValue const> const& absolutized_value);
@@ -151,12 +158,9 @@ public:
     static NonnullRefPtr<StyleValue const> compute_font_weight(NonnullRefPtr<StyleValue const> const& absolutized_value, Optional<DOM::AbstractElement> const& inheritance_parent);
     static NonnullRefPtr<StyleValue const> compute_font_width(NonnullRefPtr<StyleValue const> const& absolutized_value);
     static NonnullRefPtr<StyleValue const> compute_line_height(NonnullRefPtr<StyleValue const> const& absolutized_value, CSSPixels computed_font_size);
-    static NonnullRefPtr<StyleValue const> compute_position_area(NonnullRefPtr<StyleValue const> const& absolutized_value);
 
-    enum class BypassPseudoElementPropertyWhitelist : u8 {
-        No,
-        Yes,
-    };
+    [[nodiscard]] NonnullRefPtr<ComputedValues const> build_computed_values(ComputedProperties&, DOM::AbstractElement, StyleScope const&) const;
+    [[nodiscard]] NonnullRefPtr<ComputedProperties> reconstruct_computed_properties(ComputedValues const&) const;
 
 private:
     virtual void visit_edges(Visitor&) override;
@@ -166,8 +170,13 @@ private:
         CreatePseudoElementStyleIfNeeded,
     };
 
+    enum class IncludeInlineStyle : u8 {
+        No,
+        Yes,
+    };
+
     struct LayerMatchingRules {
-        FlyString qualified_layer_name;
+        Utf16FlyString qualified_layer_name;
         Vector<ScopedMatchingRule> rules;
     };
 
@@ -185,11 +194,11 @@ private:
 
     [[nodiscard]] MatchingRuleSet build_matching_rule_set(DOM::AbstractElement, bool& did_match_any_pseudo_element_rules, ComputeStyleMode) const;
 
-    [[nodiscard]] RefPtr<ComputedProperties> compute_style_impl(DOM::AbstractElement, ComputeStyleMode, Optional<bool&> did_change_custom_properties, StyleScope const&) const;
-    [[nodiscard]] NonnullRefPtr<CascadedProperties> compute_cascaded_values(DOM::AbstractElement, bool did_match_any_pseudo_element_rules, ComputeStyleMode, MatchingRuleSet const&) const;
-    void collect_animation_into(DOM::AbstractElement, GC::Ref<Animations::KeyframeEffect> animation, ComputedProperties&, ComputedProperties::Builder*) const;
+    [[nodiscard]] RefPtr<ComputedProperties> compute_style_impl(DOM::AbstractElement, ComputeStyleMode, Optional<bool&> did_change_custom_properties, StyleScope const&, IncludeInlineStyle) const;
+    [[nodiscard]] NonnullRefPtr<CascadedProperties> compute_cascaded_values(DOM::AbstractElement, MatchingRuleSet const&, IncludeInlineStyle) const;
+    void collect_animation_effects_into(DOM::AbstractElement, ReadonlySpan<GC::Ref<Animations::KeyframeEffect>>, ComputedProperties&, ComputedProperties::Builder*) const;
     void compute_custom_properties(ComputedProperties&, DOM::AbstractElement) const;
-    void start_needed_transitions(ComputedProperties const& old_style, ComputedProperties::Builder& new_style, DOM::AbstractElement) const;
+    void start_needed_transitions(ComputedValues const& old_style, ComputedProperties::Builder& new_style, DOM::AbstractElement) const;
     void resolve_effective_overflow_values(ComputedProperties::Builder&) const;
     void transform_box_type_if_needed(ComputedProperties::Builder&, DOM::AbstractElement) const;
 
@@ -197,31 +206,11 @@ private:
 
     [[nodiscard]] Length::FontMetrics calculate_root_element_font_metrics(ComputedProperties const&) const;
 
-    [[nodiscard]] Vector<ScopedMatchingRule> collect_matching_rules_from_context(DOM::AbstractElement, CascadeOrigin, GC::Ptr<DOM::ShadowRoot const>, Optional<FlyString const> qualified_layer_name = {}, u64* matching_pseudo_element_styles = nullptr) const;
-
-    void cascade_declarations(
-        CascadedProperties&,
-        DOM::AbstractElement,
-        Vector<ScopedMatchingRule> const&,
-        CascadeOrigin,
-        Important,
-        Optional<FlyString> layer_name,
-        bool include_inline_style) const;
-
-    void apply_property_list_to_cascade(
-        CascadedProperties&,
-        DOM::AbstractElement,
-        ReadonlySpan<StyleProperty>,
-        CascadeOrigin,
-        Important,
-        Optional<FlyString> layer_name,
-        GC::Ptr<CSSStyleDeclaration const> source,
-        GC::Ptr<DOM::ShadowRoot const> source_shadow_root,
-        BypassPseudoElementPropertyWhitelist) const;
+    [[nodiscard]] Vector<ScopedMatchingRule> collect_matching_rules_from_context(DOM::AbstractElement, CascadeOrigin, GC::Ptr<DOM::ShadowRoot const>, Optional<Utf16FlyString const> qualified_layer_name = {}, u64* matching_pseudo_element_styles = nullptr) const;
 
     GC::Ref<DOM::Document> m_document;
 
-    [[nodiscard]] RuleCache const* rule_cache_for_cascade_origin(CascadeOrigin, Optional<FlyString const> qualified_layer_name, GC::Ptr<DOM::ShadowRoot const>) const;
+    [[nodiscard]] RuleCache const* rule_cache_for_cascade_origin(CascadeOrigin, Optional<Utf16FlyString const> qualified_layer_name, GC::Ptr<DOM::ShadowRoot const>) const;
 
     Length::FontMetrics m_default_font_metrics;
     mutable Length::FontMetrics m_root_element_font_metrics;
@@ -232,7 +221,6 @@ private:
     mutable Optional<ComputationContext> m_cached_generic_computation_context;
     ComputationContext make_computation_context_for_property(PropertyID, ComputedProperties const&, Optional<DOM::AbstractElement>) const;
     ComputationContext const& get_computation_context_for_property(PropertyID, ComputedProperties const&, Optional<DOM::AbstractElement>) const;
-    ComputationContext fallback_computation_context_for_custom_property(DOM::AbstractElement const&) const;
     void clear_computation_context_caches() const
     {
         const_cast<StyleComputer*>(this)->m_cached_font_computation_context = {};
@@ -252,8 +240,8 @@ private:
     mutable u64 m_multi_bucket_rule_generation { 0 };
 
     OwnPtr<CountingBloomFilter<u8, 14>> m_ancestor_filter;
-    OwnPtr<SelectorEngine::HasResultCache> m_has_result_cache;
-    OwnPtr<SelectorEngine::HasFastRejectFilterCache> m_has_fast_reject_filter_cache;
+    OwnPtr<SelectorMatching::HasResultCache> m_has_result_cache;
+    OwnPtr<SelectorMatching::HasFastRejectFilterCache> m_has_fast_reject_filter_cache;
 };
 
 inline bool StyleComputer::should_reject_with_ancestor_filter(Selector const& selector) const

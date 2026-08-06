@@ -34,7 +34,7 @@ WebIDL::ExceptionOr<GC::Ref<CSSMathSum>> CSSMathSum::add_all_types_into_math_sum
         if (auto added_types = type.added_to(value->type()); added_types.has_value()) {
             type = added_types.release_value();
         } else {
-            return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Cannot create a CSSMathSum with values of incompatible types"sv };
+            return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Cannot create a CSSMathSum with values of incompatible types"_utf16 };
         }
     }
 
@@ -210,14 +210,14 @@ Optional<SumValue> CSSMathSum::create_a_sum_value() const
     return values;
 }
 
-WebIDL::ExceptionOr<NonnullRefPtr<CalculationNode const>> CSSMathSum::create_calculation_node(CalculationContext const& context) const
+WebIDL::ExceptionOr<CalcNodeRef> CSSMathSum::create_calculation_node(CalculationContext const& context) const
 {
-    Vector<NonnullRefPtr<CalculationNode const>> child_nodes;
+    Vector<CalcNodeRef> child_nodes;
     for (auto const& child_value : m_values->values()) {
         child_nodes.append(TRY(child_value->create_calculation_node(context)));
     }
 
-    return SumCalculationNode::create(move(child_nodes));
+    return CalcNodeRef::sum(move(child_nodes));
 }
 
 }

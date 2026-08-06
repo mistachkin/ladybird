@@ -35,7 +35,7 @@ GC_DEFINE_ALLOCATOR(WebGLRenderingContext);
 // https://www.khronos.org/registry/webgl/specs/latest/1.0/#fire-a-webgl-context-event
 // Returns false if the event was canceled (the page called preventDefault), which is how
 // webglcontextlost signals that the page wants the context restored.
-bool fire_webgl_context_event(HTML::HTMLCanvasElement& canvas_element, FlyString const& type)
+bool fire_webgl_context_event(HTML::HTMLCanvasElement& canvas_element, Utf16FlyString const& type)
 {
     // To fire a WebGL context event named e means that an event using the WebGLContextEvent interface, with its type attribute [DOM4] initialized to e, its cancelable attribute initialized to true, and its isTrusted attribute [DOM4] initialized to true, is to be dispatched at the given object.
     // FIXME: Consider setting a status message.
@@ -87,6 +87,10 @@ Optional<RemoteWebGLContext> create_remote_webgl_context(HTML::HTMLCanvasElement
         context_attributes.antialias);
     if (!result.success)
         return {};
+
+    // NB: The display list must be re-recorded so its DrawCanvas command refers to the new remote context's
+    //     canvas id. Content updates alone don't invalidate the display list, so do it here.
+    canvas_element.set_needs_repaint();
 
     return RemoteWebGLContext { transport.release_nonnull(), move(result) };
 }
@@ -168,7 +172,13 @@ void WebGLRenderingContext::did_update_canvas_content()
 {
     m_canvas_element->set_canvas_content_dirty();
 
-    m_canvas_element->set_needs_repaint();
+    // NB: Invalidate the cached DrawCanvas command so that if another change causes the display list to be
+    //     recorded, it contains the new content generation and damages the canvas. Don't request a display list
+    //     recording here: the new content reaches the compositor through the canvas surface registry when the
+    //     canvas is presented.
+    if (auto paintable = m_canvas_element->unsafe_paintable())
+        paintable->invalidate_paint_cache();
+    m_canvas_element->set_needs_repaint(InvalidateDisplayList::No);
 }
 
 Optional<WebGLContextAttributes> WebGLRenderingContext::get_context_attributes()

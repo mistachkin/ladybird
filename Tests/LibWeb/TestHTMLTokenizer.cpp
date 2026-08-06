@@ -6,6 +6,7 @@
 
 #include <LibTest/TestCase.h>
 
+#include <AK/Utf16StringBuilder.h>
 #include <LibCore/File.h>
 #include <LibWeb/HTML/Parser/HTMLTokenizer.h>
 
@@ -25,14 +26,14 @@ using Token = Web::HTML::HTMLToken;
 
 #define EXPECT_START_TAG_TOKEN(_tag_name, start_column, end_column)  \
     EXPECT_EQ(current_token->type(), Token::Type::StartTag);         \
-    EXPECT_EQ(current_token->tag_name(), #_tag_name);                \
+    EXPECT_EQ(current_token->tag_name(), #_tag_name##sv);            \
     EXPECT_EQ(current_token->start_position().column, start_column); \
     EXPECT_EQ(current_token->end_position().column, end_column);     \
     NEXT_TOKEN();
 
 #define EXPECT_END_TAG_TOKEN(_tag_name, start_column, end_column)    \
     EXPECT_EQ(current_token->type(), Token::Type::EndTag);           \
-    EXPECT_EQ(current_token->tag_name(), #_tag_name);                \
+    EXPECT_EQ(current_token->tag_name(), #_tag_name##sv);            \
     EXPECT_EQ(current_token->start_position().column, start_column); \
     EXPECT_EQ(current_token->end_position().column, end_column);     \
     NEXT_TOKEN();
@@ -61,9 +62,9 @@ using Token = Web::HTML::HTMLToken;
 
 #define EXPECT_TAG_TOKEN_ATTRIBUTE(name, attribute_value, name_start_column, name_end_column, value_start_column, value_end_column) \
     VERIFY(last_token);                                                                                                             \
-    auto name##_attr = last_token->raw_attribute(#name##_fly_string);                                                               \
+    auto name##_attr = last_token->raw_attribute(#name##_utf16_fly_string);                                                         \
     VERIFY(name##_attr.has_value());                                                                                                \
-    EXPECT_EQ(name##_attr->value, attribute_value);                                                                                 \
+    EXPECT_EQ(name##_attr->value, attribute_value##sv);                                                                             \
     EXPECT_EQ(name##_attr->name_start_position.column, name_start_column);                                                          \
     EXPECT_EQ(name##_attr->name_end_position.column, name_end_column);                                                              \
     EXPECT_EQ(name##_attr->value_start_position.column, value_start_column);                                                        \
@@ -76,7 +77,7 @@ using Token = Web::HTML::HTMLToken;
 static Vector<Token> run_tokenizer(StringView input)
 {
     Vector<Token> tokens;
-    Tokenizer tokenizer { input, "UTF-8"sv };
+    Tokenizer tokenizer { Utf16String::from_utf8(input) };
     while (true) {
         auto maybe_token = tokenizer.next_token();
         if (!maybe_token.has_value())
@@ -89,10 +90,10 @@ static Vector<Token> run_tokenizer(StringView input)
 // FIXME: It's not very nice to rely on the format of HTMLToken::to_string() to stay the same.
 static u32 hash_tokens(Vector<Token> const& tokens)
 {
-    StringBuilder builder;
+    Utf16StringBuilder builder;
     for (auto& token : tokens)
         builder.append(token.to_string());
-    return (u32)builder.string_view().hash();
+    return (u32)builder.view().hash();
 }
 
 TEST_CASE(empty)
@@ -207,9 +208,9 @@ TEST_CASE(duplicate_attributes_are_reported)
     EXPECT(token.had_duplicate_attribute());
     EXPECT_EQ(token.attribute_count(), 1u);
 
-    auto nonce = token.raw_attribute("nonce"_fly_string);
+    auto nonce = token.raw_attribute("nonce"_utf16_fly_string);
     VERIFY(nonce.has_value());
-    EXPECT_EQ(nonce->value, "x");
+    EXPECT_EQ(nonce->value, "x"sv);
 }
 
 TEST_CASE(named_character_reference)
@@ -307,7 +308,7 @@ TEST_CASE(insertion_point_inside_fast_tag_name)
     auto token = tokenizer.next_token();
     VERIFY(token.has_value());
     EXPECT_EQ(token->type(), Token::Type::StartTag);
-    EXPECT_EQ(token->tag_name(), "abcxdef");
+    EXPECT_EQ(token->tag_name(), "abcxdef"sv);
 }
 
 TEST_CASE(insertion_point_inside_fast_attribute_name)
@@ -330,9 +331,9 @@ TEST_CASE(insertion_point_inside_fast_attribute_name)
     EXPECT_EQ(token->type(), Token::Type::StartTag);
     EXPECT_EQ(token->attribute_count(), 1u);
 
-    auto attribute = token->raw_attribute("abcxdef"_fly_string);
+    auto attribute = token->raw_attribute("abcxdef"_utf16_fly_string);
     VERIFY(attribute.has_value());
-    EXPECT_EQ(attribute->value, "value");
+    EXPECT_EQ(attribute->value, "value"sv);
 }
 
 TEST_CASE(insertion_point_inside_fast_quoted_attribute_value)
@@ -354,7 +355,7 @@ TEST_CASE(insertion_point_inside_fast_quoted_attribute_value)
     VERIFY(token.has_value());
     EXPECT_EQ(token->type(), Token::Type::StartTag);
 
-    auto attribute = token->raw_attribute("a"_fly_string);
+    auto attribute = token->raw_attribute("a"_utf16_fly_string);
     VERIFY(attribute.has_value());
-    EXPECT_EQ(attribute->value, "abcxdef");
+    EXPECT_EQ(attribute->value, "abcxdef"sv);
 }

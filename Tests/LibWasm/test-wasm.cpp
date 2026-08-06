@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/ByteBuffer.h>
 #include <AK/MemoryStream.h>
 #include <LibJS/Runtime/ValueInlines.h>
 #include <LibTest/JavaScriptTestRunner.h>
@@ -34,9 +35,11 @@ TESTJS_GLOBAL_FUNCTION(read_binary_wasm_file, readBinaryWasmFile)
 
     auto array = TRY(JS::Uint8Array::create(realm, file_size.value()));
 
-    auto read = file.value()->read_until_filled(array->data());
+    auto bytes = MUST(ByteBuffer::create_uninitialized(file_size.value()));
+    auto read = file.value()->read_until_filled(bytes);
     if (read.is_error())
         return vm.throw_completion<JS::TypeError>(Utf16String::from_utf8(error_code_to_string(read.error().code())));
+    array->viewed_array_buffer()->overwrite(array->byte_offset(), bytes.data(), bytes.size());
 
     return JS::Value(array);
 }
@@ -49,10 +52,22 @@ public:
     explicit WebAssemblyModule(JS::Object& prototype)
         : JS::Object(ConstructWithPrototypeTag::Tag, prototype)
     {
-        m_machine.enable_instruction_count_limit();
+        machine().enable_instruction_count_limit();
     }
 
-    static Wasm::AbstractMachine& machine() { return m_machine; }
+    static Wasm::AbstractMachine& machine()
+    {
+        if (!s_machine)
+            s_machine = make<Wasm::AbstractMachine>();
+        return *s_machine;
+    }
+
+    static void reset_machine()
+    {
+        s_machine = nullptr;
+        s_spec_test_namespace.clear();
+    }
+
     Wasm::Module& module() { return *m_module; }
     Wasm::ModuleInstance& module_instance() { return *m_module_instance; }
 
@@ -83,6 +98,9 @@ private:
 
     static HashMap<Wasm::Linker::Name, Wasm::ExternValue> const& spec_test_namespace()
     {
+        if (!s_spec_test_namespace.is_empty())
+            return s_spec_test_namespace;
+
         Wasm::FunctionType print_type { {}, {} };
         auto address_print = alloc_noop_function(print_type);
         s_spec_test_namespace.set({ "spectest", "print", print_type }, Wasm::ExternValue { *address_print });
@@ -112,31 +130,31 @@ private:
         s_spec_test_namespace.set({ "spectest", "print_f64_f64", print_f64_f64_type }, Wasm::ExternValue { *address_f64_f64 });
 
         Wasm::TableType table_type { Wasm::ValueType(Wasm::ValueType::FunctionReference), Wasm::Limits(Wasm::AddressType::I32, 10, 20) };
-        auto table_address = m_machine.store().allocate(table_type);
+        auto table_address = machine().store().allocate(table_type);
         s_spec_test_namespace.set({ "spectest", "table", table_type }, Wasm::ExternValue { *table_address });
 
         Wasm::TableType table64_type { Wasm::ValueType(Wasm::ValueType::FunctionReference), Wasm::Limits(Wasm::AddressType::I64, 10, 20) };
-        auto table64_address = m_machine.store().allocate(table64_type);
+        auto table64_address = machine().store().allocate(table64_type);
         s_spec_test_namespace.set({ "spectest", "table64", table64_type }, Wasm::ExternValue { *table64_address });
 
         Wasm::MemoryType memory_type { Wasm::Limits(Wasm::AddressType::I32, 1, 2) };
-        auto memory_address = m_machine.store().allocate(memory_type);
+        auto memory_address = machine().store().allocate(memory_type);
         s_spec_test_namespace.set({ "spectest", "memory", memory_type }, Wasm::ExternValue { *memory_address });
 
         Wasm::GlobalType global_i32 { Wasm::ValueType(Wasm::ValueType::I32), false };
-        auto global_i32_address = m_machine.store().allocate(global_i32, Wasm::Value(666));
+        auto global_i32_address = machine().store().allocate(global_i32, Wasm::Value(666));
         s_spec_test_namespace.set({ "spectest", "global_i32", global_i32 }, Wasm::ExternValue { *global_i32_address });
 
         Wasm::GlobalType global_i64 { Wasm::ValueType(Wasm::ValueType::I64), false };
-        auto global_i64_address = m_machine.store().allocate(global_i64, Wasm::Value((i64)666));
+        auto global_i64_address = machine().store().allocate(global_i64, Wasm::Value((i64)666));
         s_spec_test_namespace.set({ "spectest", "global_i64", global_i64 }, Wasm::ExternValue { *global_i64_address });
 
         Wasm::GlobalType global_f32 { Wasm::ValueType(Wasm::ValueType::F32), false };
-        auto global_f32_address = m_machine.store().allocate(global_f32, Wasm::Value(666.6f));
+        auto global_f32_address = machine().store().allocate(global_f32, Wasm::Value(666.6f));
         s_spec_test_namespace.set({ "spectest", "global_f32", global_f32 }, Wasm::ExternValue { *global_f32_address });
 
         Wasm::GlobalType global_f64 { Wasm::ValueType(Wasm::ValueType::F64), false };
-        auto global_f64_address = m_machine.store().allocate(global_f64, Wasm::Value(666.6));
+        auto global_f64_address = machine().store().allocate(global_f64, Wasm::Value(666.6));
         s_spec_test_namespace.set({ "spectest", "global_f64", global_f64 }, Wasm::ExternValue { *global_f64_address });
 
         return s_spec_test_namespace;
@@ -144,7 +162,7 @@ private:
 
     static Optional<Wasm::FunctionAddress> alloc_noop_function(Wasm::FunctionType type)
     {
-        return m_machine.store().allocate(Wasm::HostFunction {
+        return machine().store().allocate(Wasm::HostFunction {
             [](auto&, auto) -> Wasm::Result {
                 // Noop, this just needs to exist.
                 return Wasm::Result { Vector<Wasm::Value> {} };
@@ -154,15 +172,21 @@ private:
     }
 
     static HashMap<Wasm::Linker::Name, Wasm::ExternValue> s_spec_test_namespace;
-    static Wasm::AbstractMachine m_machine;
+    static OwnPtr<Wasm::AbstractMachine> s_machine;
     RefPtr<Wasm::Module> m_module;
     RefPtr<Wasm::ModuleInstance> m_module_instance;
 };
 
 GC_DEFINE_ALLOCATOR(WebAssemblyModule);
 
-Wasm::AbstractMachine WebAssemblyModule::m_machine;
+OwnPtr<Wasm::AbstractMachine> WebAssemblyModule::s_machine;
 HashMap<Wasm::Linker::Name, Wasm::ExternValue> WebAssemblyModule::s_spec_test_namespace;
+
+TESTJS_RUN_FILE_FUNCTION(ByteString const&, JS::Realm&, JS::ExecutionContext&)
+{
+    WebAssemblyModule::reset_machine();
+    return Test::JS::RunFileHookResult::RunAsNormal;
+}
 
 TESTJS_GLOBAL_FUNCTION(parse_webassembly_module, parseWebAssemblyModule)
 {
@@ -171,7 +195,9 @@ TESTJS_GLOBAL_FUNCTION(parse_webassembly_module, parseWebAssemblyModule)
     if (!is<JS::Uint8Array>(*object))
         return vm.throw_completion<JS::TypeError>("Expected a Uint8Array argument to parse_webassembly_module"_utf16);
     auto& array = static_cast<JS::Uint8Array&>(*object);
-    FixedMemoryStream stream { array.data() };
+    auto record = JS::make_typed_array_with_buffer_witness_record(array, JS::ArrayBuffer::Order::SeqCst);
+    auto bytes = MUST(array.viewed_array_buffer()->copy_to_byte_buffer(array.byte_offset(), JS::typed_array_byte_length(record)));
+    FixedMemoryStream stream { ReadonlyBytes { bytes.data(), bytes.size() } };
     auto result = Wasm::Module::parse(stream);
     if (result.is_error())
         return vm.throw_completion<JS::SyntaxError>(Utf16String::from_utf8(Wasm::parse_error_to_byte_string(result.error())));
@@ -199,13 +225,45 @@ TESTJS_GLOBAL_FUNCTION(validate_webassembly_module, validateWebAssemblyModule)
     if (!is<JS::Uint8Array>(*object))
         return vm.throw_completion<JS::TypeError>("Expected a Uint8Array argument to validate_webassembly_module"_utf16);
     auto& array = static_cast<JS::Uint8Array&>(*object);
-    FixedMemoryStream stream { array.data() };
+    auto record = JS::make_typed_array_with_buffer_witness_record(array, JS::ArrayBuffer::Order::SeqCst);
+    auto bytes = MUST(array.viewed_array_buffer()->copy_to_byte_buffer(array.byte_offset(), JS::typed_array_byte_length(record)));
+    FixedMemoryStream stream { ReadonlyBytes { bytes.data(), bytes.size() } };
     auto result = Wasm::Module::parse(stream);
     if (result.is_error())
         return vm.throw_completion<JS::SyntaxError>(Utf16String::from_utf8(Wasm::parse_error_to_byte_string(result.error())));
     if (auto validation = WebAssemblyModule::machine().validate(*result.value(), {}, Wasm::CompileToNative::No); validation.is_error())
         return vm.throw_completion<JS::SyntaxError>(Utf16String::from_utf8(validation.release_error().error_string));
     return JS::js_undefined();
+}
+
+TESTJS_GLOBAL_FUNCTION(is_cranelift_compiled, isCraneliftCompiled)
+{
+    auto address = static_cast<unsigned long>(TRY(vm.argument(0).to_double(vm)));
+    auto function_instance = WebAssemblyModule::machine().store().get(Wasm::FunctionAddress { address });
+    if (!function_instance)
+        return vm.throw_completion<JS::TypeError>("Invalid function address"_utf16);
+
+    auto* wasm_function = function_instance->get_pointer<Wasm::WasmFunction>();
+    if (!wasm_function)
+        return JS::Value(false);
+
+    auto const& compiled_instructions = wasm_function->code().func().body().compiled_instructions;
+    return JS::Value(Wasm::cranelift_entry_acquire(compiled_instructions) != 0);
+}
+
+TESTJS_GLOBAL_FUNCTION(is_cranelift_eligible, isCraneliftEligible)
+{
+    auto address = static_cast<unsigned long>(TRY(vm.argument(0).to_double(vm)));
+    auto function_instance = WebAssemblyModule::machine().store().get(Wasm::FunctionAddress { address });
+    if (!function_instance)
+        return vm.throw_completion<JS::TypeError>("Invalid function address"_utf16);
+
+    auto* wasm_function = function_instance->get_pointer<Wasm::WasmFunction>();
+    if (!wasm_function)
+        return JS::Value(false);
+
+    auto const& compiled_instructions = wasm_function->code().func().body().compiled_instructions;
+    return JS::Value(compiled_instructions.cranelift_eligible);
 }
 
 TESTJS_GLOBAL_FUNCTION(compare_typed_arrays, compareTypedArrays)
@@ -220,9 +278,13 @@ TESTJS_GLOBAL_FUNCTION(compare_typed_arrays, compareTypedArrays)
     auto& rhs_array = static_cast<JS::TypedArrayBase&>(*rhs);
     auto lhs_record = JS::make_typed_array_with_buffer_witness_record(lhs_array, JS::ArrayBuffer::Order::SeqCst);
     auto rhs_record = JS::make_typed_array_with_buffer_witness_record(rhs_array, JS::ArrayBuffer::Order::SeqCst);
-    auto lhs_bytes = lhs_array.viewed_array_buffer()->bytes().slice(lhs_array.byte_offset(), JS::typed_array_byte_length(lhs_record));
-    auto rhs_bytes = rhs_array.viewed_array_buffer()->bytes().slice(rhs_array.byte_offset(), JS::typed_array_byte_length(rhs_record));
-    return JS::Value(lhs_bytes == rhs_bytes);
+    auto lhs_byte_length = JS::typed_array_byte_length(lhs_record);
+    auto rhs_byte_length = JS::typed_array_byte_length(rhs_record);
+    if (lhs_byte_length != rhs_byte_length)
+        return JS::Value(false);
+    auto lhs_bytes = MUST(lhs_array.viewed_array_buffer()->copy_to_byte_buffer(lhs_array.byte_offset(), lhs_byte_length));
+    auto rhs_bytes = MUST(rhs_array.viewed_array_buffer()->copy_to_byte_buffer(rhs_array.byte_offset(), rhs_byte_length));
+    return JS::Value(lhs_bytes.bytes() == rhs_bytes.bytes());
 }
 
 static bool _is_canonical_nan32(u32 value)
@@ -335,7 +397,7 @@ JS_DEFINE_NATIVE_FUNCTION(WebAssemblyModule::get_export)
             if (auto ptr = value.get_pointer<Wasm::FunctionAddress>())
                 return JS::Value(static_cast<unsigned long>(ptr->value()));
             if (auto v = value.get_pointer<Wasm::GlobalAddress>()) {
-                auto global = m_machine.store().get(*v);
+                auto global = machine().store().get(*v);
                 switch (global->type().type().kind()) {
                 case Wasm::ValueType::I32:
                     return JS::Value(static_cast<double>(global->value().to<i32>()));
@@ -431,9 +493,12 @@ JS_DEFINE_NATIVE_FUNCTION(WebAssemblyModule::wasm_invoke)
             if (!is<JS::TypedArrayBase>(*object))
                 return vm.throw_completion<JS::TypeError>("Expected typed array"_utf16);
             auto& array = static_cast<JS::TypedArrayBase&>(*object);
+            auto record = JS::make_typed_array_with_buffer_witness_record(array, JS::ArrayBuffer::Order::SeqCst);
+            if (JS::typed_array_byte_length(record) < sizeof(u128))
+                return vm.throw_completion<JS::TypeError>("Expected at least 16 bytes"_utf16);
             u128 bits = 0;
             auto* ptr = bit_cast<u8*>(&bits);
-            memcpy(ptr, array.viewed_array_buffer()->data(), 16);
+            array.viewed_array_buffer()->copy_to(array.byte_offset(), { ptr, sizeof(u128) });
             arguments.append(Wasm::Value(bits));
             break;
         }
@@ -517,7 +582,8 @@ JS_DEFINE_NATIVE_FUNCTION(WebAssemblyModule::wasm_invoke)
             u128 val = value.to<u128>();
             // FIXME: remove the MUST here
             auto buf = MUST(JS::ArrayBuffer::create(*vm.current_realm(), 16));
-            memcpy(buf->data(), val.bytes().data(), 16);
+            auto bytes = val.bytes();
+            buf->overwrite(0, bytes.data(), bytes.size());
             return JS::Value(buf);
         }
         case Wasm::ValueType::FunctionReference:

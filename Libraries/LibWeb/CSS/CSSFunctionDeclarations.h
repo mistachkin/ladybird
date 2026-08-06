@@ -21,14 +21,14 @@ public:
 
     virtual ~CSSFunctionDeclarations() override = default;
 
-    GC::Ref<CSSFunctionDescriptors> style() { return m_style; }
+    GC::Ref<CSSFunctionDescriptors> style() const { return m_style; }
 
 private:
     CSSFunctionDeclarations(JS::Realm&, GC::Ref<CSSFunctionDescriptors>);
 
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Cell::Visitor&) override;
-    virtual String serialized() const override;
+    virtual Utf16String serialized() const override;
     virtual void dump(StringBuilder&, int indent_levels) const override;
 
     GC::Ref<CSSFunctionDescriptors> m_style;

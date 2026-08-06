@@ -7,12 +7,15 @@
 
 #pragma once
 
+#include <AK/Optional.h>
 #include <AK/RefCounted.h>
+#include <AK/Utf16String.h>
 #include <LibURL/Origin.h>
 #include <LibURL/URL.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Requests.h>
 #include <LibWeb/Forward.h>
+#include <LibWeb/HTML/CrossProcessId.h>
 #include <LibWeb/HTML/POSTResource.h>
 #include <LibWeb/HTML/SerializedPolicyContainer.h>
 #include <LibWeb/ReferrerPolicy/ReferrerPolicy.h>
@@ -22,11 +25,16 @@ namespace Web::HTML {
 // https://html.spec.whatwg.org/multipage/browsing-the-web.html#document-state-2
 class WEB_API DocumentState final : public RefCounted<DocumentState> {
 public:
-    static NonnullRefPtr<DocumentState> create() { return adopt_ref(*new DocumentState()); }
+    static NonnullRefPtr<DocumentState> create(CrossProcessId cross_process_id)
+    {
+        auto document_state = adopt_ref(*new DocumentState());
+        document_state->m_cross_process_id = cross_process_id;
+        return document_state;
+    }
     ~DocumentState();
 
     struct NestedHistory {
-        String id;
+        CrossProcessId id;
         Vector<NonnullRefPtr<SessionHistoryEntry>> entries;
     };
 
@@ -36,6 +44,14 @@ public:
 
     [[nodiscard]] Optional<UniqueNodeID> document_id() const { return m_document_id; }
     void set_document_id(Optional<UniqueNodeID> document_id) { m_document_id = document_id; }
+
+    [[nodiscard]] CrossProcessId cross_process_id() const { return m_cross_process_id; }
+
+    // Reconstructing from the UI process adopts the canonical id the UI already tracks for this state, so later reports
+    // and acknowledgements name the identity the UI expects.
+    // FIXME: Remove this API. It is only needed because the UI process can mint its own ids for provisional entries and
+    //        seed them back onto live local states. Remove once ids are only ever allocated in WebContent.
+    void adopt_cross_process_id_from_ui_process(CrossProcessId id) { m_cross_process_id = id; }
 
     [[nodiscard]] Variant<SerializedPolicyContainer, Client> const& history_policy_container() const { return m_history_policy_container; }
     void set_history_policy_container(Variant<SerializedPolicyContainer, Client> history_policy_container) { m_history_policy_container = move(history_policy_container); }
@@ -58,8 +74,8 @@ public:
     [[nodiscard]] Vector<NestedHistory> const& nested_histories() const { return m_nested_histories; }
     [[nodiscard]] Vector<NestedHistory>& nested_histories() { return m_nested_histories; }
 
-    [[nodiscard]] Variant<Empty, String, POSTResource> resource() const { return m_resource; }
-    void set_resource(Variant<Empty, String, POSTResource> resource) { m_resource = move(resource); }
+    [[nodiscard]] DocumentResource resource() const { return m_resource; }
+    void set_resource(DocumentResource resource) { m_resource = move(resource); }
 
     [[nodiscard]] bool reload_pending() const { return m_reload_pending; }
     void set_reload_pending(bool reload_pending) { m_reload_pending = reload_pending; }
@@ -67,8 +83,8 @@ public:
     [[nodiscard]] bool ever_populated() const { return m_ever_populated; }
     void set_ever_populated(bool ever_populated) { m_ever_populated = ever_populated; }
 
-    [[nodiscard]] String navigable_target_name() const { return m_navigable_target_name; }
-    void set_navigable_target_name(String navigable_target_name) { m_navigable_target_name = navigable_target_name; }
+    [[nodiscard]] Utf16String const& navigable_target_name() const { return m_navigable_target_name; }
+    void set_navigable_target_name(Utf16String navigable_target_name) { m_navigable_target_name = move(navigable_target_name); }
 
 private:
     DocumentState();
@@ -77,6 +93,10 @@ private:
     // NOTE: We store the document's unique ID rather than a pointer to the document, because DocumentState is
     //       decoupled from the document's lifetime (LocalNavigable owns the document directly).
     Optional<UniqueNodeID> m_document_id;
+
+    // AD-HOC: Stable identity used by the UI-process session history mirror to preserve shared document states
+    //         across IPC and WebContent process swaps.
+    CrossProcessId m_cross_process_id;
 
     // https://html.spec.whatwg.org/multipage/browsing-the-web.html#document-state-history-policy-container
     Variant<SerializedPolicyContainer, Client> m_history_policy_container { Client::Tag };
@@ -100,7 +120,7 @@ private:
     Vector<NestedHistory> m_nested_histories;
 
     // https://html.spec.whatwg.org/multipage/browsing-the-web.html#document-state-resource
-    Variant<Empty, String, POSTResource> m_resource {};
+    DocumentResource m_resource {};
 
     // https://html.spec.whatwg.org/multipage/browsing-the-web.html#document-state-reload-pending
     bool m_reload_pending { false };
@@ -109,7 +129,7 @@ private:
     bool m_ever_populated { false };
 
     // https://html.spec.whatwg.org/multipage/browsing-the-web.html#document-state-nav-target-name
-    String m_navigable_target_name;
+    Utf16String m_navigable_target_name;
 };
 
 }

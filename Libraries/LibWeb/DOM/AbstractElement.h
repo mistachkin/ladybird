@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <AK/Utf16String.h>
 #include <LibGC/Cell.h>
 #include <LibWeb/CSS/PseudoElement.h>
 #include <LibWeb/Forward.h>
@@ -38,6 +39,7 @@ public:
     TreeCountingFunctionResolutionContext tree_counting_function_resolution_context() const;
 
     GC::Ptr<Element const> parent_element() const;
+    Element* flat_tree_parent_element() const;
     Optional<AbstractElement> element_to_inherit_style_from() const;
     Optional<AbstractElement> previous_in_tree_order() { return walk_layout_tree(WalkMethod::Previous); }
     Optional<AbstractElement> previous_sibling_in_tree_order() { return walk_layout_tree(WalkMethod::PreviousSibling); }
@@ -45,7 +47,7 @@ public:
 
     void set_inheritance_override(GC::Ref<Element> element) { m_inheritance_override = element; }
 
-    CSS::ComputedProperties const* computed_properties() const;
+    CSS::ComputedValues const* computed_values() const;
     GC::Ptr<CSS::CSSStyleProperties const> inline_style() const;
 
     void set_custom_property_data(RefPtr<CSS::CustomPropertyData const>);
@@ -57,12 +59,12 @@ public:
     CSS::CountersSet& ensure_counters_set();
     void set_counters_set(OwnPtr<CSS::CountersSet>&&);
 
-    HashMap<FlyString, GC::Ref<CSS::CSSAnimation>>* css_defined_animations() const;
-    void set_has_css_defined_animations();
+    Vector<GC::Ref<CSS::CSSAnimation>> const* css_defined_animations() const;
+    void set_css_defined_animations(Vector<GC::Ref<CSS::CSSAnimation>>&&);
 
     void visit(GC::Cell::Visitor& visitor) const;
 
-    String debug_description() const;
+    Utf16String debug_description() const;
     bool operator==(AbstractElement const&) const = default;
 
     CSS::StyleScope const& style_scope() const;

@@ -6,11 +6,10 @@
 
 #include <LibWeb/Layout/BlockContainer.h>
 #include <LibWeb/Layout/BreakNode.h>
-#include <LibWeb/Layout/InlineFormattingContext.h>
 
 namespace Web::Layout {
 
-BreakNode::BreakNode(DOM::Document& document, HTML::HTMLBRElement& element, CSS::ComputedProperties const& style)
+BreakNode::BreakNode(DOM::Document& document, HTML::HTMLBRElement& element, NonnullRefPtr<CSS::ComputedValues const> style)
     : Layout::NodeWithStyleAndBoxModelMetrics(document, &element, style)
 {
 }

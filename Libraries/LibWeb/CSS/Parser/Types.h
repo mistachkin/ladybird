@@ -6,9 +6,9 @@
 
 #pragma once
 
-#include <AK/FlyString.h>
 #include <AK/Function.h>
 #include <AK/OwnPtr.h>
+#include <AK/Utf16FlyString.h>
 #include <AK/Variant.h>
 #include <AK/Vector.h>
 #include <LibWeb/CSS/Parser/Token.h>
@@ -29,7 +29,7 @@ using DeclarationVisitor = AK::Function<void(Declaration const&)>;
 
 // https://drafts.csswg.org/css-syntax/#ref-for-at-rule%E2%91%A0%E2%91%A1
 struct AtRule {
-    FlyString name;
+    Utf16FlyString name;
     Vector<ComponentValue> prelude;
     Vector<RuleOrListOfDeclarations> child_rules_and_lists_of_declarations;
     bool is_block_rule { false };
@@ -37,9 +37,7 @@ struct AtRule {
     void for_each(AtRuleVisitor&& visit_at_rule, QualifiedRuleVisitor&& visit_qualified_rule, DeclarationVisitor&& visit_declaration) const;
     void for_each_as_declaration_list(DeclarationVisitor&& visit) const;
     void for_each_as_qualified_rule_list(QualifiedRuleVisitor&& visit) const;
-    void for_each_as_at_rule_list(AtRuleVisitor&& visit) const;
     void for_each_as_declaration_rule_list(AtRuleVisitor&& visit_at_rule, DeclarationVisitor&& visit_declaration) const;
-    void for_each_as_rule_list(RuleVisitor&& visit) const;
 };
 
 // https://drafts.csswg.org/css-syntax/#qualified-rule
@@ -49,27 +47,28 @@ struct QualifiedRule {
     Vector<RuleOrListOfDeclarations> child_rules;
     Optional<SourcePosition> source_position = {};
 
-    void for_each_as_declaration_list(FlyString const& rule_name, DeclarationVisitor&& visit) const;
+    void for_each_as_declaration_list(Utf16FlyString const& rule_name, DeclarationVisitor&& visit) const;
 };
 
 // https://drafts.csswg.org/css-syntax/#declaration
 struct Declaration {
-    FlyString name;
+    Utf16FlyString name;
     Vector<ComponentValue> value;
     Important important = Important::No;
     Optional<String> original_value_text = {};
-    Optional<String> original_full_text = {};
+    Optional<Utf16String> original_full_text = {};
     Optional<SourcePosition> source_position = {};
 };
 
 struct SubstitutionFunctionsPresence {
     bool attr { false };
+    bool dashed_function { false };
     bool env { false };
     bool if_ { false };
     bool inherit { false };
     bool var { false };
 
-    bool has_any() const { return attr || env || if_ || inherit || var; }
+    bool has_any() const { return attr || dashed_function || env || if_ || inherit || var; }
 };
 
 class ComponentValueToken {
@@ -106,7 +105,8 @@ struct SimpleBlock {
     bool is_paren() const { return token.is(Token::Type::OpenParen); }
     bool is_square() const { return token.is(Token::Type::OpenSquare); }
 
-    String to_string() const;
+    Utf16String to_string() const;
+    void serialize_to(Utf16StringBuilder&) const;
     String original_source_text() const;
 
     bool operator==(SimpleBlock const& other) const { return token == other.token && value == other.value; }
@@ -114,12 +114,13 @@ struct SimpleBlock {
 
 // https://drafts.csswg.org/css-syntax/#function
 struct Function {
-    FlyString name;
+    Utf16FlyString name;
     Vector<ComponentValue> value;
     ComponentValueToken name_token = {};
     ComponentValueToken end_token = {};
 
-    String to_string() const;
+    Utf16String to_string() const;
+    void serialize_to(Utf16StringBuilder&) const;
     String original_source_text() const;
 
     bool operator==(Function const& other) const { return name == other.name && value == other.value; }
@@ -128,7 +129,8 @@ struct Function {
 // https://drafts.csswg.org/css-variables/#guaranteed-invalid-value
 struct GuaranteedInvalidValue {
     GuaranteedInvalidValue() = default;
-    String to_string() const { return {}; }
+    Utf16String to_string() const { return {}; }
+    void serialize_to(Utf16StringBuilder&) const { }
     String original_source_text() const { return {}; }
 
     bool operator==(GuaranteedInvalidValue const&) const = default;

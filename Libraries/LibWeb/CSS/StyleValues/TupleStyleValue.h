@@ -18,19 +18,17 @@ public:
     }
     virtual ~TupleStyleValue() override = default;
 
-    StyleValueTuple const& tuple() const { return m_tuple; }
+    StyleValueTuple tuple() const
+    {
+        return m_values;
+    }
 
-    virtual void serialize(StringBuilder&, SerializationMode) const override;
-    virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const override;
+    void serialize(StringBuilder&, SerializationMode) const;
+    ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const;
 
     // FIXME: Support tokenization and reification
 
-    bool properties_equal(TupleStyleValue const& other) const { return m_tuple == other.m_tuple; }
-
-    virtual bool is_computationally_independent() const override
-    {
-        return all_of(m_tuple, [](auto& value) { return !value || value->is_computationally_independent(); });
-    }
+    bool properties_equal(TupleStyleValue const& other) const { return tuple() == other.tuple(); }
 
     struct Indices {
         struct FontVariantEastAsian {
@@ -66,13 +64,42 @@ public:
     };
 
 private:
+    friend class StyleValue;
+
+    explicit TupleStyleValue(StyleValueFFI::StyleValueData const* data)
+        : StyleValueWithDefaultOperators(Type::Tuple, data)
+    {
+        auto const& values = data->tuple.values;
+        m_values.ensure_capacity(values.length);
+        for (size_t i = 0; i < values.length; ++i) {
+            auto* child_data = static_cast<StyleValueFFI::StyleValueData const*>(values.pointer[i].pointer);
+            if (child_data)
+                m_values.unchecked_append(StyleValue::adopt_rust_style_value_data(StyleValueFFI::rust_style_value_retain(child_data)));
+            else
+                m_values.unchecked_append(nullptr);
+        }
+    }
+
     explicit TupleStyleValue(StyleValueTuple values)
-        : StyleValueWithDefaultOperators(Type::Tuple)
-        , m_tuple(move(values))
+        : StyleValueWithDefaultOperators(Type::Tuple, make_tuple_data(values))
+        , m_values(move(values))
     {
     }
 
-    StyleValueTuple m_tuple;
+    static StyleValueFFI::StyleValueData const* make_tuple_data(StyleValueTuple const& values)
+    {
+        Vector<StyleValueFFI::StyleValueData const*> pointers;
+        pointers.ensure_capacity(values.size());
+        for (auto const& value : values) {
+            if (value)
+                pointers.unchecked_append(StyleValueFFI::rust_style_value_retain(value->rust_style_value_data()));
+            else
+                pointers.unchecked_append(nullptr);
+        }
+        return StyleValueFFI::rust_style_value_create_tuple(pointers.data(), pointers.size());
+    }
+
+    StyleValueTuple m_values;
 };
 
 }

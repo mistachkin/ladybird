@@ -14,6 +14,7 @@
 #include <LibCore/ImmutableBytes.h>
 #include <LibGC/Function.h>
 #include <LibHTTP/HeaderList.h>
+#include <LibRequests/CameFromCache.h>
 #include <LibRequests/Forward.h>
 #include <LibRequests/Request.h>
 #include <LibRequests/RequestClient.h>
@@ -34,7 +35,7 @@ public:
 
     void set_client(NonnullRefPtr<Requests::RequestClient>);
 
-    using OnHeadersReceived = GC::Function<void(Requests::Request*, HTTP::HeaderList const& response_headers, Optional<u32> status_code, Optional<String> const& reason_phrase, Optional<Core::ImmutableBytes> javascript_bytecode, Optional<u64> javascript_bytecode_cache_vary_key)>;
+    using OnHeadersReceived = GC::Function<void(Requests::Request*, HTTP::HeaderList const& response_headers, Optional<u32> status_code, Optional<String> const& reason_phrase, Optional<Core::ImmutableBytes> javascript_bytecode, Optional<u64> javascript_bytecode_cache_vary_key, Requests::CameFromCache came_from_cache)>;
     using OnDataReceived = GC::Function<void(Requests::ResponseData data)>;
     using OnCachedBodyAvailable = GC::Function<void(Core::ImmutableBytes data)>;
     using OnComplete = GC::Function<void(bool success, Requests::RequestTimingInfo const& timing_info, Optional<StringView> error_message)>;
@@ -82,8 +83,8 @@ private:
     };
     template<typename FileHandler, typename ErrorHandler>
     void handle_file_load_request(LoadRequest& request, FileHandler on_file, ErrorHandler on_error);
-    template<typename Callback>
-    void handle_about_load_request(LoadRequest const& request, Callback callback);
+    template<typename ResourceHandler, typename ErrorHandler>
+    void handle_about_load_request(LoadRequest const& request, ResourceHandler on_resource, ErrorHandler on_error);
     template<typename ResourceHandler, typename ErrorHandler>
     void handle_resource_load_request(LoadRequest const& request, ResourceHandler on_resource, ErrorHandler on_error);
 

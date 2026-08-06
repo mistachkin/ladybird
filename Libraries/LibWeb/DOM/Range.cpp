@@ -23,6 +23,7 @@
 #include <LibWeb/DOM/Range.h>
 #include <LibWeb/DOM/SelectionchangeEventDispatching.h>
 #include <LibWeb/DOM/Text.h>
+#include <LibWeb/Editing/EditingHistory.h>
 #include <LibWeb/Geometry/DOMRect.h>
 #include <LibWeb/Geometry/DOMRectList.h>
 #include <LibWeb/HTML/HTMLHtmlElement.h>
@@ -127,12 +128,18 @@ void Range::update_associated_selection()
         return;
 
     document.reset_cursor_blink_cycle();
+    document.set_cursor_position_needs_repaint();
 
     // https://w3c.github.io/selection-api/#selectionchange-event
     // When the selection is dissociated with its range, associated with a new range, or the associated range's boundary
     // point is mutated either by the user or the content script, the user agent must schedule a selectionchange event
     // on document.
     schedule_a_selectionchange_event(document, document);
+
+    // NB: A selection change ends typing coalescence in the editing history, like Blink closing its open typing
+    //     command whenever the frame selection is set.
+    if (auto history = document.editing_history_if_exists())
+        history->selection_changed();
 }
 
 // https://dom.spec.whatwg.org/#concept-range-root
@@ -858,8 +865,8 @@ WebIDL::ExceptionOr<void> Range::insert(GC::Ref<Node> node)
     else
         parent = reference_node->parent();
 
-    // 6. Ensure pre-insertion validity of node into parent before referenceNode.
-    TRY(parent->ensure_pre_insertion_validity(node->realm(), node, reference_node));
+    // 6. Ensure pre-insert validity given node, parent, referenceNode, and « ».
+    TRY(parent->ensure_pre_insert_validity(node->realm(), node, reference_node, Node::ChildrenToExclude::None));
 
     // 7. If range’s start node is a Text node, set referenceNode to the result of splitting it with offset range’s start offset.
     if (is<Text>(*m_start_container))
@@ -1311,6 +1318,11 @@ GC::Ref<Geometry::DOMRect> Range::get_bounding_client_rect()
 // https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html#dom-range-createcontextualfragment
 WebIDL::ExceptionOr<GC::Ref<DocumentFragment>> Range::create_contextual_fragment(TrustedTypes::TrustedHTMLOrString const& string)
 {
+    return create_contextual_fragment(string, HTML::ParserScriptingMode::Fragment);
+}
+
+WebIDL::ExceptionOr<GC::Ref<DocumentFragment>> Range::create_contextual_fragment(TrustedTypes::TrustedHTMLOrString const& string, HTML::ParserScriptingMode scripting_mode)
+{
     // 1. Let compliantString be the result of invoking the Get Trusted Type compliant string algorithm with
     //    TrustedHTML, this's relevant global object, string, "Range createContextualFragment", and "script".
     auto const compliant_string = TRY(TrustedTypes::get_trusted_type_compliant_string(
@@ -1318,7 +1330,7 @@ WebIDL::ExceptionOr<GC::Ref<DocumentFragment>> Range::create_contextual_fragment
         HTML::relevant_global_object(*this),
         string,
         TrustedTypes::InjectionSink::Range_createContextualFragment,
-        TrustedTypes::Script.to_string()));
+        TrustedTypes::Script.view()));
 
     // 2. Let node be this's start node.
     GC::Ref<Node> node = *start_container();
@@ -1345,7 +1357,7 @@ WebIDL::ExceptionOr<GC::Ref<DocumentFragment>> Range::create_contextual_fragment
     }
 
     // 7. Return the result of invoking the fragment parsing algorithm steps with element, compliantString, and Fragment.
-    return element->parse_fragment(compliant_string.to_utf8_but_should_be_ported_to_utf16(), HTML::ParserScriptingMode::Fragment);
+    return Element::parse_fragment(GC::Ref { *element }, compliant_string.utf16_view(), scripting_mode);
 }
 
 }

@@ -5,23 +5,36 @@
  */
 
 #include <LibWeb/CSS/Enums.h>
+#include <LibWeb/CSS/Serialize.h>
 #include <LibWeb/CSS/StyleValues/AnchorSizeStyleValue.h>
 
 namespace Web::CSS {
 
+static StyleValueFFI::StyleValueData const* make_anchor_size_data(Optional<Utf16FlyString> const& anchor_name, Optional<AnchorSize> const& anchor_size, ValueComparingRefPtr<StyleValue const> const& fallback_value)
+{
+    // The Rust allocation takes ownership of one strong reference to the fallback value data.
+    auto const* fallback_data = fallback_value ? StyleValueFFI::rust_style_value_retain(fallback_value->rust_style_value_data()) : nullptr;
+    return StyleValueFFI::rust_style_value_create_anchor_size(
+        anchor_name.has_value(),
+        anchor_name.has_value() ? anchor_name->to_raw_leaked() : 0,
+        anchor_size.has_value(),
+        anchor_size.has_value() ? to_underlying(*anchor_size) : 0,
+        fallback_data);
+}
+
 ValueComparingNonnullRefPtr<AnchorSizeStyleValue const> AnchorSizeStyleValue::create(
-    Optional<FlyString> const& anchor_name, Optional<AnchorSize> const& anchor_size,
+    Optional<Utf16FlyString> const& anchor_name, Optional<AnchorSize> const& anchor_size,
     ValueComparingRefPtr<StyleValue const> const& fallback_value)
 {
     return adopt_ref(*new (nothrow) AnchorSizeStyleValue(anchor_name, anchor_size, fallback_value));
 }
 
 AnchorSizeStyleValue::AnchorSizeStyleValue(
-    Optional<FlyString> const& anchor_name,
+    Optional<Utf16FlyString> const& anchor_name,
     Optional<AnchorSize> const& anchor_size,
     ValueComparingRefPtr<StyleValue const> const& fallback_value)
-    : StyleValueWithDefaultOperators(Type::AnchorSize)
-    , m_properties { .anchor_name = anchor_name, .anchor_size = anchor_size, .fallback_value = fallback_value }
+    : StyleValueWithDefaultOperators(Type::AnchorSize, make_anchor_size_data(anchor_name, anchor_size, fallback_value))
+    , m_fallback_value(fallback_value)
 {
 }
 
@@ -31,7 +44,7 @@ void AnchorSizeStyleValue::serialize(StringBuilder& builder, SerializationMode s
     builder.append("anchor-size("sv);
 
     if (anchor_name().has_value())
-        builder.append(anchor_name().value());
+        builder.append(serialize_an_identifier(anchor_name().value()));
 
     if (anchor_size().has_value()) {
         if (anchor_name().has_value())

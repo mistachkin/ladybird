@@ -30,14 +30,14 @@ WebIDL::ExceptionOr<GC::Ref<CSSTranslate>> CSSTranslate::construct_impl(JS::Real
 
     // 1. If x or y don’t match <length-percentage>, throw a TypeError.
     if (!x->type().matches_length_percentage({}))
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "CSSTranslate x component doesn't match <length-percentage>"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "CSSTranslate x component doesn't match <length-percentage>"_utf16 };
 
     if (!y->type().matches_length_percentage({}))
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "CSSTranslate y component doesn't match <length-percentage>"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "CSSTranslate y component doesn't match <length-percentage>"_utf16 };
 
     // 2. If z was passed, but doesn’t match <length>, throw a TypeError.
     if (z && !z->type().matches_length({}))
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "CSSTranslate z component doesn't match <length>"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "CSSTranslate z component doesn't match <length>"_utf16 };
 
     // 3. Let this be a new CSSTranslate object, with its x and y internal slots set to x and y.
     // 4. If z was passed, set this’s z internal slot to z, and set this’s is2D internal slot to false.
@@ -45,7 +45,7 @@ WebIDL::ExceptionOr<GC::Ref<CSSTranslate>> CSSTranslate::construct_impl(JS::Real
     Is2D is_2d = Is2D::No;
     if (!z) {
         is_2d = Is2D::Yes;
-        z = CSSUnitValue::create(realm, 0, "px"_fly_string);
+        z = CSSUnitValue::create(realm, 0, "px"_utf16_fly_string);
     }
     auto this_ = realm.create<CSSTranslate>(realm, is_2d, x, y, z.as_nonnull());
 
@@ -141,10 +141,10 @@ WebIDL::ExceptionOr<GC::Ref<Geometry::DOMMatrix>> CSSTranslate::to_matrix() cons
     auto matrix = Geometry::DOMMatrix::create(realm());
 
     // NB: to() throws a TypeError if the conversion can't be done.
-    matrix->set_m41(TRY(m_x->to("px"_fly_string))->value());
-    matrix->set_m42(TRY(m_y->to("px"_fly_string))->value());
+    matrix->set_m41(TRY(m_x->to("px"_utf16_fly_string))->value());
+    matrix->set_m42(TRY(m_y->to("px"_utf16_fly_string))->value());
     if (!is_2d())
-        matrix->set_m43(TRY(m_z->to("px"_fly_string))->value());
+        matrix->set_m43(TRY(m_z->to("px"_utf16_fly_string))->value());
 
     // 2. Return matrix.
     return matrix;
@@ -155,7 +155,7 @@ WebIDL::ExceptionOr<void> CSSTranslate::set_x(GC::Ref<CSSNumericValue> x)
     // AD-HOC: Not specced. https://github.com/w3c/css-houdini-drafts/issues/1153
     //         WPT expects this to throw for invalid values.
     if (!x->type().matches_length_percentage({}))
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "CSSTranslate x component doesn't match <length-percentage>"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "CSSTranslate x component doesn't match <length-percentage>"_utf16 };
     m_x = x;
     return {};
 }
@@ -165,7 +165,7 @@ WebIDL::ExceptionOr<void> CSSTranslate::set_y(GC::Ref<CSSNumericValue> y)
     // AD-HOC: Not specced. https://github.com/w3c/css-houdini-drafts/issues/1153
     //         WPT expects this to throw for invalid values.
     if (!y->type().matches_length_percentage({}))
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "CSSTranslate y component doesn't match <length-percentage>"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "CSSTranslate y component doesn't match <length-percentage>"_utf16 };
     m_y = y;
     return {};
 }
@@ -175,7 +175,7 @@ WebIDL::ExceptionOr<void> CSSTranslate::set_z(GC::Ref<CSSNumericValue> z)
     // AD-HOC: Not specced. https://github.com/w3c/css-houdini-drafts/issues/1153
     //         WPT expects this to throw for invalid values.
     if (!z->type().matches_length({}))
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "CSSTranslate z component doesn't match <length>"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "CSSTranslate z component doesn't match <length>"_utf16 };
     m_z = z;
     return {};
 }

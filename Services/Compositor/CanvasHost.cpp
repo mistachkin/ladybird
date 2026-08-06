@@ -10,6 +10,7 @@
 #include <LibGfx/CanvasCommandPlayer.h>
 #include <LibGfx/PaintingSurface.h>
 #include <LibGfx/SkiaBackendContext.h>
+#include <LibWeb/Painting/Canvas2DCommandStream.h>
 #include <LibWeb/Painting/CanvasSurfaceRegistry.h>
 
 namespace Compositor {
@@ -33,6 +34,14 @@ OwnPtr<Gfx::CanvasCommandPlayer> CanvasHost::create_2d_command_player(Gfx::IntSi
 
     auto format = alpha ? Gfx::BitmapFormat::BGRA8888 : Gfx::BitmapFormat::BGRx8888;
     auto player = make<Gfx::CanvasCommandPlayer>(m_skia_backend_context, size, format, Gfx::AlphaType::Premultiplied, [this](u64 canvas_id) -> Gfx::PaintingSurface const* {
+        // A 2D source resolves to its live draw surface: the shared command
+        // stream replays in recording order, so at this point the surface holds
+        // exactly the commands recorded before the referencing DrawCanvas.
+        if (auto* context = this->context(Web::Painting::CanvasId { canvas_id })) {
+            if (auto* canvas_context = context->get_pointer<Canvas2DContext>())
+                return canvas_context->command_player->surface().ptr();
+        }
+        // WebGL sources are presented separately and resolve via the registry.
         return m_canvas_surface_registry.canvas_surface(Web::Painting::CanvasId { canvas_id });
     });
 
@@ -59,13 +68,6 @@ static NonnullRefPtr<Gfx::PaintingSurface> create_presented_canvas_surface(Gfx::
         source.skia_backend_context());
     copy_surface_contents(source, *surface);
     return surface;
-}
-
-CanvasHost::Canvas2DContext& CanvasHost::as_2d(Context& context)
-{
-    auto* canvas_context = context.get_pointer<Canvas2DContext>();
-    VERIFY(canvas_context);
-    return *canvas_context;
 }
 
 HostWebGLContext& CanvasHost::as_webgl(Context& context)
@@ -129,19 +131,24 @@ void CanvasHost::present_canvas_2d_context(Web::Painting::CanvasId canvas_id, Ca
     context.has_uncommitted_commands = false;
 }
 
-void CanvasHost::execute_canvas_2d_commands(Web::Painting::CanvasId canvas_id, Gfx::CanvasCommandList const& commands, bool commit)
+void CanvasHost::execute_canvas_2d_stream(Vector<Web::Painting::Canvas2DCommandStreamSegment> const& segments)
 {
-    auto* context = this->context(canvas_id);
-    VERIFY(context);
+    for (auto const& segment : segments) {
+        // The canvas may have been destroyed while this segment was pending in
+        // WebContent, so a missing context is not a protocol violation.
+        auto* context = this->context(segment.canvas_id);
+        auto* canvas_context = context ? context->get_pointer<Canvas2DContext>() : nullptr;
+        if (!canvas_context)
+            continue;
 
-    auto& canvas_context = as_2d(*context);
-    if (!commands.is_empty()) {
-        canvas_context.command_player->play(commands);
-        canvas_context.has_uncommitted_commands = true;
+        if (!segment.commands.is_empty()) {
+            canvas_context->command_player->play(segment.commands);
+            canvas_context->has_uncommitted_commands = true;
+        }
+
+        if (segment.present && canvas_context->has_uncommitted_commands)
+            present_canvas_2d_context(segment.canvas_id, *canvas_context);
     }
-
-    if (commit && canvas_context.has_uncommitted_commands)
-        present_canvas_2d_context(canvas_id, canvas_context);
 }
 
 void CanvasHost::execute_webgl_commands(Web::Painting::CanvasId canvas_id, ReadonlyBytes commands, Vector<Gfx::DecodedImageFrame> const& bitmaps)
@@ -152,6 +159,34 @@ void CanvasHost::execute_webgl_commands(Web::Painting::CanvasId canvas_id, Reado
     MUST(webgl_context.execute_commands(commands, bitmaps));
     if (auto surface = webgl_context.surface())
         m_canvas_surface_registry.set_canvas_surface(canvas_id, surface.release_nonnull());
+}
+
+void CanvasHost::set_webgl_shared_command_buffer(Web::Painting::CanvasId canvas_id, Web::WebGL::WebGLSharedCommandBuffer shared_command_buffer)
+{
+    auto* context = this->context(canvas_id);
+    VERIFY(context);
+    as_webgl(*context).set_shared_command_buffer(move(shared_command_buffer));
+}
+
+bool CanvasHost::execute_webgl_commands_from_shared_buffer(Web::Painting::CanvasId canvas_id, u64 offset, u64 size_in_bytes, u64 flush_sequence_number, Vector<Gfx::DecodedImageFrame> const& bitmaps)
+{
+    auto* context = this->context(canvas_id);
+    VERIFY(context);
+    auto& webgl_context = as_webgl(*context);
+
+    auto commands = webgl_context.shared_command_buffer_range(offset, size_in_bytes);
+    if (!commands.has_value())
+        return false;
+
+    // WebContent can rewrite shared bytes while they execute, so a malformed stream is
+    // a misbehaving peer rather than a Compositor bug; report instead of crashing.
+    if (webgl_context.execute_commands(*commands, bitmaps).is_error())
+        return false;
+    webgl_context.store_executed_flush_sequence_number(flush_sequence_number);
+
+    if (auto surface = webgl_context.surface())
+        m_canvas_surface_registry.set_canvas_surface(canvas_id, surface.release_nonnull());
+    return true;
 }
 
 ErrorOr<ByteBuffer> CanvasHost::execute_webgl_sync_call(Web::Painting::CanvasId canvas_id, ByteBuffer request)
@@ -168,11 +203,11 @@ Web::WebGL::ReadPixelsResult CanvasHost::webgl_read_pixels_robust_angle(Web::Pai
     return as_webgl(*context).read_pixels_robust_angle(x, y, width, height, format, type, buf_size, move(pixels));
 }
 
-void CanvasHost::webgl_read_buffer_sub_data(Web::Painting::CanvasId canvas_id, Web::WebGL::GLenum target, Web::WebGL::GLintptr offset, Web::WebGL::GLintptr size, Core::AnonymousBuffer data)
+bool CanvasHost::webgl_read_buffer_sub_data(Web::Painting::CanvasId canvas_id, Web::WebGL::GLenum target, Web::WebGL::GLintptr offset, Web::WebGL::GLintptr size, Core::AnonymousBuffer data)
 {
     auto* context = this->context(canvas_id);
     VERIFY(context);
-    as_webgl(*context).read_buffer_sub_data(target, offset, size, move(data));
+    return as_webgl(*context).read_buffer_sub_data(target, offset, size, move(data));
 }
 
 void CanvasHost::present_webgl_canvas(Web::Painting::CanvasId canvas_id, bool preserve_drawing_buffer)

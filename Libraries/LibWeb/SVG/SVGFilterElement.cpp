@@ -16,7 +16,7 @@
 #include <LibWeb/DOM/Text.h>
 #include <LibWeb/HTML/DecodedImageData.h>
 #include <LibWeb/Layout/Node.h>
-#include <LibWeb/Painting/PaintableBox.h>
+#include <LibWeb/Painting/Paintable.h>
 #include <LibWeb/SVG/SVGComponentTransferFunctionElement.h>
 #include <LibWeb/SVG/SVGFEBlendElement.h>
 #include <LibWeb/SVG/SVGFEColorMatrixElement.h>
@@ -59,7 +59,7 @@ void SVGFilterElement::visit_edges(Cell::Visitor& visitor)
     SVGURIReferenceMixin::visit_edges(visitor);
 }
 
-void SVGFilterElement::attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
+void SVGFilterElement::attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_)
 {
     Base::attribute_changed(name, old_value, value, namespace_);
 
@@ -80,13 +80,13 @@ Optional<Gfx::Filter> SVGFilterElement::gfx_filter(Layout::NodeWithStyle const& 
         Gfx::InterpolationColorSpace color_space { Gfx::InterpolationColorSpace::SRGB };
     };
 
-    HashMap<String, FilterResult> result_map;
+    HashMap<Utf16String, FilterResult> result_map;
     FilterResult root;
 
     auto operating_color_space = [](DOM::Element const& element) {
         // linearRGB performs color operations in the linear-light sRGB color space; auto and sRGB use gamma-encoded sRGB.
-        auto computed_properties = element.computed_properties();
-        auto color_interpolation_filters = computed_properties ? computed_properties->color_interpolation_filters() : CSS::ColorInterpolation::Linearrgb;
+        auto computed_values = element.computed_values();
+        auto color_interpolation_filters = computed_values ? computed_values->color_interpolation_filters() : CSS::ColorInterpolation::Linearrgb;
         return CSS::to_interpolation_color_space(color_interpolation_filters);
     };
 
@@ -103,7 +103,7 @@ Optional<Gfx::Filter> SVGFilterElement::gfx_filter(Layout::NodeWithStyle const& 
     };
 
     // https://www.w3.org/TR/filter-effects-1/#element-attrdef-filter-primitive-in
-    auto resolve_input = [&](String const& name) -> FilterResult {
+    auto resolve_input = [&](Utf16View name) -> FilterResult {
         // FIXME: Add missing inputs (BackgroundImage, BackgroundAlpha, FillPaint and StrokePaint).
         if (name == "SourceGraphic"sv)
             return { {}, Gfx::InterpolationColorSpace::SRGB };
@@ -123,7 +123,7 @@ Optional<Gfx::Filter> SVGFilterElement::gfx_filter(Layout::NodeWithStyle const& 
         return root;
     };
 
-    auto resolve_input_in_color_space = [&](String const& name, Gfx::InterpolationColorSpace destination_color_space) {
+    auto resolve_input_in_color_space = [&](Utf16View name, Gfx::InterpolationColorSpace destination_color_space) {
         return convert_to_color_space(resolve_input(name), destination_color_space);
     };
 
@@ -216,8 +216,8 @@ Optional<Gfx::Filter> SVGFilterElement::gfx_filter(Layout::NodeWithStyle const& 
             auto in_attr = colormatrix_primitive->in1()->base_val();
             auto input = resolve_input_in_color_space(in_attr, operating_space);
 
-            auto type_value = colormatrix_primitive->attribute(AttributeNames::type).value_or(String {});
-            auto values_value = colormatrix_primitive->attribute(AttributeNames::values).value_or(String {});
+            auto type_value = colormatrix_primitive->attribute(AttributeNames::type).value_or({});
+            auto values_value = colormatrix_primitive->attribute(AttributeNames::values).value_or({});
 
             // Default type is "matrix" per spec.
             if (type_value.is_empty() || type_value.equals_ignoring_ascii_case("matrix"sv)) {
@@ -225,12 +225,12 @@ Optional<Gfx::Filter> SVGFilterElement::gfx_filter(Layout::NodeWithStyle const& 
                 float matrix[20] = { 0 };
                 size_t count = 0;
 
-                StringView sv = values_value;
+                Utf16View sv = values_value;
                 auto skip_leading_whitespace = [&] {
-                    sv = sv.trim_whitespace(AK::TrimMode::Left);
+                    sv = sv.trim_ascii_whitespace(AK::TrimMode::Left);
                 };
                 auto consume_comma_and_whitespace = [&] {
-                    if (!sv.is_empty() && sv[0] == ',')
+                    if (!sv.is_empty() && sv.code_unit_at(0) == ',')
                         sv = sv.substring_view(1);
                     skip_leading_whitespace();
                 };
@@ -422,9 +422,16 @@ Optional<Gfx::Filter> SVGFilterElement::gfx_filter(Layout::NodeWithStyle const& 
             auto tile_stitch_size = [turbulence, scale_x, scale_y] {
                 auto stitch_tiles = turbulence->stitch_tiles()->base_val();
                 switch (stitch_tiles) {
-                case to_underlying(SVGFETurbulenceElement::StitchType::Stitch):
-                    // FIXME: Are these the correct width and height?
-                    return Gfx::IntSize { round_to<int>(turbulence->width()->base_val()->value() * scale_x), round_to<int>(turbulence->height()->base_val()->value() * scale_y) };
+                case to_underlying(SVGFETurbulenceElement::StitchType::Stitch): {
+                    // FIXME: Use the correct width and height
+                    auto maybe_width = turbulence->width()->base_val()->value();
+                    auto maybe_height = turbulence->height()->base_val()->value();
+
+                    auto width = maybe_width.is_exception() ? 0 : maybe_width.release_value();
+                    auto height = maybe_height.is_exception() ? 0 : maybe_height.release_value();
+
+                    return Gfx::IntSize { round_to<int>(width * scale_x), round_to<int>(height * scale_y) };
+                }
                 case to_underlying(SVGFETurbulenceElement::StitchType::NoStitch):
                     return Gfx::IntSize {};
                 default:
@@ -482,30 +489,6 @@ GC::Ref<SVGAnimatedEnumeration> SVGFilterElement::filter_units() const
 GC::Ref<SVGAnimatedEnumeration> SVGFilterElement::primitive_units() const
 {
     return SVGAnimatedEnumeration::create(realm(), to_underlying(m_primitive_units.value_or(SVGUnits::UserSpaceOnUse)));
-}
-
-// https://drafts.fxtf.org/filter-effects/#element-attrdef-filter-x
-GC::Ref<SVGAnimatedLength> SVGFilterElement::x() const
-{
-    return svg_animated_length_for_property(CSS::PropertyID::X);
-}
-
-// https://drafts.fxtf.org/filter-effects/#element-attrdef-filter-y
-GC::Ref<SVGAnimatedLength> SVGFilterElement::y() const
-{
-    return svg_animated_length_for_property(CSS::PropertyID::Y);
-}
-
-// https://drafts.fxtf.org/filter-effects/#element-attrdef-filter-width
-GC::Ref<SVGAnimatedLength> SVGFilterElement::width() const
-{
-    return svg_animated_length_for_property(CSS::PropertyID::Width);
-}
-
-// https://drafts.fxtf.org/filter-effects/#element-attrdef-filter-height
-GC::Ref<SVGAnimatedLength> SVGFilterElement::height() const
-{
-    return svg_animated_length_for_property(CSS::PropertyID::Height);
 }
 
 }

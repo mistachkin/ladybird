@@ -14,6 +14,12 @@
 
 namespace Web::HTML {
 
+static Utf16String generate_random_uuid_utf16()
+{
+    auto uuid = Crypto::generate_random_uuid();
+    return Utf16String::from_ascii_without_validation(uuid.bytes());
+}
+
 NonnullRefPtr<SessionHistoryEntry> SessionHistoryEntry::create()
 {
     return adopt_ref(*new SessionHistoryEntry());
@@ -27,23 +33,12 @@ void SessionHistoryEntry::set_document_state(RefPtr<DocumentState> document_stat
 SessionHistoryEntry::SessionHistoryEntry()
     : m_classic_history_api_state(MUST(structured_serialize_for_storage(JS::VM::the(), JS::js_null())))
     , m_navigation_api_state(MUST(structured_serialize_for_storage(JS::VM::the(), JS::js_undefined())))
-    , m_navigation_api_key(Crypto::generate_random_uuid())
-    , m_navigation_api_id(Crypto::generate_random_uuid())
+    , m_navigation_api_key(generate_random_uuid_utf16())
+    , m_navigation_api_id(generate_random_uuid_utf16())
 {
 }
 
-static u64 document_state_id_for_descriptor(DocumentState const& document_state, SessionHistoryEntryDescriptorCreationState& creation_state)
-{
-    if (auto id = creation_state.document_state_ids.get(&document_state); id.has_value())
-        return *id;
-
-    auto id = creation_state.next_document_state_id++;
-    VERIFY(id != 0);
-    creation_state.document_state_ids.set(&document_state, id);
-    return id;
-}
-
-static SessionHistoryDocumentStateDescriptor create_session_history_document_state_descriptor(DocumentState const& document_state, SessionHistoryEntryDescriptorCreationState& creation_state)
+static SessionHistoryDocumentStateDescriptor create_session_history_document_state_descriptor(DocumentState& document_state)
 {
     Vector<SessionHistoryNestedHistoryDescriptor> nested_history_descriptors;
     nested_history_descriptors.ensure_capacity(document_state.nested_histories().size());
@@ -55,7 +50,7 @@ static SessionHistoryDocumentStateDescriptor create_session_history_document_sta
             //     still "pending" has not been attached to the traversable's step graph yet.
             if (!nested_entry->step_value().has_value())
                 continue;
-            nested_entry_descriptors.unchecked_append(create_session_history_entry_descriptor(nested_entry, creation_state));
+            nested_entry_descriptors.unchecked_append(create_session_history_entry_descriptor(nested_entry));
         }
 
         // NB: Keep the nested-history descriptor even when every entry in it is still pending. The entries are not
@@ -68,7 +63,7 @@ static SessionHistoryDocumentStateDescriptor create_session_history_document_sta
     }
 
     return {
-        .id = document_state_id_for_descriptor(document_state, creation_state),
+        .id = document_state.cross_process_id(),
         .history_policy_container = document_state.history_policy_container(),
         .request_referrer = document_state.request_referrer(),
         .request_referrer_policy = document_state.request_referrer_policy(),
@@ -83,13 +78,13 @@ static SessionHistoryDocumentStateDescriptor create_session_history_document_sta
     };
 }
 
-SessionHistoryEntryDescriptor create_session_history_entry_descriptor(SessionHistoryEntry const& entry, SessionHistoryEntryDescriptorCreationState& creation_state)
+SessionHistoryEntryDescriptor create_session_history_entry_descriptor(SessionHistoryEntry const& entry)
 {
     auto entry_step = entry.step_value();
     VERIFY(entry_step.has_value());
     SessionHistoryDocumentStateDescriptor document_state_descriptor;
     if (auto document_state = entry.document_state())
-        document_state_descriptor = create_session_history_document_state_descriptor(*document_state, creation_state);
+        document_state_descriptor = create_session_history_document_state_descriptor(*document_state);
 
     return {
         .step = static_cast<i32>(*entry_step),
@@ -171,30 +166,9 @@ static bool session_history_document_state_descriptors_match(SessionHistoryDocum
         && a.resource == b.resource
         && a.reload_pending == b.reload_pending
         && a.ever_populated == b.ever_populated
+        && a.is_provisional == b.is_provisional
         && a.navigable_target_name == b.navigable_target_name
         && session_history_nested_history_descriptors_match(a.nested_histories, b.nested_histories);
-}
-
-static bool session_history_nested_history_descriptors_match_ignoring_document_state_ids(Vector<SessionHistoryNestedHistoryDescriptor> const&, Vector<SessionHistoryNestedHistoryDescriptor> const&);
-
-static bool session_history_document_state_descriptors_match_ignoring_id(SessionHistoryDocumentStateDescriptor const& a, SessionHistoryDocumentStateDescriptor const& b, MatchNestedHistories match_nested_histories)
-{
-    if (!(history_policy_containers_match(a.history_policy_container, b.history_policy_container)
-            && a.request_referrer == b.request_referrer
-            && a.request_referrer_policy == b.request_referrer_policy
-            && a.initiator_origin == b.initiator_origin
-            && a.origin == b.origin
-            && a.about_base_url == b.about_base_url
-            && a.resource == b.resource
-            && a.reload_pending == b.reload_pending
-            && a.ever_populated == b.ever_populated
-            && a.navigable_target_name == b.navigable_target_name))
-        return false;
-
-    if (match_nested_histories == MatchNestedHistories::No)
-        return true;
-
-    return session_history_nested_history_descriptors_match_ignoring_document_state_ids(a.nested_histories, b.nested_histories);
 }
 
 bool session_history_entry_descriptors_match(SessionHistoryEntryDescriptor const& a, SessionHistoryEntryDescriptor const& b)
@@ -210,25 +184,6 @@ bool session_history_entry_descriptors_match(SessionHistoryEntryDescriptor const
         && a.scroll_position_data == b.scroll_position_data;
 }
 
-bool session_history_entry_descriptors_match_ignoring_document_state_id(SessionHistoryEntryDescriptor const& a, SessionHistoryEntryDescriptor const& b, MatchNestedHistories match_nested_histories)
-{
-    if (a.step != b.step)
-        return false;
-    if (a.url != b.url)
-        return false;
-    if (a.document_state.id != 0 && !session_history_document_state_descriptors_match_ignoring_id(a.document_state, b.document_state, match_nested_histories))
-        return false;
-    if (a.classic_history_api_state != b.classic_history_api_state)
-        return false;
-    if (a.navigation_api_state != b.navigation_api_state || a.navigation_api_key != b.navigation_api_key || a.navigation_api_id != b.navigation_api_id)
-        return false;
-    if (a.scroll_restoration_mode != b.scroll_restoration_mode)
-        return false;
-    if (a.document_state.id != 0 && a.scroll_position_data != b.scroll_position_data)
-        return false;
-    return true;
-}
-
 static bool session_history_entry_descriptors_match(Vector<SessionHistoryEntryDescriptor> const& a, Vector<SessionHistoryEntryDescriptor> const& b)
 {
     if (a.size() != b.size())
@@ -242,19 +197,6 @@ static bool session_history_entry_descriptors_match(Vector<SessionHistoryEntryDe
     return true;
 }
 
-static bool session_history_entry_descriptors_match_ignoring_document_state_ids(Vector<SessionHistoryEntryDescriptor> const& a, Vector<SessionHistoryEntryDescriptor> const& b)
-{
-    if (a.size() != b.size())
-        return false;
-
-    for (size_t i = 0; i < a.size(); ++i) {
-        if (session_history_entry_descriptors_match_ignoring_document_state_id(a[i], b[i]))
-            continue;
-        return false;
-    }
-    return true;
-}
-
 static bool session_history_nested_history_descriptors_match(Vector<SessionHistoryNestedHistoryDescriptor> const& a, Vector<SessionHistoryNestedHistoryDescriptor> const& b)
 {
     if (a.size() != b.size())
@@ -262,19 +204,6 @@ static bool session_history_nested_history_descriptors_match(Vector<SessionHisto
 
     for (size_t i = 0; i < a.size(); ++i) {
         if (a[i].id == b[i].id && session_history_entry_descriptors_match(a[i].entries, b[i].entries))
-            continue;
-        return false;
-    }
-    return true;
-}
-
-static bool session_history_nested_history_descriptors_match_ignoring_document_state_ids(Vector<SessionHistoryNestedHistoryDescriptor> const& a, Vector<SessionHistoryNestedHistoryDescriptor> const& b)
-{
-    if (a.size() != b.size())
-        return false;
-
-    for (size_t i = 0; i < a.size(); ++i) {
-        if (a[i].id == b[i].id && session_history_entry_descriptors_match_ignoring_document_state_ids(a[i].entries, b[i].entries))
             continue;
         return false;
     }
@@ -327,18 +256,16 @@ bool session_history_entry_matches_descriptor_ignoring_document_state_id(Session
         return false;
     if (entry.url() != descriptor.url)
         return false;
-    if (descriptor.document_state.id != 0) {
-        auto document_state = entry.document_state();
-        if (!document_state || !session_history_document_state_descriptor_matches_document_state_ignoring_id(descriptor.document_state, *document_state, match_nested_histories))
-            return false;
-    }
+    auto document_state = entry.document_state();
+    if (!document_state || !session_history_document_state_descriptor_matches_document_state_ignoring_id(descriptor.document_state, *document_state, match_nested_histories))
+        return false;
     if (entry.classic_history_api_state() != descriptor.classic_history_api_state)
         return false;
     if (entry.navigation_api_state() != descriptor.navigation_api_state || entry.navigation_api_key() != descriptor.navigation_api_key || entry.navigation_api_id() != descriptor.navigation_api_id)
         return false;
     if (entry.scroll_restoration_mode() != descriptor.scroll_restoration_mode)
         return false;
-    if (descriptor.document_state.id != 0 && entry.scroll_position_data() != descriptor.scroll_position_data)
+    if (entry.scroll_position_data() != descriptor.scroll_position_data)
         return false;
     return true;
 }
@@ -366,10 +293,10 @@ ErrorOr<Web::HTML::SessionHistoryEntryDescriptor> IPC::decode(Decoder& decoder)
     auto step = TRY(decoder.decode<i32>());
     auto url = TRY(decoder.decode<URL::URL>());
     auto document_state = TRY(decoder.decode<Web::HTML::SessionHistoryDocumentStateDescriptor>());
-    auto classic_history_api_state = TRY(decoder.decode<Web::HTML::SerializationRecord>());
-    auto navigation_api_state = TRY(decoder.decode<Web::HTML::SerializationRecord>());
-    auto navigation_api_key = TRY(decoder.decode<String>());
-    auto navigation_api_id = TRY(decoder.decode<String>());
+    auto classic_history_api_state = TRY(decoder.decode<Web::HTML::StorageSerializationRecord>());
+    auto navigation_api_state = TRY(decoder.decode<Web::HTML::StorageSerializationRecord>());
+    auto navigation_api_key = TRY(decoder.decode<Utf16String>());
+    auto navigation_api_id = TRY(decoder.decode<Utf16String>());
     auto scroll_restoration_mode = TRY(decoder.decode<Web::HTML::ScrollRestorationMode>());
     auto scroll_position_data = TRY(decoder.decode<Web::HTML::SessionHistoryEntryScrollPositionData>());
 
@@ -415,6 +342,7 @@ ErrorOr<void> IPC::encode(Encoder& encoder, Web::HTML::SessionHistoryDocumentSta
     TRY(encoder.encode(document_state.resource));
     TRY(encoder.encode(document_state.reload_pending));
     TRY(encoder.encode(document_state.ever_populated));
+    TRY(encoder.encode(document_state.is_provisional));
     TRY(encoder.encode(document_state.navigable_target_name));
     TRY(encoder.encode(document_state.nested_histories));
     return {};
@@ -423,17 +351,18 @@ ErrorOr<void> IPC::encode(Encoder& encoder, Web::HTML::SessionHistoryDocumentSta
 template<>
 ErrorOr<Web::HTML::SessionHistoryDocumentStateDescriptor> IPC::decode(Decoder& decoder)
 {
-    auto id = TRY(decoder.decode<u64>());
+    auto id = TRY(decoder.decode<Web::HTML::CrossProcessId>());
     auto history_policy_container = TRY(decoder.decode<Variant<Web::HTML::SerializedPolicyContainer, Web::HTML::DocumentState::Client>>());
     auto request_referrer = TRY(decoder.decode<Web::Fetch::Infrastructure::Request::ReferrerType>());
     auto request_referrer_policy = TRY(decoder.decode<Web::ReferrerPolicy::ReferrerPolicy>());
     auto initiator_origin = TRY(decoder.decode<Optional<URL::Origin>>());
     auto origin = TRY(decoder.decode<Optional<URL::Origin>>());
     auto about_base_url = TRY(decoder.decode<Optional<URL::URL>>());
-    auto resource = TRY(decoder.decode<Variant<Empty, String, Web::HTML::POSTResource>>());
+    auto resource = TRY(decoder.decode<Web::HTML::DocumentResource>());
     auto reload_pending = TRY(decoder.decode<bool>());
     auto ever_populated = TRY(decoder.decode<bool>());
-    auto navigable_target_name = TRY(decoder.decode<String>());
+    auto is_provisional = TRY(decoder.decode<bool>());
+    auto navigable_target_name = TRY(decoder.decode<Utf16String>());
     auto nested_histories = TRY(decoder.decode<Vector<Web::HTML::SessionHistoryNestedHistoryDescriptor>>());
 
     return Web::HTML::SessionHistoryDocumentStateDescriptor {
@@ -447,6 +376,7 @@ ErrorOr<Web::HTML::SessionHistoryDocumentStateDescriptor> IPC::decode(Decoder& d
         .resource = move(resource),
         .reload_pending = reload_pending,
         .ever_populated = ever_populated,
+        .is_provisional = is_provisional,
         .navigable_target_name = move(navigable_target_name),
         .nested_histories = move(nested_histories),
     };
@@ -463,8 +393,8 @@ ErrorOr<void> IPC::encode(Encoder& encoder, Web::HTML::SessionHistoryNestedHisto
 template<>
 ErrorOr<Web::HTML::SessionHistoryNestedHistoryDescriptor> IPC::decode(Decoder& decoder)
 {
-    auto id = TRY(decoder.decode<String>());
+    auto id = TRY(decoder.decode<Web::HTML::CrossProcessId>());
     auto entries = TRY(decoder.decode<Vector<Web::HTML::SessionHistoryEntryDescriptor>>());
 
-    return Web::HTML::SessionHistoryNestedHistoryDescriptor { move(id), move(entries) };
+    return Web::HTML::SessionHistoryNestedHistoryDescriptor { id, move(entries) };
 }

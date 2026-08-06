@@ -1,8 +1,8 @@
 Harness status: OK
 
-Found 306 tests
+Found 309 tests
 
-302 Pass
+305 Pass
 4 Fail
 Pass	accent-color
 Pass	border-collapse
@@ -96,6 +96,7 @@ Pass	animation-timing-function
 Pass	appearance
 Pass	aspect-ratio
 Pass	backdrop-filter
+Pass	backface-visibility
 Pass	background-attachment
 Pass	background-blend-mode
 Pass	background-clip
@@ -162,6 +163,7 @@ Pass	counter-reset
 Pass	counter-set
 Pass	cx
 Pass	cy
+Pass	d
 Pass	display
 Pass	filter
 Pass	flex-basis
@@ -299,6 +301,7 @@ Pass	transition-timing-function
 Pass	translate
 Pass	unicode-bidi
 Pass	user-select
+Pass	vector-effect
 Pass	vertical-align
 Pass	view-timeline-axis
 Pass	view-timeline-inset

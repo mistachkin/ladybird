@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, the Ladybird developers.
+ * Copyright (c) 2026-present, the Ladybird developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -22,6 +22,7 @@
 #include <LibGfx/Size.h>
 #include <LibWeb/Compositor/AsyncScrollTree.h>
 #include <LibWeb/Compositor/AsyncScrollingState.h>
+#include <LibWeb/Compositor/SmoothScrollAnimation.h>
 #include <LibWeb/Compositor/Types.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/Painting/AccumulatedVisualContext.h>
@@ -74,10 +75,16 @@ public:
         i32 bitmap_id { 0 };
     };
 
+    struct PendingFrame {
+        Gfx::IntRect viewport_rect;
+        Gfx::IntRect damage_rect;
+    };
+
     ContextState(Optional<u64> page_id, CompositorStateWebContentClient&, Web::Painting::CanvasSurfaceRegistry const&, bool async_scrolling_enabled);
     ~ContextState();
 
     bool is_owned_by(CompositorStateWebContentClient const&) const;
+    CompositorStateWebContentClient& web_content_client() const { return m_web_content_client; }
     void request_rendering_update();
     void dispatch_mouse_event_to_web_content(Web::MouseEvent const&);
 
@@ -90,14 +97,15 @@ public:
     RefPtr<Gfx::PaintingSurface> latest_rendered_surface() const { return m_latest_rendered_surface; }
 
     void apply_display_list_resource_transaction(Web::Painting::DisplayListResourceTransaction&&);
+    void update_image_frame_resources(Vector<Web::Painting::DisplayListImageFrameResource>);
     void install_display_list_update(
         NonnullRefPtr<Web::Painting::DisplayList>,
         Web::Painting::AccumulatedVisualContextTree,
         Web::Painting::ScrollStateSnapshot&&);
     void update_visual_context_tree(Web::Painting::AccumulatedVisualContextTree);
     void update_scroll_state(Web::Painting::ScrollStateSnapshot&&);
-    void update_video_frame(Web::Painting::VideoFrameResourceId, NonnullRefPtr<Media::VideoFrame const>);
-    void clear_video_frame(Web::Painting::VideoFrameResourceId);
+    void set_video_sink(Web::Painting::VideoSinkResourceId, RefPtr<Media::VideoSink>);
+    HashMap<u64, Media::VideoSinkHandle> const& video_sink_handles() const { return m_display_list_resource_storage.video_sink_handles(); }
 
     void invalidate_wheel_event_listener_state(u64 generation);
     ContextUpdateResult handle_mouse_event(Web::MouseEvent const&);
@@ -108,6 +116,10 @@ public:
         Gfx::FloatPoint delta,
         Gfx::IntRect viewport_rect,
         Web::Compositor::AsyncScrollOperationTracking);
+    AsyncScrollResult smooth_scroll_to(Web::Compositor::AsyncScrollNodeStableID, Gfx::FloatPoint offset, Gfx::IntRect viewport_rect, double device_pixels_per_css_pixel);
+    void cancel_smooth_scroll(Web::Compositor::AsyncScrollNodeStableID);
+    Optional<Gfx::IntRect> advance_smooth_scroll_animations(MonotonicTime now);
+    bool has_active_smooth_scroll_animations() const { return !m_smooth_scroll_animations.is_empty(); }
     ContextUpdateResult async_scroll_by(Gfx::FloatPoint position, Gfx::FloatPoint delta);
     bool should_defer_main_thread_present_for_async_scroll() const;
     Web::Compositor::PendingAsyncScrollUpdates take_pending_async_scroll_updates();
@@ -116,20 +128,22 @@ public:
     bool should_shrink_backing_stores_after_resize() const;
     void schedule_backing_store_shrink(Function<void()>);
     void finish_window_resize();
-    Optional<BackingStoreManager::Publication> resize_backing_stores_if_needed(RefPtr<Gfx::SkiaBackendContext> const&);
+    Optional<BackingStoreManager::Publication> resize_backing_stores_if_needed(RefPtr<Gfx::SkiaBackendContext> const&, BackingStoreManager::GpuSharing);
+    void invalidate_backing_stores();
 
     bool set_display_metadata(Optional<u64> display_id, double refresh_rate);
     Optional<u64> display_id() const { return m_display_id; }
     double display_refresh_rate() const { return m_display_refresh_rate; }
 
-    void queue_present_frame(Gfx::IntRect);
+    void queue_present_frame(PendingFrame);
     void mark_pending_present_frame_scheduled();
     bool has_pending_present_frame_scheduled_on(Optional<u64> display_id) const;
     bool can_schedule_pending_present_frame_if_unblocked() const;
-    Optional<Gfx::IntRect> take_pending_present_frame_if_unblocked();
+    Optional<PendingFrame> take_pending_present_frame_if_unblocked();
     bool needs_rasterization() const;
     Optional<Gfx::IntRect> current_frame_rect_to_present() const;
-    Optional<PreparedFrame> prepare_frame(Web::Painting::DisplayListPlayerSkia&, Gfx::IntRect, CompositedContextResolver const*);
+    Optional<Gfx::IntRect> video_present_rect() const;
+    Optional<PreparedFrame> prepare_frame(Web::Painting::DisplayListPlayerSkia&, PendingFrame, CompositedContextResolver const*);
     void did_submit_prepared_frame(Gfx::IntRect);
     bool present_synchronously(Web::Painting::DisplayListPlayerSkia&, CompositedContextResolver const*);
     bool can_paint_screenshot(Gfx::ShareableBitmap&) const;
@@ -138,6 +152,13 @@ public:
     void did_finish_gpu_present(i32 bitmap_id);
 
 private:
+    struct ActiveSmoothScrollAnimation {
+        Web::Compositor::AsyncScrollNodeStableID stable_node_id;
+        Web::Compositor::AsyncScrollOperationID operation_id;
+        Web::Compositor::SmoothScrollAnimation animation;
+        MonotonicTime started_at;
+    };
+
     struct VisualViewportScrollDelta {
         Web::Compositor::AsyncScrollOffset scroll_offset;
         Gfx::FloatPoint consumed_delta;
@@ -150,12 +171,13 @@ private:
     Optional<VisualViewportScrollDelta> apply_visual_viewport_scroll_delta(Gfx::FloatPoint);
     Optional<Gfx::FloatPoint> reapply_pending_async_scroll_offsets(Vector<Web::Compositor::AsyncScrollOffset> const&);
     void store_pending_async_scroll_offsets(Vector<Web::Compositor::AsyncScrollOffset> const&, Optional<Web::Compositor::AsyncScrollOperationID> = {});
+    void cancel_smooth_scroll_for_node(Web::Compositor::AsyncScrollNodeID);
     Optional<Gfx::IntRect> apply_viewport_scrollbar_drag(ViewportScrollbarController::Drag const&);
     void rebuild_wheel_hit_test_targets();
     bool is_present_blocked() const;
     bool can_render_frame() const;
     Web::Painting::AccumulatedVisualContextTree const& visual_context_tree_for_compositing() const;
-    void paint_current_display_list(Web::Painting::DisplayListPlayerSkia&, Gfx::PaintingSurface&, CompositedContextResolver const*);
+    void paint_current_display_list(Web::Painting::DisplayListPlayerSkia&, Gfx::PaintingSurface&, CompositedContextResolver const*, Optional<Gfx::IntRect> damage_rect = {});
 
     CompositorStateWebContentClient& m_web_content_client;
     Web::Painting::CanvasSurfaceRegistry const& m_canvas_surface_registry;
@@ -172,12 +194,14 @@ private:
     Web::Painting::ScrollStateSnapshot m_scroll_state_snapshot;
     BackingStoreManager m_backing_store_manager;
     RefPtr<Gfx::PaintingSurface> m_latest_rendered_surface;
+    RefPtr<Gfx::PaintingSurface> m_damage_surface;
 
     Web::Compositor::AsyncScrollTree m_async_scroll_tree;
     ViewportScrollbarController m_viewport_scrollbar_controller;
 
     Vector<Web::Compositor::AsyncScrollOffset> m_pending_async_scroll_offsets;
     Vector<Web::Compositor::AsyncScrollOperationID> m_completed_async_scroll_operation_ids;
+    Vector<ActiveSmoothScrollAnimation> m_smooth_scroll_animations;
     Web::Compositor::AsyncScrollOperationID m_next_async_scroll_operation_id { 0 };
     Gfx::IntRect m_async_scrolling_viewport_rect;
     bool m_has_async_scrolling_state { false };
@@ -193,11 +217,10 @@ private:
     Optional<u64> m_display_id;
     double m_display_refresh_rate { 60.0 };
 
-    Optional<Gfx::IntRect> m_pending_present_frame;
+    Optional<PendingFrame> m_pending_present_frame;
     bool m_pending_present_frame_scheduled { false };
     Optional<Gfx::IntRect> m_presented_frame;
     Optional<i32> m_gpu_present_bitmap_id_awaiting_completion;
-    Optional<i32> m_presented_bitmap_id_awaiting_ack;
 };
 
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, Ladybird contributors
+ * Copyright (c) 2026-present, the Ladybird developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -9,12 +9,14 @@
 #include <AK/HashMap.h>
 #include <AK/NonnullRefPtr.h>
 #include <AK/Optional.h>
+#include <AK/Utf16String.h>
 #include <AK/Variant.h>
 #include <AK/Vector.h>
 #include <AK/WeakPtr.h>
 #include <LibWeb/HTML/BroadcastChannelMessage.h>
 #include <LibWeb/HTML/WorkerAgentTypes.h>
 #include <LibWebView/Forward.h>
+#include <LibWebView/PrivateBrowsing.h>
 
 namespace WebView {
 
@@ -23,9 +25,10 @@ public:
     static WorkerProcessManager& the();
 
     struct SharedWorkerKey {
+        IsPrivate is_private { IsPrivate::No };
         Web::StorageAPI::StorageKey storage_key;
         URL::URL url;
-        String name;
+        Utf16String name;
 
         bool operator==(SharedWorkerKey const&) const = default;
     };
@@ -38,7 +41,7 @@ public:
     void remove_web_content_owner(WebContentClient&);
     void remove_web_worker_owner(WebWorkerClient&);
 
-    void broadcast_channel_message_from_web_content(Web::HTML::BroadcastChannelMessage const&);
+    void broadcast_channel_message_from_web_content(Web::HTML::BroadcastChannelMessage const&, IsPrivate);
 
 private:
     friend class WebWorkerClient;
@@ -59,16 +62,16 @@ private:
         Web::HTML::WorkerAgentOwnerToken token { 0 };
     };
 
-    Web::HTML::WorkerAgentId start_worker_agent(Owner, Web::HTML::WorkerAgentStartRequest);
+    Web::HTML::WorkerAgentId start_worker_agent(Owner, Web::HTML::WorkerAgentStartRequest, IsPrivate);
 
     void notify_worker_script_load_success(Owner const&);
     void notify_worker_script_load_failure(Owner const&);
-    void notify_worker_exception(Owner const&, String const& message, String const& filename, u32 lineno, u32 colno);
+    void notify_worker_exception(Owner const&, Utf16String const& message, Utf16String const& filename, u32 lineno, u32 colno);
     void notify_worker_close(Owner const&);
 
     void worker_did_finish_loading_script(Web::HTML::WorkerAgentId, bool worker_is_secure_context);
     void worker_did_fail_loading_script(Web::HTML::WorkerAgentId);
-    void worker_did_report_exception(Web::HTML::WorkerAgentId, String message, String filename, u32 lineno, u32 colno);
+    void worker_did_report_exception(Web::HTML::WorkerAgentId, Utf16String message, Utf16String filename, u32 lineno, u32 colno);
     void worker_did_close(Web::HTML::WorkerAgentId);
     void worker_did_die(Web::HTML::WorkerAgentId);
     void worker_did_request_file(Web::HTML::WorkerAgentId, ByteString path, i32 request_id);
@@ -86,6 +89,7 @@ private:
         bool extended_lifetime { false };
         Optional<bool> worker_is_secure_context;
         bool closing { false };
+        IsPrivate is_private { IsPrivate::No };
         Optional<SharedWorkerKey> shared_worker_key;
         Vector<Owner> owners;
     };
@@ -103,7 +107,7 @@ template<>
 struct Traits<WebView::WorkerProcessManager::SharedWorkerKey> : public DefaultTraits<WebView::WorkerProcessManager::SharedWorkerKey> {
     static unsigned hash(WebView::WorkerProcessManager::SharedWorkerKey const& key)
     {
-        return pair_int_hash(pair_int_hash(Traits<Web::StorageAPI::StorageKey>::hash(key.storage_key), Traits<URL::URL>::hash(key.url)), key.name.hash());
+        return pair_int_hash(pair_int_hash(pair_int_hash(Traits<Web::StorageAPI::StorageKey>::hash(key.storage_key), Traits<URL::URL>::hash(key.url)), key.name.hash()), static_cast<unsigned>(key.is_private));
     }
 };
 

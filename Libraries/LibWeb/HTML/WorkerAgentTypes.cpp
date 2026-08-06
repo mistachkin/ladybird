@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, Ladybird contributors
+ * Copyright (c) 2026-present, the Ladybird developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -23,6 +23,7 @@ ErrorOr<void> encode(Encoder& encoder, Web::HTML::WorkerAgentStartRequest const&
     TRY(encoder.encode(request.outside_settings));
     TRY(encoder.encode(request.storage_key));
     TRY(encoder.encode(request.caller_is_secure_context));
+    TRY(encoder.encode(request.maximum_frames_per_second));
     TRY(encoder.encode(request.owner_token));
     return {};
 }
@@ -35,12 +36,13 @@ ErrorOr<Web::HTML::WorkerAgentStartRequest> decode(Decoder& decoder)
         .agent_type = TRY(decoder.decode<Web::Bindings::AgentType>()),
         .type = TRY(decoder.decode<Web::Bindings::WorkerType>()),
         .credentials = TRY(decoder.decode<Web::Bindings::RequestCredentials>()),
-        .name = TRY(decoder.decode<String>()),
+        .name = TRY(decoder.decode<Utf16String>()),
         .extended_lifetime = TRY(decoder.decode<bool>()),
         .outside_port = TRY(decoder.decode<Web::HTML::TransferDataEncoder>()),
         .outside_settings = TRY(decoder.decode<Web::HTML::SerializedEnvironmentSettingsObject>()),
         .storage_key = TRY(decoder.decode<Web::StorageAPI::StorageKey>()),
         .caller_is_secure_context = TRY(decoder.decode<bool>()),
+        .maximum_frames_per_second = TRY(decoder.decode<double>()),
         .owner_token = TRY(decoder.decode<Web::HTML::WorkerAgentOwnerToken>()),
     };
 }

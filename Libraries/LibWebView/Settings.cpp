@@ -9,6 +9,8 @@
 #include <AK/JsonArray.h>
 #include <AK/JsonObject.h>
 #include <AK/JsonValue.h>
+#include <AK/Utf16String.h>
+#include <LibCore/GeolocationProvider.h>
 #include <LibCore/StandardPaths.h>
 #include <LibIPC/Decoder.h>
 #include <LibIPC/Encoder.h>
@@ -67,6 +69,8 @@ static constexpr auto DISK_CACHE_MAXIMUM_SIZE_KEY = "maxSize"sv;
 
 static constexpr auto GLOBAL_PRIVACY_CONTROL_KEY = "globalPrivacyControl"sv;
 
+static constexpr auto GEOLOCATION_ENABLED_KEY = "geolocationEnabled"sv;
+
 static constexpr auto DNS_SETTINGS_KEY = "dnsSettings"sv;
 
 static constexpr auto CONFIG_VARIABLES_KEY = "configVariables"sv;
@@ -97,19 +101,11 @@ static auto const& CONFIG_VARIABLE_DEFINITIONS = *new Array<ConfigVariableDefini
         .array_element_type = JsonValue::Type::String,
     },
     {
-        .id = ConfigVariableID::UseRoundedWindowCorners,
-        .name = "ui.window.use_rounded_corners"sv,
-        .title = "Use rounded window corners"sv,
-        .description = "Clip browser windows to rounded corners."sv,
+        .id = ConfigVariableID::UseClientSideWindowDecorations,
+        .name = "ui.window.use_client_side_decorations"sv,
+        .title = "Use client-side window decorations"sv,
+        .description = "Use custom title bar and window controls instead of the system window frame."sv,
         .default_value = true,
-        .array_element_type = {},
-    },
-    {
-        .id = ConfigVariableID::UseServerSideWindowDecorations,
-        .name = "ui.window.use_server_side_decorations"sv,
-        .title = "Use server-side window decorations"sv,
-        .description = "Use the system window frame instead of the custom title bar and window controls."sv,
-        .default_value = false,
         .array_element_type = {},
     },
 } };
@@ -197,12 +193,8 @@ static bool config_variable_value_is_valid(ConfigVariableDefinition const& varia
     return true;
 }
 
-Settings Settings::create(Badge<Application>)
+Settings Settings::create(ByteString settings_path)
 {
-    // FIXME: Move this to a generic "Ladybird config directory" helper.
-    auto settings_directory = ByteString::formatted("{}/Ladybird", Core::StandardPaths::config_directory());
-    auto settings_path = ByteString::formatted("{}/Settings.json", settings_directory);
-
     Settings settings { move(settings_path) };
 
     auto settings_json = read_json_file(settings.m_settings_path);
@@ -269,7 +261,8 @@ Settings Settings::create(Badge<Application>)
             return;
 
         if (auto policy = saved_settings->get_string(SITE_SETTING_POLICY_KEY); policy.has_value()) {
-            if (auto parsed = Web::HTML::autoplay_policy_from_string(*policy); parsed.has_value())
+            auto policy_utf16 = Utf16String::from_utf8_without_validation(*policy);
+            if (auto parsed = Web::HTML::autoplay_policy_from_string(policy_utf16.utf16_view()); parsed.has_value())
                 site_setting.policy = *parsed;
         }
 
@@ -290,6 +283,9 @@ Settings Settings::create(Badge<Application>)
 
     if (auto global_privacy_control = settings_json.value().get_bool(GLOBAL_PRIVACY_CONTROL_KEY); global_privacy_control.has_value())
         settings.m_global_privacy_control = *global_privacy_control ? GlobalPrivacyControl::Yes : GlobalPrivacyControl::No;
+
+    if (auto geolocation_enabled = settings_json.value().get_bool(GEOLOCATION_ENABLED_KEY); geolocation_enabled.has_value())
+        settings.m_geolocation_enabled = *geolocation_enabled && Core::GeolocationProvider::is_available();
 
     if (auto dns_settings = settings_json.value().get(DNS_SETTINGS_KEY); dns_settings.has_value())
         settings.m_dns_settings = parse_dns_settings(*dns_settings);
@@ -392,7 +388,7 @@ JsonValue Settings::serialize_json() const
             site_filters.must_append(site_filter);
 
         JsonObject setting;
-        setting.set(SITE_SETTING_POLICY_KEY, Web::HTML::autoplay_policy_to_string(site_setting.policy));
+        setting.set(SITE_SETTING_POLICY_KEY, MUST(Web::HTML::autoplay_policy_to_string(site_setting.policy).to_utf8()));
         setting.set(SITE_SETTING_SITE_FILTERS_KEY, move(site_filters));
 
         settings.set(key, move(setting));
@@ -408,6 +404,8 @@ JsonValue Settings::serialize_json() const
     settings.set(BROWSING_DATA_KEY, move(browsing_data));
 
     settings.set(GLOBAL_PRIVACY_CONTROL_KEY, m_global_privacy_control == GlobalPrivacyControl::Yes);
+
+    settings.set(GEOLOCATION_ENABLED_KEY, m_geolocation_enabled);
 
     // dnsSettings :: { mode: "system" } | { mode: "custom", server: string, port: u16, type: "udp" | "tls", forciblyEnabled: bool, dnssec: bool }
     JsonObject dns_settings;
@@ -793,6 +791,15 @@ DNSSettings Settings::parse_dns_settings(JsonValue const& dns_settings)
 
     dbgln("Invalid DNS settings in parse_dns_settings, falling back to system DNS");
     return SystemDNS {};
+}
+
+void Settings::set_geolocation_enabled(bool enabled)
+{
+    m_geolocation_enabled = enabled && Core::GeolocationProvider::is_available();
+    persist_settings();
+
+    for (auto& observer : m_observers)
+        observer.geolocation_settings_changed();
 }
 
 void Settings::set_dns_settings(DNSSettings const& dns_settings, bool override_by_command_line)

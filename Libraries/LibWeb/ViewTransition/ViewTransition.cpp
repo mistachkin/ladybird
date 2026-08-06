@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Utf16String.h>
 #include <LibGfx/DecodedImageFrame.h>
 #include <LibJS/Runtime/Realm.h>
 #include <LibWeb/CSS/CSSKeyframesRule.h>
@@ -17,7 +18,7 @@
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/Layout/Node.h>
-#include <LibWeb/Painting/PaintableBox.h>
+#include <LibWeb/Painting/Paintable.h>
 #include <LibWeb/ViewTransition/ViewTransition.h>
 #include <LibWeb/WebIDL/AbstractOperations.h>
 #include <LibWeb/WebIDL/Promise.h>
@@ -29,13 +30,13 @@ GC_DEFINE_ALLOCATOR(ReplacedNamedViewTransitionPseudoElement);
 GC_DEFINE_ALLOCATOR(CapturedElement);
 GC_DEFINE_ALLOCATOR(ViewTransition);
 
-NamedViewTransitionPseudoElement::NamedViewTransitionPseudoElement(CSS::PseudoElement type, FlyString view_transition_name)
+NamedViewTransitionPseudoElement::NamedViewTransitionPseudoElement(CSS::PseudoElement type, Utf16FlyString view_transition_name)
     : m_type(type)
     , m_view_transition_name(view_transition_name)
 {
 }
 
-ReplacedNamedViewTransitionPseudoElement::ReplacedNamedViewTransitionPseudoElement(CSS::PseudoElement type, FlyString view_transition_name, Optional<Gfx::DecodedImageFrame> content = {})
+ReplacedNamedViewTransitionPseudoElement::ReplacedNamedViewTransitionPseudoElement(CSS::PseudoElement type, Utf16FlyString view_transition_name, Optional<Gfx::DecodedImageFrame> content = {})
     : NamedViewTransitionPseudoElement(type, view_transition_name)
 {
     m_content = content;
@@ -230,7 +231,7 @@ ErrorOr<void> ViewTransition::capture_the_old_state()
     auto& named_elements = m_named_elements;
 
     // 3. Let usedTransitionNames be a new set of strings.
-    auto used_transition_names = AK::OrderedHashTable<FlyString>();
+    auto used_transition_names = AK::OrderedHashTable<Utf16FlyString>();
 
     // 4. Let captureElements be a new list of elements.
     auto capture_elements = AK::Vector<DOM::Element&>();
@@ -368,7 +369,7 @@ ErrorOr<void> ViewTransition::capture_the_new_state()
     // NOTE: We just use m_named_elements
 
     // 3. Let usedTransitionNames be a new set of strings.
-    auto used_transition_names = AK::OrderedHashTable<FlyString>();
+    auto used_transition_names = AK::OrderedHashTable<Utf16FlyString>();
 
     // 4. For each element of every element that is connected, and has a node document equal to document, in paint
     //    order:
@@ -478,12 +479,12 @@ void ViewTransition::setup_transition_pseudo_elements()
             //       animation-name: -ua-view-transition-fade-in;
             //     }
             //    NOTE: The above code example contains variables to be replaced.
-            unsigned index = MUST(stylesheet->insert_rule(MUST(String::formatted(R"(
+            unsigned index = MUST(stylesheet->insert_rule(Utf16String::formatted(R"(
                 :root::view-transition-new({}) {{
                     animation-name: -ua-view-transition-fade-in;
                 }}
             )",
-                                                              transition_name)),
+                                                              transition_name),
                 stylesheet->rules().length()));
             captured_element->image_animation_name_rule = as<CSS::CSSStyleRule>(stylesheet->css_rules()->item(index));
         }
@@ -499,12 +500,12 @@ void ViewTransition::setup_transition_pseudo_elements()
             //       animation-name: -ua-view-transition-fade-out;
             //     }
             //    NOTE: The above code example contains variables to be replaced.
-            unsigned index = MUST(stylesheet->insert_rule(MUST(String::formatted(R"(
+            unsigned index = MUST(stylesheet->insert_rule(Utf16String::formatted(R"(
                 :root::view-transition-old({}) {{
                     animation-name: -ua-view-transition-fade-out;
                 }}
             )",
-                                                              transition_name)),
+                                                              transition_name),
                 stylesheet->rules().length()));
             captured_element->image_animation_name_rule = as<CSS::CSSStyleRule>(stylesheet->css_rules()->item(index));
         }
@@ -538,7 +539,7 @@ void ViewTransition::setup_transition_pseudo_elements()
             //       }
             //     }
             //    NOTE: The above code example contains variables to be replaced.
-            unsigned index = MUST(stylesheet->insert_rule(MUST(String::formatted(R"(
+            unsigned index = MUST(stylesheet->insert_rule(Utf16String::formatted(R"(
                 @keyframes -ua-view-transition-group-anim-{} {{
                     from {{
                         transform: {};
@@ -548,7 +549,7 @@ void ViewTransition::setup_transition_pseudo_elements()
                     }}
                 }}
             )",
-                                                              transition_name, "transform", width, height, "backdrop_filter")),
+                                                              transition_name, "transform", width, height, "backdrop_filter"),
                 stylesheet->rules().length()));
             // FIXME: all the strings above should be the identically named variables, serialized somehow.
             captured_element->group_keyframes = as<CSS::CSSKeyframesRule>(stylesheet->css_rules()->item(index));
@@ -559,12 +560,12 @@ void ViewTransition::setup_transition_pseudo_elements()
             //       animation-name: -ua-view-transition-group-anim-transitionName;
             //     }
             //    NOTE: The above code example contains variables to be replaced.
-            index = MUST(stylesheet->insert_rule(MUST(String::formatted(R"(
+            index = MUST(stylesheet->insert_rule(Utf16String::formatted(R"(
                 :root::view-transition-group({0}) {{
                     animation-name: -ua-view-transition-group-anim-{0};
                 }}
             )",
-                                                     transition_name)),
+                                                     transition_name),
                 stylesheet->rules().length()));
             captured_element->group_animation_name_rule = as<CSS::CSSStyleRule>(stylesheet->css_rules()->item(index));
 
@@ -574,12 +575,12 @@ void ViewTransition::setup_transition_pseudo_elements()
             //       isolation: isolate;
             //     }
             //    NOTE: The above code example contains variables to be replaced.
-            index = MUST(stylesheet->insert_rule(MUST(String::formatted(R"(
+            index = MUST(stylesheet->insert_rule(Utf16String::formatted(R"(
                 :root::view-transition-image-pair({}) {{
                     isolation: isolate;
                 }}
             )",
-                                                     transition_name)),
+                                                     transition_name),
                 stylesheet->rules().length()));
             captured_element->image_pair_isolation_rule = as<CSS::CSSStyleRule>(stylesheet->css_rules()->item(index));
 
@@ -597,7 +598,7 @@ void ViewTransition::setup_transition_pseudo_elements()
             //    cross-fade.
             // AD-HOC: We can't use the given CSS exactly since it is two rules, not one.
             //         Instead we turn it into one rule, with both of them nested inside.
-            index = MUST(stylesheet->insert_rule(MUST(String::formatted(R"(
+            index = MUST(stylesheet->insert_rule(Utf16String::formatted(R"(
                 :root {{
                     &::view-transition-old({0}) {{
                         animation-name: -ua-view-transition-fade-out, -ua-mix-blend-mode-plus-lighter;
@@ -607,7 +608,7 @@ void ViewTransition::setup_transition_pseudo_elements()
                     }}
                 }}
             )",
-                                                     transition_name)),
+                                                     transition_name),
                 stylesheet->rules().length()));
             captured_element->image_animation_name_rule = as<CSS::CSSStyleRule>(stylesheet->css_rules()->item(index));
         }
@@ -937,7 +938,7 @@ ErrorOr<void> ViewTransition::update_pseudo_element_styles()
             // }
             // NOTE: The above code example contains variables to be replaced.
             auto stylesheet = as<HTML::Window>(HTML::relevant_global_object(*this)).associated_document().dynamic_view_transition_style_sheet();
-            unsigned index = MUST(stylesheet->insert_rule(MUST(String::formatted(R"(
+            unsigned index = MUST(stylesheet->insert_rule(Utf16String::formatted(R"(
                 :root::view-transition-group({}) {{
                     width: {};
                     height: {};
@@ -950,7 +951,7 @@ ErrorOr<void> ViewTransition::update_pseudo_element_styles()
                     color-scheme: {};
                 }}
             )",
-                                                              transition_name, width, height, "transform", "writing_mode", "direction", "text_orientation", "mix_blend_mode", "backdrop_filter", "color_scheme")),
+                                                              transition_name, width, height, "transform", "writing_mode", "direction", "text_orientation", "mix_blend_mode", "backdrop_filter", "color_scheme"),
                 stylesheet->rules().length()));
             // FIXME: all the strings above should be the identically named variables, serialized somehow.
             captured_element->group_styles_rule = as<CSS::CSSStyleRule>(stylesheet->css_rules()->item(index));
@@ -969,20 +970,7 @@ ErrorOr<void> ViewTransition::update_pseudo_element_styles()
         // }
         // NOTE: The above code example contains variables to be replaced.
         else {
-            captured_element->group_styles_rule->set_selector_text(MUST(String::formatted(":root::view-transition-group({0})", transition_name)));
-            captured_element->group_styles_rule->set_css_text(MUST(String::formatted(R"(
-                width: {};
-                height: {};
-                transform: {};
-                writing-mode: {};
-                direction: {};
-                text-orientation: {};
-                mix-blend-mode: {};
-                backdrop-filter: {};
-                color-scheme: {};
-            )",
-                width, height, "transform", "writing_mode", "direction", "text_orientation", "mix_blend_mode", "backdrop_filter", "color_scheme")));
-            // FIXME: all the strings above should be the identically named variables, serialized somehow.
+            captured_element->group_styles_rule->set_selector_text(Utf16String::formatted(":root::view-transition-group({0})", transition_name));
         }
 
         // 5. If capturedElement’s new element is not null, then:

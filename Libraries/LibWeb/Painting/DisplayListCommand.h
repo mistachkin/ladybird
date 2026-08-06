@@ -39,14 +39,16 @@ class DisplayList;
     V(FillRect, fill_rect)                                                             \
     V(DrawScaledDecodedImageFrame, draw_scaled_decoded_image_frame)                    \
     V(DrawRepeatedDecodedImageFrame, draw_repeated_decoded_image_frame)                \
+    V(DrawRepeatedDisplayList, draw_repeated_display_list)                             \
+    V(DrawTiledDecodedImageFrame, draw_tiled_decoded_image_frame)                      \
     V(DrawCompositedContext, draw_composited_context)                                  \
     V(DrawCanvas, draw_canvas)                                                         \
     V(DrawVideoFrame, draw_video_frame)                                                \
     V(Save, save)                                                                      \
     V(SaveLayer, save_layer)                                                           \
     V(Restore, restore)                                                                \
-    V(Translate, translate)                                                            \
     V(AddClipRect, add_clip_rect)                                                      \
+    V(AddClipPath, add_clip_path)                                                      \
     V(PaintLinearGradient, paint_linear_gradient)                                      \
     V(PaintRadialGradient, paint_radial_gradient)                                      \
     V(PaintConicGradient, paint_conic_gradient)                                        \
@@ -120,6 +122,10 @@ struct DisplayListCommandHeader {
     DisplayListCommandType type;
     u32 payload_size { 0 };
     VisualContextIndex context_index { VISUAL_VIEWPORT_NODE_INDEX };
+    // Apply only the coordinate-affecting nodes of the context chain, skipping clips and effects. Used
+    // by inspector overlays, which track the highlighted element's transforms and scroll offsets but
+    // must not be clipped or faded by its ancestors.
+    bool context_geometry_only { false };
     bool has_bounding_rect { false };
     bool is_clip { false };
     Gfx::IntRect bounding_rect {};
@@ -163,8 +169,11 @@ struct DrawScaledDecodedImageFrame {
     static constexpr DisplayListCommandType command_type = DisplayListCommandType::DrawScaledDecodedImageFrame;
 
     Gfx::IntRect dst_rect;
+    Optional<Gfx::FloatRect> src_rect;
     ImageFrameResourceId frame_id;
     Gfx::ScalingMode scaling_mode;
+    Gfx::CompositingAndBlendingOperator compositing_and_blending_operator { Gfx::CompositingAndBlendingOperator::Normal };
+    Optional<Color> isolated_backdrop_color;
 
     [[nodiscard]] Gfx::IntRect bounding_rect() const { return dst_rect; }
     void dump(StringBuilder&) const;
@@ -184,6 +193,44 @@ struct DrawRepeatedDecodedImageFrame {
     ImageFrameResourceId frame_id;
     Gfx::ScalingMode scaling_mode;
     Repeat repeat;
+    Gfx::CompositingAndBlendingOperator compositing_and_blending_operator { Gfx::CompositingAndBlendingOperator::Normal };
+    Optional<Color> isolated_backdrop_color;
+
+    [[nodiscard]] Gfx::IntRect bounding_rect() const { return clip_rect; }
+    void dump(StringBuilder&) const;
+};
+
+struct DrawRepeatedDisplayList {
+    static constexpr StringView command_name = "DrawRepeatedDisplayList"sv;
+    static constexpr DisplayListCommandType command_type = DisplayListCommandType::DrawRepeatedDisplayList;
+
+    struct Repeat {
+        bool x { false };
+        bool y { false };
+    };
+
+    Gfx::IntRect dst_rect;
+    Gfx::IntRect clip_rect;
+    DisplayListResourceId display_list_id;
+    Gfx::ScalingMode scaling_mode;
+    Repeat repeat;
+
+    [[nodiscard]] Gfx::IntRect bounding_rect() const { return clip_rect; }
+    void dump(StringBuilder&) const;
+};
+
+struct DrawTiledDecodedImageFrame {
+    static constexpr StringView command_name = "DrawTiledDecodedImageFrame"sv;
+    static constexpr DisplayListCommandType command_type = DisplayListCommandType::DrawTiledDecodedImageFrame;
+
+    Gfx::FloatRect tile_rect;
+    Gfx::IntRect clip_rect;
+    Gfx::FloatRect src_rect;
+    Gfx::FloatSize tile_step;
+    ImageFrameResourceId frame_id;
+    Gfx::ScalingMode scaling_mode;
+    Optional<u32> tile_count_x;
+    Optional<u32> tile_count_y;
 
     [[nodiscard]] Gfx::IntRect bounding_rect() const { return clip_rect; }
     void dump(StringBuilder&) const;
@@ -207,6 +254,10 @@ struct DrawCanvas {
 
     Gfx::IntRect dst_rect;
     CanvasId canvas_id;
+    // NB: The canvas pixels live in the compositor's canvas surface registry, so the command bytes don't
+    //     change when the canvas content does. The content generation encodes content changes so that display
+    //     list damage computation can tell that the canvas needs to be repainted.
+    u64 content_generation { 0 };
     Gfx::ScalingMode scaling_mode;
 
     [[nodiscard]] Gfx::IntRect bounding_rect() const { return dst_rect; }
@@ -218,7 +269,7 @@ struct DrawVideoFrame {
     static constexpr DisplayListCommandType command_type = DisplayListCommandType::DrawVideoFrame;
 
     Gfx::IntRect dst_rect;
-    VideoFrameResourceId video_frame_id;
+    VideoSinkResourceId video_sink_id;
     Gfx::ScalingMode scaling_mode;
 
     [[nodiscard]] Gfx::IntRect bounding_rect() const { return dst_rect; }
@@ -249,15 +300,6 @@ struct Restore {
     void dump(StringBuilder&) const;
 };
 
-struct Translate {
-    static constexpr StringView command_name = "Translate"sv;
-    static constexpr DisplayListCommandType command_type = DisplayListCommandType::Translate;
-
-    Gfx::IntPoint delta;
-
-    void dump(StringBuilder&) const;
-};
-
 struct AddClipRect {
     static constexpr StringView command_name = "AddClipRect"sv;
     static constexpr DisplayListCommandType command_type = DisplayListCommandType::AddClipRect;
@@ -265,6 +307,19 @@ struct AddClipRect {
     Gfx::IntRect rect;
 
     [[nodiscard]] Gfx::IntRect bounding_rect() const { return rect; }
+    bool is_clip() const { return true; }
+    void dump(StringBuilder&) const;
+};
+
+struct AddClipPath {
+    static constexpr StringView command_name = "AddClipPath"sv;
+    static constexpr DisplayListCommandType command_type = DisplayListCommandType::AddClipPath;
+
+    Gfx::IntRect path_bounding_rect;
+    DisplayListDataSpan path_data;
+    Gfx::WindingRule winding_rule;
+
+    [[nodiscard]] Gfx::IntRect bounding_rect() const { return path_bounding_rect; }
     bool is_clip() const { return true; }
     void dump(StringBuilder&) const;
 };
@@ -554,8 +609,8 @@ struct CompositorScrollNode {
 
     UniqueNodeID document_id;
     UniqueNodeID scrollable_node_id;
-    ScrollFrameIndex scroll_frame_index;
-    ScrollFrameIndex parent_scroll_frame_index;
+    VisualContextIndex scroll_node_index;
+    VisualContextIndex parent_scroll_node_index;
     Gfx::IntRect scrollport_rect;
     Gfx::FloatPoint max_scroll_offset;
     CompositorScrollNodeKind scroll_node_kind { CompositorScrollNodeKind::Element };
@@ -572,9 +627,9 @@ struct CompositorStickyArea {
     static constexpr DisplayListCommandType command_type = DisplayListCommandType::CompositorStickyArea;
 
     UniqueNodeID document_id;
-    ScrollFrameIndex scroll_frame_index;
-    ScrollFrameIndex parent_scroll_frame_index;
-    ScrollFrameIndex nearest_scrolling_ancestor_index;
+    VisualContextIndex scroll_node_index;
+    VisualContextIndex parent_scroll_node_index;
+    VisualContextIndex nearest_scrolling_ancestor_index;
     Gfx::FloatPoint position_relative_to_scroll_ancestor;
     Gfx::FloatSize border_box_size;
     Gfx::FloatSize scrollport_size;
@@ -602,7 +657,7 @@ struct CompositorWheelHitTestTarget {
     static constexpr DisplayListCommandType command_type = DisplayListCommandType::CompositorWheelHitTestTarget;
 
     UniqueNodeID document_id;
-    ScrollFrameIndex target_scroll_frame_index;
+    VisualContextIndex target_scroll_node_index;
     Gfx::FloatRect rect;
 
     void dump(StringBuilder&) const;
@@ -613,7 +668,7 @@ struct CompositorWheelHitTestTargetWithCornerRadii {
     static constexpr DisplayListCommandType command_type = DisplayListCommandType::CompositorWheelHitTestTargetWithCornerRadii;
 
     UniqueNodeID document_id;
-    ScrollFrameIndex target_scroll_frame_index;
+    VisualContextIndex target_scroll_node_index;
     Gfx::FloatRect rect;
     Gfx::CornerRadii corner_radii;
 
@@ -634,7 +689,7 @@ struct CompositorViewportScrollbar {
     static constexpr DisplayListCommandType command_type = DisplayListCommandType::CompositorViewportScrollbar;
 
     UniqueNodeID document_id;
-    ScrollFrameIndex scroll_frame_index;
+    VisualContextIndex scroll_node_index;
     Gfx::IntRect gutter_rect;
     Gfx::IntRect thumb_rect;
     Gfx::IntRect expanded_gutter_rect;
@@ -653,7 +708,7 @@ struct PaintScrollBar {
     static constexpr StringView command_name = "PaintScrollBar"sv;
     static constexpr DisplayListCommandType command_type = DisplayListCommandType::PaintScrollBar;
 
-    ScrollFrameIndex scroll_frame_index;
+    VisualContextIndex scroll_node_index;
     Gfx::IntRect gutter_rect;
     Gfx::IntRect thumb_rect;
     double scroll_size;

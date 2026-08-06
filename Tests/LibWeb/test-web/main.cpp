@@ -888,10 +888,11 @@ static void run_test(TestWebView& view, TestRunContext& context, size_t test_ind
     });
     test.timeout_timer->start();
 
-    view.on_set_test_timeout = [&context, test_index, timeout_in_milliseconds](double milliseconds) {
+    view.on_set_test_timeout = [&context, test_index](double milliseconds) {
         auto& test = context.tests[test_index];
-        if (milliseconds > timeout_in_milliseconds)
-            test.timeout_timer->restart(AK::clamp_to<int>(milliseconds));
+        if (milliseconds <= 0)
+            return;
+        test.timeout_timer->restart(AK::clamp_to<int>(milliseconds));
     };
 
     // Clear the current document.
@@ -978,20 +979,20 @@ static void set_ui_callbacks_for_tests(TestWebView& view, TestRunCapture& test_r
         }
 
         if (add_txt_files) {
-            selected_files.empend("file1"sv, MUST(ByteBuffer::copy("Contents for file1"sv.bytes())));
+            selected_files.empend("file1"_utf16, MUST(ByteBuffer::copy("Contents for file1"sv.bytes())));
 
             if (allow_multiple_files == Web::HTML::AllowMultipleFiles::Yes) {
-                selected_files.empend("file2"sv, MUST(ByteBuffer::copy("Contents for file2"sv.bytes())));
-                selected_files.empend("file3"sv, MUST(ByteBuffer::copy("Contents for file3"sv.bytes())));
-                selected_files.empend("file4"sv, MUST(ByteBuffer::copy("Contents for file4"sv.bytes())));
+                selected_files.empend("file2"_utf16, MUST(ByteBuffer::copy("Contents for file2"sv.bytes())));
+                selected_files.empend("file3"_utf16, MUST(ByteBuffer::copy("Contents for file3"sv.bytes())));
+                selected_files.empend("file4"_utf16, MUST(ByteBuffer::copy("Contents for file4"sv.bytes())));
             }
         }
 
         if (add_cpp_files) {
-            selected_files.empend("file1.cpp"sv, MUST(ByteBuffer::copy("int main() {{ return 1; }}"sv.bytes())));
+            selected_files.empend("file1.cpp"_utf16, MUST(ByteBuffer::copy("int main() {{ return 1; }}"sv.bytes())));
 
             if (allow_multiple_files == Web::HTML::AllowMultipleFiles::Yes) {
-                selected_files.empend("file2.cpp"sv, MUST(ByteBuffer::copy("int main() {{ return 2; }}"sv.bytes())));
+                selected_files.empend("file2.cpp"_utf16, MUST(ByteBuffer::copy("int main() {{ return 2; }}"sv.bytes())));
             }
         }
 
@@ -1156,6 +1157,19 @@ static ErrorOr<int> run_tests(Core::AnonymousBuffer const& theme, Web::DevicePix
 
     Vector<TestCompletion> non_passing_tests;
     bool fail_fast_triggered = false;
+
+    // If the Compositor dies, it takes the rendering pipeline of every in-flight test with it. So, fail all those as
+    // Crashed, not Pass. WebView::Application restarts the Compositor afterwards, so subsequent tests still run.
+    app.on_compositor_process_death = [&]() {
+        warnln("test-web: Compositor process died; failing all in-flight tests as crashed");
+        for (auto& view : views) {
+            if (auto index = s_current_test_index_by_view.get(view.ptr()); index.has_value()) {
+                test_run_capture.write_test_output(*view);
+                view->on_test_complete({ *index, TestResult::Crashed });
+            }
+        }
+    };
+    ScopeGuard clear_compositor_death_hook = [&] { app.on_compositor_process_death = {}; };
 
     for (auto [view_id, view] : enumerate(views)) {
         set_ui_callbacks_for_tests(*view, test_run_capture);

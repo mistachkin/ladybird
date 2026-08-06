@@ -26,7 +26,6 @@ public:
 
     bool is_valid() const;
     ParsedFontFace font_face() const;
-    GC::Ref<CSSStyleDeclaration> style() { return m_style; }
     GC::Ref<CSSFontFaceDescriptors> descriptors() { return m_style; }
     GC::Ref<CSSFontFaceDescriptors const> descriptors() const { return m_style; }
 
@@ -39,7 +38,7 @@ private:
     CSSFontFaceRule(JS::Realm&, GC::Ref<CSSFontFaceDescriptors>);
 
     virtual void initialize(JS::Realm&) override;
-    virtual String serialized() const override;
+    virtual Utf16String serialized() const override;
     virtual void visit_edges(Visitor&) override;
     virtual void dump(StringBuilder&, int indent_levels) const override;
 

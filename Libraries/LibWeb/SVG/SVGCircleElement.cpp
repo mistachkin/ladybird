@@ -29,35 +29,6 @@ void SVGCircleElement::initialize(JS::Realm& realm)
     Base::initialize(realm);
 }
 
-bool SVGCircleElement::is_presentational_hint(FlyString const& name) const
-{
-    if (Base::is_presentational_hint(name))
-        return true;
-
-    return first_is_one_of(name,
-        SVG::AttributeNames::cx,
-        SVG::AttributeNames::cy,
-        SVG::AttributeNames::r);
-}
-
-void SVGCircleElement::apply_presentational_hints(Vector<CSS::StyleProperty>& properties) const
-{
-    Base::apply_presentational_hints(properties);
-    auto parsing_context = CSS::Parser::ParsingParams { document(), CSS::Parser::ParsingMode::SVGPresentationAttribute };
-
-    auto cx_attribute = attribute(SVG::AttributeNames::cx);
-    if (auto cx_value = parse_css_value(parsing_context, cx_attribute.value_or(String {}), CSS::PropertyID::Cx))
-        properties.append({ .property_id = CSS::PropertyID::Cx, .value = cx_value.release_nonnull() });
-
-    auto cy_attribute = attribute(SVG::AttributeNames::cy);
-    if (auto cy_value = parse_css_value(parsing_context, cy_attribute.value_or(String {}), CSS::PropertyID::Cy))
-        properties.append({ .property_id = CSS::PropertyID::Cy, .value = cy_value.release_nonnull() });
-
-    auto r_attribute = attribute(SVG::AttributeNames::r);
-    if (auto r_value = parse_css_value(parsing_context, r_attribute.value_or(String {}), CSS::PropertyID::R))
-        properties.append({ .property_id = CSS::PropertyID::R, .value = r_value.release_nonnull() });
-}
-
 static CSSPixels normalized_diagonal_length(CSSPixelSize viewport_size)
 {
     if (viewport_size.width() == viewport_size.height())
@@ -67,18 +38,13 @@ static CSSPixels normalized_diagonal_length(CSSPixelSize viewport_size)
 
 Gfx::Path SVGCircleElement::get_path(CSSPixelSize viewport_size)
 {
-    // NB: Called during SVG layout.
-    auto node = unsafe_layout_node();
-    if (!node) {
-        dbgln("FIXME: Null layout node in SVGCircleElement::get_path");
-        return {};
-    }
+    auto computed_values = this->computed_values();
 
-    auto cx = float(node->computed_values().cx().to_px(viewport_size.width()));
-    auto cy = float(node->computed_values().cy().to_px(viewport_size.height()));
+    auto cx = float(computed_values->cx().to_px(viewport_size.width()));
+    auto cy = float(computed_values->cy().to_px(viewport_size.height()));
     // Percentages refer to the normalized diagonal of the current SVG viewport
     // (see Units: https://svgwg.org/svg2-draft/coords.html#Units)
-    auto r = float(node->computed_values().r().to_px(normalized_diagonal_length(viewport_size)));
+    auto r = float(computed_values->r().to_px(normalized_diagonal_length(viewport_size)));
 
     // A zero radius disables rendering.
     if (r == 0)
@@ -104,24 +70,6 @@ Gfx::Path SVGCircleElement::get_path(CSSPixelSize viewport_size)
     path.arc_to({ cx + r, cy }, r, large_arc, sweep);
 
     return path;
-}
-
-// https://www.w3.org/TR/SVG11/shapes.html#CircleElementCXAttribute
-GC::Ref<SVGAnimatedLength> SVGCircleElement::cx() const
-{
-    return svg_animated_length_for_property(CSS::PropertyID::Cx);
-}
-
-// https://www.w3.org/TR/SVG11/shapes.html#CircleElementCYAttribute
-GC::Ref<SVGAnimatedLength> SVGCircleElement::cy() const
-{
-    return svg_animated_length_for_property(CSS::PropertyID::Cy);
-}
-
-// https://www.w3.org/TR/SVG11/shapes.html#CircleElementRAttribute
-GC::Ref<SVGAnimatedLength> SVGCircleElement::r() const
-{
-    return svg_animated_length_for_property(CSS::PropertyID::R);
 }
 
 }

@@ -91,6 +91,14 @@ GC::Ptr<DecodedImageData> SharedResourceRequest::image_data() const
     return m_image_data;
 }
 
+bool SharedResourceRequest::can_be_pruned_from_memory_cache() const
+{
+    // NB: Pruning an image that still has clients (e.g. a live element displaying it) frees no memory, since the
+    //     clients keep the decoded data alive, but it forces a refetch if script recreates an element with the
+    //     same URL, e.g. when a framework re-renders the page.
+    return m_image_data && !m_image_data->has_clients();
+}
+
 void SharedResourceRequest::touch_memory_cache_entry()
 {
     m_cache_touch_serial = ++s_next_memory_cache_touch_serial;
@@ -134,8 +142,10 @@ void SharedResourceRequest::fetch_resource(JS::Realm& realm, GC::Ref<Fetch::Infr
                 return;
 
             auto extracted_mime_type = Fetch::Infrastructure::extract_mime_type(response->header_list());
-            auto mime_type = extracted_mime_type.has_value() ? extracted_mime_type.value().essence().bytes_as_string_view() : StringView {};
-            self->handle_successful_fetch(request->url(), mime_type, move(data), image_data_is_cors_cross_origin);
+            auto const is_svg_image = extracted_mime_type.has_value()
+                ? extracted_mime_type.value().essence() == "image/svg+xml"sv
+                : request->url().basename().ends_with(".svg"sv);
+            self->handle_successful_fetch(request->url(), is_svg_image ? IsSVGImage::Yes : IsSVGImage::No, move(data), image_data_is_cors_cross_origin);
         });
         auto process_body_error = GC::create_function(self->heap(), [weak_this](JS::Value) {
             auto self = weak_this.ptr();
@@ -188,15 +198,12 @@ void SharedResourceRequest::add_callbacks(Function<void()> on_finish, Function<v
     m_callbacks.append(move(callbacks));
 }
 
-void SharedResourceRequest::handle_successful_fetch(URL::URL const& url_string, StringView mime_type, ByteBuffer data, bool image_data_is_cors_cross_origin)
+void SharedResourceRequest::handle_successful_fetch(URL::URL const& url_string, IsSVGImage is_svg_image, ByteBuffer data, bool image_data_is_cors_cross_origin)
 {
     // AD-HOC: At this point, things gets very ad-hoc.
     // FIXME: Bring this closer to spec.
 
-    bool const is_svg_image = mime_type == "image/svg+xml"sv
-        || (mime_type.is_empty() && url_string.basename().ends_with(".svg"sv));
-
-    if (is_svg_image) {
+    if (is_svg_image == IsSVGImage::Yes) {
         auto result = SVG::SVGDecodedImageData::create(m_document->realm(), m_page, url_string, data);
         if (result.is_error()) {
             handle_failed_fetch();

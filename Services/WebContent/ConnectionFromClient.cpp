@@ -12,8 +12,11 @@
 #include <AK/Debug.h>
 #include <AK/JsonArray.h>
 #include <AK/JsonObject.h>
+#include <AK/Math.h>
 #include <AK/OwnPtr.h>
 #include <AK/QuickSort.h>
+#include <AK/Utf16FlyString.h>
+#include <AK/Utf16String.h>
 #include <LibCore/Process.h>
 #include <LibCore/System.h>
 #include <LibDevTools/IndexedDBSerialization.h>
@@ -22,13 +25,13 @@
 #include <LibGfx/Color.h>
 #include <LibGfx/Font/FontDatabase.h>
 #include <LibGfx/SystemTheme.h>
+#include <LibIPC/Transport.h>
 #include <LibJS/Runtime/ConsoleObject.h>
 #include <LibJS/Runtime/Date.h>
 #include <LibUnicode/TimeZone.h>
 #include <LibWasm/Types.h>
 #include <LibWeb/ARIA/RoleType.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
-#include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/CustomPropertyData.h>
 #include <LibWeb/CSS/Parser/ErrorReporter.h>
 #include <LibWeb/CSS/StyleComputer.h>
@@ -42,15 +45,18 @@
 #include <LibWeb/DOM/Element.h>
 #include <LibWeb/DOM/ElementFactory.h>
 #include <LibWeb/DOM/Node.h>
+#include <LibWeb/DOM/Range.h>
 #include <LibWeb/DOM/ShadowRoot.h>
 #include <LibWeb/DOM/Text.h>
 #include <LibWeb/Dump.h>
 #include <LibWeb/Fetch/Fetching/Fetching.h>
+#include <LibWeb/Geometry/DOMRect.h>
 #include <LibWeb/HTML/AutoplaySettings.h>
 #include <LibWeb/HTML/BroadcastChannel.h>
 #include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/EventLoop/EventLoop.h>
 #include <LibWeb/HTML/HTMLInputElement.h>
+#include <LibWeb/HTML/HTMLTextAreaElement.h>
 #include <LibWeb/HTML/LocalNavigable.h>
 #include <LibWeb/HTML/LocalTraversableNavigable.h>
 #include <LibWeb/HTML/NavigableContainer.h>
@@ -62,6 +68,7 @@
 #include <LibWeb/Infra/Strings.h>
 #include <LibWeb/Layout/FlexLayoutData.h>
 #include <LibWeb/Layout/GridLayoutData.h>
+#include <LibWeb/Layout/Node.h>
 #include <LibWeb/Layout/Viewport.h>
 #include <LibWeb/Loader/ContentBlocker.h>
 #include <LibWeb/Loader/ProxyMappings.h>
@@ -72,9 +79,12 @@
 #include <LibWeb/Painting/StackingContext.h>
 #include <LibWeb/Painting/ViewportPaintable.h>
 #include <LibWeb/Platform/EventLoopPlugin.h>
+#include <LibWeb/Platform/FontPlugin.h>
+#include <LibWeb/Selection/Selection.h>
 #include <LibWebView/Attribute.h>
+#include <LibWebView/CompositorConnection.h>
+#include <LibWebView/DictionaryLookup.h>
 #include <LibWebView/ViewImplementation.h>
-#include <WebContent/CompositorConnection.h>
 #include <WebContent/ConnectionFromClient.h>
 #include <WebContent/PageClient.h>
 #include <WebContent/PageHost.h>
@@ -91,7 +101,7 @@ ConnectionFromClient::ConnectionFromClient(NonnullOwnPtr<IPC::Transport> transpo
 
 ConnectionFromClient::~ConnectionFromClient() = default;
 
-CompositorConnection* ConnectionFromClient::compositor_process_connection() const
+WebView::CompositorConnection* ConnectionFromClient::compositor_process_connection() const
 {
     if (!m_compositor_connection || !m_compositor_connection->is_open())
         return nullptr;
@@ -117,9 +127,9 @@ Messages::WebContentServer::InitTransportResponse ConnectionFromClient::init_tra
     VERIFY_NOT_REACHED();
 }
 
-void ConnectionFromClient::initialize(u64 initial_page_id)
+void ConnectionFromClient::initialize(u64 initial_page_id, Web::HTML::CrossProcessId root_navigable_id, Web::HTML::CrossProcessIdAllocator cross_process_id_allocator)
 {
-    m_page_host->initialize(initial_page_id);
+    m_page_host->initialize(initial_page_id, root_navigable_id, cross_process_id_allocator);
 }
 
 void ConnectionFromClient::set_page_parent_context(u64 page_id, Optional<Web::Compositor::CompositorContextId> parent_context_id)
@@ -134,13 +144,13 @@ void ConnectionFromClient::set_page_parent_context(u64 page_id, Optional<Web::Co
     compositor_context.set_parent_context(parent_context_id);
 }
 
-void ConnectionFromClient::set_remote_child_frame_compositor_context(u64 page_id, String frame_id, Optional<Web::Compositor::CompositorContextId> context_id)
+void ConnectionFromClient::set_remote_child_frame_compositor_context(u64 page_id, Web::HTML::CrossProcessId frame_id, Optional<Web::Compositor::CompositorContextId> context_id)
 {
     if (auto page = this->page(page_id); page.has_value())
-        page->set_remote_child_frame_compositor_context(move(frame_id), context_id);
+        page->set_remote_child_frame_compositor_context(frame_id, context_id);
 }
 
-void ConnectionFromClient::run_iframe_load_event_steps(u64 page_id, String frame_id)
+void ConnectionFromClient::run_iframe_load_event_steps(u64 page_id, Web::HTML::CrossProcessId frame_id)
 {
     if (auto page = this->page(page_id); page.has_value())
         page->run_iframe_load_event_steps(frame_id);
@@ -172,14 +182,14 @@ void ConnectionFromClient::close_server()
 Messages::WebContentServer::GetWindowHandleResponse ConnectionFromClient::get_window_handle(u64 page_id)
 {
     if (auto page = this->page(page_id); page.has_value())
-        return page->page().top_level_traversable()->window_handle();
+        return page->page().top_level_traversable()->window_handle().to_utf8();
     return String {};
 }
 
 void ConnectionFromClient::set_window_handle(u64 page_id, String handle)
 {
     if (auto page = this->page(page_id); page.has_value()) {
-        page->set_window_handle(move(handle));
+        page->set_window_handle(Utf16String::from_utf8(handle));
         page->send_current_needs_beforeunload_check();
     }
 }
@@ -191,6 +201,12 @@ void ConnectionFromClient::connect_to_webdriver(u64 page_id, ByteString webdrive
         if (auto result = page->connect_to_webdriver(webdriver_endpoint); result.is_error())
             dbgln("Unable to connect to the WebDriver process: {}", result.error());
     }
+}
+
+void ConnectionFromClient::notify_webdriver_of_window_replacement(u64 page_id)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->notify_webdriver_of_window_replacement();
 }
 
 void ConnectionFromClient::complete_webdriver_navigation_completion(u64 page_id, u64 request_id, Web::WebDriver::Response response)
@@ -223,7 +239,7 @@ void ConnectionFromClient::connect_to_image_decoder(IPC::TransportHandle handle)
 void ConnectionFromClient::connect_to_compositor_process(IPC::TransportHandle handle)
 {
     auto transport = MUST(handle.create_transport());
-    m_compositor_connection = adopt_ref(*new CompositorConnection(move(transport)));
+    m_compositor_connection = adopt_ref(*new WebView::CompositorConnection(move(transport)));
     m_compositor_connection->on_mouse_event = [this](u64 page_id, Web::MouseEvent event) {
         mouse_event(page_id, move(event));
     };
@@ -238,6 +254,9 @@ void ConnectionFromClient::connect_to_compositor_process(IPC::TransportHandle ha
         m_compositor_connection->transport().set_peer_pid(response->compositor_pid());
     }
 #endif
+
+    // Establish the video presentation channel now that the Compositor connection is up.
+    m_compositor_connection->ensure_video_presentation_channel();
 }
 
 void ConnectionFromClient::compositor_process_reconnected()
@@ -278,14 +297,15 @@ void ConnectionFromClient::load_url(u64 page_id, URL::URL url, Web::Bindings::Na
 }
 
 void ConnectionFromClient::load_url_with_document_resource(u64 page_id, URL::URL url,
-    Variant<Empty, String, Web::HTML::POSTResource> document_resource,
-    Web::Bindings::NavigationHistoryBehavior history_handling)
+    Web::HTML::DocumentResource document_resource,
+    Web::Bindings::NavigationHistoryBehavior history_handling,
+    Optional<Web::HTML::NavigationSourceSnapshot> source_snapshot)
 {
     auto page = this->page(page_id);
     if (!page.has_value())
         return;
 
-    page->page().load(url, move(document_resource), history_handling);
+    page->page().load(url, move(document_resource), history_handling, move(source_snapshot));
 }
 
 void ConnectionFromClient::load_html(u64 page_id, ByteString html)
@@ -306,16 +326,22 @@ void ConnectionFromClient::reload(u64 page_id)
         page->page().reload();
 }
 
+void ConnectionFromClient::stop_loading(u64 page_id)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->page().top_level_traversable()->stop_loading();
+}
+
 void ConnectionFromClient::cancel_download(u64 page_id, u64 download_id)
 {
     if (auto page = this->page(page_id); page.has_value())
         page->cancel_download(download_id);
 }
 
-void ConnectionFromClient::traverse_the_history_by_delta(u64 page_id, i32 delta)
+void ConnectionFromClient::resolve_session_history_traversal_target(u64 page_id, u64 request_id, Optional<i32> target_step)
 {
     if (auto page = this->page(page_id); page.has_value())
-        page->page().traverse_the_history_by_delta_from_ui_process(delta);
+        page->did_resolve_session_history_traversal_target(request_id, target_step);
 }
 
 void ConnectionFromClient::traverse_the_history_to_step(u64 page_id, i32 step)
@@ -336,15 +362,14 @@ void ConnectionFromClient::check_if_traverse_history_step_is_canceled(u64 page_i
 {
     auto page = this->page(page_id);
     if (!page.has_value()) {
-        async_did_check_if_traverse_history_step_is_canceled(page_id, request_id, step, true);
+        async_did_check_if_traverse_history_step_is_canceled(page_id, request_id, step, Web::HTML::HistoryStepResult::CanceledByMissingPage);
         return;
     }
 
     auto& heap = Web::HTML::main_thread_event_loop().heap();
     page->page().top_level_traversable()->check_if_traverse_history_step_is_canceled(step,
         GC::create_function(heap, [this, page_id, request_id, step](Web::HTML::HistoryStepResult result) {
-            async_did_check_if_traverse_history_step_is_canceled(
-                page_id, request_id, step, result != Web::HTML::HistoryStepResult::Applied);
+            async_did_check_if_traverse_history_step_is_canceled(page_id, request_id, step, result);
         }));
 }
 
@@ -492,7 +517,7 @@ void ConnectionFromClient::debug_request(u64 page_id, ByteString request, ByteSt
     if (request == "dump-display-list") {
         if (auto* doc = page->page().top_level_browsing_context().active_document()) {
             auto display_list_dump = doc->dump_display_list();
-            dbgln("{}", display_list_dump);
+            dbgln("{}", display_list_dump.to_utf8());
         }
         return;
     }
@@ -552,10 +577,11 @@ void ConnectionFromClient::debug_request(u64 page_id, ByteString request, ByteSt
     }
 
     if (request == "dump-all-resolved-styles") {
-        auto dump_style = [](String const& title, Web::CSS::ComputedProperties const& style, RefPtr<Web::CSS::CustomPropertyData const> custom_property_data) {
+        auto dump_style = [](String const& title, Web::CSS::ComputedValues const& style, RefPtr<Web::CSS::CustomPropertyData const> custom_property_data) {
             dbgln("+ {}", title);
-            for (size_t i = to_underlying(Web::CSS::first_longhand_property_id); i < to_underlying(Web::CSS::last_longhand_property_id); ++i) {
-                dbgln("|  {} = {}", Web::CSS::string_from_property_id(static_cast<Web::CSS::PropertyID>(i)), style.property(static_cast<Web::CSS::PropertyID>(i)).to_string(Web::CSS::SerializationMode::Normal));
+            for (size_t i = to_underlying(Web::CSS::first_longhand_property_id); i <= to_underlying(Web::CSS::last_longhand_property_id); ++i) {
+                auto property_id = static_cast<Web::CSS::PropertyID>(i);
+                dbgln("|  {} = {}", Web::CSS::string_from_property_id(property_id), style.computed_style_value(property_id)->to_string(Web::CSS::SerializationMode::Normal));
             }
             if (custom_property_data) {
                 custom_property_data->for_each_property([](Utf16FlyString const& name, Web::CSS::StyleProperty const& property) {
@@ -574,13 +600,14 @@ void ConnectionFromClient::debug_request(u64 page_id, ByteString request, ByteSt
                     nodes_to_visit.enqueue(child.ptr());
                 if (auto* element = as_if<Web::DOM::Element>(node)) {
                     auto styles = doc->style_computer().compute_style({ *element });
-                    dump_style(MUST(String::formatted("Element {}", node->debug_description())), styles, element->custom_property_data({}));
+                    dump_style(MUST(String::formatted("Element {}", node->debug_description())), *styles, element->custom_property_data({}));
 
                     element->for_each_synthetic_pseudo_element([&](Web::CSS::PseudoElement pseudo_element_type, Web::DOM::PseudoElement const& pseudo_element) {
-                        if (!pseudo_element.computed_properties())
+                        auto computed_values = pseudo_element.computed_values();
+                        if (!computed_values)
                             return;
 
-                        dump_style(MUST(String::formatted("PseudoElement {}::{}", node->debug_description(), Web::CSS::pseudo_element_name(pseudo_element_type))), *pseudo_element.computed_properties(), pseudo_element.custom_property_data());
+                        dump_style(MUST(String::formatted("PseudoElement {}::{}", node->debug_description(), Web::CSS::pseudo_element_name(pseudo_element_type))), *computed_values, pseudo_element.custom_property_data());
                     });
                 }
             }
@@ -704,7 +731,7 @@ void ConnectionFromClient::inspect_dom_tree(u64 page_id)
 {
     if (auto page = this->page(page_id); page.has_value()) {
         if (auto* doc = page->page().top_level_browsing_context().active_document())
-            async_did_inspect_dom_tree(page_id, doc->dump_dom_tree_as_json());
+            async_did_inspect_dom_tree(page_id, doc->dump_dom_tree_as_json().to_utf8());
     }
 }
 
@@ -746,8 +773,8 @@ void ConnectionFromClient::inspect_storage(u64 page_id, Web::StorageAPI::Storage
             continue;
 
         JsonObject item;
-        item.set("name"sv, name.release_value());
-        item.set("value"sv, value.release_value());
+        item.set("name"sv, name.release_value().to_utf8());
+        item.set("value"sv, value.release_value().to_utf8());
         storage_items.must_append(move(item));
     }
 
@@ -767,7 +794,7 @@ static Optional<GC::Ref<Web::HTML::Storage>> active_session_storage_for_page(Pag
     return storage_or_error.release_value();
 }
 
-Messages::WebContentServer::SetSessionStorageItemResponse ConnectionFromClient::set_session_storage_item(u64 page_id, String key, String value)
+Messages::WebContentServer::SetSessionStorageItemResponse ConnectionFromClient::set_session_storage_item(u64 page_id, Utf16String key, Utf16String value)
 {
     auto page = this->page(page_id);
     if (!page.has_value())
@@ -785,15 +812,15 @@ Messages::WebContentServer::SetSessionStorageItemResponse ConnectionFromClient::
     return WebView::StorageSetResult { move(old_value) };
 }
 
-Messages::WebContentServer::RemoveSessionStorageItemResponse ConnectionFromClient::remove_session_storage_item(u64 page_id, String key)
+Messages::WebContentServer::RemoveSessionStorageItemResponse ConnectionFromClient::remove_session_storage_item(u64 page_id, Utf16String key)
 {
     auto page = this->page(page_id);
     if (!page.has_value())
-        return Optional<String> {};
+        return Optional<Utf16String> {};
 
     auto storage = active_session_storage_for_page(*page);
     if (!storage.has_value())
-        return Optional<String> {};
+        return Optional<Utf16String> {};
 
     auto old_value = (*storage)->get_item(key);
     if (old_value.has_value())
@@ -835,9 +862,9 @@ void ConnectionFromClient::inspect_dom_node(u64 page_id, WebView::DOMNodePropert
     Web::DOM::AbstractElement abstract_element { element, pseudo_element };
     node->document().update_style_for_element(abstract_element);
 
-    auto properties = element.computed_properties(pseudo_element);
+    auto computed_values = element.computed_values(pseudo_element);
 
-    if (!properties) {
+    if (!computed_values) {
         async_did_inspect_dom_node(page_id, { property_type, {} });
         return;
     }
@@ -854,13 +881,15 @@ void ConnectionFromClient::inspect_dom_node(u64 page_id, WebView::DOMNodePropert
     auto serialize_computed_style = [&]() {
         JsonObject serialized;
 
-        properties->for_each_property([&](auto property_id, auto& value) {
+        for (auto i = to_underlying(Web::CSS::first_longhand_property_id); i <= to_underlying(Web::CSS::last_longhand_property_id); ++i) {
+            auto property_id = static_cast<Web::CSS::PropertyID>(i);
+            auto value = computed_values->computed_style_value(property_id);
             serialized.set(
                 Web::CSS::string_from_property_id(property_id).to_utf16_string().to_utf8_but_should_be_ported_to_utf16(),
-                value.to_string(Web::CSS::SerializationMode::Normal));
-        });
+                value->to_string(Web::CSS::SerializationMode::Normal));
+        }
 
-        // FIXME: Custom properties are not yet included in ComputedProperties, so add them manually.
+        // FIXME: Custom properties are not included in ComputedValues, so add them manually.
         if (auto custom_property_data = element.custom_property_data(pseudo_element)) {
             custom_property_data->for_each_property([&](Utf16FlyString const& name, Web::CSS::StyleProperty const& value) {
                 serialized.set(name.to_utf16_string().to_utf8_but_should_be_ported_to_utf16(), value.value->to_string(Web::CSS::SerializationMode::Normal));
@@ -871,18 +900,17 @@ void ConnectionFromClient::inspect_dom_node(u64 page_id, WebView::DOMNodePropert
     };
 
     auto serialize_layout = [&](Web::Layout::Node const* layout_node) {
-        auto first_paintable = layout_node ? layout_node->first_paintable() : nullptr;
-        if (!layout_node || !layout_node->is_box() || !first_paintable || !first_paintable->is_paintable_box()) {
+        auto paintable = layout_node ? layout_node->paintable() : nullptr;
+        if (!layout_node || !layout_node->is_box() || !paintable) {
             return JsonObject {};
         }
 
-        auto const& paintable_box = as<Web::Painting::PaintableBox>(*first_paintable);
-        auto const& box_model = paintable_box.box_model();
+        auto const& box_model = paintable->box_model();
 
         JsonObject serialized;
 
-        serialized.set("width"sv, paintable_box.content_width().to_double());
-        serialized.set("height"sv, paintable_box.content_height().to_double());
+        serialized.set("width"sv, paintable->content_width().to_double());
+        serialized.set("height"sv, paintable->content_height().to_double());
 
         serialized.set("padding-top"sv, box_model.padding.top.to_double());
         serialized.set("padding-right"sv, box_model.padding.right.to_double());
@@ -899,12 +927,15 @@ void ConnectionFromClient::inspect_dom_node(u64 page_id, WebView::DOMNodePropert
         serialized.set("border-bottom-width"sv, box_model.border.bottom.to_double());
         serialized.set("border-left-width"sv, box_model.border.left.to_double());
 
-        serialized.set("box-sizing"sv, properties->property(Web::CSS::PropertyID::BoxSizing).to_string(Web::CSS::SerializationMode::Normal));
-        serialized.set("display"sv, properties->property(Web::CSS::PropertyID::Display).to_string(Web::CSS::SerializationMode::Normal));
-        serialized.set("float"sv, properties->property(Web::CSS::PropertyID::Float).to_string(Web::CSS::SerializationMode::Normal));
-        serialized.set("line-height"sv, properties->property(Web::CSS::PropertyID::LineHeight).to_string(Web::CSS::SerializationMode::Normal));
-        serialized.set("position"sv, properties->property(Web::CSS::PropertyID::Position).to_string(Web::CSS::SerializationMode::Normal));
-        serialized.set("z-index"sv, properties->property(Web::CSS::PropertyID::ZIndex).to_string(Web::CSS::SerializationMode::Normal));
+        auto serialize_property = [&](Web::CSS::PropertyID property_id) {
+            return computed_values->computed_style_value(property_id)->to_string(Web::CSS::SerializationMode::Normal);
+        };
+        serialized.set("box-sizing"sv, serialize_property(Web::CSS::PropertyID::BoxSizing));
+        serialized.set("display"sv, serialize_property(Web::CSS::PropertyID::Display));
+        serialized.set("float"sv, serialize_property(Web::CSS::PropertyID::Float));
+        serialized.set("line-height"sv, serialize_property(Web::CSS::PropertyID::LineHeight));
+        serialized.set("position"sv, serialize_property(Web::CSS::PropertyID::Position));
+        serialized.set("z-index"sv, serialize_property(Web::CSS::PropertyID::ZIndex));
 
         return serialized;
     };
@@ -912,7 +943,7 @@ void ConnectionFromClient::inspect_dom_node(u64 page_id, WebView::DOMNodePropert
     auto serialize_used_fonts = [&]() {
         JsonArray serialized;
 
-        properties->computed_font_list(node->document().font_computer())->for_each_font_entry([&](Gfx::FontCascadeList::Entry const& entry) {
+        computed_values->font_list().for_each_font_entry([&](Gfx::FontCascadeList::Entry const& entry) {
             auto const& font = *entry.font;
 
             JsonObject font_object;
@@ -977,11 +1008,11 @@ static StringView grid_track_state_to_string(Web::Layout::GridTrackState state)
     VERIFY_NOT_REACHED();
 }
 
-static JsonArray serialize_grid_line_names(Vector<String> const& names)
+static JsonArray serialize_grid_line_names(Vector<Utf16FlyString> const& names)
 {
     JsonArray serialized_names;
     for (auto const& name : names)
-        serialized_names.must_append(name);
+        serialized_names.must_append(MUST(name.view().to_utf8()));
     return serialized_names;
 }
 
@@ -1012,7 +1043,7 @@ static JsonObject serialize_grid_area(Web::Layout::GridLayoutArea const& area)
     JsonObject serialized_area;
     serialized_area.set("columnEnd"sv, area.column_end);
     serialized_area.set("columnStart"sv, area.column_start);
-    serialized_area.set("name"sv, area.name);
+    serialized_area.set("name"sv, MUST(area.name.view().to_utf8()));
     serialized_area.set("rowEnd"sv, area.row_end);
     serialized_area.set("rowStart"sv, area.row_start);
     serialized_area.set("type"sv, grid_track_type_to_string(area.type));
@@ -1187,7 +1218,7 @@ static void append_grid_layouts_for_node_and_frame_descendants(Web::DOM::Node& r
         if (!content_navigable)
             return Web::TraversalDecision::Continue;
 
-        auto content_document = content_navigable->active_document();
+        auto content_document = as<Web::HTML::LocalNavigable>(*content_navigable).active_document();
         if (!content_document)
             return Web::TraversalDecision::Continue;
 
@@ -1512,7 +1543,7 @@ void ConnectionFromClient::inspect_accessibility_tree(u64 page_id)
 {
     if (auto page = this->page(page_id); page.has_value()) {
         if (auto* doc = page->page().top_level_browsing_context().active_document())
-            async_did_inspect_accessibility_tree(page_id, doc->dump_accessibility_tree_as_json());
+            async_did_inspect_accessibility_tree(page_id, doc->dump_accessibility_tree_as_json().to_utf8());
     }
 }
 
@@ -1601,7 +1632,7 @@ void ConnectionFromClient::resolve_dom_node_url(u64 page_id, u64 request_id, Opt
     }();
 
     auto resolved_url = document
-        ? document->encoding_parse_url(url)
+        ? document->encoding_parse_url(Utf16String::from_utf8(url))
               .map([](auto const& parsed_url) {
                   return parsed_url.serialize();
               })
@@ -1715,7 +1746,7 @@ void ConnectionFromClient::set_dom_node_text(u64 page_id, Web::UniqueNodeID node
     async_did_finish_editing_dom_node(page_id, character_data.unique_id());
 }
 
-void ConnectionFromClient::set_dom_node_tag(u64 page_id, Web::UniqueNodeID node_id, String name)
+void ConnectionFromClient::set_dom_node_tag(u64 page_id, Web::UniqueNodeID node_id, Utf16FlyString name)
 {
     auto* dom_node = Web::DOM::Node::from_unique_id(node_id);
     if (!dom_node || !dom_node->is_element() || !dom_node->parent()) {
@@ -1724,9 +1755,9 @@ void ConnectionFromClient::set_dom_node_tag(u64 page_id, Web::UniqueNodeID node_
     }
 
     auto& element = static_cast<Web::DOM::Element&>(*dom_node);
-    auto new_element = Web::DOM::create_element(element.document(), name, element.namespace_uri(), element.prefix(), element.is_value()).release_value_but_fixme_should_propagate_errors();
+    auto new_element = Web::DOM::create_element(element.document(), move(name), element.namespace_uri(), element.prefix(), element.is_value()).release_value_but_fixme_should_propagate_errors();
 
-    element.for_each_attribute([&](auto const& attribute) {
+    element.for_each_attribute([&](Web::DOM::Attr const& attribute) {
         new_element->set_attribute_value(attribute.local_name(), attribute.value(), attribute.prefix(), attribute.namespace_uri());
     });
 
@@ -1757,7 +1788,7 @@ void ConnectionFromClient::add_dom_node_attributes(u64 page_id, Web::UniqueNodeI
     async_did_finish_editing_dom_node(page_id, element.unique_id());
 }
 
-void ConnectionFromClient::replace_dom_node_attribute(u64 page_id, Web::UniqueNodeID node_id, String name, Vector<WebView::Attribute> replacement_attributes)
+void ConnectionFromClient::replace_dom_node_attribute(u64 page_id, Web::UniqueNodeID node_id, Utf16FlyString name, Vector<WebView::Attribute> replacement_attributes)
 {
     auto* dom_node = Web::DOM::Node::from_unique_id(node_id);
     if (!dom_node || !dom_node->is_element()) {
@@ -1944,12 +1975,12 @@ static void append_paint_tree(Web::Page& page, StringBuilder& builder)
         builder.append("(no layout tree)"sv);
         return;
     }
-    if (!layout_root->first_paintable()) {
+    if (!layout_root->paintable()) {
         builder.append("(no paint tree)"sv);
         return;
     }
 
-    Web::dump_tree(builder, *layout_root->first_paintable());
+    Web::dump_tree(builder, *layout_root->paintable());
 }
 
 static void append_stacking_context_tree(Web::Page& page, StringBuilder& builder)
@@ -1967,7 +1998,7 @@ static void append_stacking_context_tree(Web::Page& page, StringBuilder& builder
         builder.append("(no layout tree)"sv);
         return;
     }
-    if (!layout_root->first_paintable()) {
+    if (!layout_root->paintable()) {
         builder.append("(no paint tree)"sv);
         return;
     }
@@ -2032,14 +2063,107 @@ void ConnectionFromClient::request_internal_page_info(u64 page_id, WebView::Page
 Messages::WebContentServer::GetSelectedTextResponse ConnectionFromClient::get_selected_text(u64 page_id)
 {
     if (auto page = this->page(page_id); page.has_value())
-        return page->page().focused_navigable().selected_text().to_byte_string();
+        return page->page().focused_navigable().selected_text().to_utf8().to_byte_string();
     return ByteString {};
+}
+
+static WebView::DictionaryLookupTextStyle dictionary_lookup_text_style_from_layout_node(Web::Layout::Node const& layout_node, double zoom_level)
+{
+    auto const& font = layout_node.first_available_font();
+    return {
+        .font_family = font.family().to_string(),
+        .ui_point_size = font.pixel_size() * static_cast<float>(zoom_level),
+        .weight = font.weight(),
+        .slope = font.slope(),
+    };
+}
+
+static Web::Layout::Node const* layout_node_for_dictionary_lookup(Web::DOM::Node const& node)
+{
+    for (auto const* current = &node; current; current = current->parent_or_shadow_host_node()) {
+        auto const* layout_node = current->layout_node();
+        if (layout_node && layout_node->has_style_or_parent_with_style())
+            return layout_node;
+    }
+
+    return nullptr;
+}
+
+static Optional<Gfx::IntPoint> dictionary_lookup_baseline_origin_for_range(Web::DOM::Range& range, Web::Page& page, Web::Layout::Node const& layout_node)
+{
+    auto& document = range.start_container()->document();
+    auto navigable = document.navigable();
+    if (!navigable)
+        return {};
+
+    auto to_top_level_viewport_point = [&](Web::CSSPixelPoint point) {
+        auto scroll_offset = navigable->viewport_scroll_offset();
+        Web::CSSPixelPoint viewport_point { point.x() - scroll_offset.x(), point.y() - scroll_offset.y() };
+        return navigable->to_top_level_position(viewport_point);
+    };
+
+    auto rect = range.get_bounding_client_rect();
+    if (rect->width() <= 0 || rect->height() <= 0)
+        return {};
+
+    auto const& font = layout_node.first_available_font();
+    Web::CSSPixelPoint baseline_origin {
+        Web::CSSPixels::nearest_value_for(rect->x()),
+        Web::CSSPixels::nearest_value_for(rect->y() + font.pixel_metrics().ascent),
+    };
+    return page.css_to_device_point(to_top_level_viewport_point(baseline_origin)).to_type<int>();
+}
+
+Messages::WebContentServer::GetSelectedTextForLookupResponse ConnectionFromClient::get_selected_text_for_lookup(u64 page_id)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return Optional<WebView::DictionaryLookup> {};
+
+    auto& navigable = page->page().focused_navigable();
+    auto text = navigable.selected_text();
+    if (text.is_empty())
+        return Optional<WebView::DictionaryLookup> {};
+
+    auto document = navigable.active_document();
+    auto range = document ? document->get_selection()->range() : nullptr;
+    auto const* layout_node = range ? layout_node_for_dictionary_lookup(range->start_container()) : nullptr;
+    if (!layout_node && document) {
+        if (auto active_element = document->active_element())
+            layout_node = layout_node_for_dictionary_lookup(*active_element);
+    }
+
+    Optional<WebView::DictionaryLookupTextStyle> style;
+    Optional<Gfx::IntPoint> baseline_origin;
+    if (layout_node) {
+        style = dictionary_lookup_text_style_from_layout_node(*layout_node, navigable.page().client().zoom_level());
+        if (range)
+            baseline_origin = dictionary_lookup_baseline_origin_for_range(*range, page->page(), *layout_node);
+    }
+
+    return WebView::DictionaryLookup {
+        .text = text.to_utf8(),
+        .style = move(style),
+        .baseline_origin = baseline_origin,
+    };
+}
+
+Messages::WebContentServer::SelectWordForDictionaryLookupResponse ConnectionFromClient::select_word_for_dictionary_lookup(u64 page_id, Web::DevicePixelPoint position)
+{
+#if defined(AK_OS_MACOS)
+    if (auto page = this->page(page_id); page.has_value())
+        return page->page().select_word_for_dictionary_lookup(position);
+#else
+    (void)page_id;
+    (void)position;
+#endif
+    return false;
 }
 
 Messages::WebContentServer::CutSelectedTextResponse ConnectionFromClient::cut_selected_text(u64 page_id)
 {
     if (auto page = this->page(page_id); page.has_value())
-        return page->page().focused_navigable().cut_selected_text().to_byte_string();
+        return page->page().focused_navigable().cut_selected_text().to_utf8().to_byte_string();
     return ByteString {};
 }
 
@@ -2049,7 +2173,21 @@ void ConnectionFromClient::select_all(u64 page_id)
         page->page().focused_navigable().select_all();
 }
 
-void ConnectionFromClient::find_in_page(u64 page_id, String query, CaseSensitivity case_sensitivity)
+void ConnectionFromClient::undo(u64 page_id)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->page().focused_navigable().undo();
+    update_input_method_state(page_id);
+}
+
+void ConnectionFromClient::redo(u64 page_id)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->page().focused_navigable().redo();
+    update_input_method_state(page_id);
+}
+
+void ConnectionFromClient::find_in_page(u64 page_id, Utf16String query, CaseSensitivity case_sensitivity)
 {
     auto page = this->page(page_id);
     if (!page.has_value())
@@ -2083,43 +2221,78 @@ void ConnectionFromClient::paste(u64 page_id, Utf16String text)
 {
     if (auto page = this->page(page_id); page.has_value())
         page->page().focused_navigable().paste(text);
+    update_input_method_state(page_id);
 }
 
 void ConnectionFromClient::set_marked_text_from_input_method(u64 page_id, Utf16String text)
 {
     if (auto page = this->page(page_id); page.has_value())
         page->page().focused_navigable().set_marked_text_from_input_method(text);
-    update_input_method_caret_rect(page_id);
+    update_input_method_state(page_id);
 }
 
-void ConnectionFromClient::commit_text_from_input_method(u64 page_id, Utf16String text)
+void ConnectionFromClient::commit_text_from_input_method(u64 page_id, Utf16String text, i32 replacement_start, i32 replacement_length)
 {
     if (auto page = this->page(page_id); page.has_value())
-        page->page().focused_navigable().commit_text_from_input_method(text);
-    update_input_method_caret_rect(page_id);
+        page->page().focused_navigable().commit_text_from_input_method(text, replacement_start, replacement_length);
+    update_input_method_state(page_id);
 }
 
 void ConnectionFromClient::unmark_text_from_input_method(u64 page_id)
 {
     if (auto page = this->page(page_id); page.has_value())
         page->page().focused_navigable().unmark_text_from_input_method();
+    update_input_method_state(page_id);
 }
 
-void ConnectionFromClient::update_input_method_caret_rect(u64 page_id)
+static constexpr size_t maximum_input_method_surrounding_text_length = 1024;
+
+void ConnectionFromClient::update_input_method_state(u64 page_id)
 {
     auto page = this->page(page_id);
     if (!page.has_value())
         return;
 
-    // Push the updated caret position to the UI — so platform input methods can place their overlays. We deliberately
-    // push this asynchronously — rather than answering a synchronous request from inside an AppKit text-input callback.
-    // Blocking there re-enters the run loop — and can deadlock input-method server <-> UI <-> WebContent message flow.
+    // Push the updated input state to the UI, so platform input methods can place their overlays. We deliberately
+    // push this asynchronously instead of answering a synchronous request from inside an AppKit text-input callback.
+    // Blocking there re-enters the run loop and can deadlock input-method server <-> UI <-> WebContent message flow.
     Optional<Web::DevicePixelRect> caret_rect;
+    bool is_enabled = false;
+    i32 cursor_position = 0;
+    i32 anchor_position = 0;
+    Utf16String text_before_cursor;
+    Utf16String text_after_cursor;
+
     if (auto document = page->page().focused_navigable().active_document()) {
         if (auto rect = document->current_caret_rect(); rect.has_value())
             caret_rect = page->page().enclosing_device_rect(*rect);
+
+        if (auto const* text_control = as_if<Web::HTML::FormAssociatedTextControlElement>(document->focused_area().ptr())) {
+            if (text_control->selection_start_binding().has_value()) {
+                auto value = text_control->relevant_value();
+                auto selection_start = text_control->selection_start();
+                auto selection_end = text_control->selection_end();
+                auto cursor = text_control->selection_direction_state() == Web::HTML::SelectionDirection::Backward ? selection_start : selection_end;
+                auto anchor = cursor == selection_start ? selection_end : selection_start;
+                auto value_length = value.length_in_code_units();
+                auto text_before_start = cursor > maximum_input_method_surrounding_text_length ? cursor - maximum_input_method_surrounding_text_length : 0;
+                auto text_after_length = min(value_length - cursor, maximum_input_method_surrounding_text_length);
+
+                auto const& html_element = text_control->text_control_to_html_element();
+                if (auto const* input_element = as_if<Web::HTML::HTMLInputElement>(html_element))
+                    is_enabled = input_element->is_mutable();
+                else if (auto const* text_area_element = as_if<Web::HTML::HTMLTextAreaElement>(html_element))
+                    is_enabled = text_area_element->is_mutable();
+
+                cursor_position = AK::clamp_to<i32>(cursor);
+                anchor_position = AK::clamp_to<i32>(anchor);
+                text_before_cursor = Utf16String::from_utf16(value.substring_view(text_before_start, cursor - text_before_start));
+                text_after_cursor = Utf16String::from_utf16(value.substring_view(cursor, text_after_length));
+            }
+        }
     }
-    async_did_update_input_caret_rect(page_id, caret_rect);
+
+    async_did_update_input_method_state(page_id, caret_rect, is_enabled, cursor_position, anchor_position, move(text_before_cursor), move(text_after_cursor));
 }
 
 void ConnectionFromClient::set_content_blockers(u64 page_id, Core::AnonymousBuffer patterns_buffer)
@@ -2138,7 +2311,7 @@ void ConnectionFromClient::set_content_blockers(u64 page_id, Core::AnonymousBuff
     }
 }
 
-void ConnectionFromClient::set_autoplay_settings(u64, Web::HTML::AutoplayPolicy policy, Vector<String> allowlist)
+void ConnectionFromClient::set_autoplay_settings(u64, Web::HTML::AutoplayPolicy policy, Vector<Utf16String> allowlist)
 {
     Web::HTML::AutoplaySettings::the().set_policy(policy, allowlist);
 }
@@ -2197,6 +2370,18 @@ void ConnectionFromClient::set_browsing_behavior(u64 page_id, WebView::BrowsingB
 void ConnectionFromClient::set_enable_global_privacy_control(u64, bool enable)
 {
     Web::ResourceLoader::the().set_enable_global_privacy_control(enable);
+}
+
+void ConnectionFromClient::set_geolocation_emulated_position(u64 page_id, WebView::GeolocationPositionData position, Optional<u16> error_code)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->set_geolocation_emulated_position(position, error_code);
+}
+
+void ConnectionFromClient::geolocation_position_response(u64 page_id, u64 request_id, WebView::GeolocationPositionData position, Optional<u16> error_code)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->geolocation_position_response(request_id, position, error_code);
 }
 
 void ConnectionFromClient::set_has_focus(u64 page_id, bool has_focus)
@@ -2300,7 +2485,7 @@ void ConnectionFromClient::confirm_closed(u64 page_id, bool accepted)
         page->page().confirm_closed(accepted);
 }
 
-void ConnectionFromClient::prompt_closed(u64 page_id, Optional<String> response)
+void ConnectionFromClient::prompt_closed(u64 page_id, Optional<Utf16String> response)
 {
     if (auto page = this->page(page_id); page.has_value())
         page->page().prompt_closed(move(response));
@@ -2366,22 +2551,27 @@ void ConnectionFromClient::toggle_media_controls_state(u64 page_id)
         page->page().toggle_media_controls_state();
 }
 
-void ConnectionFromClient::toggle_page_mute_state(u64 page_id)
+void ConnectionFromClient::set_page_mute_state(u64 page_id, Web::HTML::MuteState mute_state)
 {
     if (auto page = this->page(page_id); page.has_value())
-        page->page().toggle_page_mute_state();
+        page->page().set_page_mute_state(mute_state);
 }
 
 void ConnectionFromClient::set_user_style(u64 page_id, String source)
 {
     if (auto page = this->page(page_id); page.has_value())
-        page->page().set_user_style(move(source));
+        page->page().set_user_style(Utf16String::from_utf8(source));
 }
 
 void ConnectionFromClient::system_time_zone_changed()
 {
     JS::clear_system_time_zone_cache();
     Unicode::clear_system_time_zone_cache();
+}
+
+void ConnectionFromClient::set_system_font_family(String family)
+{
+    Web::Platform::FontPlugin::the().set_system_font_family(FlyString { family });
 }
 
 void ConnectionFromClient::set_document_cookie_version_buffer(u64 page_id, Core::AnonymousBuffer document_cookie_version_buffer)
@@ -2422,7 +2612,7 @@ void ConnectionFromClient::did_worker_agent_fail_loading_script(Web::HTML::Worke
     Web::HTML::WorkerAgentParent::did_fail_loading_worker_script(owner_token);
 }
 
-void ConnectionFromClient::did_worker_agent_report_exception(Web::HTML::WorkerAgentOwnerToken owner_token, String message, String filename, u32 lineno, u32 colno)
+void ConnectionFromClient::did_worker_agent_report_exception(Web::HTML::WorkerAgentOwnerToken owner_token, Utf16String message, Utf16String filename, u32 lineno, u32 colno)
 {
     Web::HTML::WorkerAgentParent::did_report_worker_exception(owner_token, move(message), move(filename), lineno, colno);
 }

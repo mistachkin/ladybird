@@ -10,7 +10,7 @@
 #include <LibWeb/Layout/Box.h>
 #include <LibWeb/Page/ElementResizeAction.h>
 #include <LibWeb/Painting/ChromeMetrics.h>
-#include <LibWeb/Painting/PaintableBox.h>
+#include <LibWeb/Painting/Paintable.h>
 
 // https://drafts.csswg.org/css-ui#resize
 
@@ -21,7 +21,7 @@ static Optional<CSSPixelSize> containing_block_padding_box_size(Layout::Node con
     auto parent_box = layout_node.containing_block();
     if (!parent_box)
         return {};
-    if (auto first_paintable = parent_box->first_paintable(); auto const* paintable_box = as_if<Painting::PaintableBox>(first_paintable.ptr()))
+    if (auto paintable = parent_box->paintable(); auto const* paintable_box = paintable.ptr())
         return paintable_box->absolute_padding_box_rect().size();
     return {};
 }
@@ -95,8 +95,8 @@ void ElementResizeAction::handle_pointer_move(CSSPixelPoint pointer_position)
     }
 
     auto style = element->style_for_bindings();
-    auto width_str = MUST(String::formatted("{:.2f}px", max(0.0, css_width.to_double())));
-    auto height_str = MUST(String::formatted("{:.2f}px", max(0.0, css_height.to_double())));
+    auto width_str = Utf16String::formatted("{:.2f}px", max(0.0, css_width.to_double()));
+    auto height_str = Utf16String::formatted("{:.2f}px", max(0.0, css_height.to_double()));
 
     MUST(style->set_property(CSS::PropertyID::Width, width_str));
     MUST(style->set_property(CSS::PropertyID::Height, height_str));

@@ -130,23 +130,23 @@ static String escape_for_dump(Utf16String const& string)
     return escape_for_dump(string.to_utf8());
 }
 
-static StringView namespace_label(Optional<FlyString> const& namespace_uri)
+static String namespace_label(Optional<Utf16FlyString> const& namespace_uri)
 {
     if (!namespace_uri.has_value())
-        return "none"sv;
+        return "none"_string;
     if (namespace_uri == Web::Namespace::HTML)
-        return "html"sv;
+        return "html"_string;
     if (namespace_uri == Web::Namespace::MathML)
-        return "mathml"sv;
+        return "mathml"_string;
     if (namespace_uri == Web::Namespace::SVG)
-        return "svg"sv;
+        return "svg"_string;
     if (namespace_uri == Web::Namespace::XLink)
-        return "xlink"sv;
+        return "xlink"_string;
     if (namespace_uri == Web::Namespace::XML)
-        return "xml"sv;
+        return "xml"_string;
     if (namespace_uri == Web::Namespace::XMLNS)
-        return "xmlns"sv;
-    return namespace_uri->bytes_as_string_view();
+        return "xmlns"_string;
+    return namespace_uri->to_utf16_string().to_utf8();
 }
 
 static StringView quirks_mode_label(Web::DOM::Document const& document)
@@ -283,13 +283,13 @@ static GC::Ref<Web::DOM::Document> parse_html(JS::Realm& realm, Web::DOM::Docume
 {
     auto document = Web::DOM::Document::create(realm, URL::about_blank());
     document->set_document_type(Web::DOM::Document::Type::HTML);
-    document->set_content_type("text/html"_string);
+    document->set_content_type("text/html"_utf16_fly_string);
     document->set_origin(origin_document.origin());
     document->set_ready_to_run_scripts();
-    document->set_allow_declarative_shadow_roots(true);
+    document->set_allow_declarative_shadow_roots(Web::HTML::HTMLParser::AllowDeclarativeShadowRoots::Yes);
     document->set_custom_element_registry(realm.create<Web::HTML::CustomElementRegistry>(realm));
 
-    auto parser = Web::HTML::HTMLParser::create(document, input, Web::HTML::ParserScriptingMode::Disabled, "UTF-8"sv);
+    auto parser = Web::HTML::HTMLParser::create_from_byte_string(document, input, Web::HTML::ParserScriptingMode::Disabled, "UTF-8"sv);
     parser->run(URL::about_blank());
     return document;
 }

@@ -25,12 +25,12 @@ GC_DEFINE_ALLOCATOR(Index);
 
 Index::~Index() = default;
 
-GC::Ref<Index> Index::create(JS::Realm& realm, GC::Ref<ObjectStore> store, String const& name, KeyPath const& key_path, bool unique, bool multi_entry)
+GC::Ref<Index> Index::create(JS::Realm& realm, GC::Ref<ObjectStore> store, Utf16String const& name, KeyPath const& key_path, bool unique, bool multi_entry)
 {
     return realm.create<Index>(store, name, key_path, unique, multi_entry);
 }
 
-Index::Index(GC::Ref<ObjectStore> store, String const& name, KeyPath const& key_path, bool unique, bool multi_entry)
+Index::Index(GC::Ref<ObjectStore> store, Utf16String const& name, KeyPath const& key_path, bool unique, bool multi_entry)
     : m_object_store(store)
     , m_name(name)
     , m_unique(unique)
@@ -51,7 +51,7 @@ void Index::visit_edges(Visitor& visitor)
     }
 }
 
-void Index::set_name(String name)
+void Index::set_name(Utf16String name)
 {
     // NOTE: Update the key in the map so it still matches the name
     auto old_value = m_object_store->index_set().take(m_name).release_value();
@@ -68,7 +68,7 @@ bool Index::has_record_with_key(GC::Ref<Key> key)
 }
 
 // https://w3c.github.io/IndexedDB/#index-referenced-value
-HTML::SerializationRecord const& Index::referenced_value(IndexRecord const& index_record) const
+HTML::StorageSerializationRecord const& Index::referenced_value(IndexRecord const& index_record) const
 {
     // Records in an index are said to have a referenced value.
     // This is the value of the record in the index’s referenced object store which has a key equal to the index’s record’s value.

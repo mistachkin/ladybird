@@ -214,8 +214,16 @@
 #    cmakedefine01 RESOURCE_DEBUG
 #endif
 
+#ifndef SHARED_QUEUE_DEBUG
+#    cmakedefine01 SHARED_QUEUE_DEBUG
+#endif
+
 #ifndef SPAM_DEBUG
 #    cmakedefine01 SPAM_DEBUG
+#endif
+
+#ifndef STRUCTURED_SERIALIZE_DEBUG
+#    cmakedefine01 STRUCTURED_SERIALIZE_DEBUG
 #endif
 
 #ifndef SYNTAX_HIGHLIGHTING_DEBUG
@@ -258,6 +266,10 @@
 #    cmakedefine01 UTF8_DEBUG
 #endif
 
+#ifndef VIDEO_FRAME_POOL_DEBUG
+#    cmakedefine01 VIDEO_FRAME_POOL_DEBUG
+#endif
+
 #ifndef VULKAN_VALIDATION_LAYERS_DEBUG
 #    cmakedefine01 VULKAN_VALIDATION_LAYERS_DEBUG
 #endif
@@ -292,6 +304,10 @@
 
 #ifndef WEBDRIVER_ROUTE_DEBUG
 #    cmakedefine01 WEBDRIVER_ROUTE_DEBUG
+#endif
+
+#ifndef VIDEO_PRESENTATION_CHANNEL_DEBUG
+#    cmakedefine01 VIDEO_PRESENTATION_CHANNEL_DEBUG
 #endif
 
 #ifndef WEBGL_CONTEXT_DEBUG

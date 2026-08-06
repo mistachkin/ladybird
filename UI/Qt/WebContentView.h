@@ -11,11 +11,13 @@
 #include <AK/Function.h>
 #include <AK/Optional.h>
 #include <AK/OwnPtr.h>
+#include <AK/Vector.h>
 #include <LibGfx/Cursor.h>
 #include <LibGfx/Forward.h>
 #include <LibGfx/Rect.h>
 #include <LibURL/URL.h>
 #include <LibWeb/Forward.h>
+#include <LibWebView/PrivateBrowsing.h>
 #include <LibWebView/ViewImplementation.h>
 
 #include <QMenu>
@@ -26,7 +28,10 @@
 #ifdef AK_OS_MACOS
 #    define LADYBIRD_QT_USE_METAL_RHI_WIDGET 1
 #    define LADYBIRD_QT_USE_RHI_WIDGET 1
-#elif defined(USE_VULKAN_DMABUF_IMAGES) && QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
+#elif defined(USE_DIRECTX)
+#    define LADYBIRD_QT_USE_D3D_RHI_WIDGET 1
+#    define LADYBIRD_QT_USE_RHI_WIDGET 1
+#elif defined(USE_VULKAN_DMABUF_IMAGES)
 #    define LADYBIRD_QT_USE_VULKAN_WINDOW 1
 #endif
 
@@ -40,6 +45,16 @@ class QKeyEvent;
 class QSinglePointEvent;
 class QCursor;
 
+#ifdef LADYBIRD_QT_USE_D3D_RHI_WIDGET
+struct ID3D11Texture2D;
+
+namespace Gfx {
+
+struct WindowsD3DHandle;
+
+}
+#endif
+
 namespace Ladybird {
 
 #ifdef LADYBIRD_QT_USE_RHI_WIDGET
@@ -49,6 +64,7 @@ using WebContentViewBase = QWidget;
 #endif
 
 struct WebContentViewInitialState {
+    WebView::IsPrivate is_private { WebView::IsPrivate::No };
     double maximum_frames_per_second { 60.0 };
     Optional<u64> display_id;
 };
@@ -83,6 +99,7 @@ public:
     virtual void hideEvent(QHideEvent*) override;
     virtual void focusInEvent(QFocusEvent*) override;
     virtual void focusOutEvent(QFocusEvent*) override;
+    void update_page_focus();
     virtual bool event(QEvent*) override;
 
     void set_viewport_rect(Gfx::IntRect);
@@ -90,6 +107,9 @@ public:
     void set_zoom_level(double);
     void set_maximum_frames_per_second(double);
     void set_display_metadata(Optional<u64> display_id, double maximum_frames_per_second);
+    void set_vertical_tab_overlay_insets(int left, int right);
+    void prepare_for_window_move();
+    void finish_window_move();
 
     enum class PaletteMode {
         Default,
@@ -108,8 +128,6 @@ public slots:
 signals:
     void urls_dropped(QList<QUrl> const&);
 
-    void native_window_pointer_event();
-
 private:
     // ^WebView::ViewImplementation
     virtual void initialize_client(CreateNewClient) override;
@@ -117,6 +135,7 @@ private:
     virtual Web::DevicePixelSize viewport_size() const override;
     virtual Gfx::IntPoint to_content_position(Gfx::IntPoint widget_position) const override;
     virtual Gfx::IntPoint to_widget_position(Gfx::IntPoint content_position) const override;
+    virtual void did_accept_presented_backing_store(i32, Gfx::IntRect) override;
 
 #ifdef LADYBIRD_QT_USE_RHI_WIDGET
     // ^QRhiWidget
@@ -136,6 +155,9 @@ private:
     void update_cursor(Gfx::Cursor cursor);
     void apply_web_content_cursor(QCursor const&);
     void schedule_repaint();
+#ifdef LADYBIRD_QT_USE_RHI_WIDGET
+    void schedule_frame_damage_repaint();
+#endif
     void update_compositor_display_metadata();
 
     Web::DevicePixelPoint node_picker_position_for(QSinglePointEvent const&) const;
@@ -175,6 +197,31 @@ private:
     void* m_imported_iosurface_texture { nullptr };
     Gfx::SharedImageBuffer const* m_imported_shared_image_buffer { nullptr };
     unsigned long m_render_target_pixel_format { 0 };
+
+    bool m_repaint_retry_scheduled { false };
+#endif
+
+#ifdef LADYBIRD_QT_USE_RHI_WIDGET
+    bool m_force_full_repaint { true };
+    bool m_has_pending_frame_damage { false };
+    Gfx::IntRect m_pending_frame_damage;
+#endif
+
+#ifdef LADYBIRD_QT_USE_D3D_RHI_WIDGET
+    // The front and back backing stores alternate every frame, so imported textures are cached
+    // per shared image buffer to avoid re-opening the shared handle on every present. Entries
+    // with a null qrhi_texture record failed imports so they are not retried every frame.
+    struct ImportedD3DTexture {
+        Gfx::SharedImageBuffer const* shared_image_buffer { nullptr };
+        int handle_value { -1 };
+        ID3D11Texture2D* d3d11_texture { nullptr };
+        QRhiTexture* qrhi_texture { nullptr };
+    };
+
+    QRhiTexture* imported_d3d_texture_for(Gfx::SharedImageBuffer const&, Gfx::WindowsD3DHandle const&);
+    void release_imported_d3d_textures();
+
+    Vector<ImportedD3DTexture> m_imported_d3d_textures;
 #endif
 
 #ifdef LADYBIRD_QT_USE_VULKAN_WINDOW
@@ -186,14 +233,23 @@ private:
 
     void create_vulkan_window();
     void destroy_vulkan_window();
+    void update_vulkan_window_input_region();
+    void update_vulkan_alpha_blending_support();
     bool current_paintable_can_use_vulkan_window() const;
     void schedule_vulkan_window_update();
     void update_vulkan_window_geometry();
     void set_vulkan_window_cursor(QCursor const&);
     bool handle_vulkan_window_event(QEvent*);
+    bool vulkan_window_has_native_focus() const;
+    void set_vulkan_window_container_visible(bool);
+    void fall_back_to_bitmap_rendering();
 
     VulkanWindow* m_vulkan_window { nullptr };
     QWidget* m_vulkan_window_container { nullptr };
+    Optional<bool> m_vulkan_window_supports_alpha_blending;
+
+    int m_vertical_tab_overlay_left { 0 };
+    int m_vertical_tab_overlay_right { 0 };
 #endif
 };
 

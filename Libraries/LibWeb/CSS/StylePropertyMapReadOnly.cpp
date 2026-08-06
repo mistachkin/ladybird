@@ -11,6 +11,7 @@
 #include <LibWeb/CSS/CSSStyleValue.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/CustomPropertyData.h>
+#include <LibWeb/CSS/CustomPropertyRegistration.h>
 #include <LibWeb/CSS/PropertyNameAndID.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
@@ -56,7 +57,7 @@ WebIDL::ExceptionOr<Variant<GC::Ref<CSSStyleValue>, Empty>> StylePropertyMapRead
     // 2. If property is not a valid CSS property, throw a TypeError.
     auto property = PropertyNameAndID::from_name(property_name);
     if (!property.has_value())
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, MUST(String::formatted("'{}' is not a valid CSS property", property_name)) };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, Utf16String::formatted("'{}' is not a valid CSS property", property_name) };
 
     // 3. Let props be the value of this’s [[declarations]] internal slot.
     auto& props = m_declarations;
@@ -80,7 +81,7 @@ WebIDL::ExceptionOr<GC::RootVector<GC::Ref<CSSStyleValue>>> StylePropertyMapRead
     // 2. If property is not a valid CSS property, throw a TypeError.
     auto property = PropertyNameAndID::from_name(property_name);
     if (!property.has_value())
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, MUST(String::formatted("'{}' is not a valid CSS property", property_name)) };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, Utf16String::formatted("'{}' is not a valid CSS property", property_name) };
 
     // 3. Let props be the value of this’s [[declarations]] internal slot.
     auto& props = m_declarations;
@@ -108,7 +109,7 @@ WebIDL::ExceptionOr<bool> StylePropertyMapReadOnly::has(Utf16FlyString property_
     // 2. If property is not a valid CSS property, throw a TypeError.
     auto property = PropertyNameAndID::from_name(property_name);
     if (!property.has_value())
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, MUST(String::formatted("'{}' is not a valid CSS property", property_name)) };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, Utf16String::formatted("'{}' is not a valid CSS property", property_name) };
 
     // 3. Let props be the value of this’s [[declarations]] internal slot.
     auto& props = m_declarations;
@@ -185,8 +186,14 @@ RefPtr<StyleValue const> StylePropertyMapReadOnly::get_style_value(Source& sourc
 
             if (property.id() >= first_longhand_property_id && property.id() <= last_longhand_property_id) {
                 // FIXME: This will only ever be null for pseudo-elements. What should we do in that case?
-                if (auto computed_properties = element.computed_properties())
-                    return computed_properties->property(property.id());
+                if (auto computed_values = element.computed_values()) {
+                    auto property_id = property.id();
+                    if (property_is_logical_alias(property_id))
+                        property_id = map_logical_alias_to_physical_property(property_id, LogicalAliasMappingContext { computed_values->writing_mode(), computed_values->direction() });
+                    if (property_id == PropertyID::BackgroundColor && computed_values->background_color_style_value())
+                        return computed_values->background_color_style_value();
+                    return computed_values->computed_style_value(property_id);
+                }
             }
 
             return nullptr;

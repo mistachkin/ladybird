@@ -7,6 +7,7 @@
 #pragma once
 
 #include <AK/Function.h>
+#include <AK/Utf16View.h>
 #include <LibWeb/DOM/DocumentLoadEventDelayer.h>
 #include <LibWeb/HTML/CORSSettingAttribute.h>
 #include <LibWeb/HTML/HTMLElement.h>
@@ -38,6 +39,7 @@ public:
     void prepare_script(Badge<XMLDocumentBuilder, HTMLParser>) { prepare_script(); }
 
     void execute_script();
+    void stop_delaying_document_load_event(Badge<DOM::Document>) { m_document_load_event_delayer.clear(); }
 
     // [Non-standard] True iff this element's `type` attribute was
     // recognized as the TH8 signed MIME (`text/th8+signed`).  Used
@@ -51,9 +53,9 @@ public:
     virtual void post_connection() override;
 
     // https://html.spec.whatwg.org/multipage/scripting.html#dom-script-supports
-    static bool supports(JS::VM&, StringView type)
+    static bool supports(JS::VM&, Utf16View type)
     {
-        return type.is_one_of("classic"sv, "module"sv, "importmap"sv, "th8"sv, "th8+signed"sv);
+        return type.is_one_of(u"classic"sv, u"module"sv, u"importmap"sv, u"th8"sv, u"th8+signed"sv);
     }
 
     void set_source_line_number(Badge<HTMLParser>, size_t source_line_number) { m_source_line_number = source_line_number; }
@@ -78,7 +80,7 @@ public:
 
     virtual WebIDL::ExceptionOr<void> cloned(Node&, bool) const override;
 
-    void set_string_text(Utf16String const& value) { m_script_text = value; }
+    void set_string_text(Utf16View value) { m_script_text = Utf16String::from_utf16(value); }
 
 protected:
     // https://html.spec.whatwg.org/multipage/urls-and-fetching.html#implicitly-potentially-render-blocking
@@ -93,7 +95,7 @@ private:
     virtual void visit_edges(Cell::Visitor&) override;
     virtual void adopted_from(DOM::Document&) override;
 
-    virtual void attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
+    virtual void attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_) override;
 
     // https://www.w3.org/TR/trusted-types/#prepare-script-text
     WebIDL::ExceptionOr<void> prepare_script_text();

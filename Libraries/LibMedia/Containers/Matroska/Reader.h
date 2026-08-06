@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <AK/HashTable.h>
 #include <AK/NonnullOwnPtr.h>
 #include <AK/NonnullRefPtr.h>
 #include <AK/Optional.h>
@@ -60,7 +61,7 @@ public:
 
     static size_t find_cue_point_index_at_or_before(Vector<TrackCuePoint> const&, Optional<AK::Duration> total_duration, AK::Duration target);
 
-    TimeRanges buffered_time_ranges(NonnullRefPtr<MediaStreamCursor> const&, Vector<MediaStream::ByteRange> const& byte_ranges) const;
+    HashMap<u64, BufferedRangesScan> buffered_time_ranges_by_track_number(NonnullRefPtr<MediaStreamCursor> const&, Vector<MediaStream::ByteRange> const& byte_ranges) const;
 
 private:
     Reader() = default;
@@ -68,6 +69,8 @@ private:
     DecoderErrorOr<void> parse_initial_data(Streamer&);
 
     DecoderErrorOr<Optional<size_t>> find_first_top_level_element_with_id(Streamer&, StringView element_name, u32 element_id);
+    DecoderErrorOr<void> parse_seek_head(Streamer&, HashTable<size_t>& parsed_seek_heads);
+    DecoderErrorOr<void> parse_seek_head_at_position(Streamer&, size_t seek_head_position, HashTable<size_t>& parsed_seek_heads);
 
     DecoderErrorOr<void> parse_segment_information(Streamer&);
 
@@ -100,8 +103,7 @@ private:
         size_t start { 0 };
         size_t end { 0 };
         Optional<SampleIterator> iterator;
-        Optional<AK::Duration> time_start { OptionalNone() };
-        AK::Duration time_end { AK::Duration::zero() };
+        HashMap<u64, TimeRanges::Range> track_intervals;
     };
     mutable Vector<BufferedRange> m_buffered_ranges;
 };

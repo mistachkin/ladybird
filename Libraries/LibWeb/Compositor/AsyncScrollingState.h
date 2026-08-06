@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <AK/Forward.h>
 #include <AK/Optional.h>
 #include <AK/StringView.h>
 #include <AK/Types.h>
@@ -17,16 +18,16 @@
 #include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/Painting/AccumulatedVisualContext.h>
-#include <LibWeb/Painting/ScrollFrame.h>
+#include <LibWeb/Painting/ScrollNodeState.h>
 
 namespace Web::Compositor {
 
 using AsyncScrollOperationID = u64;
 
-// Stable identifier for a scroll frame in a document; the frame index alone is not unique across nested documents.
+// Stable identifier for a scroll node in a document; the node index alone is not unique across nested documents.
 struct AsyncScrollNodeID {
     UniqueNodeID document_id;
-    Painting::ScrollFrameIndex scroll_frame_index;
+    Painting::VisualContextIndex scroll_node_index;
 
     bool operator==(AsyncScrollNodeID const&) const = default;
 };
@@ -52,13 +53,11 @@ struct AsyncScrollOffset {
     Gfx::FloatPoint unadopted_scroll_delta;
 };
 
-// One scrollable area from the paint snapshot. Non-viewport scrollports are stored in hit_test_visual_context_index
-// coordinates and transformed to viewport coordinates when the compositor rebuilds wheel targets.
+// One scrollable area from the paint snapshot.
 struct AsyncScrollNode {
     AsyncScrollNodeID node_id;
     AsyncScrollNodeStableID stable_node_id;
     Optional<AsyncScrollNodeID> parent_node_id;
-    Painting::VisualContextIndex hit_test_visual_context_index;
     Gfx::IntRect scrollport_rect;
     Gfx::FloatPoint max_scroll_offset;
     bool is_viewport { false };
@@ -66,13 +65,13 @@ struct AsyncScrollNode {
     bool can_be_wheel_scrolled_vertically { false };
 };
 
-// Sticky elements are represented as scroll frames whose offset is derived from ancestor scroll offsets. Keep only
+// Sticky elements are represented as scroll nodes whose offset is derived from ancestor scroll offsets. Keep only
 // the precomputed geometry needed to replay that calculation on the compositor thread after an async scroll mutation.
 struct AsyncStickyArea {
     UniqueNodeID document_id;
-    Painting::ScrollFrameIndex scroll_frame_index;
-    Painting::ScrollFrameIndex parent_scroll_frame_index;
-    Painting::ScrollFrameIndex nearest_scrolling_ancestor_index;
+    Painting::VisualContextIndex scroll_node_index;
+    Painting::VisualContextIndex parent_scroll_node_index;
+    Painting::VisualContextIndex nearest_scrolling_ancestor_index;
     Gfx::FloatPoint position_relative_to_scroll_ancestor;
     Gfx::FloatSize border_box_size;
     Gfx::FloatSize scrollport_size;
@@ -105,7 +104,7 @@ struct MainThreadWheelEventRegion {
 
 struct ViewportScrollbar {
     AsyncScrollNodeID scroll_node_id;
-    Painting::ScrollFrameIndex scroll_frame_index;
+    Painting::VisualContextIndex scroll_node_index;
     Gfx::IntRect gutter_rect;
     Gfx::IntRect thumb_rect;
     Gfx::IntRect expanded_gutter_rect;
@@ -157,7 +156,7 @@ enum class WheelScrollAdmission {
 
 WEB_API AsyncScrollingState async_scrolling_state_from_display_list(Painting::DisplayList const&);
 WEB_API WheelRoutingAdmission wheel_routing_admission_for(AsyncScrollingState const&);
-WEB_API StringView wheel_routing_admission_to_string(WheelRoutingAdmission);
+WEB_API Utf16View wheel_routing_admission_to_utf16_view(WheelRoutingAdmission);
 WEB_API bool blocks_wheel_event_at_position(AsyncScrollingState const&, RefPtr<Painting::DisplayList const> const&, Painting::AccumulatedVisualContextTree const*, Painting::ScrollStateSnapshot const&, Gfx::FloatPoint position);
 WEB_API WheelScrollAdmission admit_wheel_scroll(AsyncScrollingState const&, RefPtr<Painting::DisplayList const> const&, Painting::AccumulatedVisualContextTree const*, Painting::ScrollStateSnapshot const&, Gfx::FloatPoint position, Gfx::FloatPoint delta, bool blocking_wheel_event_regions_are_current);
 

@@ -6,13 +6,37 @@
 
 #include <LibTest/TestCase.h>
 #include <LibURL/Parser.h>
+#include <LibWeb/HTML/CrossProcessId.h>
 #include <LibWebView/HistoryDebug.h>
 #include <LibWebView/SessionHistory.h>
+
+static Web::HTML::CrossProcessId navigable_id(StringView id)
+{
+    if (id == "frame-1"sv)
+        return { 1, 1 };
+    if (id == "frame"sv)
+        return { 1, 2 };
+    if (id == "1"sv)
+        return { 2, 1 };
+    VERIFY_NOT_REACHED();
+}
+
+static Web::HTML::CrossProcessId test_document_state_id(u64 local_id)
+{
+    VERIFY(local_id > 0);
+    return { 3, local_id };
+}
+
+static Web::HTML::CrossProcessId allocate_test_ui_process_document_state_id()
+{
+    static Web::HTML::CrossProcessIdAllocator allocator { .namespace_id = 4 };
+    return allocator.allocate();
+}
 
 static Web::HTML::SessionHistoryNestedHistoryDescriptor nested_history(StringView id, Vector<Web::HTML::SessionHistoryEntryDescriptor> entries)
 {
     return {
-        .id = MUST(String::from_utf8(id)),
+        .id = navigable_id(id),
         .entries = move(entries),
     };
 }
@@ -24,11 +48,9 @@ static URL::URL parse_url(StringView url)
     return parsed_url.release_value();
 }
 
-static Web::HTML::SerializationRecord state_record(u8 byte)
+static Web::HTML::StorageSerializationRecord state_record(u8 byte)
 {
-    Web::HTML::SerializationRecord record;
-    record.append(byte);
-    return record;
+    return Web::HTML::StorageSerializationRecord { MUST(ByteBuffer::copy({ &byte, 1 })) };
 }
 
 static Web::HTML::SessionHistoryEntryDescriptor create_test_entry(i32 step, URL::URL url)
@@ -37,7 +59,7 @@ static Web::HTML::SessionHistoryEntryDescriptor create_test_entry(i32 step, URL:
         .step = step,
         .url = move(url),
         .document_state = {
-            .id = 0,
+            .id = test_document_state_id(1000 + static_cast<u64>(step)),
             .history_policy_container = Web::HTML::DocumentState::Client::Tag,
             .request_referrer = Web::Fetch::Infrastructure::Request::Referrer::Client,
             .request_referrer_policy = Web::ReferrerPolicy::DEFAULT_REFERRER_POLICY,
@@ -69,8 +91,8 @@ static Web::HTML::SessionHistoryEntryDescriptor entry(i32 step, StringView url, 
     auto entry = create_test_entry(step, parse_url(url));
     entry.classic_history_api_state = state_record(classic_history_api_state);
     entry.navigation_api_state = state_record(navigation_api_state);
-    entry.navigation_api_key = MUST(String::from_utf8(navigation_api_key));
-    entry.navigation_api_id = MUST(String::from_utf8(navigation_api_id));
+    entry.navigation_api_key = Utf16String::from_utf8(navigation_api_key);
+    entry.navigation_api_id = Utf16String::from_utf8(navigation_api_id);
     entry.scroll_restoration_mode = scroll_restoration_mode;
     return entry;
 }
@@ -85,19 +107,19 @@ static Web::HTML::SessionHistoryEntryDescriptor entry_with_scroll_position(i32 s
 static Web::HTML::SessionHistoryEntryDescriptor entry(i32 step, StringView url, u64 document_state_id, StringView navigable_target_name)
 {
     auto entry = create_test_entry(step, parse_url(url));
-    entry.document_state.id = document_state_id;
+    entry.document_state.id = test_document_state_id(document_state_id);
     entry.document_state.ever_populated = true;
-    entry.document_state.navigable_target_name = MUST(String::from_utf8(navigable_target_name));
+    entry.document_state.navigable_target_name = Utf16String::from_utf8(navigable_target_name);
     return entry;
 }
 
 static Web::HTML::SessionHistoryEntryDescriptor entry_with_reload_pending(i32 step, StringView url, u64 document_state_id, StringView navigable_target_name, Vector<Web::HTML::SessionHistoryNestedHistoryDescriptor> nested_histories)
 {
     auto entry = create_test_entry(step, parse_url(url));
-    entry.document_state.id = document_state_id;
+    entry.document_state.id = test_document_state_id(document_state_id);
     entry.document_state.reload_pending = true;
     entry.document_state.ever_populated = true;
-    entry.document_state.navigable_target_name = MUST(String::from_utf8(navigable_target_name));
+    entry.document_state.navigable_target_name = Utf16String::from_utf8(navigable_target_name);
     entry.document_state.nested_histories = move(nested_histories);
     return entry;
 }
@@ -122,9 +144,9 @@ static Web::HTML::SessionHistoryEntryDescriptor entry(i32 step, StringView url, 
 static Web::HTML::SessionHistoryEntryDescriptor entry(i32 step, StringView url, u64 document_state_id, StringView navigable_target_name, Vector<Web::HTML::SessionHistoryNestedHistoryDescriptor> nested_histories)
 {
     auto entry = create_test_entry(step, parse_url(url));
-    entry.document_state.id = document_state_id;
+    entry.document_state.id = test_document_state_id(document_state_id);
     entry.document_state.ever_populated = true;
-    entry.document_state.navigable_target_name = MUST(String::from_utf8(navigable_target_name));
+    entry.document_state.navigable_target_name = Utf16String::from_utf8(navigable_target_name);
     entry.document_state.nested_histories = move(nested_histories);
     return entry;
 }
@@ -161,8 +183,8 @@ static void expect_entry_state(Web::HTML::SessionHistoryEntryDescriptor const& e
 
 static void expect_entry_document_state(Web::HTML::SessionHistoryEntryDescriptor const& entry, u64 expected_document_state_id, StringView expected_navigable_target_name)
 {
-    EXPECT_EQ(entry.document_state.id, expected_document_state_id);
-    EXPECT_EQ(entry.document_state.navigable_target_name, MUST(String::from_utf8(expected_navigable_target_name)));
+    EXPECT_EQ(entry.document_state.id, test_document_state_id(expected_document_state_id));
+    EXPECT_EQ(entry.document_state.navigable_target_name, Utf16String::from_utf8(expected_navigable_target_name));
 }
 
 static void expect_entry_viewport_scroll_position(Web::HTML::SessionHistoryEntryDescriptor const& entry, Web::CSSPixelPoint expected_viewport_scroll_position)
@@ -179,7 +201,7 @@ static void expect_entry_resource(Web::HTML::SessionHistoryEntryDescriptor const
     }
 
     if (expected_resource == "string"sv) {
-        EXPECT(entry.document_state.resource.has<String>());
+        EXPECT(entry.document_state.resource.has<Utf16String>());
         return;
     }
 
@@ -203,7 +225,7 @@ static void expect_step_to_restore(Optional<i32> step, i32 expected_step)
 static void expect_nested_history(Web::HTML::SessionHistoryEntryDescriptor const& entry, size_t index, StringView expected_id, size_t expected_size)
 {
     VERIFY(index < entry.document_state.nested_histories.size());
-    EXPECT_EQ(entry.document_state.nested_histories[index].id, MUST(String::from_utf8(expected_id)));
+    EXPECT_EQ(entry.document_state.nested_histories[index].id, navigable_id(expected_id));
     EXPECT_EQ(entry.document_state.nested_histories[index].entries.size(), expected_size);
 }
 
@@ -232,11 +254,56 @@ TEST_CASE(complete_web_content_update_replaces_mirror)
     expect_current_entry(history, 1, "https://b.example/"sv);
 }
 
+TEST_CASE(targeted_entry_updates_find_nested_history_entries_by_navigation_api_key)
+{
+    WebView::TraversableSessionHistory history;
+
+    Vector<Web::HTML::SessionHistoryEntryDescriptor> entries {
+        entry(0, "https://top.example/0"sv, 1, 1, "top-0"sv, "top-id-0"sv, Web::HTML::ScrollRestorationMode::Auto),
+        entry(1, "https://top.example/1"sv, 2, 2, "top-1"sv, "top-id-1"sv, Web::HTML::ScrollRestorationMode::Auto),
+    };
+
+    auto entries0 = {
+        entry(0, "https://child.example/0"sv, 3, 3, "child-0"sv, "child-id-0"sv, Web::HTML::ScrollRestorationMode::Auto),
+        entry(2, "https://child.example/1"sv, 4, 4, "child-1"sv, "child-id-1"sv, Web::HTML::ScrollRestorationMode::Auto),
+    };
+    entries[0].document_state.nested_histories.append(nested_history("frame-1"sv, entries0));
+    auto entries1 = {
+        entry(0, "https://child.example/0"sv, 3, 3, "child-0"sv, "child-id-0"sv, Web::HTML::ScrollRestorationMode::Auto),
+        entry(2, "https://child.example/1"sv, 4, 4, "child-1"sv, "child-id-1"sv, Web::HTML::ScrollRestorationMode::Auto),
+    };
+    entries[1].document_state.nested_histories.append(nested_history("frame-1"sv, entries1));
+
+    auto update_result = history.update_from_web_content(move(entries), { 0, 1, 2 }, 2);
+    EXPECT_EQ(update_result, WebView::TraversableSessionHistory::UpdateResult::CompleteSnapshot);
+
+    EXPECT(history.update_entry(navigable_id("frame-1"sv), Utf16String::from_utf8("child-1"sv), [&](auto& entry) {
+        entry.navigation_api_state = state_record(9);
+    }));
+    EXPECT(history.update_entry(navigable_id("frame-1"sv), Utf16String::from_utf8("child-1"sv), [&](auto& entry) {
+        entry.scroll_restoration_mode = Web::HTML::ScrollRestorationMode::Manual;
+    }));
+
+    auto expect_copied_nested_histories_were_updated = [](Vector<Web::HTML::SessionHistoryEntryDescriptor> const& copied_entries) {
+        VERIFY(copied_entries.size() == 2);
+        for (auto const& top_level_entry : copied_entries) {
+            VERIFY(top_level_entry.document_state.nested_histories.size() == 1);
+            auto const& nested_entries = top_level_entry.document_state.nested_histories[0].entries;
+            VERIFY(nested_entries.size() == 2);
+            expect_entry_state(nested_entries[0], 3, 3, "child-0"sv, "child-id-0"sv, Web::HTML::ScrollRestorationMode::Auto);
+            expect_entry_state(nested_entries[1], 4, 9, "child-1"sv, "child-id-1"sv, Web::HTML::ScrollRestorationMode::Manual);
+        }
+    };
+
+    expect_copied_nested_histories_were_updated(history.entries());
+    expect_copied_nested_histories_were_updated(history.web_content_known_entries());
+}
+
 TEST_CASE(fresh_process_snapshot_does_not_drop_previous_entries)
 {
     WebView::TraversableSessionHistory history;
-    history.navigate(parse_url("https://a.example/"sv));
-    history.navigate(parse_url("https://b.example/"sv));
+    history.navigate(parse_url("https://a.example/"sv), allocate_test_ui_process_document_state_id());
+    history.navigate(parse_url("https://b.example/"sv), allocate_test_ui_process_document_state_id());
 
     auto update_result = history.update_from_web_content({
                                                              entry(0, URL::about_blank()),
@@ -263,7 +330,7 @@ TEST_CASE(replace_navigation_snapshot_drops_speculative_entry)
         { 0, 1 }, 1);
     EXPECT_EQ(initial_update_result, WebView::TraversableSessionHistory::UpdateResult::CompleteSnapshot);
 
-    history.navigate(parse_url("https://c.example/"sv));
+    history.navigate(parse_url("https://c.example/"sv), allocate_test_ui_process_document_state_id());
 
     auto update_result = history.update_from_web_content({
                                                              entry(0, "https://a.example/"sv),
@@ -289,7 +356,7 @@ TEST_CASE(replace_navigation_snapshot_drops_speculative_first_entry)
         { 0 }, 0);
     EXPECT_EQ(initial_update_result, WebView::TraversableSessionHistory::UpdateResult::CompleteSnapshot);
 
-    history.replace_current_entry_url(parse_url("https://b.example/"sv));
+    history.replace_current_entry_url(parse_url("https://b.example/"sv), allocate_test_ui_process_document_state_id());
 
     auto update_result = history.update_from_web_content({
                                                              entry(0, "https://b.example/"sv),
@@ -307,8 +374,8 @@ TEST_CASE(replace_navigation_snapshot_drops_speculative_first_entry)
 TEST_CASE(fresh_single_entry_snapshot_does_not_drop_previous_entries)
 {
     WebView::TraversableSessionHistory history;
-    history.navigate(parse_url("https://a.example/"sv));
-    history.navigate(parse_url("https://b.example/"sv));
+    history.navigate(parse_url("https://a.example/"sv), allocate_test_ui_process_document_state_id());
+    history.navigate(parse_url("https://b.example/"sv), allocate_test_ui_process_document_state_id());
 
     auto update_result = history.update_from_web_content({
                                                              entry(0, "https://b.example/"sv),
@@ -334,16 +401,11 @@ TEST_CASE(fresh_single_entry_snapshot_does_not_drop_previous_entries)
 TEST_CASE(complete_matching_snapshot_updates_current_index)
 {
     WebView::TraversableSessionHistory history;
-    history.navigate(parse_url("https://a.example/"sv));
-    history.navigate(parse_url("https://b.example/"sv));
-    history.navigate(parse_url("https://c.example/"sv));
+    history.navigate(parse_url("https://a.example/"sv), allocate_test_ui_process_document_state_id());
+    history.navigate(parse_url("https://b.example/"sv), allocate_test_ui_process_document_state_id());
+    history.navigate(parse_url("https://c.example/"sv), allocate_test_ui_process_document_state_id());
 
-    auto update_result = history.update_from_web_content({
-                                                             entry(0, "https://a.example/"sv),
-                                                             entry(1, "https://b.example/"sv),
-                                                             entry(2, "https://c.example/"sv),
-                                                         },
-        { 0, 1, 2 }, 1);
+    auto update_result = history.update_from_web_content(history.entries(), history.used_steps(), 1);
 
     EXPECT_EQ(update_result, WebView::TraversableSessionHistory::UpdateResult::CompleteSnapshot);
     EXPECT_EQ(history.size(), 3uz);
@@ -430,9 +492,9 @@ TEST_CASE(matching_snapshot_updates_document_state)
 TEST_CASE(partial_snapshot_preserves_forward_history_after_fallback_traversal)
 {
     WebView::TraversableSessionHistory history;
-    history.navigate(parse_url("https://a.example/"sv));
-    history.navigate(parse_url("https://b.example/"sv));
-    history.navigate(parse_url("https://c.example/"sv));
+    history.navigate(parse_url("https://a.example/"sv), allocate_test_ui_process_document_state_id());
+    history.navigate(parse_url("https://b.example/"sv), allocate_test_ui_process_document_state_id());
+    history.navigate(parse_url("https://c.example/"sv), allocate_test_ui_process_document_state_id());
     history.traverse_to(1);
 
     auto update_result = history.update_from_web_content({
@@ -453,9 +515,9 @@ TEST_CASE(partial_snapshot_preserves_forward_history_after_fallback_traversal)
 TEST_CASE(partial_snapshot_preserves_entries_outside_web_content_known_history)
 {
     WebView::TraversableSessionHistory history;
-    history.navigate(parse_url("https://a.example/"sv));
-    history.navigate(parse_url("https://b.example/"sv));
-    history.navigate(parse_url("https://c.example/"sv));
+    history.navigate(parse_url("https://a.example/"sv), allocate_test_ui_process_document_state_id());
+    history.navigate(parse_url("https://b.example/"sv), allocate_test_ui_process_document_state_id());
+    history.navigate(parse_url("https://c.example/"sv), allocate_test_ui_process_document_state_id());
     history.traverse_to(1);
 
     auto update_result = history.update_from_web_content({
@@ -482,7 +544,7 @@ TEST_CASE(partial_snapshot_preserves_entries_outside_web_content_known_history)
     EXPECT(!history.web_content_can_traverse_to(*target_c));
 }
 
-TEST_CASE(complete_snapshot_accepts_reassigned_document_state_ids)
+TEST_CASE(complete_snapshot_preserves_document_state_ids)
 {
     WebView::TraversableSessionHistory history;
 
@@ -500,14 +562,14 @@ TEST_CASE(complete_snapshot_accepts_reassigned_document_state_ids)
     EXPECT_EQ(initial_update_result, WebView::TraversableSessionHistory::UpdateResult::CompleteSnapshot);
 
     auto update_result = history.update_from_web_content({
-                                                             entry(0, "https://a.example/"sv, 10, "top-a"sv),
-                                                             entry(1, "https://nested.example/"sv, 20, "top-nested"sv, {
-                                                                                                                           nested_history("frame-1"sv, {
-                                                                                                                                                           entry(1, "https://frame.example/a"sv, 30, "frame"sv),
-                                                                                                                                                           entry(2, "https://frame.example/b"sv, 40, "frame"sv),
-                                                                                                                                                       }),
-                                                                                                                       }),
-                                                             entry(3, "https://c.example/"sv, 50, "top-c"sv),
+                                                             entry(0, "https://a.example/"sv, 1, "top-a"sv),
+                                                             entry(1, "https://nested.example/"sv, 2, "top-nested"sv, {
+                                                                                                                          nested_history("frame-1"sv, {
+                                                                                                                                                          entry(1, "https://frame.example/a"sv, 3, "frame"sv),
+                                                                                                                                                          entry(2, "https://frame.example/b"sv, 4, "frame"sv),
+                                                                                                                                                      }),
+                                                                                                                      }),
+                                                             entry(3, "https://c.example/"sv, 5, "top-c"sv),
                                                          },
         { 0, 1, 2, 3 }, 2);
 
@@ -532,9 +594,9 @@ TEST_CASE(complete_snapshot_accepts_reassigned_document_state_ids)
 TEST_CASE(partial_snapshot_updates_nested_history_and_preserves_forward_history)
 {
     WebView::TraversableSessionHistory history;
-    history.navigate(parse_url("https://a.example/"sv));
-    history.navigate(parse_url("https://b.example/"sv));
-    history.navigate(parse_url("https://c.example/"sv));
+    history.navigate(parse_url("https://a.example/"sv), allocate_test_ui_process_document_state_id());
+    history.navigate(parse_url("https://b.example/"sv), allocate_test_ui_process_document_state_id());
+    history.navigate(parse_url("https://c.example/"sv), allocate_test_ui_process_document_state_id());
     history.traverse_to(1);
 
     auto update_result = history.update_from_web_content({
@@ -566,9 +628,9 @@ TEST_CASE(partial_snapshot_updates_nested_history_and_preserves_forward_history)
 TEST_CASE(fresh_process_snapshot_preserves_forward_history_at_first_entry)
 {
     WebView::TraversableSessionHistory history;
-    history.navigate(URL::about_blank());
-    history.navigate(parse_url("https://a.example/"sv));
-    history.navigate(parse_url("https://b.example/"sv));
+    history.navigate(URL::about_blank(), allocate_test_ui_process_document_state_id());
+    history.navigate(parse_url("https://a.example/"sv), allocate_test_ui_process_document_state_id());
+    history.navigate(parse_url("https://b.example/"sv), allocate_test_ui_process_document_state_id());
     history.traverse_to(0);
 
     auto update_result = history.update_from_web_content({
@@ -588,8 +650,8 @@ TEST_CASE(fresh_process_snapshot_preserves_forward_history_at_first_entry)
 TEST_CASE(partial_snapshot_extends_history_without_dropping_prefix)
 {
     WebView::TraversableSessionHistory history;
-    history.navigate(parse_url("https://a.example/"sv));
-    history.navigate(parse_url("https://b.example/"sv));
+    history.navigate(parse_url("https://a.example/"sv), allocate_test_ui_process_document_state_id());
+    history.navigate(parse_url("https://b.example/"sv), allocate_test_ui_process_document_state_id());
 
     auto update_result = history.update_from_web_content({
                                                              entry(0, URL::about_blank()),
@@ -648,8 +710,8 @@ TEST_CASE(partial_snapshot_accepts_same_document_update_at_current_step)
 TEST_CASE(partial_snapshot_allows_web_content_traversal_within_known_suffix)
 {
     WebView::TraversableSessionHistory history;
-    history.navigate(parse_url("https://a.example/"sv));
-    history.navigate(parse_url("https://b.example/"sv));
+    history.navigate(parse_url("https://a.example/"sv), allocate_test_ui_process_document_state_id());
+    history.navigate(parse_url("https://b.example/"sv), allocate_test_ui_process_document_state_id());
 
     auto update_result = history.update_from_web_content({
                                                              entry(0, URL::about_blank()),
@@ -734,9 +796,9 @@ TEST_CASE(reseeded_partial_snapshot_preserves_ui_only_history)
 TEST_CASE(partial_snapshot_replaces_forward_history_after_new_navigation)
 {
     WebView::TraversableSessionHistory history;
-    history.navigate(parse_url("https://a.example/"sv));
-    history.navigate(parse_url("https://b.example/"sv));
-    history.navigate(parse_url("https://c.example/"sv));
+    history.navigate(parse_url("https://a.example/"sv), allocate_test_ui_process_document_state_id());
+    history.navigate(parse_url("https://b.example/"sv), allocate_test_ui_process_document_state_id());
+    history.navigate(parse_url("https://c.example/"sv), allocate_test_ui_process_document_state_id());
     history.traverse_to(1);
 
     auto update_result = history.update_from_web_content({
@@ -758,10 +820,10 @@ TEST_CASE(partial_snapshot_replaces_forward_history_after_new_navigation)
 TEST_CASE(partial_snapshot_anchors_to_current_duplicate_url_entry)
 {
     WebView::TraversableSessionHistory history;
-    history.navigate(parse_url("https://a.example/"sv));
-    history.navigate(parse_url("https://b.example/"sv));
-    history.navigate(parse_url("https://a.example/"sv));
-    history.navigate(parse_url("https://c.example/"sv));
+    history.navigate(parse_url("https://a.example/"sv), allocate_test_ui_process_document_state_id());
+    history.navigate(parse_url("https://b.example/"sv), allocate_test_ui_process_document_state_id());
+    history.navigate(parse_url("https://a.example/"sv), allocate_test_ui_process_document_state_id());
+    history.navigate(parse_url("https://c.example/"sv), allocate_test_ui_process_document_state_id());
     history.traverse_to(2);
 
     auto update_result = history.update_from_web_content({
@@ -903,9 +965,9 @@ TEST_CASE(used_steps_include_nested_history_steps)
 TEST_CASE(traversal_target_for_top_level_step)
 {
     WebView::TraversableSessionHistory history;
-    history.navigate(parse_url("https://a.example/"sv));
-    history.navigate(parse_url("https://b.example/"sv));
-    history.navigate(parse_url("https://c.example/"sv));
+    history.navigate(parse_url("https://a.example/"sv), allocate_test_ui_process_document_state_id());
+    history.navigate(parse_url("https://b.example/"sv), allocate_test_ui_process_document_state_id());
+    history.navigate(parse_url("https://c.example/"sv), allocate_test_ui_process_document_state_id());
     history.traverse_to(1);
 
     EXPECT(history.current_step_is_top_level_entry());
@@ -1222,7 +1284,7 @@ TEST_CASE(applied_web_content_traversal_rejects_unknown_web_content_state)
     EXPECT(!history.web_content_current_step().has_value());
 }
 
-TEST_CASE(same_document_reseed_snapshot_accepts_reassigned_document_state_ids)
+TEST_CASE(same_document_reseed_snapshot_preserves_document_state_ids)
 {
     WebView::TraversableSessionHistory history;
 
@@ -1255,17 +1317,17 @@ TEST_CASE(same_document_reseed_snapshot_accepts_reassigned_document_state_ids)
                                                              entry(0, "https://a.example/"sv),
                                                              entry(1, "https://b.example/"sv),
                                                              entry(2, "https://c.example/"sv),
-                                                             entry(3, "https://nested.example/"sv, 8, "main"sv, {
-                                                                                                                    nested_history("1"sv, {
-                                                                                                                                              entry(3, "https://frame.example/a"sv, 6, ""sv),
-                                                                                                                                              entry(4, "https://frame.example/b"sv, 7, ""sv),
-                                                                                                                                          }),
+                                                             entry(3, "https://nested.example/"sv, 6, "main"sv, {
+                                                                                                                    nested_history("frame-1"sv, {
+                                                                                                                                                    entry(3, "https://frame.example/a"sv, 7, ""sv),
+                                                                                                                                                    entry(4, "https://frame.example/b"sv, 8, ""sv),
+                                                                                                                                                }),
                                                                                                                 }),
-                                                             entry(5, "https://nested.example/same-document"sv, 8, "main"sv, {
-                                                                                                                                 nested_history("1"sv, {
-                                                                                                                                                           entry(3, "https://frame.example/a"sv, 6, ""sv),
-                                                                                                                                                           entry(4, "https://frame.example/b"sv, 7, ""sv),
-                                                                                                                                                       }),
+                                                             entry(5, "https://nested.example/same-document"sv, 6, "main"sv, {
+                                                                                                                                 nested_history("frame-1"sv, {
+                                                                                                                                                                 entry(3, "https://frame.example/a"sv, 7, ""sv),
+                                                                                                                                                                 entry(4, "https://frame.example/b"sv, 8, ""sv),
+                                                                                                                                                             }),
                                                                                                                              }),
                                                          },
         { 0, 1, 2, 3, 4, 5 }, 5);
@@ -1276,7 +1338,7 @@ TEST_CASE(same_document_reseed_snapshot_accepts_reassigned_document_state_ids)
     EXPECT(history.web_content_can_traverse_to(*history.traversal_target_for_delta(-1)));
 }
 
-TEST_CASE(seed_ack_accepts_reconstructed_document_state_for_unknown_current_entry)
+TEST_CASE(seed_ack_accepts_preserved_document_state_ids)
 {
     WebView::TraversableSessionHistory history;
     auto update_result = history.update_from_web_content({
@@ -1290,9 +1352,9 @@ TEST_CASE(seed_ack_accepts_reconstructed_document_state_for_unknown_current_entr
     history.forget_web_content_state();
 
     EXPECT(history.did_seed_web_content_from_ui_process({
-                                                            entry(0, "https://a.example/"sv, 1, "main"sv),
-                                                            entry(1, "https://a.example/replaced"sv, 2, "main"sv),
-                                                            entry(2, "https://a.example/pushed"sv, 2, "main"sv),
+                                                            entry(0, "https://a.example/"sv),
+                                                            entry(1, "https://a.example/replaced"sv, 1, "main"sv),
+                                                            entry(2, "https://a.example/pushed"sv, 1, "main"sv),
                                                         },
         { 0, 1, 2 }, 0));
     EXPECT(history.web_content_history_matches_mirror());
@@ -1324,7 +1386,7 @@ TEST_CASE(seed_ack_rejects_reconstructed_history_with_mismatched_state)
 TEST_CASE(traversal_target_for_delta_outside_used_steps)
 {
     WebView::TraversableSessionHistory history;
-    history.navigate(parse_url("https://a.example/"sv));
+    history.navigate(parse_url("https://a.example/"sv), allocate_test_ui_process_document_state_id());
 
     EXPECT(!history.traversal_target_for_delta(-1).has_value());
     EXPECT(!history.traversal_target_for_delta(0).has_value());
@@ -1380,7 +1442,7 @@ TEST_CASE(navigate_clears_forward_nested_history_entries)
         { 0, 1, 2, 3 }, 1);
     EXPECT_EQ(update_result, WebView::TraversableSessionHistory::UpdateResult::CompleteSnapshot);
 
-    history.navigate(parse_url("https://b.example/"sv));
+    history.navigate(parse_url("https://b.example/"sv), allocate_test_ui_process_document_state_id());
 
     EXPECT_EQ(history.size(), 2uz);
     EXPECT_EQ(history.used_step_count(), 3uz);
@@ -1402,9 +1464,9 @@ TEST_CASE(navigate_clears_forward_nested_history_entries)
 TEST_CASE(partial_snapshot_missing_nested_history_descriptor_is_invalid)
 {
     WebView::TraversableSessionHistory history;
-    history.navigate(parse_url("https://a.example/"sv));
-    history.navigate(parse_url("https://b.example/"sv));
-    history.navigate(parse_url("https://c.example/"sv));
+    history.navigate(parse_url("https://a.example/"sv), allocate_test_ui_process_document_state_id());
+    history.navigate(parse_url("https://b.example/"sv), allocate_test_ui_process_document_state_id());
+    history.navigate(parse_url("https://c.example/"sv), allocate_test_ui_process_document_state_id());
     history.traverse_to(1);
 
     auto update_result = history.update_from_web_content({
@@ -1598,9 +1660,9 @@ TEST_CASE(partial_snapshot_missing_preserved_nested_history_descriptor_is_invali
 TEST_CASE(matching_snapshot_missing_nested_history_descriptor_is_invalid)
 {
     WebView::TraversableSessionHistory history;
-    history.navigate(parse_url("https://a.example/"sv));
-    history.navigate(parse_url("https://b.example/"sv));
-    history.navigate(parse_url("https://c.example/"sv));
+    history.navigate(parse_url("https://a.example/"sv), allocate_test_ui_process_document_state_id());
+    history.navigate(parse_url("https://b.example/"sv), allocate_test_ui_process_document_state_id());
+    history.navigate(parse_url("https://c.example/"sv), allocate_test_ui_process_document_state_id());
     history.traverse_to(1);
 
     auto update_result = history.update_from_web_content({
@@ -1638,9 +1700,9 @@ TEST_CASE(history_log_entries_marks_current_entries_steps_and_reload_pending)
     EXPECT_EQ(update_result, WebView::TraversableSessionHistory::UpdateResult::CompleteSnapshot);
 
     EXPECT_EQ(history_log_entries(history), ByteString { "entries=[0:0:https://a.example/, *1:1:https://b.example/ "
-                                                         "document_state={id=0, resource=post}, 2:2:https://c.example/ "
-                                                         "document_state={id=1, reload_pending=true, target_name=main} "
-                                                         "nested={frame=[3:https://frame.example/]}] "
+                                                         "document_state={id=3:1001, resource=post}, 2:2:https://c.example/ "
+                                                         "document_state={id=3:7, reload_pending=true, target_name=main} "
+                                                         "nested={1:2=[3:https://frame.example/]}] "
                                                          "used_steps=[0:0, *1:1, 2:2, 3:3]"sv });
 
     auto current_entry = history.current_entry();
@@ -1671,8 +1733,8 @@ TEST_CASE(history_log_entries_marks_nested_histories)
     EXPECT_EQ(update_result, WebView::TraversableSessionHistory::UpdateResult::CompleteSnapshot);
 
     EXPECT_EQ(history_log_entries(history), ByteString { "entries=[0:0:https://a.example/, *1:1:https://b.example/ "
-                                                         "document_state={id=1, target_name=main} "
-                                                         "nested={frame=[2:https://frame.example/]}] "
+                                                         "document_state={id=3:7, target_name=main} "
+                                                         "nested={1:2=[2:https://frame.example/]}] "
                                                          "used_steps=[0:0, 1:1, *2:2]"sv });
 }
 
@@ -1707,8 +1769,9 @@ TEST_CASE(clear_current_entry_reload_pending)
     auto update_result = history.update_from_web_content({
                                                              entry(0, "https://a.example/"sv),
                                                              entry_with_reload_pending(1, "https://b.example/"sv, 7, "main"sv, {}),
+                                                             entry_with_reload_pending(2, "https://c.example/"sv, 7, "main"sv, {}),
                                                          },
-        { 0, 1 }, 1);
+        { 0, 1, 2 }, 1);
     EXPECT_EQ(update_result, WebView::TraversableSessionHistory::UpdateResult::CompleteSnapshot);
 
     auto current_entry = history.current_entry();
@@ -1720,6 +1783,10 @@ TEST_CASE(clear_current_entry_reload_pending)
     current_entry = history.current_entry();
     VERIFY(current_entry);
     EXPECT(!current_entry->document_state.reload_pending);
+
+    auto shared_document_state_entry = history.entry_at(2);
+    VERIFY(shared_document_state_entry);
+    EXPECT(!shared_document_state_entry->document_state.reload_pending);
 }
 
 TEST_CASE(mark_current_entry_reload_pending)
@@ -1748,11 +1815,11 @@ TEST_CASE(navigate_preserves_document_resource)
 {
     WebView::TraversableSessionHistory history;
 
-    history.navigate(parse_url("https://a.example/"sv));
-    history.navigate(parse_url("https://b.example/"sv), Web::HTML::POSTResource {
-                                                            .request_body = MUST(ByteBuffer::copy("name=ladybird"sv.bytes())),
-                                                            .request_content_type = Web::HTML::POSTResource::RequestContentType::ApplicationXWWWFormUrlencoded,
-                                                        });
+    history.navigate(parse_url("https://a.example/"sv), allocate_test_ui_process_document_state_id());
+    history.navigate(parse_url("https://b.example/"sv), allocate_test_ui_process_document_state_id(), Web::HTML::POSTResource {
+                                                                                                          .request_body = MUST(ByteBuffer::copy("name=ladybird"sv.bytes())),
+                                                                                                          .request_content_type = Web::HTML::POSTResource::RequestContentType::ApplicationXWWWFormUrlencoded,
+                                                                                                      });
 
     auto current_entry = history.current_entry();
     VERIFY(current_entry);
@@ -1763,11 +1830,11 @@ TEST_CASE(replace_current_entry_preserves_document_resource)
 {
     WebView::TraversableSessionHistory history;
 
-    history.navigate(parse_url("https://a.example/"sv));
-    history.replace_current_entry(parse_url("https://b.example/"sv), Web::HTML::POSTResource {
-                                                                         .request_body = MUST(ByteBuffer::copy("name=ladybird"sv.bytes())),
-                                                                         .request_content_type = Web::HTML::POSTResource::RequestContentType::ApplicationXWWWFormUrlencoded,
-                                                                     });
+    history.navigate(parse_url("https://a.example/"sv), allocate_test_ui_process_document_state_id());
+    history.replace_current_entry(parse_url("https://b.example/"sv), allocate_test_ui_process_document_state_id(), Web::HTML::POSTResource {
+                                                                                                                       .request_body = MUST(ByteBuffer::copy("name=ladybird"sv.bytes())),
+                                                                                                                       .request_content_type = Web::HTML::POSTResource::RequestContentType::ApplicationXWWWFormUrlencoded,
+                                                                                                                   });
 
     auto current_entry = history.current_entry();
     VERIFY(current_entry);
@@ -1791,10 +1858,10 @@ TEST_CASE(replace_current_entry_discards_replaced_document_state)
         { 0, 1, 2 }, 0);
     EXPECT_EQ(update_result, WebView::TraversableSessionHistory::UpdateResult::CompleteSnapshot);
 
-    history.replace_current_entry(parse_url("https://b.example/"sv), Web::HTML::POSTResource {
-                                                                         .request_body = MUST(ByteBuffer::copy("name=ladybird"sv.bytes())),
-                                                                         .request_content_type = Web::HTML::POSTResource::RequestContentType::ApplicationXWWWFormUrlencoded,
-                                                                     });
+    history.replace_current_entry(parse_url("https://b.example/"sv), allocate_test_ui_process_document_state_id(), Web::HTML::POSTResource {
+                                                                                                                       .request_body = MUST(ByteBuffer::copy("name=ladybird"sv.bytes())),
+                                                                                                                       .request_content_type = Web::HTML::POSTResource::RequestContentType::ApplicationXWWWFormUrlencoded,
+                                                                                                                   });
 
     EXPECT_EQ(history.size(), 2uz);
     EXPECT_EQ(history.used_step_count(), 2uz);
@@ -1807,7 +1874,8 @@ TEST_CASE(replace_current_entry_discards_replaced_document_state)
 
     auto* current_entry = history.current_entry();
     VERIFY(current_entry);
-    EXPECT_EQ(current_entry->document_state.id, 0u);
+    EXPECT(current_entry->document_state.id.namespace_id > 0);
+    EXPECT(current_entry->document_state.id.local_id > 0);
     EXPECT(current_entry->document_state.navigable_target_name.is_empty());
     EXPECT(current_entry->document_state.nested_histories.is_empty());
     expect_entry_resource(*current_entry, "post"sv);
@@ -1829,7 +1897,7 @@ TEST_CASE(replace_current_entry_at_nested_step_keeps_current_step_valid)
         { 0, 1, 2 }, 1);
     EXPECT_EQ(update_result, WebView::TraversableSessionHistory::UpdateResult::CompleteSnapshot);
 
-    history.replace_current_entry(parse_url("https://b.example/"sv), Empty {});
+    history.replace_current_entry(parse_url("https://b.example/"sv), allocate_test_ui_process_document_state_id(), Empty {});
 
     EXPECT_EQ(history.size(), 2uz);
     EXPECT_EQ(history.used_step_count(), 2uz);
@@ -1851,11 +1919,11 @@ TEST_CASE(replace_current_entry_url_keeps_document_resource)
 {
     WebView::TraversableSessionHistory history;
 
-    history.navigate(parse_url("https://a.example/"sv), Web::HTML::POSTResource {
-                                                            .request_body = MUST(ByteBuffer::copy("name=ladybird"sv.bytes())),
-                                                            .request_content_type = Web::HTML::POSTResource::RequestContentType::ApplicationXWWWFormUrlencoded,
-                                                        });
-    history.replace_current_entry_url(parse_url("https://b.example/"sv));
+    history.navigate(parse_url("https://a.example/"sv), allocate_test_ui_process_document_state_id(), Web::HTML::POSTResource {
+                                                                                                          .request_body = MUST(ByteBuffer::copy("name=ladybird"sv.bytes())),
+                                                                                                          .request_content_type = Web::HTML::POSTResource::RequestContentType::ApplicationXWWWFormUrlencoded,
+                                                                                                      });
+    history.replace_current_entry_url(parse_url("https://b.example/"sv), allocate_test_ui_process_document_state_id());
 
     auto current_entry = history.current_entry();
     VERIFY(current_entry);

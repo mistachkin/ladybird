@@ -57,18 +57,18 @@ Optional<NumericType::BaseType> NumericType::base_type_from_value_type(ValueType
 }
 
 // https://drafts.css-houdini.org/css-typed-om-1/#cssnumericvalue-create-a-type
-Optional<NumericType> NumericType::create_from_unit(FlyString const& unit)
+Optional<NumericType> NumericType::create_from_unit(Utf16FlyString const& unit)
 {
     // To create a type from a string unit, follow the appropriate branch of the following:
 
     // unit is "number"
-    if (unit == "number"_fly_string) {
+    if (unit == "number"_utf16_fly_string) {
         // Return «[ ]» (empty map)
         return NumericType {};
     }
 
     // unit is "percent"
-    if (unit == "percent"_fly_string) {
+    if (unit == "percent"_utf16_fly_string) {
         // Return «[ "percent" → 1 ]»
         return NumericType { BaseType::Percent, 1 };
     }
@@ -309,13 +309,6 @@ NumericType NumericType::inverted() const
 
     // 3. Return result.
     return result;
-}
-
-// https://drafts.csswg.org/css-values-4/#css-consistent-typec
-bool NumericType::has_consistent_type_with(NumericType const& other) const
-{
-    // Two or more calculations have a consistent type if adding the types doesn’t result in failure.
-    return added_to(other).has_value();
 }
 
 // https://drafts.csswg.org/css-values-4/#css-consistent-typec

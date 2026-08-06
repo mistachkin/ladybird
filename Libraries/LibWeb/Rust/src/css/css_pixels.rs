@@ -1,0 +1,331 @@
+/*
+ * Copyright (c) 2026-present, the Ladybird developers.
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+
+// CSSPixels fixed-point arithmetic, bit-exact with the C++ implementation in
+// PixelUnits.h: an i32 with 6 fractional bits. The parity test on the C++
+// side compares every operation against the original.
+//
+// Rounding notes, matching C++ exactly:
+// - Conversion from floating point rounds half to even (the C++ path goes
+//   through the x87 fistp instruction in the default rounding mode) and
+//   saturates at the i32 bounds.
+// - Multiplication rounds the cut-off fraction half away from zero when more
+//   fraction bits follow, and half to even otherwise.
+// - Fraction-to-value conversion truncates (plain integer division).
+
+pub const FRACTIONAL_BITS: u32 = 6;
+pub const FIXED_POINT_DENOMINATOR: i32 = 1 << FRACTIONAL_BITS;
+pub const RADIX_MASK: i32 = FIXED_POINT_DENOMINATOR - 1;
+pub const MAX_INTEGER_VALUE: i32 = i32::MAX >> FRACTIONAL_BITS;
+pub const MIN_INTEGER_VALUE: i32 = i32::MIN >> FRACTIONAL_BITS;
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[repr(transparent)]
+pub struct CssPixels(i32);
+
+impl std::ops::Mul for CssPixels {
+    type Output = CssPixels;
+    fn mul(self, other: CssPixels) -> CssPixels {
+        self.fixed_point_multiply(other)
+    }
+}
+
+fn clamp_i64_to_i32(value: i64) -> i32 {
+    value.clamp(i32::MIN as i64, i32::MAX as i64) as i32
+}
+
+fn clamp_f64_to_i32(value: f64) -> i32 {
+    if value >= i32::MAX as f64 {
+        return i32::MAX;
+    }
+    if value <= i32::MIN as f64 {
+        return i32::MIN;
+    }
+    value.round_ties_even() as i32
+}
+
+fn clamp_f32_to_i32(value: f32) -> i32 {
+    if value >= i32::MAX as f32 {
+        return i32::MAX;
+    }
+    if value <= i32::MIN as f32 {
+        return i32::MIN;
+    }
+    value.round_ties_even() as i32
+}
+
+impl CssPixels {
+    pub fn from_raw(raw: i32) -> Self {
+        Self(raw)
+    }
+
+    pub fn raw_value(self) -> i32 {
+        self.0
+    }
+
+    pub fn from_integer(value: i64) -> Self {
+        if value > MAX_INTEGER_VALUE as i64 {
+            Self(i32::MAX)
+        } else if value < MIN_INTEGER_VALUE as i64 {
+            Self(i32::MIN)
+        } else {
+            Self((value as i32) << FRACTIONAL_BITS)
+        }
+    }
+
+    pub fn nearest_value_for(value: f64) -> Self {
+        if value.is_nan() {
+            return Self(0);
+        }
+        Self(clamp_f64_to_i32(value * FIXED_POINT_DENOMINATOR as f64))
+    }
+
+    /// Matches `CSSPixels::nearest_value_for(float)`: the scaling and
+    /// ties-to-even conversion both stay on the f32 path.
+    pub fn nearest_value_for_f32(value: f32) -> Self {
+        if value.is_nan() {
+            return Self(0);
+        }
+        Self(clamp_f32_to_i32(value * FIXED_POINT_DENOMINATOR as f32))
+    }
+
+    pub fn floor(self) -> Self {
+        Self(self.0 & !RADIX_MASK)
+    }
+
+    pub fn ceil(self) -> Self {
+        let floor = self.0 & !RADIX_MASK;
+        let increment = if self.0 & RADIX_MASK != 0 {
+            FIXED_POINT_DENOMINATOR
+        } else {
+            0
+        };
+        Self(floor.wrapping_add(increment))
+    }
+
+    pub fn to_double(self) -> f64 {
+        self.0 as f64 / FIXED_POINT_DENOMINATOR as f64
+    }
+
+    fn fixed_point_multiply(self, other: CssPixels) -> Self {
+        let value = self.0 as i64 * other.0 as i64;
+        let mut int_value = clamp_i64_to_i32(value >> FRACTIONAL_BITS);
+
+        // Rounding: if the last bit cut off was 1:
+        if value & (1i64 << (FRACTIONAL_BITS - 1)) != 0 {
+            // If any bit after was 1 as well, round away from zero.
+            if value & (RADIX_MASK as i64 >> 1) != 0 {
+                int_value = int_value.saturating_add(1);
+            } else {
+                // Otherwise round to the next even value, adding the least
+                // significant bit of the raw integer value.
+                int_value = int_value.saturating_add(int_value & 1);
+            }
+        }
+        Self(int_value)
+    }
+
+    /// Division through CSSPixelFraction: the conversion back to a value is a
+    /// truncating integer division of the widened numerator.
+    pub fn div_as_fraction(self, denominator: CssPixels) -> Self {
+        let wide_value = (self.0 as i64) << FRACTIONAL_BITS;
+        Self(clamp_i64_to_i32(wide_value / denominator.0 as i64))
+    }
+
+    pub fn scaled(self, factor: f64) -> Self {
+        Self::nearest_value_for(self.to_double() * factor)
+    }
+
+    /// Matches the floating-point `CSSPixelFraction(double, double)`
+    /// constructor: a denominator that rounds to zero CSSPixels is rescued by
+    /// folding it into the numerator before the fixed-point conversion.
+    pub(crate) fn fraction_nearest_values_for(mut numerator: f64, mut denominator: f64) -> (CssPixels, CssPixels) {
+        if Self::nearest_value_for(denominator).raw_value() == 0 {
+            numerator /= denominator;
+            denominator = 1.0;
+        }
+        (Self::nearest_value_for(numerator), Self::nearest_value_for(denominator))
+    }
+}
+
+const MAX_DIMENSION_RAW: i32 = 17_895_700 * 64;
+
+pub(crate) fn max_dimension_value() -> CssPixels {
+    CssPixels::from_raw(MAX_DIMENSION_RAW)
+}
+
+pub(crate) fn clamp_to_max_dimension_value(value: CssPixels) -> CssPixels {
+    if matches!(value.raw_value(), i32::MIN | i32::MAX) {
+        max_dimension_value()
+    } else {
+        value
+    }
+}
+
+pub(crate) fn css_clamp(value: CssPixels, min: CssPixels, max: CssPixels) -> CssPixels {
+    min.max(value.min(max))
+}
+
+impl std::ops::Add for CssPixels {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        Self::from_raw(self.raw_value().saturating_add(other.raw_value()))
+    }
+}
+
+impl std::ops::AddAssign for CssPixels {
+    fn add_assign(&mut self, other: Self) {
+        *self = *self + other;
+    }
+}
+
+impl std::ops::Sub for CssPixels {
+    type Output = Self;
+
+    fn sub(self, other: Self) -> Self {
+        Self::from_raw(self.raw_value().saturating_sub(other.raw_value()))
+    }
+}
+
+impl std::ops::SubAssign for CssPixels {
+    fn sub_assign(&mut self, other: Self) {
+        *self = *self - other;
+    }
+}
+
+impl std::ops::Neg for CssPixels {
+    type Output = Self;
+
+    fn neg(self) -> Self {
+        Self::from_raw(0i32.saturating_sub(self.raw_value()))
+    }
+}
+
+impl std::ops::Mul<usize> for CssPixels {
+    type Output = Self;
+
+    fn mul(self, other: usize) -> Self {
+        let raw = (self.raw_value() as i64).saturating_mul(other as i64);
+        Self::from_raw(raw.clamp(i32::MIN as i64, i32::MAX as i64) as i32)
+    }
+}
+
+impl std::ops::Mul<CssPixels> for usize {
+    type Output = CssPixels;
+
+    fn mul(self, other: CssPixels) -> CssPixels {
+        other * self
+    }
+}
+
+impl std::ops::Div<usize> for CssPixels {
+    type Output = Self;
+
+    fn div(self, other: usize) -> Self {
+        assert_ne!(other, 0);
+        Self::from_raw((self.raw_value() as i64 / other as i64) as i32)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn integer_construction_shifts_and_saturates() {
+        assert_eq!(CssPixels::from_integer(3).raw_value(), 3 << 6);
+        assert_eq!(CssPixels::from_integer(1 << 40).raw_value(), i32::MAX);
+        assert_eq!(CssPixels::from_integer(-(1 << 40)).raw_value(), i32::MIN);
+    }
+
+    #[test]
+    fn nearest_value_rounds_half_to_even() {
+        // 0.0078125 * 64 = 0.5: ties to even -> 0.
+        assert_eq!(CssPixels::nearest_value_for(0.0078125).raw_value(), 0);
+        // 0.0234375 * 64 = 1.5: ties to even -> 2.
+        assert_eq!(CssPixels::nearest_value_for(0.0234375).raw_value(), 2);
+        assert_eq!(CssPixels::nearest_value_for(f64::NAN).raw_value(), 0);
+    }
+
+    #[test]
+    fn f32_nearest_value_keeps_the_float_instantiation() {
+        assert_eq!(CssPixels::nearest_value_for_f32(0.0078125).raw_value(), 0);
+        assert_eq!(CssPixels::nearest_value_for_f32(0.0234375).raw_value(), 2);
+        assert_eq!(CssPixels::nearest_value_for_f32(f32::NAN).raw_value(), 0);
+        assert_eq!(CssPixels::nearest_value_for_f32(f32::INFINITY).raw_value(), i32::MAX);
+        assert_eq!(
+            CssPixels::nearest_value_for_f32(f32::NEG_INFINITY).raw_value(),
+            i32::MIN
+        );
+    }
+
+    #[test]
+    fn fixed_point_floor_and_ceil_match_cpp_bit_operations() {
+        for (raw, floor, ceil) in [
+            (0, 0, 0),
+            (1, 0, 64),
+            (63, 0, 64),
+            (64, 64, 64),
+            (65, 64, 128),
+            (-1, -64, 0),
+            (-63, -64, 0),
+            (-64, -64, -64),
+            (-65, -128, -64),
+        ] {
+            assert_eq!(CssPixels::from_raw(raw).floor().raw_value(), floor);
+            assert_eq!(CssPixels::from_raw(raw).ceil().raw_value(), ceil);
+        }
+    }
+
+    #[test]
+    fn multiplication_rounding_modes() {
+        // 0.5 * 0.5 = 0.25: exact, no rounding.
+        let half = CssPixels::from_raw(32);
+        assert_eq!((half * half).raw_value(), 16);
+        // Half-bit set with trailing bits rounds away from zero;
+        // half-bit alone rounds to even.
+        let x = CssPixels::from_raw(33); // 33 * 32 = 1056; 1056 >> 6 = 16 r 32 (half, no trailing) -> even
+        assert_eq!((x * half).raw_value(), 16);
+        let y = CssPixels::from_raw(35); // 35 * 33 = 1155 = 18 * 64 + 3; below half -> truncate
+        assert_eq!((y * CssPixels::from_raw(33)).raw_value(), 18);
+    }
+
+    #[test]
+    fn fraction_division_truncates() {
+        // (10 << 6) << 6 / (3 << 6) = 640 / 3 * ... : 10/3 in fixed point = 213.33 -> 213.
+        let ten = CssPixels::from_integer(10);
+        let three = CssPixels::from_integer(3);
+        assert_eq!(ten.div_as_fraction(three).raw_value(), 213);
+        let minus_ten = CssPixels::from_integer(-10);
+        assert_eq!(minus_ten.div_as_fraction(three).raw_value(), -213);
+    }
+}
+
+/// FFI hooks for the C++ parity test.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_css_pixels_multiply(left_raw: i32, right_raw: i32) -> i32 {
+    crate::abort_on_panic(|| (CssPixels::from_raw(left_raw) * CssPixels::from_raw(right_raw)).raw_value())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_css_pixels_divide_as_fraction(numerator_raw: i32, denominator_raw: i32) -> i32 {
+    crate::abort_on_panic(|| {
+        CssPixels::from_raw(numerator_raw)
+            .div_as_fraction(CssPixels::from_raw(denominator_raw))
+            .raw_value()
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_css_pixels_nearest_value_for(value: f64) -> i32 {
+    crate::abort_on_panic(|| CssPixels::nearest_value_for(value).raw_value())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_css_pixels_scaled(raw: i32, factor: f64) -> i32 {
+    crate::abort_on_panic(|| CssPixels::from_raw(raw).scaled(factor).raw_value())
+}

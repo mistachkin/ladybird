@@ -6,8 +6,6 @@
 
 #pragma once
 
-#include <LibWeb/SVG/AttributeParser.h>
-#include <LibWeb/SVG/SVGAnimatedLength.h>
 #include <LibWeb/SVG/SVGGradientElement.h>
 
 namespace Web::SVG {
@@ -19,16 +17,27 @@ class SVGRadialGradientElement : public SVGGradientElement {
 public:
     virtual ~SVGRadialGradientElement() override = default;
 
-    virtual void attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
+    virtual void attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_) override;
 
     virtual Optional<Painting::PaintStyle> to_gfx_paint_style(SVGPaintContext const&) const override;
 
-    GC::Ref<SVGAnimatedLength> cx() const;
-    GC::Ref<SVGAnimatedLength> cy() const;
-    GC::Ref<SVGAnimatedLength> fx() const;
-    GC::Ref<SVGAnimatedLength> fy() const;
-    GC::Ref<SVGAnimatedLength> fr() const;
-    GC::Ref<SVGAnimatedLength> r() const;
+    // https://w3c.github.io/svgwg/svg2-draft/pservers.html#__svg__SVGRadialGradientElement__cx
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(cx, Horizontal, CSS::PercentageStyleValue::create(CSS::Percentage { 50 }));
+
+    // https://w3c.github.io/svgwg/svg2-draft/pservers.html#__svg__SVGRadialGradientElement__cy
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(cy, Vertical, CSS::PercentageStyleValue::create(CSS::Percentage { 50 }));
+
+    // https://w3c.github.io/svgwg/svg2-draft/pservers.html#__svg__SVGRadialGradientElement__fx
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(fx, Horizontal, CSS::PercentageStyleValue::create(CSS::Percentage { 50 }));
+
+    // https://w3c.github.io/svgwg/svg2-draft/pservers.html#__svg__SVGRadialGradientElement__fy
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(fy, Vertical, CSS::PercentageStyleValue::create(CSS::Percentage { 50 }));
+
+    // https://w3c.github.io/svgwg/svg2-draft/pservers.html#__svg__SVGRadialGradientElement__fr
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(fr, Unspecified, CSS::PercentageStyleValue::create(CSS::Percentage { 0 }));
+
+    // https://w3c.github.io/svgwg/svg2-draft/pservers.html#__svg__SVGRadialGradientElement__r
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(r, Unspecified, CSS::PercentageStyleValue::create(CSS::Percentage { 50 }));
 
 protected:
     SVGRadialGradientElement(DOM::Document&, DOM::QualifiedName);

@@ -8,6 +8,8 @@
 
 #include <AK/FlyString.h>
 #include <AK/String.h>
+#include <AK/Utf16FlyString.h>
+#include <AK/Utf16View.h>
 #include <AK/Vector.h>
 #include <LibGC/Ptr.h>
 #include <LibWeb/Export.h>
@@ -25,17 +27,19 @@ public:
     };
 
     static RequestURLModifier create_cross_origin(CrossOriginModifierValue);
-    static RequestURLModifier create_integrity(FlyString);
+    static RequestURLModifier create_integrity(Utf16FlyString);
     static RequestURLModifier create_referrer_policy(ReferrerPolicyModifierValue);
 
     ~RequestURLModifier() = default;
     void modify_request(GC::Ref<Fetch::Infrastructure::Request>) const;
     Type type() const { return m_type; }
+    using Value = Variant<CrossOriginModifierValue, ReferrerPolicyModifierValue, Utf16FlyString>;
+    Value const& value() const { return m_value; }
     String to_string() const;
+    Utf16String to_utf16_string() const;
     bool operator==(RequestURLModifier const&) const;
 
 private:
-    using Value = Variant<CrossOriginModifierValue, ReferrerPolicyModifierValue, FlyString>;
     RequestURLModifier(Type, Value);
 
     Type m_type;
@@ -51,12 +55,14 @@ public:
     };
 
     URL(String url, Type = Type::Url, Vector<RequestURLModifier> = {});
+    URL(Utf16View url, Type = Type::Url, Vector<RequestURLModifier> = {});
 
     String const& url() const { return m_url; }
     Type type() const { return m_type; }
     Vector<RequestURLModifier> const& request_url_modifiers() const { return m_request_url_modifiers; }
 
     String to_string() const;
+    Utf16String to_utf16_string() const;
     bool operator==(URL const&) const;
 
 private:

@@ -20,26 +20,34 @@ public:
 
     virtual ~OpacityValueStyleValue() override = default;
 
-    virtual void serialize(StringBuilder&, SerializationMode) const override;
+    void serialize(StringBuilder&, SerializationMode) const;
 
-    virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const override;
+    ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const;
 
-    double resolved() const { return m_value->as_number().number(); }
+    double resolved() const { return value()->as_number().number(); }
 
-    virtual GC::Ref<CSSStyleValue> reify(JS::Realm& realm, Utf16FlyString const& associated_property) const override;
+    GC::Ref<CSSStyleValue> reify(JS::Realm& realm, Utf16FlyString const& associated_property) const;
 
-    bool properties_equal(OpacityValueStyleValue const& other) const { return m_value == other.m_value; }
-
-    virtual bool is_computationally_independent() const override { return m_value->is_computationally_independent(); }
+    bool properties_equal(OpacityValueStyleValue const& other) const { return value() == other.value(); }
 
 private:
-    OpacityValueStyleValue(NonnullRefPtr<StyleValue const>&& value)
-        : StyleValueWithDefaultOperators(Type::OpacityValue)
-        , m_value(move(value))
+    friend class StyleValue;
+
+    explicit OpacityValueStyleValue(StyleValueFFI::StyleValueData const* data)
+        : StyleValueWithDefaultOperators(Type::OpacityValue, data)
+        , m_wrapped_value(StyleValue::adopt_rust_style_value_data(StyleValueFFI::rust_style_value_retain(static_cast<StyleValueFFI::StyleValueData const*>(data->opacity_value.value.pointer))))
     {
     }
 
-    ValueComparingNonnullRefPtr<StyleValue const> m_value;
+    OpacityValueStyleValue(NonnullRefPtr<StyleValue const>&& value)
+        : StyleValueWithDefaultOperators(Type::OpacityValue, StyleValueFFI::rust_style_value_create_opacity_value(StyleValueFFI::rust_style_value_retain(value->rust_style_value_data())))
+        , m_wrapped_value(move(value))
+    {
+    }
+
+    ValueComparingNonnullRefPtr<StyleValue const> value() const { return m_wrapped_value; }
+
+    ValueComparingNonnullRefPtr<StyleValue const> m_wrapped_value;
 };
 
 }

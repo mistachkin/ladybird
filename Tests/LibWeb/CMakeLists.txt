@@ -9,9 +9,11 @@ set(TEST_SOURCES
     TestCSSSyntaxParser.cpp
     TestCSSTokenizer.cpp
     TestCSSTokenStream.cpp
+    TestDisplayListDamage.cpp
     TestFetchResponse.cpp
     TestFetchURL.cpp
     TestHTMLTokenizer.cpp
+    TestImageData.cpp
     TestMicrosyntax.cpp
     TestMimeSniff.cpp
     TestNumbers.cpp
@@ -19,14 +21,31 @@ set(TEST_SOURCES
     TestRefCountedTreeNode.cpp
     TestSecureContexts.cpp
     TestSessionHistoryEntry.cpp
+    TestSmoothScrollAnimation.cpp
     TestSourceHighlighter.cpp
+    TestStructuredSerializeCorpus.cpp
+    TestStructuredSerializeDurability.cpp
+    TestStructuredSerializeFormat.cpp
+    TestStructuredSerializeHardening.cpp
     TestStrings.cpp
+    TestLengthAbsolutizeParity.cpp
+    TestNumericTypeParity.cpp
+    TestStylePropertyMetadataParity.cpp
+    TestStyleStructRef.cpp
+    TestWebIDLBuffers.cpp
+    TestWebGLSpanWithStorage.cpp
 )
 
 # [B4] Tests that reach into LibTH8 / LibWeb TH8 code are gated on
 # ENABLE_TH8 so the LibWeb non-TH8 build keeps compiling.
 if (ENABLE_TH8)
     list(APPEND TEST_SOURCES TestTH8HandleTable.cpp)
+endif()
+
+if (NOT WIN32)
+    list(APPEND TEST_SOURCES
+        TestStyleValueEquality.cpp
+    )
 endif()
 
 foreach(source IN LISTS TEST_SOURCES)
@@ -37,13 +56,21 @@ ladybird_utility(css-tokenizer SOURCES css-tokenizer.cpp LIBS LibFileSystem LibM
 
 target_link_libraries(TestContentBlocker PRIVATE LibURL)
 target_link_libraries(TestControlMessageQueue PRIVATE LibSync)
-target_link_libraries(TestFetchResponse PRIVATE LibGC LibHTTP LibJS)
+target_link_libraries(TestDisplayListDamage PRIVATE LibGfx)
+target_link_libraries(TestFetchResponse PRIVATE LibGC LibHTTP LibJS LibRequests LibURL)
 target_link_libraries(TestFetchURL PRIVATE LibURL)
 target_link_libraries(TestAccumulatedVisualContext PRIVATE LibGfx)
+target_link_libraries(TestImageData PRIVATE LibGC LibJS)
 target_link_libraries(TestPage PRIVATE LibGC LibJS)
 target_link_libraries(TestSecureContexts PRIVATE LibURL)
 target_link_libraries(TestSessionHistoryEntry PRIVATE LibJS LibURL)
 target_link_libraries(TestSourceHighlighter PRIVATE LibURL LibWebView)
+target_link_libraries(TestStructuredSerializeCorpus PRIVATE LibCrypto LibGC LibIPC LibJS)
+target_link_libraries(TestStructuredSerializeDurability PRIVATE LibCrypto LibGC LibIPC LibJS)
+target_link_libraries(TestStructuredSerializeFormat PRIVATE LibCrypto LibGC LibGfx LibIPC LibJS)
+target_link_libraries(TestStructuredSerializeHardening PRIVATE LibGC LibIPC LibJS)
+target_link_libraries(TestWebIDLBuffers PRIVATE LibGC LibJS)
+target_link_libraries(TestWebGLSpanWithStorage PRIVATE LibGC LibJS)
 
 if (NOT WIN32)
     add_custom_target(test-css-tokenizer ALL DEPENDS css-tokenizer "${CMAKE_BINARY_DIR}/bin/test-css-tokenizer")

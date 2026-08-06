@@ -6,7 +6,7 @@
 
 #pragma once
 
-#include <AK/FlyString.h>
+#include <AK/Utf16FlyString.h>
 
 namespace Web::UIEvents::InputTypes {
 
@@ -15,12 +15,14 @@ namespace Web::UIEvents::InputTypes {
     __ENUMERATE_INPUT_TYPE(deleteByCut)           \
     __ENUMERATE_INPUT_TYPE(deleteContentBackward) \
     __ENUMERATE_INPUT_TYPE(deleteContentForward)  \
+    __ENUMERATE_INPUT_TYPE(historyRedo)           \
+    __ENUMERATE_INPUT_TYPE(historyUndo)           \
     __ENUMERATE_INPUT_TYPE(insertFromPaste)       \
     __ENUMERATE_INPUT_TYPE(insertLineBreak)       \
     __ENUMERATE_INPUT_TYPE(insertParagraph)       \
     __ENUMERATE_INPUT_TYPE(insertText)
 
-#define __ENUMERATE_INPUT_TYPE(name) extern FlyString const& name;
+#define __ENUMERATE_INPUT_TYPE(name) extern Utf16FlyString const& name;
 ENUMERATE_INPUT_TYPES
 #undef __ENUMERATE_INPUT_TYPE
 

@@ -39,11 +39,11 @@ void StyleElementBase::update_a_style_block_for_dynamic_change()
     update_a_style_block();
 }
 
-void StyleElementBase::style_element_attribute_changed(FlyString const& name, Optional<String> const& value)
+void StyleElementBase::style_element_attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& value)
 {
     if (name == HTML::AttributeNames::media) {
         if (auto* sheet = this->sheet()) {
-            sheet->set_media(value.value_or({}));
+            sheet->set_media(value.has_value() ? value->utf16_view() : u""sv);
             associated_style_sheet_media_attribute_changed();
         }
     } else if (name == HTML::AttributeNames::type) {
@@ -93,11 +93,11 @@ void StyleElementBase::update_a_style_block(UpdateSource update_source)
 
     // 4. If element's type attribute is present and its value is neither the empty string nor an ASCII case-insensitive match for "text/css", then return.
     auto type_attribute = style_element.attribute(HTML::AttributeNames::type);
-    if (type_attribute.has_value() && !type_attribute->is_empty() && !type_attribute->bytes_as_string_view().equals_ignoring_ascii_case("text/css"sv))
+    if (type_attribute.has_value() && !type_attribute->is_empty() && !type_attribute->equals_ignoring_ascii_case(u"text/css"sv))
         return;
 
     // 5. If the Should element's inline behavior be blocked by Content Security Policy? algorithm returns "Blocked" when executed upon the style element, "style", and the style element's child text content, then return. [CSP]
-    if (ContentSecurityPolicy::should_elements_inline_type_behavior_be_blocked_by_content_security_policy(style_element.realm(), style_element, ContentSecurityPolicy::Directives::Directive::InlineType::Style, style_element.child_text_content().to_utf8_but_should_be_ported_to_utf16()) == ContentSecurityPolicy::Directives::Directive::Result::Blocked)
+    if (ContentSecurityPolicy::should_elements_inline_type_behavior_be_blocked_by_content_security_policy(style_element.realm(), style_element, ContentSecurityPolicy::Directives::Directive::InlineType::Style, style_element.child_text_content()) == ContentSecurityPolicy::Directives::Directive::Result::Blocked)
         return;
 
     // 6. Create a CSS style sheet with the following properties:
@@ -121,15 +121,17 @@ void StyleElementBase::update_a_style_block(UpdateSource update_source)
     //            Left at its default value.
     //        CSS rules
     //          Left uninitialized.
+    auto text_content = style_element.text_content();
+    auto text_content_view = text_content.has_value() ? text_content->utf16_view() : u""sv;
+    auto media_attribute = style_element.attribute(HTML::AttributeNames::media);
+    auto media_attribute_view = media_attribute.has_value() ? media_attribute->utf16_view() : u""sv;
+    auto title_attribute = style_element.in_a_document_tree() ? style_element.attribute(HTML::AttributeNames::title) : Optional<Utf16String> {};
     m_style_sheet_list = style_element.document_or_shadow_root_style_sheets();
     m_associated_css_style_sheet = m_style_sheet_list->create_a_css_style_sheet(
-        style_element.text_content().value_or({}).to_utf8_but_should_be_ported_to_utf16(),
-        "text/css"_string,
+        text_content_view,
         &style_element,
-        style_element.attribute(HTML::AttributeNames::media).value_or({}),
-        style_element.in_a_document_tree()
-            ? style_element.attribute(HTML::AttributeNames::title).value_or({})
-            : String {},
+        media_attribute_view,
+        title_attribute.has_value() ? title_attribute.release_value() : Utf16String {},
         CSS::StyleSheetList::Alternate::No,
         CSS::StyleSheetList::OriginClean::Yes,
         {},
@@ -198,8 +200,7 @@ void StyleElementBase::finished_loading_critical_subresources(AnyFailed any_fail
             VERIFY(element.document().script_blocking_style_sheet_set().contains(element));
             VERIFY(style_element_base->m_associated_css_style_sheet_is_blocking_scripts);
             // 2. Remove element from its node document's script-blocking style sheet set.
-            element.document().script_blocking_style_sheet_set().remove(element);
-            element.document().schedule_html_parser_end_check();
+            element.document().remove_from_script_blocking_style_sheet_set(element);
             style_element_base->m_associated_css_style_sheet_is_blocking_scripts = false;
         }
         // 4. Unblock rendering on element.
@@ -275,11 +276,8 @@ void StyleElementBase::remove_from_script_blocking_style_sheet_set_if_needed()
         return;
 
     auto& element = as_element();
-    auto& script_blocking_style_sheet_set = element.document().script_blocking_style_sheet_set();
-    if (script_blocking_style_sheet_set.contains(element)) {
-        script_blocking_style_sheet_set.remove(element);
-        element.document().schedule_html_parser_end_check();
-    }
+    if (element.document().script_blocking_style_sheet_set().contains(element))
+        element.document().remove_from_script_blocking_style_sheet_set(element);
 
     m_associated_css_style_sheet_is_blocking_scripts = false;
     m_document_load_event_delayer.clear();
@@ -306,6 +304,33 @@ CSS::CSSStyleSheet const* StyleElementBase::sheet() const
 {
     // The sheet attribute must return the associated CSS style sheet for the node or null if there is no associated CSS style sheet.
     return m_associated_css_style_sheet;
+}
+
+// https://html.spec.whatwg.org/multipage/semantics.html#dom-style-disabled
+bool StyleElementBase::disabled()
+{
+    // 1. If this does not have an associated CSS style sheet, return false.
+    if (!sheet())
+        return false;
+
+    // 2. If this's associated CSS style sheet's disabled flag is set, return true.
+    if (sheet()->disabled())
+        return true;
+
+    // 3. Return false.
+    return false;
+}
+
+// https://html.spec.whatwg.org/multipage/semantics.html#dom-style-disabled
+void StyleElementBase::set_disabled(bool disabled)
+{
+    // 1. If this does not have an associated CSS style sheet, return.
+    if (!sheet())
+        return;
+
+    // 2. If the given value is true, set this's associated CSS style sheet's disabled flag.
+    //    Otherwise, unset this's associated CSS style sheet's disabled flag.
+    sheet()->set_disabled(disabled);
 }
 
 void StyleElementBase::visit_style_element_edges(JS::Cell::Visitor& visitor)

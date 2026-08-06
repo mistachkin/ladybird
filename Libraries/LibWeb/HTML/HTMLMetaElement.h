@@ -12,15 +12,15 @@
 namespace Web::HTML {
 
 // https://html.spec.whatwg.org/multipage/semantics.html#pragma-directives
-#define ENUMERATE_HTML_META_HTTP_EQUIV_ATTRIBUTES                                   \
-    __ENUMERATE_HTML_META_HTTP_EQUIV_ATTRIBUTE("content-language", ContentLanguage) \
-    __ENUMERATE_HTML_META_HTTP_EQUIV_ATTRIBUTE("content-type", EncodingDeclaration) \
-    __ENUMERATE_HTML_META_HTTP_EQUIV_ATTRIBUTE("default-style", DefaultStyle)       \
-    __ENUMERATE_HTML_META_HTTP_EQUIV_ATTRIBUTE("refresh", Refresh)                  \
-    __ENUMERATE_HTML_META_HTTP_EQUIV_ATTRIBUTE("set-cookie", SetCookie)             \
-    __ENUMERATE_HTML_META_HTTP_EQUIV_ATTRIBUTE("x-ua-compatible", XUACompatible)    \
-    __ENUMERATE_HTML_META_HTTP_EQUIV_ATTRIBUTE("content-security-policy", ContentSecurityPolicy) \
-    __ENUMERATE_HTML_META_HTTP_EQUIV_ATTRIBUTE("th8-script-policy", TH8ScriptPolicy)
+#define ENUMERATE_HTML_META_HTTP_EQUIV_ATTRIBUTES                                    \
+    __ENUMERATE_HTML_META_HTTP_EQUIV_ATTRIBUTE(u"content-language", ContentLanguage) \
+    __ENUMERATE_HTML_META_HTTP_EQUIV_ATTRIBUTE(u"content-type", EncodingDeclaration) \
+    __ENUMERATE_HTML_META_HTTP_EQUIV_ATTRIBUTE(u"default-style", DefaultStyle)       \
+    __ENUMERATE_HTML_META_HTTP_EQUIV_ATTRIBUTE(u"refresh", Refresh)                  \
+    __ENUMERATE_HTML_META_HTTP_EQUIV_ATTRIBUTE(u"set-cookie", SetCookie)             \
+    __ENUMERATE_HTML_META_HTTP_EQUIV_ATTRIBUTE(u"x-ua-compatible", XUACompatible)    \
+    __ENUMERATE_HTML_META_HTTP_EQUIV_ATTRIBUTE(u"content-security-policy", ContentSecurityPolicy) \
+    __ENUMERATE_HTML_META_HTTP_EQUIV_ATTRIBUTE(u"th8-script-policy", TH8ScriptPolicy)
 
 class HTMLMetaElement final : public HTMLElement {
     WEB_PLATFORM_OBJECT(HTMLMetaElement, HTMLElement);
@@ -42,13 +42,13 @@ private:
 
     virtual void initialize(JS::Realm&) override;
 
-    void update_metadata(Optional<String> const& old_name = {});
+    void update_metadata(Optional<Utf16String> const& old_name = {});
     void update_referrer_policy();
 
     // ^DOM::Element
     virtual void inserted() override;
     virtual void removed_from(IsSubtreeRoot, Node* old_ancestor, Node& old_root) override;
-    virtual void attribute_changed(FlyString const& local_name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
+    virtual void attribute_changed(Utf16FlyString const& local_name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_) override;
 };
 
 }

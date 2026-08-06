@@ -22,14 +22,20 @@ class EditingHostManager
 public:
     [[nodiscard]] static GC::Ref<EditingHostManager> create(JS::Realm&, GC::Ref<Document>);
 
-    virtual void handle_insert(FlyString const& input_type, Utf16String const&) override;
-    virtual void handle_delete(FlyString const& input_type) override;
-    virtual EventResult handle_return_key(FlyString const& ui_input_type) override;
+    virtual void handle_insert(Utf16FlyString const& input_type, Utf16View) override;
+    virtual void handle_insert_from_clipboard(Utf16FlyString const& input_type, Utf16View plain_text, Optional<Utf16View> html) override;
+    virtual void handle_delete(Utf16FlyString const& input_type, DispatchInputEvent = DispatchInputEvent::Yes) override;
+    virtual EventResult handle_return_key(Utf16FlyString const& ui_input_type) override;
+    virtual GC::Ptr<DOM::Node> mouse_selection_scope() override { return m_active_contenteditable_element; }
     virtual void select_all() override;
-    virtual void set_selection_anchor(GC::Ref<DOM::Node>, size_t offset) override;
-    virtual void set_selection_focus(GC::Ref<DOM::Node>, size_t offset) override;
+    virtual void set_selection_anchor(GC::Ref<DOM::Node>, size_t offset, TextAffinity = TextAffinity::Downstream) override;
+    virtual void set_selection_focus(GC::Ref<DOM::Node>, size_t offset, TextAffinity = TextAffinity::Downstream) override;
     virtual void move_cursor_to_start(CollapseSelection) override;
     virtual void move_cursor_to_end(CollapseSelection) override;
+    virtual void move_cursor_to_start_of_document(CollapseSelection) override;
+    virtual void move_cursor_to_end_of_document(CollapseSelection) override;
+    virtual void move_cursor_to_previous_page(CollapseSelection) override;
+    virtual void move_cursor_to_next_page(CollapseSelection) override;
     virtual void increment_cursor_position_offset(CollapseSelection) override;
     virtual void decrement_cursor_position_offset(CollapseSelection) override;
     virtual void increment_cursor_position_to_next_word(CollapseSelection) override;

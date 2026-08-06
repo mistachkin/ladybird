@@ -14,6 +14,7 @@
 #include <LibWeb/DOMURL/DOMURL.h>
 #include <LibWeb/Fetch/Infrastructure/FetchRecord.h>
 #include <LibWeb/HTML/BrowsingContext.h>
+#include <LibWeb/HTML/DedicatedWorkerGlobalScope.h>
 #include <LibWeb/HTML/PolicyContainers.h>
 #include <LibWeb/HTML/Scripting/Agent.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
@@ -23,6 +24,7 @@
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/HTML/WorkerAgentParent.h>
 #include <LibWeb/HTML/WorkerGlobalScope.h>
+#include <LibWeb/Infra/SerializedURL.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/SecureContexts/AbstractOperations.h>
 #include <LibWeb/ServiceWorker/ServiceWorker.h>
@@ -222,7 +224,7 @@ void prepare_to_run_callback(EnvironmentSettingsObject& settings)
 }
 
 // https://html.spec.whatwg.org/multipage/urls-and-fetching.html#parse-a-url
-Optional<URL::URL> EnvironmentSettingsObject::parse_url(StringView url)
+Optional<URL::URL> EnvironmentSettingsObject::parse_url(Utf16View url)
 {
     // 1. Let baseURL be environment's base URL, if environment is a Document object; otherwise environment's API base URL.
     auto base_url = api_base_url();
@@ -232,10 +234,10 @@ Optional<URL::URL> EnvironmentSettingsObject::parse_url(StringView url)
 }
 
 // https://html.spec.whatwg.org/multipage/urls-and-fetching.html#encoding-parsing-a-url
-Optional<URL::URL> EnvironmentSettingsObject::encoding_parse_url(StringView url)
+Optional<URL::URL> EnvironmentSettingsObject::encoding_parse_url(Utf16View url)
 {
     // 1. Let encoding be UTF-8.
-    auto encoding = "UTF-8"_string;
+    auto encoding = "UTF-8"_utf16;
 
     // 2. If environment is a Document object, then set encoding to environment's character encoding.
 
@@ -248,11 +250,11 @@ Optional<URL::URL> EnvironmentSettingsObject::encoding_parse_url(StringView url)
     auto base_url = api_base_url();
 
     // 5. Return the result of applying the URL parser to url, with baseURL and encoding.
-    return DOMURL::parse(url, base_url, encoding);
+    return DOMURL::parse(url, base_url, encoding.utf16_view());
 }
 
 // https://html.spec.whatwg.org/multipage/urls-and-fetching.html#encoding-parsing-and-serializing-a-url
-Optional<String> EnvironmentSettingsObject::encoding_parse_and_serialize_url(StringView url)
+Optional<Utf16String> EnvironmentSettingsObject::encoding_parse_and_serialize_url(Utf16View url)
 {
     // 1. Let url be the result of encoding-parsing a URL given url, relative to environment.
     auto parsed_url = encoding_parse_url(url);
@@ -262,7 +264,7 @@ Optional<String> EnvironmentSettingsObject::encoding_parse_and_serialize_url(Str
         return {};
 
     // 3. Return the result of applying the URL serializer to url.
-    return parsed_url->serialize();
+    return utf16_string_from_url_ascii(parsed_url->serialize());
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#clean-up-after-running-a-callback
@@ -319,7 +321,7 @@ bool is_scripting_disabled(EnvironmentSettingsObject const& settings)
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#module-type-allowed
-bool module_type_allowed(EnvironmentSettingsObject const&, StringView module_type)
+bool module_type_allowed(EnvironmentSettingsObject const&, Utf16View module_type)
 {
     // 1. If moduleType is not "javascript-or-wasm", "css", or "json", then return false.
     if (module_type != "javascript-or-wasm"sv && module_type != "css"sv && module_type != "json"sv)
@@ -332,7 +334,7 @@ bool module_type_allowed(EnvironmentSettingsObject const&, StringView module_typ
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#add-module-to-resolved-module-set
-void add_module_to_resolved_module_set(EnvironmentSettingsObject& settings_object, String const& serialized_base_url, String const& normalized_specifier, Optional<URL::URL> const& as_url)
+void add_module_to_resolved_module_set(EnvironmentSettingsObject& settings_object, Utf16View serialized_base_url, Utf16View normalized_specifier, Optional<URL::URL> const& as_url)
 {
     // 1. Let global be settingsObject's global object.
     auto& global = settings_object.global_object();
@@ -346,8 +348,8 @@ void add_module_to_resolved_module_set(EnvironmentSettingsObject& settings_objec
     //
     // NOTE: We set 'specifier as a URL set to asURL' as a bool to simplify logic when merging import maps.
     SpecifierResolution resolution {
-        .serialized_base_url = serialized_base_url,
-        .specifier = normalized_specifier,
+        .serialized_base_url = Utf16String::from_utf16(serialized_base_url),
+        .specifier = Utf16String::from_utf16(normalized_specifier),
         .specifier_is_null_or_url_like_that_is_special = !as_url.has_value() || as_url->is_special(),
     };
 
@@ -524,8 +526,10 @@ SerializedEnvironmentSettingsObject EnvironmentSettingsObject::serialize()
             };
         }
         VERIFY(is<WorkerGlobalScope>(global_object()));
+        auto const* dedicated_worker_global_scope = as_if<DedicatedWorkerGlobalScope>(global_object());
         return SerializedWorkerGlobalScope {
             .relevant_settings_object_is_secure_context = relevant_settings_object_is_secure_context,
+            .is_supported_animation_frame_provider = dedicated_worker_global_scope && dedicated_worker_global_scope->is_supported(),
         };
     }();
 

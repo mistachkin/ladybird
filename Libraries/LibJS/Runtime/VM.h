@@ -133,6 +133,15 @@ public:
 
     [[nodiscard]] PropertyKey const& get_property_key(Bytecode::PropertyKeyTableIndex) const;
 
+    // NB: The interpreter picks its dispatch table when it starts running an outermost executable.
+    //     Enabling debugging therefore only takes effect for later interpreter invocations, not
+    //     code that is already running.
+    void enable_debugging();
+    void disable_debugging();
+    [[nodiscard]] bool debugging_enabled() const { return m_debugger; }
+    [[nodiscard]] Debugger* debugger() { return m_debugger; }
+    [[nodiscard]] Debugger const* debugger() const { return m_debugger; }
+
     enum class HandleExceptionResponse {
         ExitFromExecutable,
         ContinueInThisExecutable,
@@ -346,6 +355,7 @@ public:
 
     u32 execution_generation() const { return m_execution_generation; }
     void finish_execution_generation() { ++m_execution_generation; }
+    FlatPtr primitive_storage_cage_base() const { return m_primitive_storage_cage_base; }
 
     ThrowCompletionOr<Reference> resolve_binding(Utf16FlyString const&, Strict, Environment* = nullptr);
     ThrowCompletionOr<Reference> get_identifier_reference(Environment*, Utf16FlyString, Strict, size_t hops = 0);
@@ -562,10 +572,12 @@ private:
     WellKnownSymbols m_well_known_symbols;
 
     u32 m_execution_generation { 0 };
+    FlatPtr m_primitive_storage_cage_base { 0 };
     u32 m_run_executable_depth { 0 };
     u32 m_module_execution_depth { 0 };
     u64 m_module_async_evaluation_count { 0 }; // [[ModuleAsyncEvaluationCount]]
 
+    OwnPtr<Debugger> m_debugger;
     OwnPtr<Agent> m_agent;
 
     bool m_dynamic_imports_allowed { false };

@@ -29,7 +29,6 @@ RUN apt-get update -o APT::Update::Error-Mode=any \
         autoconf \
         autoconf-archive \
         automake \
-        bison \
         build-essential \
         ccache \
         clang-${LLVM_VERSION} \
@@ -53,7 +52,6 @@ RUN apt-get update -o APT::Update::Error-Mode=any \
         libssl-dev \
         libstdc++-${GCC_VERSION}-dev \
         libtool \
-        libxkbcommon-dev \
         libclang-${LLVM_VERSION}-dev \
         libclang-rt-${LLVM_VERSION}-dev \
         lld-${LLVM_VERSION} \
@@ -74,6 +72,8 @@ RUN apt-get update -o APT::Update::Error-Mode=any \
         python3-psutil \
         python3-venv \
         qt6-base-dev \
+        qt6-base-private-dev \
+        qt6-positioning-dev \
         qt6-tools-dev-tools \
         rsync \
         shellcheck \

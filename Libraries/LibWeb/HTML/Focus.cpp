@@ -9,6 +9,7 @@
 #include <AK/TypeCasts.h>
 #include <AK/Vector.h>
 #include <LibGC/Root.h>
+#include <LibWeb/Bindings/Element.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Element.h>
 #include <LibWeb/DOM/ShadowRoot.h>
@@ -19,12 +20,13 @@
 #include <LibWeb/HTML/NavigableContainer.h>
 #include <LibWeb/HTML/Navigation.h>
 #include <LibWeb/HTML/WindowProxy.h>
+#include <LibWeb/Page/Page.h>
 #include <LibWeb/UIEvents/FocusEvent.h>
 
 namespace Web::HTML {
 
 // https://html.spec.whatwg.org/multipage/interaction.html#fire-a-focus-event
-static void fire_a_focus_event(GC::Ptr<DOM::EventTarget> focus_event_target, GC::Ptr<DOM::EventTarget> related_focus_target, FlyString const& event_name, bool bubbles)
+static void fire_a_focus_event(GC::Ptr<DOM::EventTarget> focus_event_target, GC::Ptr<DOM::EventTarget> related_focus_target, Utf16FlyString const& event_name, bool bubbles)
 {
     // To fire a focus event named e at an element t with a given related target r, fire an event named e at t, using FocusEvent,
     // with the relatedTarget attribute initialized to r, the view attribute initialized to t's node document's relevant global
@@ -311,7 +313,7 @@ static DOM::Node* get_focusable_area(DOM::Node& focus_target, FocusTrigger focus
     if (auto* navigable_container = as_if<NavigableContainer>(&focus_target)) {
         if (!is_inert_for_focus(*navigable_container) && navigable_container->meets_focusable_area_rendering_requirements()) {
             if (auto content_navigable = navigable_container->content_navigable())
-                return content_navigable->active_document();
+                return as<LocalNavigable>(*content_navigable).active_document();
         }
     }
 
@@ -339,7 +341,7 @@ static DOM::Node* get_focusable_area(DOM::Node& focus_target, FocusTrigger focus
 
 // https://html.spec.whatwg.org/multipage/interaction.html#focusing-steps
 // FIXME: This should accept more types.
-void run_focusing_steps(DOM::Node* new_focus_target, DOM::Node* fallback_target, FocusTrigger focus_trigger)
+void run_focusing_steps(DOM::Node* new_focus_target, DOM::Node* fallback_target, FocusTrigger focus_trigger, ScrollIntoView scroll_into_view)
 {
     // 1. If new focus target is not a focusable area, then set new focus target to the result of getting the focusable
     //    area for new focus target, given focus trigger if it was passed.
@@ -368,7 +370,7 @@ void run_focusing_steps(DOM::Node* new_focus_target, DOM::Node* fallback_target,
     // 3. If new focus target is a navigable container with non-null content navigable, then set new focus target to the content navigable's active document.
     if (auto* navigable_container = as_if<NavigableContainer>(*new_focus_target)) {
         if (auto content_navigable = navigable_container->content_navigable())
-            new_focus_target = content_navigable->active_document();
+            new_focus_target = as<LocalNavigable>(*content_navigable).active_document();
     }
 
     // 4. If new focus target is a focusable area and its DOM anchor is inert, then return.
@@ -394,6 +396,41 @@ void run_focusing_steps(DOM::Node* new_focus_target, DOM::Node* fallback_target,
 
     // 8. Run the focus update steps with old chain, new chain, and new focus target respectively.
     run_focus_update_steps(move(old_chain), move(new_chain), new_focus_target);
+
+    // INTEROP: Keyboard input follows the deepest focused navigable. Focus event handlers can move focus reentrantly,
+    //          so derive the input target from the final focused area instead of the target which began this update.
+    auto focused_area = top_level_traversable->currently_focused_area();
+    if (focused_area) {
+        if (auto navigable = focused_area->document().navigable())
+            navigable->page().set_focused_navigable(*navigable);
+    }
+
+    // AD-HOC: An element focused by clicking it is already under the pointer, so other engines do not scroll it into
+    //         view. Scrolling would also move the element out from under the pointer between mousedown and mouseup,
+    //         leaving the two with different hit-test targets and suppressing the click.
+    if (focus_trigger == FocusTrigger::Click || scroll_into_view == ScrollIntoView::No)
+        return;
+
+    // NB: A focus event handler may have moved focus on to something else. That nested run of these steps is
+    //     responsible for revealing whatever it focused, and may have been asked not to reveal it at all, so this run
+    //     only reveals the target it focused itself.
+    if (focused_area.ptr() != new_focus_target)
+        return;
+
+    // AD-HOC: Scroll the newly focused element into view. The focus update steps do not do this, so an element
+    //         focused any way other than by focus() would never be revealed.
+    // NB: Not if the focused element is a navigable container: focus moving into a frame lands on its container
+    //     element in this document, and other engines do not scroll embedded content into view on focus. Ad scripts
+    //     commonly pull focus into an offscreen iframe during page load, and scrolling to it would hijack the
+    //     viewport.
+    auto* focused_element = as_if<DOM::Element>(focused_area.ptr());
+    if (!focused_element || is<NavigableContainer>(*focused_element))
+        return;
+
+    Bindings::ScrollIntoViewOptions scroll_options;
+    scroll_options.block = Bindings::ScrollLogicalPosition::Nearest;
+    scroll_options.inline_ = Bindings::ScrollLogicalPosition::Nearest;
+    (void)focused_element->scroll_into_view(scroll_options);
 }
 
 // https://html.spec.whatwg.org/multipage/interaction.html#unfocusing-steps

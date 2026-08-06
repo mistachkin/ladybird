@@ -6,8 +6,11 @@
 
 #pragma once
 
+#include <AK/Utf16String.h>
+#include <AK/Utf16View.h>
 #include <LibGC/Ptr.h>
 #include <LibJS/Heap/Cell.h>
+#include <LibWeb/Bindings/HTMLElement.h>
 #include <LibWeb/HTML/DOMStringMap.h>
 
 namespace Web::HTML {
@@ -18,14 +21,14 @@ public:
     [[nodiscard]] GC::Ref<DOMStringMap> dataset();
 
     // https://html.spec.whatwg.org/multipage/urls-and-fetching.html#dom-noncedelement-nonce
-    String const& nonce() const { return m_cryptographic_nonce; }
-    void set_nonce(String const& nonce) { m_cryptographic_nonce = nonce; }
+    Utf16String const& nonce() const { return m_cryptographic_nonce; }
+    void set_nonce(Utf16View nonce) { m_cryptographic_nonce = Utf16String::from_utf16(nonce); }
 
-    void focus();
+    void focus(Bindings::FocusOptions const& = {});
     void blur();
 
 protected:
-    void attribute_changed(FlyString const&, Optional<String> const&, Optional<String> const&, Optional<FlyString> const&);
+    void attribute_changed(Utf16FlyString const&, Optional<Utf16String> const&, Optional<Utf16String> const&, Optional<Utf16FlyString> const&);
     WebIDL::ExceptionOr<void> cloned(DOM::Node&, bool) const;
     void inserted();
     void visit_edges(JS::Cell::Visitor&);
@@ -34,7 +37,7 @@ protected:
     GC::Ptr<DOMStringMap> m_dataset;
 
     // https://html.spec.whatwg.org/multipage/urls-and-fetching.html#cryptographicnonce
-    String m_cryptographic_nonce;
+    Utf16String m_cryptographic_nonce;
 };
 
 }

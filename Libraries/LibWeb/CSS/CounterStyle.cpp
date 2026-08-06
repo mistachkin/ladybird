@@ -6,22 +6,36 @@
 
 #include "CounterStyle.h"
 #include <AK/HashTable.h>
+#include <AK/Utf16StringBuilder.h>
 #include <LibWeb/DOM/Document.h>
 
 namespace Web::CSS {
+
+static Utf16String string_from_counter_style_symbols(Vector<CounterStyleSymbol> const& symbols)
+{
+    Utf16StringBuilder builder;
+    for (auto const& symbol : symbols)
+        builder.append(symbol.view());
+    return builder.to_string();
+}
+
+static Utf16String string_from_counter_style_symbol(CounterStyleSymbol const& symbol)
+{
+    return symbol.to_utf16_string();
+}
 
 // https://drafts.csswg.org/css-counter-styles-3/#decimal
 NonnullRefPtr<CounterStyle const> CounterStyle::decimal()
 {
     static auto const& decimal_counter_style = CounterStyle::create(
-        "decimal"_fly_string,
-        GenericCounterStyleAlgorithm { CounterStyleSystem::Numeric, { "0"_fly_string, "1"_fly_string, "2"_fly_string, "3"_fly_string, "4"_fly_string, "5"_fly_string, "6"_fly_string, "7"_fly_string, "8"_fly_string, "9"_fly_string } },
-        CounterStyleNegativeSign { .prefix = "-"_fly_string, .suffix = ""_fly_string },
-        ""_fly_string,
-        ". "_fly_string,
+        "decimal"_utf16_fly_string,
+        GenericCounterStyleAlgorithm { CounterStyleSystem::Numeric, { "0"_utf16_fly_string, "1"_utf16_fly_string, "2"_utf16_fly_string, "3"_utf16_fly_string, "4"_utf16_fly_string, "5"_utf16_fly_string, "6"_utf16_fly_string, "7"_utf16_fly_string, "8"_utf16_fly_string, "9"_utf16_fly_string } },
+        CounterStyleNegativeSign { .prefix = "-"_utf16_fly_string, .suffix = ""_utf16_fly_string },
+        ""_utf16_fly_string,
+        ". "_utf16_fly_string,
         { { NumericLimits<i32>::min(), NumericLimits<i32>::max() } },
         {},
-        CounterStylePad { .minimum_length = 0, .symbol = ""_fly_string })
+        CounterStylePad { .minimum_length = 0, .symbol = ""_utf16_fly_string })
                                                    .leak_ref();
 
     return decimal_counter_style;
@@ -31,14 +45,14 @@ NonnullRefPtr<CounterStyle const> CounterStyle::decimal()
 NonnullRefPtr<CounterStyle const> CounterStyle::disc()
 {
     static auto const& disc_counter_style = CounterStyle::create(
-        "disc"_fly_string,
-        GenericCounterStyleAlgorithm { CounterStyleSystem::Cyclic, { "•"_fly_string } },
-        CounterStyleNegativeSign { .prefix = ""_fly_string, .suffix = " "_fly_string },
-        ""_fly_string,
-        " "_fly_string,
+        "disc"_utf16_fly_string,
+        GenericCounterStyleAlgorithm { CounterStyleSystem::Cyclic, { "•"_utf16_fly_string } },
+        CounterStyleNegativeSign { .prefix = ""_utf16_fly_string, .suffix = " "_utf16_fly_string },
+        ""_utf16_fly_string,
+        " "_utf16_fly_string,
         { { NumericLimits<i32>::min(), NumericLimits<i32>::max() } },
-        "decimal"_fly_string,
-        CounterStylePad { .minimum_length = 0, .symbol = ""_fly_string })
+        "decimal"_utf16_fly_string,
+        CounterStylePad { .minimum_length = 0, .symbol = ""_utf16_fly_string })
                                                 .leak_ref();
 
     return disc_counter_style;
@@ -53,7 +67,7 @@ NonnullRefPtr<CounterStyle const> CounterStyle::from_counter_style_definition(Co
             auto extended_counter_style = style_scope.get_registered_counter_style(extends.name);
 
             if (!extended_counter_style)
-                extended_counter_style = style_scope.get_registered_counter_style("decimal"_fly_string);
+                extended_counter_style = style_scope.get_registered_counter_style("decimal"_utf16_fly_string);
 
             return CounterStyle::create(
                 definition.name(),
@@ -65,20 +79,20 @@ NonnullRefPtr<CounterStyle const> CounterStyle::from_counter_style_definition(Co
                     [&](Empty const&) { return extended_counter_style->range(); },
                     [](Vector<CounterStyleRangeEntry> const& range) { return range; },
                     [&](AutoRange const&) { return AutoRange::resolve(extended_counter_style->algorithm()); }),
-                definition.fallback().value_or(extended_counter_style->fallback().value_or("decimal"_fly_string)),
+                definition.fallback().value_or(extended_counter_style->fallback().value_or("decimal"_utf16_fly_string)),
                 definition.pad().value_or(extended_counter_style->pad()));
         },
         [&](CounterStyleAlgorithm const& algorithm) {
             return CounterStyle::create(
                 definition.name(),
                 algorithm,
-                definition.negative_sign().value_or({ .prefix = "-"_fly_string, .suffix = ""_fly_string }),
-                definition.prefix().value_or(""_fly_string), definition.suffix().value_or(". "_fly_string),
+                definition.negative_sign().value_or({ .prefix = "-"_utf16_fly_string, .suffix = ""_utf16_fly_string }),
+                definition.prefix().value_or(""_utf16_fly_string), definition.suffix().value_or(". "_utf16_fly_string),
                 definition.range().visit(
                     [](Vector<CounterStyleRangeEntry> const& range) { return range; },
                     [&](auto const&) { return AutoRange::resolve(algorithm); }),
-                definition.fallback().value_or("decimal"_fly_string),
-                definition.pad().value_or({ .minimum_length = 0, .symbol = ""_fly_string }));
+                definition.fallback().value_or("decimal"_utf16_fly_string),
+                definition.pad().value_or({ .minimum_length = 0, .symbol = ""_utf16_fly_string }));
         });
 }
 
@@ -95,12 +109,12 @@ bool CounterStyle::equals(CounterStyle const& other) const
 }
 
 // https://drafts.csswg.org/css-counter-styles-3/#extended-range-optional
-static String generate_an_initial_representation_for_extended_cjk_system(i64 value, ExtendedCJKCounterStyleAlgorithm::Type type, Array<FlyString, 10> const& digit_strings, Array<FlyString, 3> const& digit_marker_strings, Array<FlyString, 3> const& group_marker_strings)
+static Utf16String generate_an_initial_representation_for_extended_cjk_system(i64 value, ExtendedCJKCounterStyleAlgorithm::Type type, Array<CounterStyleSymbol, 10> const& digit_strings, Array<CounterStyleSymbol, 3> const& digit_marker_strings, Array<CounterStyleSymbol, 3> const& group_marker_strings)
 {
     // 1. If the counter value is 0, the representation is the character for 0 specified for the given counter style.
     //    Skip the rest of this algorithm.
     if (value == 0)
-        return digit_strings[0].to_string();
+        return string_from_counter_style_symbol(digit_strings[0]);
 
     // 2. If the counter value is negative, instead use the absolute value of the counter value for the remaining steps
     //    of this algorithm.
@@ -114,7 +128,7 @@ static String generate_an_initial_representation_for_extended_cjk_system(i64 val
         value /= 10000;
     }
 
-    StringBuilder builder;
+    Utf16StringBuilder builder;
 
     for (i32 group_index = static_cast<i32>(groups.size()) - 1; group_index >= 0; --group_index) {
         auto const group_value = groups[group_index];
@@ -195,7 +209,7 @@ static String generate_an_initial_representation_for_extended_cjk_system(i64 val
 
         // 8. For the Korean styles, insert a space (" " U+0020) between each group.
         if (first_is_one_of(type, ExtendedCJKCounterStyleAlgorithm::Type::KoreanHangulFormal, ExtendedCJKCounterStyleAlgorithm::Type::KoreanHanjaInformal, ExtendedCJKCounterStyleAlgorithm::Type::KoreanHanjaFormal) && group_index != 0)
-            builder.append(' ');
+            builder.append_ascii(' ');
     }
 
     // 10. If the counter value was negative, prepend the appropriate negative sign character for the given counter
@@ -203,13 +217,13 @@ static String generate_an_initial_representation_for_extended_cjk_system(i64 val
     // NB: This is handled within `generate_a_counter_representation_impl`
 
     // 11. Return the resultant string as the representation of the counter value.
-    return MUST(builder.to_string());
+    return builder.to_string();
 }
 
-Optional<String> CounterStyle::generate_an_initial_representation_for_the_counter_value(i64 value) const
+Optional<Utf16String> CounterStyle::generate_an_initial_representation_for_the_counter_value(i64 value) const
 {
     return m_algorithm.visit(
-        [&](AdditiveCounterStyleAlgorithm const& additive_algorithm) -> Optional<String> {
+        [&](AdditiveCounterStyleAlgorithm const& additive_algorithm) -> Optional<Utf16String> {
             // https://drafts.csswg.org/css-counter-styles-3/#additive-system
             // To construct the representation:
 
@@ -221,14 +235,14 @@ Optional<String> CounterStyle::generate_an_initial_representation_for_the_counte
                 // 1. If symbol list contains a tuple with a weight of zero, append that tuple’s counter symbol to S and
                 //    return S.
                 if (auto it = additive_algorithm.symbol_list.find_if([](auto const& tuple) { return tuple.weight == 0; }); it != additive_algorithm.symbol_list.end())
-                    return it->symbol.to_string();
+                    return string_from_counter_style_symbol(it->symbol);
 
                 // 2. Otherwise, the given counter value cannot be represented by this counter style, and must instead
                 //    be represented by the fallback counter style.
                 return {};
             }
 
-            StringBuilder builder;
+            Utf16StringBuilder builder;
 
             // 3. For each tuple in symbol list:
             for (auto const& tuple : additive_algorithm.symbol_list) {
@@ -243,14 +257,14 @@ Optional<String> CounterStyle::generate_an_initial_representation_for_the_counte
 
                 // 4. Append symbol to S reps times.
                 for (int i = 0; i < reps; ++i)
-                    builder.append(tuple.symbol);
+                    builder.append(tuple.symbol.view());
 
                 // 5. Decrement value by weight * reps.
                 value -= tuple.weight * reps;
 
                 // 6. If value is zero, return S.
                 if (value == 0)
-                    return MUST(builder.to_string());
+                    return builder.to_string();
             }
 
             // Assertion: value is still non-zero.
@@ -260,7 +274,7 @@ Optional<String> CounterStyle::generate_an_initial_representation_for_the_counte
             // the fallback counter style.
             return {};
         },
-        [&](FixedCounterStyleAlgorithm const& fixed_algorithm) -> Optional<String> {
+        [&](FixedCounterStyleAlgorithm const& fixed_algorithm) -> Optional<Utf16String> {
             // https://drafts.csswg.org/css-counter-styles-3/#fixed-system
             // The first counter symbol is the representation for the first symbol value, and subsequent counter values
             // are represented by subsequent counter symbols. Once the list of counter symbols is exhausted, further
@@ -271,16 +285,16 @@ Optional<String> CounterStyle::generate_an_initial_representation_for_the_counte
             if (index < 0 || index >= static_cast<i64>(fixed_algorithm.symbol_list.size()))
                 return {};
 
-            return fixed_algorithm.symbol_list[index].to_string();
+            return string_from_counter_style_symbol(fixed_algorithm.symbol_list[index]);
         },
-        [&](GenericCounterStyleAlgorithm const& generic_algorithm) -> Optional<String> {
+        [&](GenericCounterStyleAlgorithm const& generic_algorithm) -> Optional<Utf16String> {
             switch (generic_algorithm.type) {
             case CounterStyleSystem::Cyclic: {
                 // https://drafts.csswg.org/css-counter-styles-3/#cyclic-system
                 // If there are N counter symbols and a representation is being constructed for the integer value, the
                 // representation is the counter symbol at index ( (value-1) mod N) of the list of counter symbols
                 // (0-indexed).
-                return generic_algorithm.symbol_list[(value - 1) % generic_algorithm.symbol_list.size()].to_string();
+                return string_from_counter_style_symbol(generic_algorithm.symbol_list[(value - 1) % generic_algorithm.symbol_list.size()]);
             }
             case CounterStyleSystem::Numeric: {
                 // https://drafts.csswg.org/css-counter-styles-3/#numeric-system
@@ -293,7 +307,7 @@ Optional<String> CounterStyle::generate_an_initial_representation_for_the_counte
 
                 // 1. If value is 0, append symbol(0) to S and return S.
                 if (value == 0)
-                    return generic_algorithm.symbol_list[0].to_string();
+                    return string_from_counter_style_symbol(generic_algorithm.symbol_list[0]);
 
                 // NB: Our string builder doesn't support prepending, so we use a vector and convert that to a string at
                 //     the end.
@@ -309,7 +323,7 @@ Optional<String> CounterStyle::generate_an_initial_representation_for_the_counte
                 }
 
                 // 3. Return S.
-                return MUST(String::join(""sv, symbols));
+                return string_from_counter_style_symbols(symbols);
             }
             case CounterStyleSystem::Alphabetic: {
                 // https://drafts.csswg.org/css-counter-styles-3/#alphabetic-system
@@ -337,7 +351,7 @@ Optional<String> CounterStyle::generate_an_initial_representation_for_the_counte
                 }
 
                 // Finally, return S.
-                return MUST(String::join(""sv, symbols));
+                return string_from_counter_style_symbols(symbols);
             }
             case CounterStyleSystem::Symbolic: {
                 // https://drafts.csswg.org/css-counter-styles-3/#symbolic-system
@@ -355,7 +369,9 @@ Optional<String> CounterStyle::generate_an_initial_representation_for_the_counte
 
                 // 3. Append the chosen symbol to S a number of times equal to the representation length.
                 // Finally, return S.
-                return MUST(String::repeated(symbol.to_string(), representation_length));
+                Utf16StringBuilder builder;
+                builder.append_repeated(symbol.view(), representation_length);
+                return builder.to_string();
             }
             case CounterStyleSystem::Additive:
                 // NB: This is handled by AdditiveCounterStyleAlgorithm.
@@ -364,13 +380,13 @@ Optional<String> CounterStyle::generate_an_initial_representation_for_the_counte
 
             VERIFY_NOT_REACHED();
         },
-        [&](EthiopicNumericCounterStyleAlgorithm const&) -> Optional<String> {
+        [&](EthiopicNumericCounterStyleAlgorithm const&) -> Optional<Utf16String> {
             // https://drafts.csswg.org/css-counter-styles-3/#ethiopic-numeric-counter-style
             // The following algorithm converts decimal digits to ethiopic numbers:
 
             // 1. If the number is 1, return "፩" (U+1369).
             if (value == 1)
-                return "\U00001369"_string;
+                return Utf16String::from_code_point(0x1369);
 
             // 2. Split the number into groups of two digits, starting with the least significant decimal digit.
             Vector<u8> groups {};
@@ -379,7 +395,7 @@ Optional<String> CounterStyle::generate_an_initial_representation_for_the_counte
                 value /= 100;
             }
 
-            StringBuilder builder;
+            Utf16StringBuilder builder;
 
             // 3. Index each group sequentially, starting from the least significant as group number zero.
 
@@ -435,9 +451,9 @@ Optional<String> CounterStyle::generate_an_initial_representation_for_the_counte
             }
 
             // 8. Concatenate the groups into one string, and return it.
-            return MUST(builder.to_string());
+            return builder.to_string();
         },
-        [&](ExtendedCJKCounterStyleAlgorithm const& extended_cjk_algorithm) -> Optional<String> {
+        [&](ExtendedCJKCounterStyleAlgorithm const& extended_cjk_algorithm) -> Optional<Utf16String> {
             // https://drafts.csswg.org/css-counter-styles-3/#extended-range-optional
             // All of the styles are defined by almost identical algorithms (specified as a single algorithm here, with
             // the differences called out when relevant), but use different sets of characters.
@@ -466,30 +482,30 @@ Optional<String> CounterStyle::generate_an_initial_representation_for_the_counte
                 return generate_an_initial_representation_for_extended_cjk_system(
                     value,
                     ExtendedCJKCounterStyleAlgorithm::Type::SimpChineseInformal,
-                    { "\U000096F6"_fly_string, "\U00004E00"_fly_string, "\U00004E8C"_fly_string, "\U00004E09"_fly_string, "\U000056DB"_fly_string, "\U00004E94"_fly_string, "\U0000516D"_fly_string, "\U00004E03"_fly_string, "\U0000516B"_fly_string, "\U00004E5D"_fly_string },
-                    { "\U00005341"_fly_string, "\U0000767E"_fly_string, "\U00005343"_fly_string },
-                    { "\U00004E07"_fly_string, "\U00004EBF"_fly_string, "\U00004E07\U00004EBF"_fly_string });
+                    { "\U000096F6"_utf16_fly_string, "\U00004E00"_utf16_fly_string, "\U00004E8C"_utf16_fly_string, "\U00004E09"_utf16_fly_string, "\U000056DB"_utf16_fly_string, "\U00004E94"_utf16_fly_string, "\U0000516D"_utf16_fly_string, "\U00004E03"_utf16_fly_string, "\U0000516B"_utf16_fly_string, "\U00004E5D"_utf16_fly_string },
+                    { "\U00005341"_utf16_fly_string, "\U0000767E"_utf16_fly_string, "\U00005343"_utf16_fly_string },
+                    { "\U00004E07"_utf16_fly_string, "\U00004EBF"_utf16_fly_string, "\U00004E07\U00004EBF"_utf16_fly_string });
             case ExtendedCJKCounterStyleAlgorithm::Type::SimpChineseFormal:
                 return generate_an_initial_representation_for_extended_cjk_system(
                     value,
                     ExtendedCJKCounterStyleAlgorithm::Type::SimpChineseFormal,
-                    { "\U000096F6"_fly_string, "\U000058F9"_fly_string, "\U00008D30"_fly_string, "\U000053C1"_fly_string, "\U00008086"_fly_string, "\U00004F0D"_fly_string, "\U00009646"_fly_string, "\U000067D2"_fly_string, "\U0000634C"_fly_string, "\U00007396"_fly_string },
-                    { "\U000062FE"_fly_string, "\U00004F70"_fly_string, "\U00004EDF"_fly_string },
-                    { "\U00004E07"_fly_string, "\U00004EBF"_fly_string, "\U00004E07\U00004EBF"_fly_string });
+                    { "\U000096F6"_utf16_fly_string, "\U000058F9"_utf16_fly_string, "\U00008D30"_utf16_fly_string, "\U000053C1"_utf16_fly_string, "\U00008086"_utf16_fly_string, "\U00004F0D"_utf16_fly_string, "\U00009646"_utf16_fly_string, "\U000067D2"_utf16_fly_string, "\U0000634C"_utf16_fly_string, "\U00007396"_utf16_fly_string },
+                    { "\U000062FE"_utf16_fly_string, "\U00004F70"_utf16_fly_string, "\U00004EDF"_utf16_fly_string },
+                    { "\U00004E07"_utf16_fly_string, "\U00004EBF"_utf16_fly_string, "\U00004E07\U00004EBF"_utf16_fly_string });
             case ExtendedCJKCounterStyleAlgorithm::Type::TradChineseInformal:
                 return generate_an_initial_representation_for_extended_cjk_system(
                     value,
                     ExtendedCJKCounterStyleAlgorithm::Type::TradChineseInformal,
-                    { "\U000096F6"_fly_string, "\U00004E00"_fly_string, "\U00004E8C"_fly_string, "\U00004E09"_fly_string, "\U000056DB"_fly_string, "\U00004E94"_fly_string, "\U0000516D"_fly_string, "\U00004E03"_fly_string, "\U0000516B"_fly_string, "\U00004E5D"_fly_string },
-                    { "\U00005341"_fly_string, "\U0000767E"_fly_string, "\U00005343"_fly_string },
-                    { "\U0000842C"_fly_string, "\U00005104"_fly_string, "\U00005146"_fly_string });
+                    { "\U000096F6"_utf16_fly_string, "\U00004E00"_utf16_fly_string, "\U00004E8C"_utf16_fly_string, "\U00004E09"_utf16_fly_string, "\U000056DB"_utf16_fly_string, "\U00004E94"_utf16_fly_string, "\U0000516D"_utf16_fly_string, "\U00004E03"_utf16_fly_string, "\U0000516B"_utf16_fly_string, "\U00004E5D"_utf16_fly_string },
+                    { "\U00005341"_utf16_fly_string, "\U0000767E"_utf16_fly_string, "\U00005343"_utf16_fly_string },
+                    { "\U0000842C"_utf16_fly_string, "\U00005104"_utf16_fly_string, "\U00005146"_utf16_fly_string });
             case ExtendedCJKCounterStyleAlgorithm::Type::TradChineseFormal:
                 return generate_an_initial_representation_for_extended_cjk_system(
                     value,
                     ExtendedCJKCounterStyleAlgorithm::Type::TradChineseFormal,
-                    { "\U000096F6"_fly_string, "\U000058F9"_fly_string, "\U00008CB3"_fly_string, "\U000053C3"_fly_string, "\U00008086"_fly_string, "\U00004F0D"_fly_string, "\U00009678"_fly_string, "\U000067D2"_fly_string, "\U0000634C"_fly_string, "\U00007396"_fly_string },
-                    { "\U000062FE"_fly_string, "\U00004F70"_fly_string, "\U00004EDF"_fly_string },
-                    { "\U0000842C"_fly_string, "\U00005104"_fly_string, "\U00005146"_fly_string });
+                    { "\U000096F6"_utf16_fly_string, "\U000058F9"_utf16_fly_string, "\U00008CB3"_utf16_fly_string, "\U000053C3"_utf16_fly_string, "\U00008086"_utf16_fly_string, "\U00004F0D"_utf16_fly_string, "\U00009678"_utf16_fly_string, "\U000067D2"_utf16_fly_string, "\U0000634C"_utf16_fly_string, "\U00007396"_utf16_fly_string },
+                    { "\U000062FE"_utf16_fly_string, "\U00004F70"_utf16_fly_string, "\U00004EDF"_utf16_fly_string },
+                    { "\U0000842C"_utf16_fly_string, "\U00005104"_utf16_fly_string, "\U00005146"_utf16_fly_string });
 
             // Values              | Codepoints
             //                     | japanese-informal | japanese-formal
@@ -513,16 +529,16 @@ Optional<String> CounterStyle::generate_an_initial_representation_for_the_counte
                 return generate_an_initial_representation_for_extended_cjk_system(
                     value,
                     ExtendedCJKCounterStyleAlgorithm::Type::JapaneseInformal,
-                    { "\U00003007"_fly_string, "\U00004E00"_fly_string, "\U00004E8C"_fly_string, "\U00004E09"_fly_string, "\U000056DB"_fly_string, "\U00004E94"_fly_string, "\U0000516D"_fly_string, "\U00004E03"_fly_string, "\U0000516B"_fly_string, "\U00004E5D"_fly_string },
-                    { "\U00005341"_fly_string, "\U0000767E"_fly_string, "\U00005343"_fly_string },
-                    { "\U00004E07"_fly_string, "\U00005104"_fly_string, "\U00005146"_fly_string });
+                    { "\U00003007"_utf16_fly_string, "\U00004E00"_utf16_fly_string, "\U00004E8C"_utf16_fly_string, "\U00004E09"_utf16_fly_string, "\U000056DB"_utf16_fly_string, "\U00004E94"_utf16_fly_string, "\U0000516D"_utf16_fly_string, "\U00004E03"_utf16_fly_string, "\U0000516B"_utf16_fly_string, "\U00004E5D"_utf16_fly_string },
+                    { "\U00005341"_utf16_fly_string, "\U0000767E"_utf16_fly_string, "\U00005343"_utf16_fly_string },
+                    { "\U00004E07"_utf16_fly_string, "\U00005104"_utf16_fly_string, "\U00005146"_utf16_fly_string });
             case ExtendedCJKCounterStyleAlgorithm::Type::JapaneseFormal:
                 return generate_an_initial_representation_for_extended_cjk_system(
                     value,
                     ExtendedCJKCounterStyleAlgorithm::Type::JapaneseFormal,
-                    { "\U000096F6"_fly_string, "\U000058F1"_fly_string, "\U00005F10"_fly_string, "\U000053C2"_fly_string, "\U000056DB"_fly_string, "\U00004F0D"_fly_string, "\U0000516D"_fly_string, "\U00004E03"_fly_string, "\U0000516B"_fly_string, "\U00004E5D"_fly_string },
-                    { "\U000062FE"_fly_string, "\U0000767E"_fly_string, "\U00009621"_fly_string },
-                    { "\U0000842C"_fly_string, "\U00005104"_fly_string, "\U00005146"_fly_string });
+                    { "\U000096F6"_utf16_fly_string, "\U000058F1"_utf16_fly_string, "\U00005F10"_utf16_fly_string, "\U000053C2"_utf16_fly_string, "\U000056DB"_utf16_fly_string, "\U00004F0D"_utf16_fly_string, "\U0000516D"_utf16_fly_string, "\U00004E03"_utf16_fly_string, "\U0000516B"_utf16_fly_string, "\U00004E5D"_utf16_fly_string },
+                    { "\U000062FE"_utf16_fly_string, "\U0000767E"_utf16_fly_string, "\U00009621"_utf16_fly_string },
+                    { "\U0000842C"_utf16_fly_string, "\U00005104"_utf16_fly_string, "\U00005146"_utf16_fly_string });
 
             // Values              | Codepoints
             //                     | korean-hangul-formal | korean-hanja-informal | korean-hanja-formal
@@ -546,23 +562,23 @@ Optional<String> CounterStyle::generate_an_initial_representation_for_the_counte
                 return generate_an_initial_representation_for_extended_cjk_system(
                     value,
                     ExtendedCJKCounterStyleAlgorithm::Type::KoreanHangulFormal,
-                    { "\U0000C601"_fly_string, "\U0000C77C"_fly_string, "\U0000C774"_fly_string, "\U0000C0BC"_fly_string, "\U0000C0AC"_fly_string, "\U0000C624"_fly_string, "\U0000C721"_fly_string, "\U0000CE60"_fly_string, "\U0000D314"_fly_string, "\U0000AD6C"_fly_string },
-                    { "\U0000C2ED"_fly_string, "\U0000BC31"_fly_string, "\U0000CC9C"_fly_string },
-                    { "\U0000B9CC"_fly_string, "\U0000C5B5"_fly_string, "\U0000C870"_fly_string });
+                    { "\U0000C601"_utf16_fly_string, "\U0000C77C"_utf16_fly_string, "\U0000C774"_utf16_fly_string, "\U0000C0BC"_utf16_fly_string, "\U0000C0AC"_utf16_fly_string, "\U0000C624"_utf16_fly_string, "\U0000C721"_utf16_fly_string, "\U0000CE60"_utf16_fly_string, "\U0000D314"_utf16_fly_string, "\U0000AD6C"_utf16_fly_string },
+                    { "\U0000C2ED"_utf16_fly_string, "\U0000BC31"_utf16_fly_string, "\U0000CC9C"_utf16_fly_string },
+                    { "\U0000B9CC"_utf16_fly_string, "\U0000C5B5"_utf16_fly_string, "\U0000C870"_utf16_fly_string });
             case ExtendedCJKCounterStyleAlgorithm::Type::KoreanHanjaInformal:
                 return generate_an_initial_representation_for_extended_cjk_system(
                     value,
                     ExtendedCJKCounterStyleAlgorithm::Type::KoreanHanjaInformal,
-                    { "\U000096F6"_fly_string, "\U00004E00"_fly_string, "\U00004E8C"_fly_string, "\U00004E09"_fly_string, "\U000056DB"_fly_string, "\U00004E94"_fly_string, "\U0000516D"_fly_string, "\U00004E03"_fly_string, "\U0000516B"_fly_string, "\U00004E5D"_fly_string },
-                    { "\U00005341"_fly_string, "\U0000767E"_fly_string, "\U00005343"_fly_string },
-                    { "\U0000842C"_fly_string, "\U00005104"_fly_string, "\U00005146"_fly_string });
+                    { "\U000096F6"_utf16_fly_string, "\U00004E00"_utf16_fly_string, "\U00004E8C"_utf16_fly_string, "\U00004E09"_utf16_fly_string, "\U000056DB"_utf16_fly_string, "\U00004E94"_utf16_fly_string, "\U0000516D"_utf16_fly_string, "\U00004E03"_utf16_fly_string, "\U0000516B"_utf16_fly_string, "\U00004E5D"_utf16_fly_string },
+                    { "\U00005341"_utf16_fly_string, "\U0000767E"_utf16_fly_string, "\U00005343"_utf16_fly_string },
+                    { "\U0000842C"_utf16_fly_string, "\U00005104"_utf16_fly_string, "\U00005146"_utf16_fly_string });
             case ExtendedCJKCounterStyleAlgorithm::Type::KoreanHanjaFormal:
                 return generate_an_initial_representation_for_extended_cjk_system(
                     value,
                     ExtendedCJKCounterStyleAlgorithm::Type::KoreanHanjaFormal,
-                    { "\U000096F6"_fly_string, "\U000058F9"_fly_string, "\U00008CB3"_fly_string, "\U000053C3"_fly_string, "\U000056DB"_fly_string, "\U00004E94"_fly_string, "\U0000516D"_fly_string, "\U00004E03"_fly_string, "\U0000516B"_fly_string, "\U00004E5D"_fly_string },
-                    { "\U000062FE"_fly_string, "\U0000767E"_fly_string, "\U00004EDF"_fly_string },
-                    { "\U0000842C"_fly_string, "\U00005104"_fly_string, "\U00005146"_fly_string });
+                    { "\U000096F6"_utf16_fly_string, "\U000058F9"_utf16_fly_string, "\U00008CB3"_utf16_fly_string, "\U000053C3"_utf16_fly_string, "\U000056DB"_utf16_fly_string, "\U00004E94"_utf16_fly_string, "\U0000516D"_utf16_fly_string, "\U00004E03"_utf16_fly_string, "\U0000516B"_utf16_fly_string, "\U00004E5D"_utf16_fly_string },
+                    { "\U000062FE"_utf16_fly_string, "\U0000767E"_utf16_fly_string, "\U00004EDF"_utf16_fly_string },
+                    { "\U0000842C"_utf16_fly_string, "\U00005104"_utf16_fly_string, "\U00005146"_utf16_fly_string });
             }
 
             VERIFY_NOT_REACHED();
@@ -611,7 +627,7 @@ bool CounterStyle::uses_a_negative_sign() const
 }
 
 // https://drafts.csswg.org/css-counter-styles-3/#generate-a-counter
-static String generate_a_counter_representation_impl(RefPtr<CounterStyle const> const& counter_style, StyleScope const& style_scope, i32 value, HashTable<FlyString>& fallback_history)
+static Utf16String generate_a_counter_representation_impl(RefPtr<CounterStyle const> const& counter_style, StyleScope const& style_scope, i32 value, HashTable<Utf16FlyString>& fallback_history)
 {
     // When asked to generate a counter representation using a particular counter style for a particular
     // counter value, follow these steps:
@@ -622,7 +638,7 @@ static String generate_a_counter_representation_impl(RefPtr<CounterStyle const> 
         return generate_a_counter_representation_impl(CounterStyle::decimal(), style_scope, value, fallback_history);
 
     auto const generate_a_counter_representation_using_fallback = [&]() {
-        VERIFY(counter_style->name() != "decimal"_fly_string);
+        VERIFY(counter_style->name() != "decimal"_utf16_fly_string);
 
         auto const& fallback_name = counter_style->fallback().value();
         auto fallback = style_scope.get_registered_counter_style(fallback_name);
@@ -671,25 +687,34 @@ static String generate_a_counter_representation_impl(RefPtr<CounterStyle const> 
         // the number of grapheme clusters in the counter style’s negative descriptor’s <symbol>(s).
         // FIXME: We should be counting grapheme clusters here.
         if (value_is_negative_and_uses_negative_sign)
-            difference -= counter_style->negative_sign().prefix.to_string().length_in_code_units() + counter_style->negative_sign().suffix.to_string().length_in_code_units();
+            difference -= counter_style->negative_sign().prefix.length_in_code_units() + counter_style->negative_sign().suffix.length_in_code_units();
 
         // If difference is greater than zero, prepend difference copies of the specified <symbol> to the representation.
-        if (difference > 0)
-            representation = MUST(String::formatted("{}{}", MUST(String::repeated(counter_style->pad().symbol.to_string(), difference)), representation));
+        if (difference > 0) {
+            Utf16StringBuilder builder;
+            builder.append_repeated(counter_style->pad().symbol.view(), difference);
+            builder.append(representation);
+            representation = builder.to_string();
+        }
     }
 
     // 5. If the counter value is negative and the counter style uses a negative sign, wrap the representation in the
     //    counter style’s negative sign as specified in the negative descriptor.
-    if (value_is_negative_and_uses_negative_sign)
-        representation = MUST(String::formatted("{}{}{}", counter_style->negative_sign().prefix, representation, counter_style->negative_sign().suffix));
+    if (value_is_negative_and_uses_negative_sign) {
+        Utf16StringBuilder builder;
+        builder.append(counter_style->negative_sign().prefix.view());
+        builder.append(representation);
+        builder.append(counter_style->negative_sign().suffix.view());
+        representation = builder.to_string();
+    }
 
     // 6. Return the representation.
     return representation;
 }
 
-String generate_a_counter_representation(RefPtr<CounterStyle const> const& counter_style, StyleScope const& style_scope, i32 value)
+Utf16String generate_a_counter_representation(RefPtr<CounterStyle const> const& counter_style, StyleScope const& style_scope, i32 value)
 {
-    HashTable<FlyString> fallback_history;
+    HashTable<Utf16FlyString> fallback_history;
     return generate_a_counter_representation_impl(counter_style, style_scope, value, fallback_history);
 }
 

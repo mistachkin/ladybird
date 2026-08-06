@@ -55,7 +55,7 @@ void CSSStyleDeclaration::update_style_attribute()
 }
 
 // https://drafts.csswg.org/cssom/#dom-cssstyledeclaration-csstext
-String CSSStyleDeclaration::css_text() const
+Utf16String CSSStyleDeclaration::css_text() const
 {
     // 1. If the computed flag is set, then return the empty string.
     if (is_computed())

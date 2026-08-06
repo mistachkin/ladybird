@@ -27,8 +27,8 @@ static String source_text_from_component_values(Vector<Parser::ComponentValue> c
         if (original_source_text.is_empty()) {
             auto serialized_values = serialize_a_series_of_component_values(values);
             if (source_text_mode == UnresolvedStyleValue::SourceTextMode::Trim)
-                return MUST(serialized_values.trim_ascii_whitespace());
-            return serialized_values;
+                return serialized_values.trim_ascii_whitespace().to_utf8();
+            return serialized_values.to_utf8();
         }
         builder.append(original_source_text);
     }
@@ -45,14 +45,38 @@ static void mark_as_attr_tainted(Vector<Parser::ComponentValue>& values)
         value.set_attr_tainted();
 }
 
-StringView UnresolvedStyleValue::comparison_text() const
+static StyleValueFFI::StyleValueData const* create_rust_style_value(String source_text, String value_comparison_text, Parser::SubstitutionFunctionsPresence substitution_presence, bool contains_attr_tainted_values, StyleValue const* parsed_value)
 {
-    if (!m_value_comparison_text.is_empty())
-        return m_value_comparison_text.bytes_as_string_view();
-    return m_source_text.bytes_as_string_view().trim_whitespace();
+    auto source_text_bytes = source_text.bytes();
+    auto value_comparison_text_bytes = value_comparison_text.bytes();
+    auto source_text_raw = source_text.to_raw_leaked();
+    auto value_comparison_text_raw = value_comparison_text.to_raw_leaked();
+    return StyleValueFFI::rust_style_value_create_unresolved(
+        source_text_raw,
+        source_text_bytes.data(),
+        source_text_bytes.size(),
+        value_comparison_text_raw,
+        value_comparison_text_bytes.data(),
+        value_comparison_text_bytes.size(),
+        substitution_presence.attr,
+        substitution_presence.dashed_function,
+        substitution_presence.env,
+        substitution_presence.if_,
+        substitution_presence.inherit,
+        substitution_presence.var,
+        contains_attr_tainted_values,
+        parsed_value ? StyleValueFFI::rust_style_value_retain(parsed_value->rust_style_value_data()) : nullptr);
 }
 
-ValueComparingNonnullRefPtr<UnresolvedStyleValue const> UnresolvedStyleValue::create(Vector<Parser::ComponentValue>&& values, Parser::SubstitutionFunctionsPresence substitution_presence, Optional<String> original_source_text, SourceTextMode source_text_mode, bool contains_attr_tainted_values)
+String UnresolvedStyleValue::comparison_text() const
+{
+    auto value_comparison_text = this->value_comparison_text();
+    if (!value_comparison_text.is_empty())
+        return value_comparison_text;
+    return MUST(source_text().trim_ascii_whitespace());
+}
+
+ValueComparingNonnullRefPtr<UnresolvedStyleValue const> UnresolvedStyleValue::create_internal(Vector<Parser::ComponentValue>&& values, Parser::SubstitutionFunctionsPresence substitution_presence, Optional<String> original_source_text, SourceTextMode source_text_mode, bool contains_attr_tainted_values, RefPtr<StyleValue const> parsed_value)
 {
     auto has_original_source_text = original_source_text.has_value();
     auto source_text = [&] {
@@ -61,34 +85,48 @@ ValueComparingNonnullRefPtr<UnresolvedStyleValue const> UnresolvedStyleValue::cr
 
         if (source_text_mode == SourceTextMode::Trim)
             return MUST(serialize_a_series_of_component_values_preserving_original_source_text(values).trim_ascii_whitespace());
+        if (source_text_mode == SourceTextMode::TrimLeading)
+            return MUST(serialize_a_series_of_component_values_preserving_original_source_text(values).trim_ascii_whitespace(TrimMode::Left));
 
         return source_text_from_component_values(values, source_text_mode);
     }();
     // NB: The comparison text is a normalized serialization, only used when we have separate original source text.
     //     Don't pay for serializing it otherwise.
-    auto value_comparison_text = has_original_source_text ? MUST(serialize_a_series_of_component_values(values).trim_ascii_whitespace()) : String {};
-    return adopt_ref(*new (nothrow) UnresolvedStyleValue(move(source_text), move(value_comparison_text), substitution_presence, contains_attr_tainted_values));
+    auto value_comparison_text = has_original_source_text
+        ? serialize_a_series_of_component_values(values).trim_ascii_whitespace().to_utf8()
+        : String {};
+    return adopt_ref(*new (nothrow) UnresolvedStyleValue(move(source_text), move(value_comparison_text), substitution_presence, contains_attr_tainted_values, move(parsed_value)));
 }
 
-UnresolvedStyleValue::UnresolvedStyleValue(String source_text, String value_comparison_text, Parser::SubstitutionFunctionsPresence substitution_presence, bool contains_attr_tainted_values)
-    : StyleValue(Type::Unresolved)
-    , m_source_text(move(source_text))
-    , m_value_comparison_text(move(value_comparison_text))
-    , m_substitution_functions_presence(substitution_presence)
-    , m_contains_attr_tainted_values(contains_attr_tainted_values)
+ValueComparingNonnullRefPtr<UnresolvedStyleValue const> UnresolvedStyleValue::create(Vector<Parser::ComponentValue>&& values, Parser::SubstitutionFunctionsPresence substitution_presence, Optional<String> original_source_text, SourceTextMode source_text_mode, bool contains_attr_tainted_values)
+{
+    return create_internal(move(values), substitution_presence, move(original_source_text), source_text_mode, contains_attr_tainted_values, nullptr);
+}
+
+ValueComparingNonnullRefPtr<UnresolvedStyleValue const> UnresolvedStyleValue::create_attr_tainted_with_parsed_value(Vector<Parser::ComponentValue>&& values, Parser::SubstitutionFunctionsPresence substitution_presence, Optional<String> original_source_text, SourceTextMode source_text_mode, NonnullRefPtr<StyleValue const> parsed_value)
+{
+    VERIFY(!parsed_value->is_unresolved());
+    return create_internal(move(values), substitution_presence, move(original_source_text), source_text_mode, true, move(parsed_value));
+}
+
+UnresolvedStyleValue::UnresolvedStyleValue(String source_text, String value_comparison_text, Parser::SubstitutionFunctionsPresence substitution_presence, bool contains_attr_tainted_values, RefPtr<StyleValue const> parsed_value)
+    : StyleValue(Type::Unresolved, create_rust_style_value(move(source_text), move(value_comparison_text), substitution_presence, contains_attr_tainted_values, parsed_value.ptr()))
+    , m_parsed_value(move(parsed_value))
 {
 }
 
 void UnresolvedStyleValue::serialize(StringBuilder& builder, SerializationMode) const
 {
-    builder.append(m_source_text);
+    builder.append(source_text());
 }
 
 Vector<Parser::ComponentValue> UnresolvedStyleValue::values() const
 {
-    auto parser = Parser::Parser::create(Parser::ParsingParams {}, m_value_comparison_text.is_empty() ? m_source_text : m_value_comparison_text);
+    auto source_text = this->source_text();
+    auto value_comparison_text = this->value_comparison_text();
+    auto parser = Parser::Parser::create(Parser::ParsingParams {}, value_comparison_text.is_empty() ? source_text : value_comparison_text);
     auto values = parser.parse_as_list_of_component_values();
-    if (m_contains_attr_tainted_values)
+    if (contains_attr_tainted_values())
         mark_as_attr_tainted(values);
     return values;
 }
@@ -104,7 +142,8 @@ bool UnresolvedStyleValue::equals(StyleValue const& other) const
         return false;
 
     auto const& other_unresolved = other.as_unresolved();
-    return comparison_text() == other_unresolved.comparison_text();
+    return contains_attr_tainted_values() == other_unresolved.contains_attr_tainted_values()
+        && comparison_text() == other_unresolved.comparison_text();
 }
 
 static GC::Ref<CSSUnparsedValue> reify_a_list_of_component_values(JS::Realm&, ReadonlySpan<Parser::ComponentValue>);
@@ -134,7 +173,7 @@ static GC::Ptr<CSSVariableReferenceValue> reify_a_var_reference(JS::Realm& realm
     // 1. Let object be a new CSSVariableReferenceValue.
 
     // 2. Set object’s variable internal slot to the serialization of the <custom-ident> providing the variable name.
-    FlyString variable = maybe_variable.token().ident();
+    auto variable = maybe_variable.token().ident();
 
     // 3. If var has a fallback value, set object’s fallback internal slot to the result of reifying the fallback’s
     //    component values. Otherwise, set it to null.
@@ -164,7 +203,7 @@ private:
         //     Also, a var() might not be representable, if it has an ASF in place of its name, so those will be part
         //     of a string instead.
         for (auto const& component_value : source_values) {
-            if (component_value.is_function("var"sv)) {
+            if (component_value.is_function("var"_utf16)) {
                 // First parse the var() to see if it is representable as a CSSVariableReferenceValue. It might not be,
                 // for example if it has an ASF in the place of its variable name. In that case we fall back to
                 // serializing it like a regular function.
@@ -197,7 +236,7 @@ private:
 
     void serialize_unserialized_values()
     {
-        m_reified_values.append(Utf16String::from_utf8(serialize_a_series_of_component_values(m_unserialized_values)));
+        m_reified_values.append(serialize_a_series_of_component_values(m_unserialized_values));
         m_unserialized_values.clear_with_capacity();
     }
 

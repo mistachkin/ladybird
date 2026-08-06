@@ -46,7 +46,7 @@ void SVGTextPositioningElement::visit_edges(Visitor& visitor)
     visitor.visit(m_rotate);
 }
 
-void SVGTextPositioningElement::attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
+void SVGTextPositioningElement::attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_)
 {
     Base::attribute_changed(name, old_value, value, namespace_);
 
@@ -68,7 +68,7 @@ TextPositioning SVGTextPositioningElement::text_positioning() const
 
     // https://svgwg.org/svg2-draft/text.html#TSpanAttributes
     // FIXME: This only handles single values, not lists.
-    auto resolve_value = [&](FlyString const& attribute) -> Vector<TextPositioning::Position> {
+    auto resolve_value = [&](Utf16FlyString const& attribute) -> Vector<TextPositioning::Position> {
         auto raw_value = get_attribute_value(attribute);
 
         CSS::ComputationContext computation_context {
@@ -104,7 +104,7 @@ TextPositioning SVGTextPositioningElement::text_positioning() const
 }
 
 GC::Ref<SVGAnimatedLengthList> SVGTextPositioningElement::ensure_length_list(GC::Ptr<SVGAnimatedLengthList>& list,
-    FlyString const& attribute_name) const
+    Utf16FlyString const& attribute_name) const
 {
     if (!list) {
         // FIXME: This only handles single values, not lists.
@@ -113,7 +113,7 @@ GC::Ref<SVGAnimatedLengthList> SVGTextPositioningElement::ensure_length_list(GC:
         if (maybe_number_percentage.has_value())
             value = maybe_number_percentage.release_value().value();
 
-        auto length = SVGLength::create(realm(), SVGLength::SVG_LENGTHTYPE_NUMBER, value, SVGLength::ReadOnly::Yes);
+        auto length = SVGLength::create_detached(realm(), CSS::NumberStyleValue::create(value), SVGLength::ReadOnly::Yes);
         auto length_list = SVGLengthList::create(realm(), { length }, ReadOnlyList::Yes);
         list = SVGAnimatedLengthList::create(realm(), length_list);
     }

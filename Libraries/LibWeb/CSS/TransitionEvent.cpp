@@ -7,28 +7,30 @@
 #include "TransitionEvent.h"
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/Bindings/TransitionEvent.h>
+#include <LibWeb/CSS/CSSTransition.h>
 
 namespace Web::CSS {
 
 GC_DEFINE_ALLOCATOR(TransitionEvent);
 
-GC::Ref<TransitionEvent> TransitionEvent::create(JS::Realm& realm, FlyString const& type, Bindings::TransitionEventInit const& event_init)
+GC::Ref<TransitionEvent> TransitionEvent::create(JS::Realm& realm, Utf16FlyString const& type, Bindings::TransitionEventInit const& event_init)
 {
     auto event = realm.create<TransitionEvent>(realm, type, event_init);
     event->set_is_trusted(true);
     return event;
 }
 
-GC::Ref<TransitionEvent> TransitionEvent::construct_impl(JS::Realm& realm, FlyString const& type, Bindings::TransitionEventInit const& event_init)
+GC::Ref<TransitionEvent> TransitionEvent::construct_impl(JS::Realm& realm, Utf16FlyString const& type, Bindings::TransitionEventInit const& event_init)
 {
     return realm.create<TransitionEvent>(realm, type, event_init);
 }
 
-TransitionEvent::TransitionEvent(JS::Realm& realm, FlyString const& type, Bindings::TransitionEventInit const& event_init)
+TransitionEvent::TransitionEvent(JS::Realm& realm, Utf16FlyString const& type, Bindings::TransitionEventInit const& event_init)
     : DOM::Event(realm, type, event_init)
     , m_property_name(event_init.property_name)
     , m_elapsed_time(event_init.elapsed_time)
     , m_pseudo_element(event_init.pseudo_element)
+    , m_animation(event_init.animation)
 {
 }
 
@@ -38,6 +40,12 @@ void TransitionEvent::initialize(JS::Realm& realm)
 {
     WEB_SET_PROTOTYPE_FOR_INTERFACE(TransitionEvent);
     Base::initialize(realm);
+}
+
+void TransitionEvent::visit_edges(Cell::Visitor& visitor)
+{
+    Base::visit_edges(visitor);
+    visitor.visit(m_animation);
 }
 
 }

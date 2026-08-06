@@ -17,6 +17,7 @@
 #import <Application/ApplicationDelegate.h>
 #import <Interface/BookmarksBar.h>
 #import <Interface/LadybirdWebView.h>
+#import <Interface/LocationSearchField.h>
 #import <Interface/Tab.h>
 #import <Interface/TabController.h>
 
@@ -47,6 +48,31 @@ Optional<WebView::ViewImplementation&> Application::active_web_view() const
     return {};
 }
 
+Vector<WebView::ViewImplementation&> Application::active_window_web_views() const
+{
+    Vector<WebView::ViewImplementation&> web_views;
+
+    auto add_window = [&](id window) {
+        if ([window isKindOfClass:[Tab class]])
+            web_views.append([[(Tab*)window web_view] view]);
+    };
+
+    auto* active_window = [NSApp keyWindow];
+    if (!active_window)
+        return {};
+
+    auto* tab_group = [active_window tabGroup];
+    if (!tab_group) {
+        add_window(active_window);
+        return web_views;
+    }
+
+    for (id window in [tab_group windows])
+        add_window(window);
+
+    return web_views;
+}
+
 Optional<WebView::ViewImplementation&> Application::open_blank_new_tab(Web::HTML::ActivateTab activate_tab) const
 {
     ApplicationDelegate* delegate = [NSApp delegate];
@@ -61,10 +87,47 @@ Optional<WebView::ViewImplementation&> Application::open_blank_new_tab(Web::HTML
     return [[tab web_view] view];
 }
 
-void Application::open_url_in_new_window(URL::URL const& url)
+void Application::open_url_in_new_tab(URL::URL const& url, Web::HTML::ActivateTab activate_tab) const
 {
     ApplicationDelegate* delegate = [NSApp delegate];
-    (void)[delegate createNewTab:url fromTab:nil activateTab:Web::HTML::ActivateTab::Yes];
+    auto* active_tab = [delegate activeTab];
+
+    auto is_private = active_tab ? [active_tab isPrivate] : WebView::IsPrivate::No;
+
+    (void)[delegate createNewTab:url
+                         fromTab:active_tab
+                       isPrivate:is_private
+                     activateTab:activate_tab
+                     tabLocation:TabLocation::after_tab(active_tab)];
+}
+
+void Application::open_urls_in_new_tabs(ReadonlySpan<URL::URL> urls) const
+{
+    ApplicationDelegate* delegate = [NSApp delegate];
+    auto* active_tab = [delegate activeTab];
+    auto* previous_tab = active_tab;
+
+    auto is_private = active_tab ? [active_tab isPrivate] : WebView::IsPrivate::No;
+
+    for (auto const& url : urls) {
+        auto location = previous_tab ? TabLocation::after_tab(previous_tab) : TabLocation::end();
+        auto* controller = [delegate createNewTab:url
+                                          fromTab:active_tab
+                                        isPrivate:is_private
+                                      activateTab:Web::HTML::ActivateTab::No
+                                      tabLocation:location];
+        previous_tab = (Tab*)[controller window];
+    }
+}
+
+void Application::open_url_in_new_window(URL::URL const& url, WebView::IsPrivate is_private)
+{
+    ApplicationDelegate* delegate = [NSApp delegate];
+    (void)[delegate createNewTab:url
+                         fromTab:nil
+                       isPrivate:is_private
+                     activateTab:Web::HTML::ActivateTab::Yes
+                     tabLocation:TabLocation::end()];
 }
 
 Optional<ByteString> Application::ask_user_for_download_path(ByteString const& file) const
@@ -111,6 +174,33 @@ void Application::display_error_dialog(StringView error_message) const
                    completionHandler:nil];
 }
 
+void Application::open_download(WebView::FileDownloader::Download const& download) const
+{
+    auto path = download_file_path_for_frontend_action(download);
+    if (path.is_error()) {
+        display_error_dialog("Unable to open downloaded file: path cannot be represented by this frontend"sv);
+        return;
+    }
+
+    auto* ns_path = Ladybird::string_to_ns_string(path.release_value());
+    auto* url = [NSURL fileURLWithPath:ns_path];
+    if (![[NSWorkspace sharedWorkspace] openURL:url])
+        display_error_dialog("Unable to open downloaded file"sv);
+}
+
+void Application::show_download_in_folder(WebView::FileDownloader::Download const& download) const
+{
+    auto path = download_file_path_for_frontend_action(download);
+    if (path.is_error()) {
+        display_error_dialog("Unable to show downloaded file: path cannot be represented by this frontend"sv);
+        return;
+    }
+
+    auto* ns_path = Ladybird::string_to_ns_string(path.release_value());
+    if (![[NSWorkspace sharedWorkspace] selectFile:ns_path inFileViewerRootedAtPath:@""])
+        display_error_dialog("Unable to show downloaded file in folder"sv);
+}
+
 Utf16String Application::clipboard_text(ClipboardType) const
 {
     auto* paste_board = [NSPasteboard generalPasteboard];
@@ -144,25 +234,27 @@ Vector<Web::Clipboard::SystemClipboardRepresentation> Application::clipboard_ent
     return representations;
 }
 
-void Application::insert_clipboard_entry(Web::Clipboard::SystemClipboardRepresentation entry)
+void Application::insert_clipboard_item(Web::Clipboard::SystemClipboardItem item)
 {
-    NSPasteboardType pasteboard_type = nil;
-
-    // https://w3c.github.io/clipboard-apis/#os-specific-well-known-format
-    if (entry.mime_type == "text/plain"sv)
-        pasteboard_type = NSPasteboardTypeString;
-    else if (entry.mime_type == "text/html"sv)
-        pasteboard_type = NSPasteboardTypeHTML;
-    else if (entry.mime_type == "image/png"sv)
-        pasteboard_type = NSPasteboardTypePNG;
-    else
-        return;
-
     auto* paste_board = [NSPasteboard generalPasteboard];
     [paste_board clearContents];
 
-    [paste_board setData:Ladybird::string_to_ns_data(entry.data)
-                 forType:pasteboard_type];
+    for (auto const& entry : item.system_clipboard_representations) {
+        NSPasteboardType pasteboard_type = nil;
+
+        // https://w3c.github.io/clipboard-apis/#os-specific-well-known-format
+        if (entry.mime_type == "text/plain"sv)
+            pasteboard_type = NSPasteboardTypeString;
+        else if (entry.mime_type == "text/html"sv)
+            pasteboard_type = NSPasteboardTypeHTML;
+        else if (entry.mime_type == "image/png"sv)
+            pasteboard_type = NSPasteboardTypePNG;
+        else
+            continue;
+
+        [paste_board setData:Ladybird::string_to_ns_data(entry.data)
+                     forType:pasteboard_type];
+    }
 }
 
 void Application::rebuild_bookmarks_menu() const
@@ -260,12 +352,14 @@ static NSAlert* create_bookmark_dialog(NSString* title, NSView* first_responder,
     return dialog;
 }
 
-template<typename PromiseType>
+template<typename PromiseType, typename ResolveCallback>
 static NonnullRefPtr<PromiseType> display_add_or_edit_bookmark_dialog(
     Tab* parent,
     NSString* title,
     Optional<URL::URL const&> current_url,
-    Optional<String const&> current_title)
+    Optional<String const&> current_title,
+    Optional<String> current_favicon,
+    ResolveCallback resolve_bookmark)
 {
     auto promise = PromiseType::construct();
 
@@ -294,35 +388,52 @@ static NonnullRefPtr<PromiseType> display_add_or_edit_bookmark_dialog(
                        if (auto text = Ladybird::ns_string_to_string([title_field stringValue]); !text.is_empty())
                            bookmark_title = move(text);
 
-                       promise->resolve(WebView::BookmarkItem::Bookmark {
+                       WebView::BookmarkItem::Bookmark bookmark {
                            .url = url.release_value(),
                            .title = move(bookmark_title),
-                           .favicon_base64_png = {},
-                       });
+                           .favicon_base64_png = current_favicon,
+                       };
+                       resolve_bookmark(*promise, move(bookmark));
                    }];
 
     return promise;
 }
 
-NonnullRefPtr<Application::BookmarkPromise> Application::display_add_bookmark_dialog() const
+NonnullRefPtr<Application::AddBookmarkPromise> Application::display_add_bookmark_dialog(Optional<String const&> target_folder_id) const
 {
     ApplicationDelegate* delegate = [NSApp delegate];
 
     Optional<URL::URL> current_url;
     Optional<String> current_title;
+    Optional<String> current_favicon;
+    Optional<String> copied_target_folder_id;
 
     if (auto view = active_web_view(); view.has_value()) {
         current_url = view->url();
         current_title = view->title().to_utf8();
+        current_favicon = view->favicon_base64_png();
     }
+    if (target_folder_id.has_value())
+        copied_target_folder_id = *target_folder_id;
 
-    return display_add_or_edit_bookmark_dialog<BookmarkPromise>([delegate activeTab], @"Add Bookmark", current_url, current_title);
+    return display_add_or_edit_bookmark_dialog<AddBookmarkPromise>(
+        [delegate activeTab], @"Add Bookmark", current_url, current_title, current_favicon,
+        [target_folder_id = move(copied_target_folder_id)](AddBookmarkPromise& promise, WebView::BookmarkItem::Bookmark bookmark) {
+            promise.resolve(AddBookmarkDialogResult {
+                .bookmark = move(bookmark),
+                .target_folder_id = target_folder_id,
+            });
+        });
 }
 
 NonnullRefPtr<Application::BookmarkPromise> Application::display_edit_bookmark_dialog(WebView::BookmarkItem::Bookmark const& current_bookmark) const
 {
     ApplicationDelegate* delegate = [NSApp delegate];
-    return display_add_or_edit_bookmark_dialog<BookmarkPromise>([delegate activeTab], @"Edit Bookmark", current_bookmark.url, current_bookmark.title);
+    return display_add_or_edit_bookmark_dialog<BookmarkPromise>(
+        [delegate activeTab], @"Edit Bookmark", current_bookmark.url, current_bookmark.title, current_bookmark.favicon_base64_png,
+        [](BookmarkPromise& promise, WebView::BookmarkItem::Bookmark bookmark) {
+            promise.resolve(move(bookmark));
+        });
 }
 
 template<typename PromiseType>
@@ -359,10 +470,10 @@ static NonnullRefPtr<PromiseType> display_add_or_edit_bookmark_folder_dialog(
     return promise;
 }
 
-NonnullRefPtr<Application::BookmarkFolderPromise> Application::display_add_bookmark_folder_dialog() const
+NonnullRefPtr<Application::BookmarkFolderPromise> Application::display_add_bookmark_folder_dialog(Optional<String const&> default_title) const
 {
     ApplicationDelegate* delegate = [NSApp delegate];
-    return display_add_or_edit_bookmark_folder_dialog<BookmarkFolderPromise>([delegate activeTab], @"Add Folder", {});
+    return display_add_or_edit_bookmark_folder_dialog<BookmarkFolderPromise>([delegate activeTab], @"Add Folder", default_title);
 }
 
 NonnullRefPtr<Application::BookmarkFolderPromise> Application::display_edit_bookmark_folder_dialog(WebView::BookmarkItem::Folder const& current_folder) const
@@ -428,9 +539,29 @@ void Application::on_devtools_disabled() const
 {
     if ([event type] == NSEventTypeApplicationDefined) {
         Core::ThreadEventQueue::current().process();
-    } else {
-        [super sendEvent:event];
+        return;
     }
+
+    // NSToolbarView consumes context-menu events before custom toolbar views receive them, so to have a context menu on
+    // a non-selected LocationSearchField, we have to jump through some hoops by testing if the mouse is over it and
+    // then manually showing the context menu.
+    // FIXME: Find a better way to do this.
+    if ([event type] == NSEventTypeRightMouseDown
+        || ([event type] == NSEventTypeLeftMouseDown && ([event modifierFlags] & NSEventModifierFlagControl))) {
+        auto* window = [event window];
+        auto* frame_view = [[window contentView] superview];
+        auto location = [frame_view convertPoint:[event locationInWindow] fromView:nil];
+
+        for (auto* view = [frame_view hitTest:location]; view != nil; view = [view superview]) {
+            if ([view isKindOfClass:[LocationSearchField class]]) {
+                if ([(LocationSearchField*)view handleContextMenuEvent:event])
+                    return;
+                break;
+            }
+        }
+    }
+
+    [super sendEvent:event];
 }
 
 @end

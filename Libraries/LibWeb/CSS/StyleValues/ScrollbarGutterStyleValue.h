@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, the Ladybird developers.
+ * Copyright (c) 2024-present, the Ladybird developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -18,11 +18,11 @@ public:
     }
     virtual ~ScrollbarGutterStyleValue() override = default;
 
-    ScrollbarGutter value() const { return m_value; }
+    ScrollbarGutter value() const { return static_cast<ScrollbarGutter>(m_value->scrollbar_gutter.value); }
 
-    virtual void serialize(StringBuilder& builder, SerializationMode) const override
+    void serialize(StringBuilder& builder, SerializationMode) const
     {
-        switch (m_value) {
+        switch (value()) {
         case ScrollbarGutter::Auto:
             builder.append("auto"sv);
             break;
@@ -37,18 +37,20 @@ public:
         }
     }
 
-    bool properties_equal(ScrollbarGutterStyleValue const& other) const { return m_value == other.m_value; }
-
-    virtual bool is_computationally_independent() const override { return true; }
+    bool properties_equal(ScrollbarGutterStyleValue const& other) const { return value() == other.value(); }
 
 private:
-    ScrollbarGutterStyleValue(ScrollbarGutter value)
-        : StyleValueWithDefaultOperators(Type::ScrollbarGutter)
-        , m_value(value)
+    friend class StyleValue;
+
+    explicit ScrollbarGutterStyleValue(StyleValueFFI::StyleValueData const* data)
+        : StyleValueWithDefaultOperators(Type::ScrollbarGutter, data)
     {
     }
 
-    ScrollbarGutter m_value;
+    ScrollbarGutterStyleValue(ScrollbarGutter value)
+        : StyleValueWithDefaultOperators(Type::ScrollbarGutter, StyleValueFFI::rust_style_value_create_scrollbar_gutter(to_underlying(value)))
+    {
+    }
 };
 
 }

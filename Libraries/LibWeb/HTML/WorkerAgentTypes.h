@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2026, Ladybird contributors
+ * Copyright (c) 2026-present, the Ladybird developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #pragma once
 
-#include <AK/String.h>
+#include <AK/Utf16String.h>
 #include <LibIPC/Forward.h>
 #include <LibURL/URL.h>
 #include <LibWeb/Bindings/AgentType.h>
@@ -24,13 +24,16 @@ struct WEB_API WorkerAgentStartRequest {
     Bindings::AgentType agent_type { Bindings::AgentType::DedicatedWorker };
     Bindings::WorkerType type { Bindings::WorkerType::Classic };
     Bindings::RequestCredentials credentials { Bindings::RequestCredentials::SameOrigin };
-    String name;
+    Utf16String name;
     // FIXME: We don't implement SharedWorkerOptions/extendedLifetime yet.
     bool extended_lifetime { false };
     TransferDataEncoder outside_port;
     SerializedEnvironmentSettingsObject outside_settings;
     StorageAPI::StorageKey storage_key;
     bool caller_is_secure_context { false };
+    // The rendering rate of the spawning page, used to pace rendering updates in worker event
+    // loops, which have no display connection of their own.
+    double maximum_frames_per_second { 60.0 };
     WorkerAgentOwnerToken owner_token { 0 };
 };
 

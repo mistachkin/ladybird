@@ -24,6 +24,11 @@ void KeywordStyleValue::serialize(StringBuilder& builder, SerializationMode) con
     builder.append(string_from_keyword(keyword()));
 }
 
+void KeywordStyleValue::serialize(Utf16StringBuilder& builder, SerializationMode) const
+{
+    builder.append_ascii(string_from_keyword(keyword()));
+}
+
 bool KeywordStyleValue::is_color(Keyword keyword)
 {
     switch (keyword) {
@@ -200,14 +205,14 @@ ValueComparingNonnullRefPtr<StyleValue const> KeywordStyleValue::absolutized(Com
 
 Vector<Parser::ComponentValue> KeywordStyleValue::tokenize() const
 {
-    return { Parser::Token::create_ident(FlyString::from_utf8_without_validation(string_from_keyword(m_keyword).bytes())) };
+    return { Parser::Token::create_ident(utf16_fly_string_from_keyword(keyword())) };
 }
 
 // https://drafts.css-houdini.org/css-typed-om-1/#reify-ident
 GC::Ref<CSSStyleValue> KeywordStyleValue::reify(JS::Realm& realm, Utf16FlyString const&) const
 {
     // 1. Return a new CSSKeywordValue with its value internal slot set to the serialization of ident.
-    return CSSKeywordValue::create(realm, FlyString::from_utf8_without_validation(string_from_keyword(m_keyword).bytes()));
+    return CSSKeywordValue::create(realm, utf16_fly_string_from_keyword(keyword()));
 }
 
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, The Ladybird developers
+ * Copyright (c) 2026-present, the Ladybird developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -19,16 +19,13 @@ GC_DEFINE_ALLOCATOR(MediaStreamTrack);
 
 Atomic<u64> MediaStreamTrack::s_next_provider_id { 1 };
 
-static constexpr auto audio_track_kind = static_cast<Bindings::MediaStreamTrackKind>(0);
-static constexpr auto video_track_kind = static_cast<Bindings::MediaStreamTrackKind>(1);
-
 MediaStreamTrack::MediaStreamTrack(JS::Realm& realm)
     : DOM::EventTarget(realm)
 {
 }
 
 // https://w3c.github.io/mediacapture-main/#mediastreamtrack
-GC::Ref<MediaStreamTrack> MediaStreamTrack::create(JS::Realm& realm, Bindings::MediaStreamTrackKind kind, Optional<String> label, bool muted)
+GC::Ref<MediaStreamTrack> MediaStreamTrack::create(JS::Realm& realm, MediaStreamTrackKind kind, Optional<Utf16String> label, bool muted)
 {
     // https://w3c.github.io/mediacapture-main/#dfn-create-a-mediastreamtrack
     // 1. Let track be a new object of type source's MediaStreamTrack source type.
@@ -38,13 +35,13 @@ GC::Ref<MediaStreamTrack> MediaStreamTrack::create(JS::Realm& realm, Bindings::M
     // FIXME: [[Source]], initialized to source.
 
     // [[Id]]: See MediaStream.id attribute for guidelines on how to generate such an identifier.
-    track->m_id = Crypto::generate_random_uuid();
+    track->m_id = Utf16String::from_utf8(Crypto::generate_random_uuid());
 
     // [[Kind]]: "audio" if source is an audio source, or "video" if source is a video source.
     track->m_kind = kind;
 
     // [[Label]]: source label or empty string.
-    track->m_label = label.value_or(""_string);
+    track->m_label = label.value_or({});
 
     // [[ReadyState]]: "live".
     track->m_state = Bindings::MediaStreamTrackState::Live;
@@ -126,17 +123,24 @@ GC::Ref<MediaStreamTrack> MediaStreamTrack::clone() const
     return track_clone;
 }
 
+// https://w3c.github.io/mediacapture-main/#dom-mediastreamtrack-kind
+Utf16String MediaStreamTrack::kind() const
+{
+    // The kind attribute MUST return the value it was initialized to when the object was created.
+    return m_kind == MediaStreamTrackKind::Audio ? "audio"_utf16 : "video"_utf16;
+}
+
 bool MediaStreamTrack::is_audio() const
 {
-    return m_kind == audio_track_kind;
+    return m_kind == MediaStreamTrackKind::Audio;
 }
 
 bool MediaStreamTrack::is_video() const
 {
-    return m_kind == video_track_kind;
+    return m_kind == MediaStreamTrackKind::Video;
 }
 
-Optional<String> MediaStreamTrack::device_id() const
+Optional<Utf16String> MediaStreamTrack::device_id() const
 {
     return m_settings.device_id;
 }

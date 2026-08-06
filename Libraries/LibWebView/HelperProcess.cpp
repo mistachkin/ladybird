@@ -82,7 +82,7 @@ static ErrorOr<NonnullRefPtr<ClientType>> launch_server_process(
     VERIFY_NOT_REACHED();
 }
 
-ErrorOr<NonnullRefPtr<WebView::WebContentClient>> launch_web_content_process(u64 initial_page_id)
+ErrorOr<NonnullRefPtr<WebView::WebContentClient>> launch_web_content_process(IsPrivate is_private, u64 initial_page_id, Web::HTML::CrossProcessId root_navigable_id)
 {
     auto const& browser_options = WebView::Application::browser_options();
     auto const& web_content_options = WebView::Application::web_content_options();
@@ -95,6 +95,10 @@ ErrorOr<NonnullRefPtr<WebView::WebContentClient>> launch_web_content_process(u64
     if (web_content_options.config_path.has_value()) {
         arguments.append("--config-path"sv);
         arguments.append(web_content_options.config_path.value());
+    }
+    if (web_content_options.cache_path.has_value()) {
+        arguments.append("--cache-path"sv);
+        arguments.append(web_content_options.cache_path.value());
     }
     if (web_content_options.is_test_mode == WebView::IsTestMode::Yes)
         arguments.append("--test-mode"sv);
@@ -119,8 +123,6 @@ ErrorOr<NonnullRefPtr<WebView::WebContentClient>> launch_web_content_process(u64
         arguments.append("--disable-async-scrolling"sv);
     if (web_content_options.file_scheme_urls_have_tuple_origins == FileSchemeUrlsHaveTupleOrigins::Yes)
         arguments.append("--tuple-file-origins"sv);
-    if (web_content_options.report_session_history_updates_in_test_mode == ReportSessionHistoryUpdatesInTestMode::Yes)
-        arguments.append("--report-session-history-updates-in-test-mode"sv);
     if (browser_options.disable_sandbox == DisableSandbox::Yes)
         arguments.append("--disable-sandbox"sv);
 
@@ -142,7 +144,11 @@ ErrorOr<NonnullRefPtr<WebView::WebContentClient>> launch_web_content_process(u64
         arguments.append("--mach-server-name"sv);
         arguments.append(server.value());
     }
-    return launch_server_process<WebView::WebContentClient>("WebContent"sv, move(arguments), initial_page_id);
+
+    auto client = TRY(launch_server_process<WebView::WebContentClient>("WebContent"sv, move(arguments), is_private, initial_page_id, root_navigable_id));
+    if (auto system_font_family = WebView::Application::the().system_font_family(); system_font_family.has_value())
+        client->async_set_system_font_family(system_font_family.release_value());
+    return client;
 }
 
 ErrorOr<NonnullRefPtr<ImageDecoderClient::Client>> launch_image_decoder_process()
@@ -166,8 +172,15 @@ ErrorOr<NonnullRefPtr<WebView::CompositorClient>> launch_compositor_process()
     auto const& web_content_options = WebView::Application::web_content_options();
 
     Vector<ByteString> arguments;
+
+    if (web_content_options.cache_path.has_value()) {
+        arguments.append("--cache-path"sv);
+        arguments.append(web_content_options.cache_path.value());
+    }
     if (browser_options.disable_sandbox == DisableSandbox::Yes)
         arguments.append("--disable-sandbox"sv);
+    if (web_content_options.is_test_mode == WebView::IsTestMode::Yes)
+        arguments.append("--test-mode"sv);
     if (web_content_options.force_cpu_painting == WebView::ForceCPUPainting::Yes)
         arguments.append("--force-cpu-painting"sv);
     if (web_content_options.force_fontconfig == WebView::ForceFontconfig::Yes)
@@ -182,12 +195,17 @@ ErrorOr<NonnullRefPtr<WebView::CompositorClient>> launch_compositor_process()
     return launch_server_process<WebView::CompositorClient>("Compositor"sv, move(arguments));
 }
 
-ErrorOr<NonnullRefPtr<WebWorkerClient>> launch_web_worker_process(Web::Bindings::AgentType type, Web::HTML::WorkerAgentId agent_id)
+ErrorOr<NonnullRefPtr<WebWorkerClient>> launch_web_worker_process(Web::Bindings::AgentType type, IsPrivate is_private, Web::HTML::WorkerAgentId agent_id)
 {
     auto const& browser_options = WebView::Application::browser_options();
     auto const& web_content_options = WebView::Application::web_content_options();
 
     Vector<ByteString> arguments;
+
+    if (web_content_options.cache_path.has_value()) {
+        arguments.append("--cache-path"sv);
+        arguments.append(web_content_options.cache_path.value());
+    }
 
     if (browser_options.disable_sandbox == DisableSandbox::Yes)
         arguments.append("--disable-sandbox"sv);
@@ -218,7 +236,10 @@ ErrorOr<NonnullRefPtr<WebWorkerClient>> launch_web_worker_process(Web::Bindings:
         arguments.append(server.value());
     }
 
-    return launch_server_process<WebWorkerClient>("WebWorker"sv, move(arguments), agent_id);
+    auto client = TRY(launch_server_process<WebWorkerClient>("WebWorker"sv, move(arguments), is_private, agent_id));
+    if (auto system_font_family = WebView::Application::the().system_font_family(); system_font_family.has_value())
+        client->async_set_system_font_family(system_font_family.release_value());
+    return client;
 }
 
 ErrorOr<NonnullRefPtr<Requests::RequestClient>> launch_request_server_process()
@@ -227,6 +248,9 @@ ErrorOr<NonnullRefPtr<Requests::RequestClient>> launch_request_server_process()
     auto const& request_server_options = Application::request_server_options();
 
     Vector<ByteString> arguments;
+
+    arguments.append("--cache-path"sv);
+    arguments.append(request_server_options.cache_path);
 
     if (browser_options.disable_sandbox == DisableSandbox::Yes)
         arguments.append("--disable-sandbox"sv);
@@ -241,9 +265,6 @@ ErrorOr<NonnullRefPtr<Requests::RequestClient>> launch_request_server_process()
         break;
     case HTTPDiskCacheMode::Enabled:
         arguments.append("enabled"sv);
-        break;
-    case HTTPDiskCacheMode::Partitioned:
-        arguments.append("partitioned"sv);
         break;
     case HTTPDiskCacheMode::Testing:
         arguments.append("testing"sv);
@@ -277,9 +298,9 @@ ErrorOr<NonnullRefPtr<Requests::RequestClient>> launch_request_server_process()
     return client;
 }
 
-ErrorOr<IPC::TransportHandle> connect_new_request_server_client()
+ErrorOr<IPC::TransportHandle> connect_new_request_server_client(IsPrivate is_private)
 {
-    auto response = Application::request_server_client().send_sync_but_allow_failure<Messages::RequestServer::ConnectNewClient>();
+    auto response = Application::request_server_client().send_sync_but_allow_failure<Messages::RequestServer::ConnectNewClient>(is_private == IsPrivate::Yes ? RequestServer::IsPrivate::Yes : RequestServer::IsPrivate::No);
     if (!response)
         return Error::from_string_literal("Failed to connect to RequestServer");
     return response->take_handle();

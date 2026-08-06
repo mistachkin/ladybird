@@ -67,7 +67,8 @@ static JS::ThrowCompletionOr<GC::Ref<WebIDL::CallbackType>> convert_value_to_cal
 }
 
 // https://webidl.spec.whatwg.org/#es-sequence
-static JS::ThrowCompletionOr<Vector<String>> convert_value_to_sequence_of_strings(JS::VM& vm, JS::Value value)
+template<typename T, typename Converter>
+static JS::ThrowCompletionOr<Vector<T>> convert_value_to_sequence(JS::VM& vm, JS::Value value, Converter converter)
 {
     // FIXME: De-duplicate this from the IDL generator.
     // An ECMAScript value V is converted to an IDL sequence<T> value as follows:
@@ -91,7 +92,7 @@ static JS::ThrowCompletionOr<Vector<String>> convert_value_to_sequence_of_string
     auto iterator = TRY(JS::get_iterator_from_method(vm, value, *method));
 
     // 2. Initialize i to be 0.
-    Vector<String> sequence_of_strings;
+    Vector<T> sequence;
 
     // 3. Repeat
     for (;;) {
@@ -100,30 +101,50 @@ static JS::ThrowCompletionOr<Vector<String>> convert_value_to_sequence_of_string
 
         // 2. If next is false, then return an IDL sequence value of type sequence<T> of length i, where the value of the element at index j is Sj.
         if (!next.has<JS::IterationResult>())
-            return sequence_of_strings;
+            return sequence;
 
         // 3. Let nextItem be ? IteratorValue(next).
         auto next_item = TRY(next.get<JS::IterationResult>().value);
 
         // 4. Initialize Si to the result of converting nextItem to an IDL value of type T.
-
-        // https://webidl.spec.whatwg.org/#es-DOMString
-        // An ECMAScript value V is converted to an IDL DOMString value by running the following algorithm:
-        // 1. If V is null and the conversion is to an IDL type associated with the [LegacyNullToEmptyString] extended attribute, then return the DOMString value that represents the empty string.
-        // NOTE: This doesn't apply.
-
-        // 2. Let x be ? ToString(V).
-        // 3. Return the IDL DOMString value that represents the same sequence of code units as the one the ECMAScript String value x represents.
-        auto string_value = TRY(next_item.to_utf16_string(vm)).to_utf8_but_should_be_ported_to_utf16();
-
-        sequence_of_strings.append(move(string_value));
+        sequence.append(TRY(converter(next_item)));
 
         // 5. Set i to i + 1.
     }
 }
 
+static JS::ThrowCompletionOr<Utf16String> convert_value_to_dom_string(JS::VM& vm, JS::Value value)
+{
+    // https://webidl.spec.whatwg.org/#es-DOMString
+    // An ECMAScript value V is converted to an IDL DOMString value by running the following algorithm:
+    // 1. If V is null and the conversion is to an IDL type associated with the [LegacyNullToEmptyString] extended attribute, then return the DOMString value that represents the empty string.
+    // NOTE: This doesn't apply.
+
+    // 2. Let x be ? ToString(V).
+    // 3. Return the IDL DOMString value that represents the same sequence of code units as the one the ECMAScript String value x represents.
+    return TRY(value.to_utf16_string(vm));
+}
+
+static JS::ThrowCompletionOr<Vector<Utf16String>> convert_value_to_sequence_of_strings(JS::VM& vm, JS::Value value)
+{
+    return convert_value_to_sequence<Utf16String>(vm, value, [&](auto next_item) -> JS::ThrowCompletionOr<Utf16String> {
+        return TRY(convert_value_to_dom_string(vm, next_item));
+    });
+}
+
+static JS::ThrowCompletionOr<Vector<Utf16FlyString>> convert_value_to_sequence_of_fly_strings(JS::VM& vm, JS::Value value)
+{
+    return convert_value_to_sequence<Utf16FlyString>(vm, value, [&](auto next_item) -> JS::ThrowCompletionOr<Utf16FlyString> {
+        if (next_item.is_string())
+            return Utf16FlyString::from_utf16(next_item.as_string().utf16_string_view());
+
+        auto string = TRY(convert_value_to_dom_string(vm, next_item));
+        return Utf16FlyString::from_utf16(string.utf16_view());
+    });
+}
+
 // https://html.spec.whatwg.org/multipage/custom-elements.html#dom-customelementregistry-define
-JS::ThrowCompletionOr<void> CustomElementRegistry::define(String const& name, WebIDL::CallbackType* constructor, Bindings::ElementDefinitionOptions const& options)
+JS::ThrowCompletionOr<void> CustomElementRegistry::define(Utf16FlyString const& name, WebIDL::CallbackType* constructor, Bindings::ElementDefinitionOptions const& options)
 {
     auto& realm = this->realm();
     auto& vm = this->vm();
@@ -134,7 +155,7 @@ JS::ThrowCompletionOr<void> CustomElementRegistry::define(String const& name, We
 
     // 2. If name is not a valid custom element name, then throw a "SyntaxError" DOMException.
     if (!is_valid_custom_element_name(name))
-        return JS::throw_completion(WebIDL::SyntaxError::create(realm, Utf16String::formatted("'{}' is not a valid custom element name", name)));
+        return JS::throw_completion(WebIDL::SyntaxError::create(realm, Utf16String::formatted("'{}' is not a valid custom element name", name.to_utf16_string())));
 
     // 3. If this's custom element definition set contains an item with name name, then throw a "NotSupportedError"
     //    DOMException.
@@ -143,7 +164,7 @@ JS::ThrowCompletionOr<void> CustomElementRegistry::define(String const& name, We
     });
 
     if (existing_definition_with_name_iterator != m_custom_element_definitions.end())
-        return JS::throw_completion(WebIDL::NotSupportedError::create(realm, Utf16String::formatted("A custom element with name '{}' is already defined", name)));
+        return JS::throw_completion(WebIDL::NotSupportedError::create(realm, Utf16String::formatted("A custom element with name '{}' is already defined", name.to_utf16_string())));
 
     // 4. If this's custom element definition set contains an item with constructor constructor, then throw a
     //    "NotSupportedError" DOMException.
@@ -155,7 +176,7 @@ JS::ThrowCompletionOr<void> CustomElementRegistry::define(String const& name, We
         return JS::throw_completion(WebIDL::NotSupportedError::create(realm, "The given constructor is already in use by another custom element"_utf16));
 
     // 5. Let localName be name.
-    String local_name = name;
+    auto local_name = name;
 
     // 6. Let extends be options["extends"] if it exists; otherwise null.
     auto& extends = options.extends;
@@ -168,12 +189,12 @@ JS::ThrowCompletionOr<void> CustomElementRegistry::define(String const& name, We
 
         // 2. If extends is a valid custom element name, then throw a "NotSupportedError" DOMException.
         if (is_valid_custom_element_name(extends.value()))
-            return JS::throw_completion(WebIDL::NotSupportedError::create(realm, Utf16String::formatted("'{}' is a custom element name, only non-custom elements can be extended", extends.value())));
+            return JS::throw_completion(WebIDL::NotSupportedError::create(realm, Utf16String::formatted("'{}' is a custom element name, only non-custom elements can be extended", extends->to_utf16_string())));
 
         // 3. If the element interface for extends and the HTML namespace is HTMLUnknownElement (e.g., if extends does
         //    not indicate an element definition in this specification), then throw a "NotSupportedError" DOMException.
         if (DOM::is_unknown_html_element(extends.value()))
-            return JS::throw_completion(WebIDL::NotSupportedError::create(realm, Utf16String::formatted("'{}' is an unknown HTML element", extends.value())));
+            return JS::throw_completion(WebIDL::NotSupportedError::create(realm, Utf16String::formatted("'{}' is an unknown HTML element", extends->to_utf16_string())));
 
         // 4. Set localName to extends.
         local_name = extends.value();
@@ -196,10 +217,10 @@ JS::ThrowCompletionOr<void> CustomElementRegistry::define(String const& name, We
     bool disable_shadow = false;
 
     // 13. Let observedAttributes be an empty sequence<DOMString>.
-    Vector<String> observed_attributes;
+    Vector<Utf16FlyString> observed_attributes;
 
     // 14. Run the following steps while catching any exceptions:
-    OrderedHashMap<FlyString, GC::Root<WebIDL::CallbackType>> lifecycle_callbacks;
+    OrderedHashMap<Utf16FlyString, GC::Root<WebIDL::CallbackType>> lifecycle_callbacks;
     auto get_definition_attributes_from_constructor = [&]() -> JS::ThrowCompletionOr<void> {
         // 1. Let prototype be ? Get(constructor, "prototype").
         auto prototype_value = TRY(constructor->callback->get(vm.names.prototype));
@@ -221,7 +242,7 @@ JS::ThrowCompletionOr<void> CustomElementRegistry::define(String const& name, We
         for (auto const& callback_name : { CustomElementReactionNames::connectedCallback, CustomElementReactionNames::disconnectedCallback, CustomElementReactionNames::connectedMoveCallback, CustomElementReactionNames::adoptedCallback, CustomElementReactionNames::attributeChangedCallback }) {
 
             // 1. Let callbackValue be ? Get(prototype, callbackName).
-            auto callback_value = TRY(prototype->get(Utf16FlyString::from_utf8(callback_name)));
+            auto callback_value = TRY(prototype->get(callback_name));
 
             // 2. If callbackValue is not undefined, then set lifecycleCallbacks[callbackName] to the result of
             //    converting callbackValue to the Web IDL Function callback type.
@@ -242,11 +263,11 @@ JS::ThrowCompletionOr<void> CustomElementRegistry::define(String const& name, We
             //    converting observedAttributesIterable to a sequence<DOMString>. Rethrow any exceptions from the
             //    conversion.
             if (!observed_attributes_iterable.is_undefined())
-                observed_attributes = TRY(convert_value_to_sequence_of_strings(vm, observed_attributes_iterable));
+                observed_attributes = TRY(convert_value_to_sequence_of_fly_strings(vm, observed_attributes_iterable));
         }
 
         // 6. Let disabledFeatures be an empty sequence<DOMString>.
-        Vector<String> disabled_features;
+        Vector<Utf16String> disabled_features;
 
         // 7. Let disabledFeaturesIterable be ? Get(constructor, "disabledFeatures").
         auto disabled_features_iterable = TRY(constructor->callback->get(vm.names.disabledFeatures));
@@ -257,10 +278,10 @@ JS::ThrowCompletionOr<void> CustomElementRegistry::define(String const& name, We
             disabled_features = TRY(convert_value_to_sequence_of_strings(vm, disabled_features_iterable));
 
         // 9. If disabledFeatures contains "internals", then set disableInternals to true.
-        disable_internals = disabled_features.contains_slow("internals"sv);
+        disable_internals = disabled_features.contains_slow(u"internals"sv);
 
         // 10. If disabledFeatures contains "shadow", then set disableShadow to true.
-        disable_shadow = disabled_features.contains_slow("shadow"sv);
+        disable_shadow = disabled_features.contains_slow(u"shadow"sv);
 
         // 11. Let formAssociatedValue be ? Get( constructor, "formAssociated").
         auto form_associated_value = TRY(constructor->callback->get(vm.names.formAssociated));
@@ -273,7 +294,7 @@ JS::ThrowCompletionOr<void> CustomElementRegistry::define(String const& name, We
         if (form_associated) {
             for (auto const& callback_name : { CustomElementReactionNames::formAssociatedCallback, CustomElementReactionNames::formResetCallback, CustomElementReactionNames::formDisabledCallback, CustomElementReactionNames::formStateRestoreCallback }) {
                 // 1. Let callbackValue be ? Get(prototype, callbackName).
-                auto callback_value = TRY(prototype->get(Utf16FlyString::from_utf8(callback_name)));
+                auto callback_value = TRY(prototype->get(callback_name));
 
                 // 2. If callbackValue is not undefined, then set lifecycleCallbacks[callbackName] to the result of
                 //    converting callbackValue to the Web IDL Function callback type.
@@ -330,7 +351,7 @@ JS::ThrowCompletionOr<void> CustomElementRegistry::define(String const& name, We
 }
 
 // https://html.spec.whatwg.org/multipage/custom-elements.html#dom-customelementregistry-get
-Variant<GC::Ref<WebIDL::CallbackType>, Empty> CustomElementRegistry::get(String const& name) const
+Variant<GC::Ref<WebIDL::CallbackType>, Empty> CustomElementRegistry::get(Utf16FlyString const& name) const
 {
     // 1. If this's custom element definition set contains an item with name name, then return that item's constructor.
     auto existing_definition_iterator = m_custom_element_definitions.find_if([&name](auto const& definition) {
@@ -345,7 +366,7 @@ Variant<GC::Ref<WebIDL::CallbackType>, Empty> CustomElementRegistry::get(String 
 }
 
 // https://html.spec.whatwg.org/multipage/custom-elements.html#dom-customelementregistry-getname
-Optional<String> CustomElementRegistry::get_name(GC::Ref<WebIDL::CallbackType> constructor) const
+Optional<Utf16String> CustomElementRegistry::get_name(GC::Ref<WebIDL::CallbackType> constructor) const
 {
     // 1. If this's custom element definition set contains an item with constructor constructor, then return that item's name.
     auto existing_definition_iterator = m_custom_element_definitions.find_if([&constructor](auto const& definition) {
@@ -353,20 +374,20 @@ Optional<String> CustomElementRegistry::get_name(GC::Ref<WebIDL::CallbackType> c
     });
 
     if (!existing_definition_iterator.is_end())
-        return (*existing_definition_iterator)->name();
+        return (*existing_definition_iterator)->name().to_utf16_string();
 
     // 2. Return null.
     return {};
 }
 
 // https://html.spec.whatwg.org/multipage/custom-elements.html#dom-customelementregistry-whendefined
-WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> CustomElementRegistry::when_defined(String const& name)
+WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> CustomElementRegistry::when_defined(Utf16FlyString const& name)
 {
     auto& realm = this->realm();
 
     // 1. If name is not a valid custom element name, then return a promise rejected with a "SyntaxError" DOMException.
     if (!is_valid_custom_element_name(name))
-        return WebIDL::create_rejected_promise(realm, WebIDL::SyntaxError::create(realm, Utf16String::formatted("'{}' is not a valid custom element name", name)));
+        return WebIDL::create_rejected_promise(realm, WebIDL::SyntaxError::create(realm, Utf16String::formatted("'{}' is not a valid custom element name", name.to_utf16_string())));
 
     // 2. If this's custom element definition set contains an item with name name, then return a promise resolved with that item's constructor.
     auto existing_definition_iterator = m_custom_element_definitions.find_if([&name](auto const& definition) {
@@ -465,7 +486,7 @@ void CustomElementRegistry::append_scoped_document(GC::Ref<DOM::Document> docume
     m_scoped_documents.set(document);
 }
 
-GC::Ptr<CustomElementDefinition> CustomElementRegistry::get_definition_with_name_and_local_name(String const& name, String const& local_name) const
+GC::Ptr<CustomElementDefinition> CustomElementRegistry::get_definition_with_name_and_local_name(Utf16FlyString const& name, Utf16FlyString const& local_name) const
 {
     auto definition_iterator = m_custom_element_definitions.find_if([&](auto const& definition) {
         return definition->name() == name && definition->local_name() == local_name;
@@ -504,7 +525,7 @@ GC::Ptr<CustomElementRegistry> look_up_a_custom_element_registry(DOM::Node const
 }
 
 // https://html.spec.whatwg.org/multipage/custom-elements.html#look-up-a-custom-element-definition
-GC::Ptr<CustomElementDefinition> look_up_a_custom_element_definition(GC::Ptr<CustomElementRegistry> registry, Optional<FlyString> const& namespace_, FlyString const& local_name, Optional<String> const& is)
+GC::Ptr<CustomElementDefinition> look_up_a_custom_element_definition(GC::Ptr<CustomElementRegistry> registry, Optional<Utf16FlyString> const& namespace_, Utf16FlyString const& local_name, Optional<Utf16FlyString> const& is)
 {
     // 1. If registry is null, then return null.
     if (!registry)
@@ -516,8 +537,7 @@ GC::Ptr<CustomElementDefinition> look_up_a_custom_element_definition(GC::Ptr<Cus
 
     // 3. If registry's custom element definition set contains an item with name and local name both equal to
     //    localName, then return that item.
-    auto converted_local_name = local_name.to_string();
-    if (auto maybe_definition = registry->get_definition_with_name_and_local_name(converted_local_name, converted_local_name))
+    if (auto maybe_definition = registry->get_definition_with_name_and_local_name(local_name, local_name))
         return maybe_definition;
 
     // 4. If registry's custom element definition set contains an item with name equal to is and local name equal to
@@ -529,7 +549,7 @@ GC::Ptr<CustomElementDefinition> look_up_a_custom_element_definition(GC::Ptr<Cus
     if (!is.has_value())
         return nullptr;
 
-    return registry->get_definition_with_name_and_local_name(is.value(), converted_local_name);
+    return registry->get_definition_with_name_and_local_name(is.value(), local_name);
 }
 
 // https://dom.spec.whatwg.org/#is-a-global-custom-element-registry

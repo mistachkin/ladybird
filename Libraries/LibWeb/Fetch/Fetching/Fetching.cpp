@@ -59,6 +59,7 @@
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/HTML/WorkerGlobalScope.h>
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
+#include <LibWeb/Infra/SerializedURL.h>
 #include <LibWeb/Loader/LoadRequest.h>
 #include <LibWeb/Loader/ResourceLoader.h>
 #include <LibWeb/MixedContent/AbstractOperations.h>
@@ -853,13 +854,13 @@ void fetch_response_handover(JS::Realm& realm, Infrastructure::FetchParams const
 
                 // 3. If mimeType is non-null, then set bodyInfo’s content type to the result of minimizing a supported MIME type given mimeType.
                 if (mime_type.has_value())
-                    body_info.content_type = MimeSniff::minimise_a_supported_mime_type(mime_type.value());
+                    body_info.content_type = Utf16String::from_utf8(MimeSniff::minimise_a_supported_mime_type(mime_type.value()));
             }
 
             // 8. If fetchParams’s request’s initiator type is not null, then mark resource timing given timingInfo,
             //    request’s URL, request’s initiator type, global, cacheState, bodyInfo, and responseStatus.
             if (fetch_params.request()->initiator_type().has_value()) {
-                ResourceTiming::PerformanceResourceTiming::mark_resource_timing(timing_info, fetch_params.request()->url().to_string(), Infrastructure::initiator_type_to_string(fetch_params.request()->initiator_type().value()), global, cache_state, body_info, response_status);
+                ResourceTiming::PerformanceResourceTiming::mark_resource_timing(timing_info, utf16_string_from_url_ascii(fetch_params.request()->url().to_string()), Infrastructure::initiator_type_to_string(fetch_params.request()->initiator_type().value()), global, cache_state, body_info, response_status);
             }
         });
     };
@@ -1066,7 +1067,7 @@ GC::Ref<PendingResponse> scheme_fetch(JS::Realm& realm, Infrastructure::FetchPar
         URL::BlobURLEntry::Blob* blob_object;
         if (blob_object = maybe_blob_object.value().get_pointer<URL::BlobURLEntry::Blob>(); !blob_object)
             return PendingResponse::create(vm, request, Infrastructure::Response::network_error(vm, "Failed to obtain a Blob object from 'blob:' URL"_string));
-        auto const blob = FileAPI::Blob::create(realm, blob_object->data, blob_object->type);
+        auto const blob = FileAPI::Blob::create(realm, blob_object->data, Utf16String::from_utf8(blob_object->type));
 
         // 9. Let response be a new response.
         auto response = Infrastructure::Response::create(vm);
@@ -1484,6 +1485,13 @@ GC::Ptr<PendingResponse> http_redirect_fetch(JS::Realm& realm, Infrastructure::F
     // 4. If locationURL is null, then return response.
     if (!location_url_or_error.is_error() && !location_url_or_error.value().has_value())
         return PendingResponse::create(vm, request, response);
+
+    // AD-HOC: Navigation responses are kept alive in RequestServer so they can be transferred to the UI process if
+    //         they become downloads. This response will be discarded in favor of either a network error or the
+    //         redirect response, so release that hold and stop the request if it is still active.
+    internal_response->release_request_for_transfer();
+    if (auto const& request_server_request = internal_response->request_server_request(); request_server_request.has_value() && request_server_request->request)
+        request_server_request->request->stop();
 
     // 5. If locationURL is failure, then return a network error.
     if (location_url_or_error.is_error())
@@ -2191,6 +2199,9 @@ GC::Ref<PendingResponse> nonstandard_resource_loader_file_or_http_network_fetch(
     load_request.set_initiator_type(request->initiator_type());
     load_request.set_destination(request->destination());
     load_request.set_request_mode(request->mode());
+    load_request.set_referrer_policy(request->referrer_policy());
+    load_request.set_is_navigation_request(request->is_navigation_request());
+    load_request.set_priority(request->priority());
     load_request.set_source_url(content_blocker_source_url_for_request(*request));
 
     if (auto const* body = request->body().get_pointer<GC::Ref<Infrastructure::Body>>()) {
@@ -2247,7 +2258,7 @@ GC::Ref<PendingResponse> nonstandard_resource_loader_file_or_http_network_fetch(
     // 13. Set up stream with byte reading support with pullAlgorithm set to pullAlgorithm, cancelAlgorithm set to cancelAlgorithm.
     stream->set_up_with_byte_reading_support(pull_algorithm, cancel_algorithm);
 
-    auto on_headers_received = GC::create_function(vm.heap(), [&vm, pending_response, stream, request, fetched_data_receiver](Requests::Request* request_server_request, HTTP::HeaderList const& response_headers, Optional<u32> status_code, Optional<String> const& reason_phrase, Optional<Core::ImmutableBytes> javascript_bytecode, Optional<u64> javascript_bytecode_cache_vary_key) {
+    auto on_headers_received = GC::create_function(vm.heap(), [&vm, pending_response, stream, request, fetched_data_receiver](Requests::Request* request_server_request, HTTP::HeaderList const& response_headers, Optional<u32> status_code, Optional<String> const& reason_phrase, Optional<Core::ImmutableBytes> javascript_bytecode, Optional<u64> javascript_bytecode_cache_vary_key, Requests::CameFromCache) {
         if (pending_response->is_resolved()) {
             // RequestServer will send us the response headers twice, the second time being for HTTP trailers. This
             // fetch algorithm is not interested in trailers, so just drop them here.

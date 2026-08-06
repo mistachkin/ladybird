@@ -7,6 +7,7 @@
 #include <AK/Optional.h>
 #include <Interface/LadybirdWebViewBridge.h>
 #include <LibURL/URL.h>
+#include <LibWakeLock/DisplaySleepInhibitor.h>
 #include <LibWeb/HTML/SelectedFile.h>
 #include <LibWebView/Application.h>
 #include <LibWebView/Utilities.h>
@@ -19,6 +20,7 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <Utilities/Conversions.h>
+#import <Utilities/DictionaryLookup.h>
 
 #if !__has_feature(objc_arc)
 #    error "This project requires ARC"
@@ -54,17 +56,20 @@ static Optional<u64> display_id_for_screen(NSScreen* screen)
 static bool is_browser_reserved_key_equivalent(NSEvent* event)
 {
     auto modifiers = event.modifierFlags & (NSEventModifierFlagCommand | NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagShift);
-    if (modifiers != NSEventModifierFlagCommand)
-        return false;
-
     auto* characters = [[event charactersIgnoringModifiers] lowercaseString];
     if ([characters length] != 1)
         return false;
 
     unichar character = [characters characterAtIndex:0];
+    if (modifiers == (NSEventModifierFlagCommand | NSEventModifierFlagShift))
+        return character == 'n';
+    if (modifiers != NSEventModifierFlagCommand)
+        return false;
+
     return character == 'l'
         || character == 'n'
         || character == 'q'
+        || character == 'r'
         || character == 't'
         || character == 'w';
 }
@@ -90,6 +95,7 @@ static Web::DevicePixelPoint node_picker_position_for(Ladybird::WebViewBridge co
 @interface LadybirdWebView () <NSDraggingDestination>
 {
     OwnPtr<Ladybird::WebViewBridge> m_web_view_bridge;
+    Optional<WakeLock::DisplaySleepInhibitor> m_screen_display_sleep_inhibitor;
 
     Optional<HideCursor> m_hidden_cursor;
 
@@ -100,11 +106,14 @@ static Web::DevicePixelPoint node_picker_position_for(Ladybird::WebViewBridge co
     // key is pressed. Instead, we only receive an event that the modifier flags have changed, and we must determine for
     // ourselves whether the modifier key was pressed or released.
     NSEventModifierFlags m_modifier_flags;
+
+    NSInteger m_last_pressure_stage;
 }
 
 @property (nonatomic, weak) id<LadybirdWebViewObserver> observer;
 @property (nonatomic, strong) NSMenu* page_context_menu;
 @property (nonatomic, strong) NSMenu* link_context_menu;
+@property (nonatomic, strong) NSMenu* selected_text_link_context_menu;
 @property (nonatomic, strong) NSMenu* image_context_menu;
 @property (nonatomic, strong) NSMenu* media_context_menu;
 @property (nonatomic, strong) NSMenu* select_dropdown;
@@ -131,8 +140,9 @@ static Web::DevicePixelPoint node_picker_position_for(Ladybird::WebViewBridge co
 @synthesize status_label = _status_label;
 
 - (instancetype)init:(id<LadybirdWebViewObserver>)observer
+           isPrivate:(WebView::IsPrivate)is_private
 {
-    if (self = [self initWebView:observer]) {
+    if (self = [self initWebView:observer isPrivate:is_private]) {
         m_web_view_bridge->initialize_client();
     }
 
@@ -148,7 +158,7 @@ static Web::DevicePixelPoint node_picker_position_for(Ladybird::WebViewBridge co
                      parent:(LadybirdWebView*)parent
                   pageIndex:(u64)page_index
 {
-    if (self = [self initWebView:observer]) {
+    if (self = [self initWebView:observer isPrivate:[parent view].is_private()]) {
         m_web_view_bridge->initialize_client_as_child(*parent->m_web_view_bridge, page_index);
     }
 
@@ -156,6 +166,7 @@ static Web::DevicePixelPoint node_picker_position_for(Ladybird::WebViewBridge co
 }
 
 - (instancetype)initWebView:(id<LadybirdWebViewObserver>)observer
+                  isPrivate:(WebView::IsPrivate)is_private
 {
     if (self = [super init]) {
         self.observer = observer;
@@ -180,7 +191,7 @@ static Web::DevicePixelPoint node_picker_position_for(Ladybird::WebViewBridge co
         auto maximum_frames_per_second = [[NSScreen mainScreen] maximumFramesPerSecond];
         auto display_id = display_id_for_screen([NSScreen mainScreen]);
 
-        m_web_view_bridge = MUST(Ladybird::WebViewBridge::create(move(screen_rects), device_pixel_ratio, maximum_frames_per_second, display_id));
+        m_web_view_bridge = MUST(Ladybird::WebViewBridge::create(is_private, move(screen_rects), device_pixel_ratio, maximum_frames_per_second, display_id));
         [self setWebViewCallbacks];
 
         [[NSNotificationCenter defaultCenter] addObserver:self
@@ -190,6 +201,7 @@ static Web::DevicePixelPoint node_picker_position_for(Ladybird::WebViewBridge co
 
         self.page_context_menu = Ladybird::create_context_menu(self, [self view].page_context_menu());
         self.link_context_menu = Ladybird::create_context_menu(self, [self view].link_context_menu());
+        self.selected_text_link_context_menu = Ladybird::create_context_menu(self, [self view].selected_text_link_context_menu());
         self.image_context_menu = Ladybird::create_context_menu(self, [self view].image_context_menu());
         self.media_context_menu = Ladybird::create_context_menu(self, [self view].media_context_menu());
 
@@ -206,6 +218,7 @@ static Web::DevicePixelPoint node_picker_position_for(Ladybird::WebViewBridge co
         [self addGestureRecognizer:self.pinch_recognizer];
 
         m_modifier_flags = 0;
+        m_last_pressure_stage = 0;
     }
 
     return self;
@@ -285,7 +298,7 @@ static Web::DevicePixelPoint node_picker_position_for(Ladybird::WebViewBridge co
 - (void)findInPage:(NSString*)query
     caseSensitivity:(CaseSensitivity)case_sensitivity
 {
-    m_web_view_bridge->find_in_page(Ladybird::ns_string_to_string(query), case_sensitivity);
+    m_web_view_bridge->find_in_page(Ladybird::ns_string_to_utf16_string(query), case_sensitivity);
 }
 
 - (void)findInPageNextMatch
@@ -383,25 +396,28 @@ static Web::DevicePixelPoint node_picker_position_for(Ladybird::WebViewBridge co
         [[self window] close];
     };
 
-    m_web_view_bridge->on_load_start = [weak_self](auto const& url, bool is_redirect) {
+    m_web_view_bridge->on_load_start = [weak_self]() {
         LadybirdWebView* self = weak_self;
         if (self == nil) {
             return;
         }
-        [self.observer onLoadStart:url isRedirect:is_redirect];
-
         if (_status_label != nil) {
             [self.status_label setHidden:YES];
         }
     };
 
-    m_web_view_bridge->on_load_finish = [weak_self](auto const& url) {
+    m_web_view_bridge->on_loading_state_change = [weak_self](bool is_loading) {
         LadybirdWebView* self = weak_self;
         if (self == nil) {
             return;
         }
-        [self.observer onLoadFinish:url];
+        if (is_loading)
+            [self.observer onLoadStart];
+        else
+            [self.observer onLoadFinish];
     };
+    if (m_web_view_bridge->is_loading())
+        m_web_view_bridge->on_loading_state_change(true);
 
     m_web_view_bridge->on_url_change = [weak_self](auto const& url) {
         LadybirdWebView* self = weak_self;
@@ -456,6 +472,15 @@ static Web::DevicePixelPoint node_picker_position_for(Ladybird::WebViewBridge co
                 [self.observer onCreateNewTab:urls[i] activateTab:Web::HTML::ActivateTab::No];
             }
         }
+    };
+
+    m_web_view_bridge->on_request_dictionary_lookup = [weak_self](auto const& lookup, auto position) {
+        LadybirdWebView* self = weak_self;
+        if (self == nil) {
+            return;
+        }
+
+        Ladybird::show_dictionary_lookup(self, lookup, Ladybird::gfx_point_to_ns_point(position));
     };
 
     m_web_view_bridge->on_cursor_change = [weak_self](auto cursor) {
@@ -627,7 +652,7 @@ static Web::DevicePixelPoint node_picker_position_for(Ladybird::WebViewBridge co
         if (self == nil) {
             return;
         }
-        auto* ns_message = Ladybird::string_to_ns_string(message);
+        auto* ns_message = Ladybird::utf16_string_to_ns_string(message);
 
         self.dialog = [[NSAlert alloc] init];
         [self.dialog setMessageText:ns_message];
@@ -644,7 +669,7 @@ static Web::DevicePixelPoint node_picker_position_for(Ladybird::WebViewBridge co
         if (self == nil) {
             return;
         }
-        auto* ns_message = Ladybird::string_to_ns_string(message);
+        auto* ns_message = Ladybird::utf16_string_to_ns_string(message);
 
         self.dialog = [[NSAlert alloc] init];
         [[self.dialog addButtonWithTitle:@"OK"] setTag:NSModalResponseOK];
@@ -663,8 +688,8 @@ static Web::DevicePixelPoint node_picker_position_for(Ladybird::WebViewBridge co
         if (self == nil) {
             return;
         }
-        auto* ns_message = Ladybird::string_to_ns_string(message);
-        auto* ns_default = Ladybird::string_to_ns_string(default_);
+        auto* ns_message = Ladybird::utf16_string_to_ns_string(message);
+        auto* ns_default = Ladybird::utf16_string_to_ns_string(default_);
 
         auto* input = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 200, 24)];
         [input setStringValue:ns_default];
@@ -679,10 +704,10 @@ static Web::DevicePixelPoint node_picker_position_for(Ladybird::WebViewBridge co
 
         [self.dialog beginSheetModalForWindow:[self window]
                             completionHandler:^(NSModalResponse response) {
-                                Optional<String> text;
+                                Optional<Utf16String> text;
 
                                 if (response == NSModalResponseOK) {
-                                    text = Ladybird::ns_string_to_string([input stringValue]);
+                                    text = Ladybird::ns_string_to_utf16_string([input stringValue]);
                                 }
 
                                 m_web_view_bridge->prompt_closed(move(text));
@@ -699,7 +724,7 @@ static Web::DevicePixelPoint node_picker_position_for(Ladybird::WebViewBridge co
             return;
         }
 
-        auto* ns_message = Ladybird::string_to_ns_string(message);
+        auto* ns_message = Ladybird::utf16_string_to_ns_string(message);
 
         auto* input = (NSTextField*)[self.dialog accessoryView];
         [input setStringValue:ns_message];
@@ -780,14 +805,14 @@ static Web::DevicePixelPoint node_picker_position_for(Ladybird::WebViewBridge co
                     }
                 },
                 [&](Web::HTML::FileFilter::MimeType const& filter) {
-                    auto* ns_mime_type = Ladybird::string_to_ns_string(filter.value);
+                    auto* ns_mime_type = Ladybird::utf16_string_to_ns_string(filter.value);
 
                     if (auto* ut_type = [UTType typeWithMIMEType:ns_mime_type]) {
                         [accepted_file_filters addObject:ut_type];
                     }
                 },
                 [&](Web::HTML::FileFilter::Extension const& filter) {
-                    auto* ns_extension = Ladybird::string_to_ns_string(filter.value);
+                    auto* ns_extension = Ladybird::utf16_string_to_ns_string(filter.value);
 
                     if (auto* ut_type = [UTType typeWithFilenameExtension:ns_extension]) {
                         [accepted_file_filters addObject:ut_type];
@@ -834,8 +859,9 @@ static Web::DevicePixelPoint node_picker_position_for(Ladybird::WebViewBridge co
         self.select_dropdown.minimumWidth = minimum_width;
 
         auto add_menu_item = [self](Web::HTML::SelectItemOption const& item_option, bool in_option_group) {
+            auto label = in_option_group ? Utf16String::formatted("    {}", item_option.label) : item_option.label;
             NSMenuItem* menuItem = [[NSMenuItem alloc]
-                initWithTitle:Ladybird::string_to_ns_string(in_option_group ? MUST(String::formatted("    {}", item_option.label)) : item_option.label)
+                initWithTitle:Ladybird::utf16_string_to_ns_string(label)
                        action:item_option.disabled ? nil : @selector(selectDropdownAction:)
                 keyEquivalent:@""];
             menuItem.representedObject = [NSNumber numberWithUnsignedInt:item_option.id];
@@ -847,7 +873,7 @@ static Web::DevicePixelPoint node_picker_position_for(Ladybird::WebViewBridge co
             if (item.has<Web::HTML::SelectItemOptionGroup>()) {
                 auto const& item_option_group = item.get<Web::HTML::SelectItemOptionGroup>();
                 NSMenuItem* subtitle = [[NSMenuItem alloc]
-                    initWithTitle:Ladybird::string_to_ns_string(item_option_group.label)
+                    initWithTitle:Ladybird::utf16_string_to_ns_string(item_option_group.label)
                            action:nil
                     keyEquivalent:@""];
                 [self.select_dropdown addItem:subtitle];
@@ -964,6 +990,25 @@ static Web::DevicePixelPoint node_picker_position_for(Ladybird::WebViewBridge co
         }
         [self.observer onAudioPlayStateChange:play_state];
     };
+
+    m_web_view_bridge->on_screen_wake_lock_state_changed = [weak_self](auto wake_lock_state) {
+        LadybirdWebView* self = weak_self;
+        if (self == nil) {
+            return;
+        }
+
+        switch (wake_lock_state) {
+        case Web::ScreenWakeLockState::Released:
+            self->m_screen_display_sleep_inhibitor.clear();
+            break;
+        case Web::ScreenWakeLockState::Acquired:
+            if (self->m_screen_display_sleep_inhibitor.has_value())
+                break;
+            if (auto inhibitor = WakeLock::DisplaySleepInhibitor::create("Ladybird Content"sv); !inhibitor.is_error())
+                self->m_screen_display_sleep_inhibitor = inhibitor.release_value();
+            break;
+        }
+    };
 }
 
 - (void)handleCurrentKeyDownEvent:(BOOL)shouldInsertText
@@ -1034,6 +1079,8 @@ static Web::DevicePixelPoint node_picker_position_for(Ladybird::WebViewBridge co
     CAMetalLayer* layer = [CAMetalLayer layer];
     layer.device = m_metal_device;
     layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+    static auto* color_space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    layer.colorspace = color_space;
     layer.framebufferOnly = YES;
     layer.displaySyncEnabled = YES;
     layer.contentsGravity = kCAGravityTopLeft;
@@ -1169,6 +1216,25 @@ static Web::DevicePixelPoint node_picker_position_for(Ladybird::WebViewBridge co
     // The origin of a NSScrollView is the lower-left corner, with the y-axis extending upwards. Instead,
     // we want the origin to be the top-left corner, with the y-axis extending downward.
     return YES;
+}
+
+- (void)quickLookWithEvent:(NSEvent*)event
+{
+    auto position = Ladybird::ns_point_to_gfx_point([self convertPoint:[event locationInWindow] fromView:nil]);
+    if (!m_web_view_bridge->look_up_selected_text_at(position))
+        [super quickLookWithEvent:event];
+}
+
+- (void)pressureChangeWithEvent:(NSEvent*)event
+{
+    auto stage = [event stage];
+    if (m_last_pressure_stage == 1 && stage == 2) {
+        auto* user_defaults = [NSUserDefaults standardUserDefaults];
+        if ([user_defaults integerForKey:@"com.apple.trackpad.forceClick"] == 1)
+            [self quickLookWithEvent:event];
+    }
+
+    m_last_pressure_stage = stage;
 }
 
 - (void)mouseExited:(NSEvent*)event
@@ -1332,6 +1398,12 @@ static Web::DevicePixelPoint node_picker_position_for(Ladybird::WebViewBridge co
         auto key_event = Ladybird::ns_event_to_key_event(Web::KeyEvent::Type::KeyDown, event);
         if (key_event.key == Web::UIEvents::KeyCode::Key_Escape)
             m_web_view_bridge->node_picker_cancel();
+        return;
+    }
+
+    auto key_event = Ladybird::ns_event_to_key_event(Web::KeyEvent::Type::KeyDown, event);
+    if (key_event.key == Web::UIEvents::KeyCode::Key_Escape && key_event.modifiers == Web::UIEvents::KeyModifier::Mod_None && m_web_view_bridge->is_loading()) {
+        m_web_view_bridge->stop_loading();
         return;
     }
 

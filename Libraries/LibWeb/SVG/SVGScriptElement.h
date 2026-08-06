@@ -29,12 +29,13 @@ public:
 
     bool is_ready_to_be_parser_executed() const { return m_ready_to_be_parser_executed; }
     void execute_pending_parser_blocking_script(Badge<HTML::HTMLParser>);
+    void stop_delaying_document_load_event(Badge<DOM::Document>) { m_document_load_event_delayer.clear(); }
 
     void set_source_line_number(Badge<HTML::HTMLParser>, size_t source_line_number) { m_source_line_number = source_line_number; }
 
     virtual void inserted() override;
     virtual void children_changed(ChildrenChangedMetadata const&) override;
-    virtual void attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
+    virtual void attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_) override;
 
 protected:
     SVGScriptElement(DOM::Document&, DOM::QualifiedName);

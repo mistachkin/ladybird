@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <AK/Utf16View.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/HTML/AutocompleteElement.h>
 #include <LibWeb/HTML/HTMLElement.h>
@@ -41,7 +42,7 @@ public:
     WebIDL::ExceptionOr<void> set_length(WebIDL::UnsignedLong);
     HTMLOptionElement* item(WebIDL::UnsignedLong index);
     virtual Optional<JS::Value> item_value(size_t index) const override;
-    HTMLOptionElement* named_item(FlyString const& name);
+    HTMLOptionElement* named_item(Utf16View name);
     WebIDL::ExceptionOr<void> add(HTMLOptionOrOptGroupElement element, NullableHTMLElementOrElementIndex before = { Empty {} });
     virtual WebIDL::ExceptionOr<void> set_value_of_indexed_property(u32, JS::Value) override;
     void remove();
@@ -55,7 +56,7 @@ public:
 
     Utf16String value() const;
     virtual Utf16String form_value() const override { return value(); }
-    WebIDL::ExceptionOr<void> set_value(Utf16String const&);
+    WebIDL::ExceptionOr<void> set_value(Utf16View);
 
     bool is_open() const { return m_is_open; }
     void set_is_open(bool);
@@ -92,7 +93,7 @@ public:
 
     virtual void reset_algorithm() override;
 
-    String const& type() const;
+    Utf16FlyString type() const;
 
     virtual Optional<ARIA::Role> default_role() const override;
 
@@ -100,7 +101,7 @@ public:
     virtual void activation_behavior(DOM::Event const&) override;
 
     virtual void form_associated_element_was_inserted() override;
-    virtual void form_associated_element_attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
+    virtual void form_associated_element_attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_) override;
 
     void did_select_item(Optional<u32> const& id);
 

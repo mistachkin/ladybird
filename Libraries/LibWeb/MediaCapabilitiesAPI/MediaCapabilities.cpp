@@ -53,7 +53,7 @@ bool is_valid_media_decoding_configuration(Bindings::MediaDecodingConfiguration 
 }
 
 // https://w3c.github.io/media-capabilities/#valid-audio-mime-type
-bool is_valid_audio_mime_type(StringView string)
+bool is_valid_audio_mime_type(Utf16View string)
 {
     // A valid audio MIME type is a string that is a valid media MIME type and for which the type per [RFC9110] is
     // either audio or application.
@@ -64,7 +64,7 @@ bool is_valid_audio_mime_type(StringView string)
 }
 
 // https://w3c.github.io/media-capabilities/#valid-video-mime-type
-bool is_valid_video_mime_type(StringView string)
+bool is_valid_video_mime_type(Utf16View string)
 {
     // A valid video MIME type is a string that is a valid media MIME type and for which the type per [RFC9110] is
     // either video or application.
@@ -186,7 +186,7 @@ Bindings::MediaCapabilitiesDecodingInfo create_a_media_capabilities_decoding_inf
     info_configuration.video = configuration.video;
     info_configuration.type = configuration.type;
     info_configuration.key_system_configuration = configuration.key_system_configuration;
-    info.configuration.emplace(move(info_configuration));
+    info.configuration = move(info_configuration);
 
     // 3. If configuration.keySystemConfiguration exists:
     if (false) {

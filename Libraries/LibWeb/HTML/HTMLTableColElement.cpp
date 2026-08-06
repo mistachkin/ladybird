@@ -48,10 +48,10 @@ void HTMLTableColElement::set_span(unsigned int value)
 {
     if (value > 2147483647)
         value = 1;
-    set_attribute_value(HTML::AttributeNames::span, String::number(value));
+    set_attribute_value(HTML::AttributeNames::span, Utf16String::number(value));
 }
 
-bool HTMLTableColElement::is_presentational_hint(FlyString const& name) const
+bool HTMLTableColElement::is_presentational_hint(Utf16FlyString const& name) const
 {
     if (Base::is_presentational_hint(name))
         return true;
@@ -62,7 +62,7 @@ bool HTMLTableColElement::is_presentational_hint(FlyString const& name) const
 void HTMLTableColElement::apply_presentational_hints(Vector<CSS::StyleProperty>& properties) const
 {
     Base::apply_presentational_hints(properties);
-    for_each_attribute([&](auto& name, auto& value) {
+    for_each_attribute([&](Utf16FlyString const& name, Utf16View value) {
         // https://html.spec.whatwg.org/multipage/rendering.html#tables-2:maps-to-the-dimension-property-2
         if (name == HTML::AttributeNames::width) {
             if (auto parsed_value = parse_dimension_value(value))

@@ -7,6 +7,8 @@
 #pragma once
 
 #include <AK/NonnullRefPtr.h>
+#include <AK/Utf16String.h>
+#include <AK/Utf16View.h>
 #include <LibWeb/CSS/CSSRule.h>
 #include <LibWeb/CSS/CSSStyleProperties.h>
 #include <LibWeb/CSS/Percentage.h>
@@ -21,32 +23,39 @@ class CSSKeyframeRule final : public CSSRule {
     GC_DECLARE_ALLOCATOR(CSSKeyframeRule);
 
 public:
-    static GC::Ref<CSSKeyframeRule> create(JS::Realm&, CSS::Percentage key, CSSStyleProperties&);
+    static GC::Ref<CSSKeyframeRule> create(JS::Realm&, Vector<CSS::Percentage>&& keys, CSSStyleProperties&);
 
     virtual ~CSSKeyframeRule() = default;
 
-    CSS::Percentage key() const { return m_key; }
+    Vector<CSS::Percentage> keys() const { return m_keys; }
     GC::Ref<CSSStyleProperties> style() const { return m_declarations; }
 
-    String key_text() const
+    Utf16String key_text() const
     {
-        return m_key.to_string();
+        Utf16StringBuilder builder;
+        for (auto const& key : m_keys) {
+            if (!builder.is_empty())
+                builder.append(", "sv);
+            builder.appendff("{}%"sv, key.value());
+        }
+
+        return builder.to_string();
     }
 
-    void set_key_text(String const& key_text)
+    void set_key_text(Utf16View)
     {
-        dbgln("FIXME: CSSKeyframeRule::set_key_text is not implemented: {}", key_text);
+        dbgln("FIXME: CSSKeyframeRule::set_key_text is not implemented");
     }
 
 private:
-    CSSKeyframeRule(JS::Realm&, CSS::Percentage, CSSStyleProperties&);
+    CSSKeyframeRule(JS::Realm&, Vector<CSS::Percentage>&&, CSSStyleProperties&);
 
     virtual void visit_edges(Visitor&) override;
     virtual void initialize(JS::Realm&) override;
-    virtual String serialized() const override;
+    virtual Utf16String serialized() const override;
     virtual void dump(StringBuilder&, int indent_levels) const override;
 
-    CSS::Percentage m_key;
+    Vector<CSS::Percentage> m_keys;
     GC::Ref<CSSStyleProperties> m_declarations;
 };
 

@@ -21,6 +21,8 @@ using Bindings::ReadyState;
 
 GC_DEFINE_ALLOCATOR(MediaSource);
 
+static bool is_type_supported(Utf16View type);
+
 WebIDL::ExceptionOr<GC::Ref<MediaSource>> MediaSource::construct_impl(JS::Realm& realm)
 {
     return realm.create<MediaSource>(realm);
@@ -97,8 +99,58 @@ void MediaSource::set_assigned_to_media_element(Badge<HTML::HTMLMediaElement>, H
     m_media_element_assigned_to = media_element;
 }
 
-void MediaSource::unassign_from_media_element(Badge<HTML::HTMLMediaElement>)
+// https://w3c.github.io/media-source/#mediasource-detach
+void MediaSource::detach_from_media_element(Badge<HTML::HTMLMediaElement>)
 {
+    // FIXME: 1. If the MediaSource was constructed in a DedicatedWorkerGlobalScope:
+    //               1. Notify the MediaSource using an internal detach message posted to [[port to worker]].
+    //               2. Set [[port to worker]] null.
+    //               3. Set [[channel with worker]] null.
+    //               4. The implicit message handler for this detach notification runs the remainder of these
+    //                  steps in the DedicatedWorkerGlobalScope MediaSource.
+    //           Otherwise, the MediaSource was constructed in a Window:
+    //               Continue the remainder of these steps on the Window MediaSource.
+    // FIXME: 2. Set [[port to main]] null.
+
+    // 3. Set the readyState attribute to "closed".
+    m_ready_state = ReadyState::Closed;
+
+    // FIXME: 4. If this is a ManagedMediaSource, then set streaming attribute to false.
+
+    // 5. Update duration to NaN.
+    m_duration = NAN;
+
+    // AD-HOC: Abort the buffer-append algorithm of every SourceBuffer removed below. The spec steps (copied in below)
+    //         don't say to do that, but other engines implement them by running the removeSourceBuffer() steps on every
+    //         SourceBuffer — and those steps abort the buffer-append algorithm when the updating attribute is true.
+    //         Without this, a buffer-append task queued before detaching would still run afterwards — against a media
+    //         element that the media element load algorithm has reset.
+    //         https://github.com/w3c/media-source/issues/378
+    for (size_t i = 0; i < m_source_buffers->length(); i++)
+        m_source_buffers->item(i)->abort_if_updating({});
+
+    // 6. Remove all the SourceBuffer objects from activeSourceBuffers.
+    m_active_source_buffers->remove_all_buffers({});
+
+    // 7. Queue a task to fire an event named removesourcebuffer at activeSourceBuffers.
+    queue_a_media_source_task(GC::create_function(heap(), [source_buffers = m_active_source_buffers] {
+        source_buffers->dispatch_event(DOM::Event::create(source_buffers->realm(), EventNames::removesourcebuffer));
+    }));
+
+    // 8. Remove all the SourceBuffer objects from sourceBuffers.
+    m_source_buffers->remove_all_buffers({});
+
+    // 9. Queue a task to fire an event named removesourcebuffer at sourceBuffers.
+    queue_a_media_source_task(GC::create_function(heap(), [source_buffers = m_source_buffers] {
+        source_buffers->dispatch_event(DOM::Event::create(source_buffers->realm(), EventNames::removesourcebuffer));
+    }));
+
+    // 10. Queue a task to fire an event named sourceclose at the MediaSource.
+    queue_a_media_source_task(GC::create_function(heap(), [this] {
+        dispatch_event(DOM::Event::create(realm(), EventNames::sourceclose));
+    }));
+
+    // AD-HOC: Sever the media element assignment that was established when this MediaSource was attached.
     m_media_element_assigned_to = nullptr;
 }
 
@@ -154,20 +206,20 @@ GC::Ptr<WebIDL::CallbackType> MediaSource::onsourceclose()
 }
 
 // https://w3c.github.io/media-source/#addsourcebuffer-method
-WebIDL::ExceptionOr<GC::Ref<SourceBuffer>> MediaSource::add_source_buffer(String const& type)
+WebIDL::ExceptionOr<GC::Ref<SourceBuffer>> MediaSource::add_source_buffer(Utf16String const& type)
 {
     // 1. If type is an empty string then throw a TypeError exception and abort these steps.
     if (type.is_empty()) {
         return WebIDL::SimpleException {
             WebIDL::SimpleExceptionType::TypeError,
-            "SourceBuffer type must not be empty"sv
+            "SourceBuffer type must not be empty"_utf16
         };
     }
 
     // 2. If type contains a MIME type that is not supported or contains a MIME type that is not
     //    supported with the types specified for the other SourceBuffer objects in sourceBuffers,
     //    then throw a NotSupportedError exception and abort these steps.
-    if (!is_type_supported(type)) {
+    if (!is_type_supported(type.utf16_view())) {
         return WebIDL::NotSupportedError::create(realm(), "Unsupported MIME type"_utf16);
     }
 
@@ -182,7 +234,7 @@ WebIDL::ExceptionOr<GC::Ref<SourceBuffer>> MediaSource::add_source_buffer(String
     // 5. Let buffer be a new instance of a ManagedSourceBuffer if this is a ManagedMediaSource, or
     //    a SourceBuffer otherwise, with their respective associated resources.
     auto buffer = realm().create<SourceBuffer>(realm(), GC::Ref(*this));
-    buffer->set_content_type(type);
+    buffer->set_content_type(type.utf16_view());
 
     // FIXME: 6. Set buffer's [[generate timestamps flag]] to the value in the "Generate Timestamps Flag"
     //           column of the Media Source Extensions™ Byte Stream Format Registry entry that is
@@ -285,7 +337,7 @@ WebIDL::ExceptionOr<void> MediaSource::set_duration(double new_duration)
 {
     // 1. If the value being set is negative or NaN then throw a TypeError exception and abort these steps.
     if (new_duration < 0 || isnan(new_duration))
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "duration must not be negative or NaN"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "duration must not be negative or NaN"_utf16 };
 
     // 2. If the readyState attribute is not in the "open" state then throw an InvalidStateError exception
     //    and abort these steps.
@@ -335,7 +387,7 @@ void MediaSource::run_duration_change_algorithm(double new_duration)
 }
 
 // https://w3c.github.io/media-source/#dom-mediasource-istypesupported
-bool MediaSource::is_type_supported(String const& type)
+static bool is_type_supported(Utf16View type)
 {
     // 1. If type is an empty string, then return false.
     if (type.is_empty())
@@ -380,6 +432,11 @@ bool MediaSource::is_type_supported(String const& type)
 
     // 6. Return true.
     return true;
+}
+
+bool MediaSource::is_type_supported(Utf16View type)
+{
+    return MediaSourceExtensions::is_type_supported(type);
 }
 
 }

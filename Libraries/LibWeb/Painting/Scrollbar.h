@@ -1,41 +1,44 @@
 /*
- * Copyright (c) 2026, the Ladybird developers.
+ * Copyright (c) 2026-present, the Ladybird developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #pragma once
 
+#include <AK/OwnPtr.h>
 #include <LibWeb/Painting/ChromeWidget.h>
-#include <LibWeb/Painting/PaintableBox.h>
+#include <LibWeb/Painting/Paintable.h>
 
 namespace Web::Painting {
 
 class Scrollbar final : public ChromeWidget {
 public:
-    static NonnullRefPtr<Scrollbar> create(PaintableBox&, PaintableBox::ScrollDirection);
+    static NonnullRefPtr<Scrollbar> create(Paintable&, Paintable::ScrollDirection);
 
-    PaintableBox::ScrollDirection direction() const { return m_direction; }
+    Paintable::ScrollDirection direction() const { return m_direction; }
     bool is_enlarged() const { return m_hovered || m_thumb_grab_position.has_value(); }
 
     virtual bool contains(CSSPixelPoint position, ChromeMetrics const&) const override;
 
-    virtual MouseAction handle_pointer_event(FlyString const& type, unsigned button, CSSPixelPoint visual_viewport_position) override;
+    virtual MouseAction handle_pointer_event(Utf16FlyString const& type, unsigned button, CSSPixelPoint visual_viewport_position) override;
     virtual void mouse_enter() override;
     virtual void mouse_leave() override;
 
 private:
-    Scrollbar(PaintableBox&, PaintableBox::ScrollDirection);
+    Scrollbar(Paintable&, Paintable::ScrollDirection);
 
     MouseAction mouse_down(CSSPixelPoint, unsigned button);
     MouseAction mouse_move(CSSPixelPoint);
     MouseAction mouse_up(CSSPixelPoint, unsigned button);
     bool scroll_to_mouse_position(CSSPixelPoint);
+    void release_thumb_grab();
+    virtual void did_detach_from_paintable() override;
 
-    WeakPtr<PaintableBox> m_paintable_box;
-    PaintableBox::ScrollDirection m_direction;
+    Paintable::ScrollDirection m_direction;
     bool m_hovered { false };
     Optional<CSSPixels> m_thumb_grab_position;
+    OwnPtr<HTML::UserScrollGestureHold> m_thumb_grab_gesture_hold;
 };
 
 }

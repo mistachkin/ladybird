@@ -8,6 +8,7 @@
 
 #include <AK/DoublyLinkedList.h>
 #include <LibWasm/AbstractMachine/AbstractMachine.h>
+#include <LibWasm/AbstractMachine/ValueStack.h>
 #include <LibWasm/Types.h>
 
 namespace Wasm {
@@ -40,16 +41,16 @@ public:
         m_store.unregister_configuration({}, *this);
     }
 
-    template<typename... Args>
-    void set_frame(IsTailcall is_tailcall, Args&&... frame_init)
+    void set_frame(IsTailcall is_tailcall, ModuleInstance const& module, Vector<Value, ArgumentsStaticSize> locals, Expression const& expression, size_t arity)
     {
-        m_frame_stack.empend(forward<Args>(frame_init)...);
+        m_owned_locals_stack.append(move(locals));
+        auto* locals_ptr = m_owned_locals_stack.last().data();
+        m_frame_stack.empend(module, locals_ptr, expression, arity, /* owns_locals = */ true);
 
         auto& frame = m_frame_stack.last();
-        m_locals_base = frame.locals_data();
-        auto const& memories = frame.module().memories();
-        m_default_memory = memories.is_empty() ? nullptr : m_store.unsafe_get(memories[0]);
-        m_default_memory_base = m_default_memory ? m_default_memory->data().data() : nullptr;
+        m_locals_base = locals_ptr;
+        m_memory_instances = frame.module().resolved_memories(m_store);
+        m_global_instances = frame.module().resolved_globals(m_store);
         frame.set_compiled_fn_table(&frame.module().compiled_fn_table(m_store));
 
         auto continuation = frame.expression().instructions().size() - 1;
@@ -65,40 +66,41 @@ public:
         }
         m_label_stack.append(label);
 
+        // A tail call replaces the current frame, so release its record first; otherwise a
+        // tail-call loop would grow the record region without bound.
+        if (is_tailcall == IsTailcall::Yes && m_call_record_base)
+            m_call_record_stack.release_to(m_call_record_base);
         auto max_call_rec_size = frame.expression().compiled_instructions.max_call_rec_size;
-        if (max_call_rec_size > 0) {
-            get_arguments_allocation_if_possible(m_current_call_record, max_call_rec_size);
-            m_current_call_record.resize_and_keep_capacity(max_call_rec_size);
-            m_call_record_base = m_current_call_record.data();
-        } else {
+        if (max_call_rec_size > 0)
+            m_call_record_base = m_call_record_stack.allocate(max_call_rec_size);
+        else
             m_call_record_base = nullptr;
-        }
     }
     // Lightweight set_frame for direct Cranelift-to-Cranelift calls.
     void set_frame_lightweight(ModuleInstance const& module, Value* locals_ptr,
-        Expression const& expression, size_t arity)
+        Expression const& expression, size_t arity, size_t max_call_rec_size)
     {
         VERIFY(bit_cast<FlatPtr>(&module) != 0);
-        m_frame_stack.empend(module, locals_ptr, expression, arity);
-        m_frame_stack.last().set_compiled_fn_table(&module.compiled_fn_table(m_store));
-        m_locals_base = locals_ptr;
-        auto const& memories = module.memories();
-        m_default_memory = memories.is_empty() ? nullptr : m_store.unsafe_get(memories[0]);
-        m_default_memory_base = m_default_memory ? m_default_memory->data().data() : nullptr;
-        // Skip capacity hints and label push (Cranelift uses its own structured control flow).
-    }
 
-    void setup_call_record_for_current_frame()
-    {
-        auto max_call_rec_size = m_frame_stack.last().expression().compiled_instructions.max_call_rec_size;
-        if (max_call_rec_size > 0) {
-            m_current_call_record.clear_with_capacity();
-            m_current_call_record.ensure_capacity(max_call_rec_size);
-            m_current_call_record.resize_and_keep_capacity(max_call_rec_size);
-            m_call_record_base = m_current_call_record.data();
-        } else {
-            m_call_record_base = nullptr;
+        // For the (common) same-module call case, we already have the compiled-fn-table pointer cached on the caller's frame, so reuse it instead of re-resolving through the store on every call.
+        bool const same_module = !m_frame_stack.is_empty() && &m_frame_stack.last().module() == &module;
+        auto const* table = same_module ? m_frame_stack.last().compiled_fn_table() : &module.compiled_fn_table(m_store);
+        m_frame_stack.empend(module, locals_ptr, expression, arity);
+        m_frame_stack.last().set_compiled_fn_table(table);
+        m_locals_base = locals_ptr;
+        if (!same_module) {
+            m_memory_instances = module.resolved_memories(m_store);
+            m_global_instances = module.resolved_globals(m_store);
         }
+        // Compiled code pushes to the value stack without bounds checks, so verify here that the
+        // frame's whole stack usage fits the reservation.
+        if (auto hint = expression.stack_usage_hint(); hint.has_value())
+            m_value_stack.ensure_capacity(m_value_stack.size() + *hint);
+        // Compiled code writes call-record entries without null checks, so allocate eagerly
+        // (heavy set_frame does the same).
+        if (max_call_rec_size > 0)
+            m_call_record_base = m_call_record_stack.allocate(max_call_rec_size);
+        // Skip the label push (Cranelift uses its own structured control flow).
     }
 
     ALWAYS_INLINE auto& frame() const { return m_frame_stack.last(); }
@@ -113,9 +115,7 @@ public:
     ALWAYS_INLINE auto& label_stack() { return m_label_stack; }
     ALWAYS_INLINE auto& store() const { return m_store; }
     ALWAYS_INLINE auto& store() { return m_store; }
-    ALWAYS_INLINE MemoryInstance* default_memory() const { return m_default_memory; }
-    ALWAYS_INLINE u8* default_memory_base() const { return m_default_memory_base; }
-    ALWAYS_INLINE void refresh_default_memory_base() { m_default_memory_base = m_default_memory ? m_default_memory->data().data() : nullptr; }
+    ALWAYS_INLINE MemoryInstance* memory_instance(size_t index) const { return m_memory_instances[index]; }
     ALWAYS_INLINE Value& compiled_call_result_scratch() { return m_compiled_call_result_scratch; }
     ALWAYS_INLINE Value const& compiled_call_result_scratch() const { return m_compiled_call_result_scratch; }
 
@@ -124,12 +124,13 @@ public:
     ALWAYS_INLINE Value* locals_base() const { return m_locals_base; }
     ALWAYS_INLINE void set_locals_base(Value* base) { m_locals_base = base; }
 
-    // When > 0, unwind_impl skips the frame pop (the direct call didn't push a frame).
-    size_t m_compiled_direct_call_depth { 0 };
-
     static constexpr size_t locals_base_offset() { return __builtin_offsetof(Configuration, m_locals_base); }
-    static constexpr size_t default_memory_base_offset() { return __builtin_offsetof(Configuration, m_default_memory_base); }
+    static constexpr size_t memory_instances_offset() { return __builtin_offsetof(Configuration, m_memory_instances); }
+    static constexpr size_t global_instances_offset() { return __builtin_offsetof(Configuration, m_global_instances); }
     static constexpr size_t compiled_call_result_scratch_offset() { return __builtin_offsetof(Configuration, m_compiled_call_result_scratch); }
+    static constexpr size_t value_stack_base_offset() { return __builtin_offsetof(Configuration, m_value_stack) + ValueStack::base_offset(); }
+    static constexpr size_t value_stack_top_offset() { return __builtin_offsetof(Configuration, m_value_stack) + ValueStack::top_offset(); }
+    static constexpr size_t call_record_base_offset() { return __builtin_offsetof(Configuration, m_call_record_base); }
 
     ALWAYS_INLINE Value& call_record_entry(size_t index) { return m_call_record_base[index]; }
     ALWAYS_INLINE Value const& call_record_entry(size_t index) const { return m_call_record_base[index]; }
@@ -137,49 +138,29 @@ public:
     ALWAYS_INLINE void set_call_record_base(Value* base) { m_call_record_base = base; }
     ALWAYS_INLINE void setup_call_record(size_t max_call_rec_size)
     {
-        get_arguments_allocation_if_possible(m_current_call_record, max_call_rec_size);
-        m_current_call_record.resize_and_keep_capacity(max_call_rec_size);
-        m_call_record_base = m_current_call_record.data();
-    }
-    ALWAYS_INLINE Vector<Value, ArgumentsStaticSize> take_call_record_vector()
-    {
-        auto result = move(m_current_call_record);
-        m_call_record_base = nullptr;
-        return result;
-    }
-    ALWAYS_INLINE void restore_call_record_vector(Vector<Value, ArgumentsStaticSize>&& vec)
-    {
-        m_current_call_record = move(vec);
-        m_call_record_base = m_current_call_record.data();
+        m_call_record_base = m_call_record_stack.allocate(max_call_rec_size);
     }
 
     struct CallFrameHandle {
         explicit CallFrameHandle(Configuration& configuration)
             : configuration(configuration)
-            , saved_direct_call_depth(configuration.m_compiled_direct_call_depth)
+            , saved_call_record_base(configuration.m_call_record_base)
+            , saved_call_record_mark(configuration.m_call_record_stack.mark())
         {
-            if (configuration.m_call_record_base)
-                moved_call_record = move(configuration.m_current_call_record);
-            configuration.m_compiled_direct_call_depth = 0;
             configuration.depth()++;
             configuration.m_call_record_base = nullptr;
         }
 
         ~CallFrameHandle()
         {
-            if (moved_call_record.has_value()) {
-                configuration.m_current_call_record = moved_call_record.release_value();
-                configuration.m_call_record_base = configuration.m_current_call_record.data();
-            } else {
-                configuration.m_call_record_base = nullptr;
-            }
+            configuration.m_call_record_stack.release_to(saved_call_record_mark);
+            configuration.m_call_record_base = saved_call_record_base;
             configuration.unwind({}, *this);
-            configuration.m_compiled_direct_call_depth = saved_direct_call_depth;
         }
 
         Configuration& configuration;
-        Optional<Vector<Value, ArgumentsStaticSize>> moved_call_record;
-        size_t saved_direct_call_depth;
+        Value* saved_call_record_base;
+        Value* saved_call_record_mark;
     };
 
     void unwind(Badge<CallFrameHandle>, CallFrameHandle const&) { unwind_impl(); }
@@ -211,23 +192,9 @@ public:
         arguments.ensure_capacity(max(max_size, frame().module().cached_minimum_call_record_allocation_size));
     }
 
-    void release_arguments_allocation(Vector<Value, ArgumentsStaticSize>& arguments, bool expect_frame = true)
+    void release_arguments_allocation(Vector<Value, ArgumentsStaticSize>& arguments)
     {
         arguments.clear_with_capacity(); // Clear to avoid copying, but keep capacity for reuse.
-        auto size = expect_frame ? frame().expression().compiled_instructions.max_call_rec_size : 0;
-
-        if (size > 0) {
-            // If we need a call record, keep this as the current one.
-            if (!m_call_record_base) {
-                m_current_call_record = move(arguments);
-                m_current_call_record.resize_and_keep_capacity(size);
-                m_call_record_base = m_current_call_record.data();
-                return;
-            }
-
-            if (m_current_call_record.size() < size)
-                m_current_call_record.resize_and_keep_capacity(size);
-        }
 
         if (arguments.capacity() != ArgumentsStaticSize) {
             if (m_call_argument_freelist.size() >= 16) {
@@ -237,12 +204,6 @@ public:
 
             m_call_argument_freelist.unchecked_append(move(arguments));
         }
-    }
-
-    void take_call_record(Vector<Value, ArgumentsStaticSize>& call_record)
-    {
-        call_record = move(m_current_call_record);
-        m_call_record_base = nullptr;
     }
 
     template<SourceAddressMix mix>
@@ -344,18 +305,19 @@ public:
     void unwind_impl();
 
     Store& m_store;
-    Vector<Value, 64, FastLastAccess::Yes> m_value_stack;
+    ValueStack m_value_stack;
+    ValueStack m_call_record_stack;
     Vector<Label, 64, FastLastAccess::Yes> m_label_stack;
     Vector<Frame> m_frame_stack;
-    Vector<Value, ArgumentsStaticSize> m_current_call_record;
+    Vector<Vector<Value, ArgumentsStaticSize>> m_owned_locals_stack;
     Vector<Vector<Value, ArgumentsStaticSize>, 16, FastLastAccess::Yes> m_call_argument_freelist;
     size_t m_depth { 0 };
     u64 m_ip { 0 };
     bool m_should_limit_instruction_count { false };
     Value* m_locals_base { nullptr };
     Value* m_call_record_base { nullptr };
-    MemoryInstance* m_default_memory { nullptr };
-    u8* m_default_memory_base { nullptr };
+    MemoryInstanceTable m_memory_instances { nullptr };
+    GlobalInstanceTable m_global_instances { nullptr };
     Value m_compiled_call_result_scratch;
 };
 

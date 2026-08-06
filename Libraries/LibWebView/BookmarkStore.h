@@ -6,7 +6,6 @@
 
 #pragma once
 
-#include <AK/Badge.h>
 #include <AK/JsonValue.h>
 #include <AK/Optional.h>
 #include <AK/String.h>
@@ -55,7 +54,7 @@ public:
 
 class WEBVIEW_API BookmarkStore {
 public:
-    static BookmarkStore create(Badge<Application>);
+    static BookmarkStore create(ByteString bookmarks_path);
 
     Vector<BookmarkItem> const& root_items() const { return m_items; }
 
@@ -67,7 +66,7 @@ public:
     void import_items(JsonArray const& items_array);
 
     void add_bookmark(URL::URL url, Optional<String> title, Optional<String> favicon_base64, Optional<String const&> target_folder_id = {});
-    void add_folder(Optional<String> title, Optional<String const&> target_folder_id = {});
+    String add_folder(Optional<String> title, Optional<String const&> target_folder_id = {});
 
     void edit_bookmark(StringView id, URL::URL url, Optional<String> title);
     void edit_folder(StringView id, Optional<String> title);

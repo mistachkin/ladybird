@@ -34,7 +34,7 @@ WebIDL::ExceptionOr<GC::Ref<CSSMathProduct>> CSSMathProduct::multiply_all_types_
         if (auto multiplied_types = type.multiplied_by(value->type()); multiplied_types.has_value()) {
             type = multiplied_types.release_value();
         } else {
-            return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Cannot create a CSSMathProduct with values of incompatible types"sv };
+            return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Cannot create a CSSMathProduct with values of incompatible types"_utf16 };
         }
     }
 
@@ -198,14 +198,14 @@ Optional<SumValue> CSSMathProduct::create_a_sum_value() const
     return values;
 }
 
-WebIDL::ExceptionOr<NonnullRefPtr<CalculationNode const>> CSSMathProduct::create_calculation_node(CalculationContext const& context) const
+WebIDL::ExceptionOr<CalcNodeRef> CSSMathProduct::create_calculation_node(CalculationContext const& context) const
 {
-    Vector<NonnullRefPtr<CalculationNode const>> child_nodes;
+    Vector<CalcNodeRef> child_nodes;
     for (auto const& child_value : m_values->values()) {
         child_nodes.append(TRY(child_value->create_calculation_node(context)));
     }
 
-    return ProductCalculationNode::create(move(child_nodes));
+    return CalcNodeRef::product(move(child_nodes));
 }
 
 }

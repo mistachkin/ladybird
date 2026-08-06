@@ -8,6 +8,8 @@
 
 #include <AK/Assertions.h>
 #include <AK/ByteString.h>
+#include <AK/CharacterTypes.h>
+#include <AK/Math.h>
 #include <AK/Optional.h>
 #include <AK/StringConversions.h>
 #include <AK/Utf16String.h>
@@ -22,6 +24,18 @@
 namespace Gfx {
 
 namespace {
+
+static auto const g_linearized_srgb_components = [] {
+    Array<double, 256> components;
+    for (size_t i = 0; i < components.size(); ++i) {
+        auto srgb_component = i / 255.0;
+        if (srgb_component <= 0.04045)
+            components[i] = srgb_component / 12.92;
+        else
+            components[i] = AK::pow((srgb_component + 0.055) / 1.055, 2.4);
+    }
+    return components;
+}();
 
 char nth_digit(u32 value, u8 digit)
 {
@@ -40,6 +54,24 @@ char nth_digit(u32 value, u8 digit)
     }
 
     return '0' + value % 10;
+}
+
+static bool color_name_matches(StringView string, StringView name)
+{
+    return string.equals_ignoring_ascii_case(name);
+}
+
+static bool color_name_matches(Utf16View const& string, StringView name)
+{
+    if (string.length_in_code_units() != name.length())
+        return false;
+
+    for (size_t i = 0; i < string.length_in_code_units(); ++i) {
+        if (AK::to_ascii_lowercase(string.code_unit_at(i)) != AK::to_ascii_lowercase(name[i]))
+            return false;
+    }
+
+    return true;
 }
 
 Array<char, 4> format_to_8bit_compatible(u8 value)
@@ -84,15 +116,9 @@ double Color::relative_luminance() const
     //   * GsRGB = G8bit/255
     //   * BsRGB = B8bit/255
     // The "^" character is the exponentiation operator. (Formula taken from [SRGB].)
-    auto linearized_srgb_component = [](u8 component) {
-        auto srgb_component = component / 255.0;
-        if (srgb_component <= 0.04045)
-            return srgb_component / 12.92;
-        return AK::pow((srgb_component + 0.055) / 1.055, 2.4);
-    };
-    return 0.2126 * linearized_srgb_component(red())
-        + 0.7152 * linearized_srgb_component(green())
-        + 0.0722 * linearized_srgb_component(blue());
+    return 0.2126 * g_linearized_srgb_components[red()]
+        + 0.7152 * g_linearized_srgb_components[green()]
+        + 0.0722 * g_linearized_srgb_components[blue()];
 }
 
 // https://w3c.github.io/wcag/guidelines/22/#dfn-contrast-ratio
@@ -224,7 +250,8 @@ static Optional<Color> parse_rgba_color(StringView string)
     return Color(*r, *g, *b, a);
 }
 
-Optional<Color> Color::from_named_css_color_string(StringView string)
+template<typename StringType>
+static Optional<Color> color_from_named_css_color_string(StringType const& string)
 {
     if (string.is_empty())
         return {};
@@ -390,11 +417,21 @@ Optional<Color> Color::from_named_css_color_string(StringView string)
     };
 
     for (auto const& web_color : web_colors) {
-        if (string.equals_ignoring_ascii_case(web_color.name))
+        if (color_name_matches(string, web_color.name))
             return Color::from_bgrx(web_color.color);
     }
 
     return {};
+}
+
+Optional<Color> Color::from_named_css_color_string(StringView string)
+{
+    return color_from_named_css_color_string(string);
+}
+
+Optional<Color> Color::from_named_css_color_string(Utf16View const& string)
+{
+    return color_from_named_css_color_string(string);
 }
 
 static Optional<Color> hex_string_to_color(StringView string)

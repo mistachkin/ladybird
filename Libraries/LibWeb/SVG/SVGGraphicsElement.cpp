@@ -10,17 +10,19 @@
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/Bindings/SVGGraphicsElement.h>
 #include <LibWeb/CSS/Parser/Parser.h>
+#include <LibWeb/CSS/UpdateStyle.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/ShadowRoot.h>
 #include <LibWeb/Geometry/DOMRect.h>
 #include <LibWeb/Layout/Node.h>
 #include <LibWeb/Painting/PaintStyle.h>
-#include <LibWeb/Painting/PaintableBox.h>
+#include <LibWeb/Painting/Paintable.h>
 #include <LibWeb/Painting/SVGForeignObjectPaintable.h>
 #include <LibWeb/Painting/SVGGraphicsPaintable.h>
 #include <LibWeb/Painting/SVGSVGPaintable.h>
 #include <LibWeb/SVG/AttributeNames.h>
 #include <LibWeb/SVG/AttributeParser.h>
+#include <LibWeb/SVG/FragmentIdentifier.h>
 #include <LibWeb/SVG/SVGClipPathElement.h>
 #include <LibWeb/SVG/SVGGradientElement.h>
 #include <LibWeb/SVG/SVGGraphicsElement.h>
@@ -44,12 +46,12 @@ void SVGGraphicsElement::initialize(JS::Realm& realm)
     Base::initialize(realm);
 }
 
-void SVGGraphicsElement::attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
+void SVGGraphicsElement::attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_)
 {
     Base::attribute_changed(name, old_value, value, namespace_);
 
-    if (name == "transform"sv) {
-        auto transform_list = AttributeParser::parse_transform(value.value_or(String {}));
+    if (name == AttributeNames::transform) {
+        auto transform_list = AttributeParser::parse_transform(value.value_or({}));
         if (transform_list.has_value())
             m_transform = transform_from_transform_list(*transform_list);
         set_needs_layout_update(DOM::SetNeedsLayoutReason::SVGGraphicsElementTransformChange);
@@ -61,9 +63,12 @@ Optional<Painting::PaintStyle> SVGGraphicsElement::svg_paint_computed_value_to_g
     // FIXME: This entire function is an ad-hoc hack:
     if (!paint_value.has_value() || !paint_value->is_url())
         return {};
-    if (auto gradient = try_resolve_url_to<SVG::SVGGradientElement const>(paint_value->as_url()))
+    if (auto gradient = try_resolve_url_to<SVG::SVGGradientElement const>(paint_value->as_url())) {
+        CSS::update_style_for_subtree_including_display_none(const_cast<DOM::Document&>(document()), *gradient);
         return gradient->to_gfx_paint_style(paint_context);
+    }
     if (auto pattern = try_resolve_url_to<SVG::SVGPatternElement const>(paint_value->as_url())) {
+        CSS::update_style_for_subtree_including_display_none(const_cast<DOM::Document&>(document()), *pattern);
         if (recording_context && layout_node())
             return pattern->to_gfx_paint_style(paint_context, *recording_context, *layout_node());
     }
@@ -88,18 +93,30 @@ Optional<Painting::PaintStyle> SVGGraphicsElement::stroke_paint_style(SVGPaintCo
 GC::Ptr<DOM::Element> SVGGraphicsElement::resolve_url_to_element(CSS::URL const& url) const
 {
     // FIXME: Complete and use the entire URL, not just the fragment.
-    Optional<FlyString> fragment;
     if (auto fragment_offset = url.url().find_byte_offset('#'); fragment_offset.has_value()) {
-        fragment = MUST(url.url().substring_from_byte_offset_with_shared_superstring(fragment_offset.value() + 1));
+        auto fragment_string = MUST(url.url().substring_from_byte_offset_with_shared_superstring(fragment_offset.value() + 1));
+        return resolve_fragment_identifier_to_element(decode_fragment_identifier(fragment_string));
     }
-    if (!fragment.has_value())
+
+    return {};
+}
+
+GC::Ptr<DOM::Element> SVGGraphicsElement::resolve_url_to_element(Utf16String const& url_string) const
+{
+    auto url = document().encoding_parse_url(url_string);
+    if (!url.has_value() || !url->fragment().has_value())
         return {};
-    if (auto element = document().get_element_by_id(*fragment))
+    return resolve_fragment_identifier_to_element(decode_fragment_identifier(*url->fragment()));
+}
+
+GC::Ptr<DOM::Element> SVGGraphicsElement::resolve_fragment_identifier_to_element(Utf16String const& fragment) const
+{
+    if (auto element = document().get_element_by_id(fragment))
         return element;
 
     auto containing_shadow = containing_shadow_root();
     if (containing_shadow) {
-        if (auto element = containing_shadow->get_element_by_id(*fragment))
+        if (auto element = containing_shadow->get_element_by_id(fragment))
             return element;
     }
 
@@ -212,12 +229,8 @@ Optional<Gfx::Color> SVGGraphicsElement::fill_color() const
     if (!paint.has_value())
         return {};
 
-    if (paint->is_url()) {
-        if (auto referenced_element = try_resolve_url_to<SVGGraphicsElement const>(paint->as_url()))
-            return referenced_element->fill_color();
-
+    if (paint->is_url())
         return paint->fallback_color();
-    }
 
     return paint->as_color();
 }
@@ -231,12 +244,8 @@ Optional<Gfx::Color> SVGGraphicsElement::stroke_color() const
     if (!paint.has_value())
         return {};
 
-    if (paint->is_url()) {
-        if (auto referenced_element = try_resolve_url_to<SVGGraphicsElement const>(paint->as_url()))
-            return referenced_element->stroke_color();
-
+    if (paint->is_url())
         return paint->fallback_color();
-    }
 
     return paint->as_color();
 }
@@ -350,6 +359,17 @@ Optional<float> SVGGraphicsElement::stroke_width() const
     return resolve_relative_to_viewport_size(unsafe_layout_node()->computed_values().stroke_width());
 }
 
+static Painting::SVGGraphicsPaintable::ComputedTransforms const* computed_svg_transforms_of(Painting::Paintable const& paintable)
+{
+    if (auto const* svg_graphics_paintable = as_if<Painting::SVGGraphicsPaintable>(paintable))
+        return &svg_graphics_paintable->computed_transforms();
+    if (auto const* svg_foreign_object_paintable = as_if<Painting::SVGForeignObjectPaintable>(paintable))
+        return &svg_foreign_object_paintable->computed_transforms();
+    if (auto const* svg_svg_paintable = as_if<Painting::SVGSVGPaintable>(paintable))
+        return &svg_svg_paintable->computed_transforms();
+    return nullptr;
+}
+
 // https://svgwg.org/svg2-draft/types.html#__svg__SVGGraphicsElement__getBBox
 WebIDL::ExceptionOr<GC::Ref<Geometry::DOMRect>> SVGGraphicsElement::get_b_box(Optional<Bindings::SVGBoundingBoxOptions> const&)
 {
@@ -368,11 +388,35 @@ WebIDL::ExceptionOr<GC::Ref<Geometry::DOMRect>> SVGGraphicsElement::get_b_box(Op
     document().update_layout_if_needed_for_node(*this, DOM::UpdateLayoutReason::SVGGraphicsElementGetBBox);
     if (!layout_node())
         return Geometry::DOMRect::create(realm());
-    // Invert the SVG -> screen space transform.
-    auto owner_svg_element = this->owner_svg_element();
-    if (!owner_svg_element)
-        return Geometry::DOMRect::create(realm());
 
+    auto owner_svg_element = this->owner_svg_element();
+
+    // The outermost svg element has no ancestor svg element to measure against; per the bounding box
+    // algorithm its bounding box is the union of its children's bounding boxes in its own user
+    // coordinate system (i.e. with the viewBox transform undone, but each child's own transforms kept).
+    if (!owner_svg_element) {
+        if (!is<SVGSVGElement>(*this))
+            return Geometry::DOMRect::create(realm());
+        auto self_paintable = paintable_box();
+        if (!self_paintable)
+            return Geometry::DOMRect::create(realm());
+        auto viewport_origin = self_paintable->absolute_rect().location().to_type<float>();
+        Gfx::FloatRect united_rect;
+        self_paintable->for_each_child([&](Painting::Paintable const& child) {
+            auto child_rect = child.absolute_rect().to_type<float>().translated(-viewport_origin);
+            if (auto const* transforms = computed_svg_transforms_of(child)) {
+                if (auto inverse = transforms->svg_to_viewbox_transform().inverse(); inverse.has_value())
+                    child_rect = inverse->map(child_rect);
+            }
+            united_rect.unite(child_rect);
+            return IterationDecision::Continue;
+        });
+        if (united_rect.is_empty())
+            return Geometry::DOMRect::create(realm());
+        return Geometry::DOMRect::create(realm(), united_rect);
+    }
+
+    // Invert the SVG -> screen space transform.
     auto owner_paintable = owner_svg_element->paintable_box();
     auto self_paintable = paintable_box();
     if (!owner_paintable || !self_paintable)
@@ -380,17 +424,8 @@ WebIDL::ExceptionOr<GC::Ref<Geometry::DOMRect>> SVGGraphicsElement::get_b_box(Op
 
     auto svg_rect = owner_paintable->absolute_rect();
     auto rect = self_paintable->absolute_rect().to_type<float>().translated(-svg_rect.location().to_type<float>());
-    auto svg_to_css_pixels_transform = [&]() -> Optional<Gfx::AffineTransform> {
-        if (auto const* svg_graphics_paintable = as_if<Painting::SVGGraphicsPaintable>(*self_paintable))
-            return svg_graphics_paintable->computed_transforms().svg_to_css_pixels_transform();
-        if (auto const* svg_foreign_object_paintable = as_if<Painting::SVGForeignObjectPaintable>(*self_paintable))
-            return svg_foreign_object_paintable->computed_transforms().svg_to_css_pixels_transform();
-        if (auto const* svg_svg_paintable = as_if<Painting::SVGSVGPaintable>(*self_paintable))
-            return svg_svg_paintable->computed_transforms().svg_to_css_pixels_transform();
-        return {};
-    }();
-    if (svg_to_css_pixels_transform.has_value()) {
-        auto inv = svg_to_css_pixels_transform->inverse();
+    if (auto const* transforms = computed_svg_transforms_of(*self_paintable)) {
+        auto inv = transforms->svg_to_css_pixels_transform().inverse();
         if (inv.has_value())
             rect = inv->map(rect);
     }

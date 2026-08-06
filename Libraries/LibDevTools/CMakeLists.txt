@@ -32,12 +32,13 @@ set(SOURCES
     Actors/WatcherActor.cpp
     Connection.cpp
     DevToolsServer.cpp
+    FirefoxClient.cpp
     IndexedDBSerialization.cpp
     StorageHelpers.cpp
 )
 
 ladybird_lib(LibDevTools devtools EXPLICIT_SYMBOL_EXPORT)
-target_link_libraries(LibDevTools PRIVATE LibCore LibHTTP LibWeb LibURL)
+target_link_libraries(LibDevTools PRIVATE LibCore LibFileSystem LibHTTP LibWeb LibURL)
 if (ENABLE_TH8)
     target_link_libraries(LibDevTools PRIVATE LibTH8)
 endif()

@@ -128,7 +128,7 @@ void HTMLSelectElement::set_size(WebIDL::UnsignedLong size)
 {
     if (size > 2147483647)
         size = 0;
-    set_attribute_value(HTML::AttributeNames::size, String::number(size));
+    set_attribute_value(HTML::AttributeNames::size, Utf16String::number(size));
 }
 
 // https://html.spec.whatwg.org/multipage/form-elements.html#dom-select-options
@@ -174,7 +174,7 @@ Optional<JS::Value> HTMLSelectElement::item_value(size_t index) const
 }
 
 // https://html.spec.whatwg.org/multipage/form-elements.html#dom-select-nameditem
-HTMLOptionElement* HTMLSelectElement::named_item(FlyString const& name)
+HTMLOptionElement* HTMLSelectElement::named_item(Utf16View name)
 {
     // The namedItem(name) method must return the value returned by the method of the same name on the options collection, when invoked with the same argument.
     return as<HTMLOptionElement>(const_cast<HTMLOptionsCollection&>(*options()).named_item(name));
@@ -421,16 +421,13 @@ void HTMLSelectElement::children_changed(ChildrenChangedMetadata const& metadata
 }
 
 // https://html.spec.whatwg.org/multipage/form-elements.html#dom-select-type
-String const& HTMLSelectElement::type() const
+Utf16FlyString HTMLSelectElement::type() const
 {
     // The type IDL attribute, on getting, must return the string "select-one" if the multiple attribute is absent, and the string "select-multiple" if the multiple attribute is present.
-    static String const& select_one = *new String("select-one"_string);
-    static String const& select_multiple = *new String("select-multiple"_string);
-
     if (!has_attribute(AttributeNames::multiple))
-        return select_one;
+        return "select-one"_utf16_fly_string;
 
-    return select_multiple;
+    return "select-multiple"_utf16_fly_string;
 }
 
 Optional<ARIA::Role> HTMLSelectElement::default_role() const
@@ -460,7 +457,7 @@ Utf16String HTMLSelectElement::value() const
 }
 
 // https://html.spec.whatwg.org/multipage/form-elements.html#dom-select-value
-WebIDL::ExceptionOr<void> HTMLSelectElement::set_value(Utf16String const& value)
+WebIDL::ExceptionOr<void> HTMLSelectElement::set_value(Utf16View value)
 {
     // The value setter steps are:
     ScopeGuard guard { [&]() {
@@ -502,30 +499,31 @@ void HTMLSelectElement::send_select_update_notifications()
 {
     // To send select update notifications for a select element element, queue an element task on
     // the user interaction task source given element to run these steps:
-    queue_an_element_task(HTML::Task::Source::UserInteraction, [this] {
-        // 1. Set the select element's user validity to true.
-        m_user_validity = true;
+    // https://github.com/whatwg/html/issues/1080
+    // INTEROP: Other engines perform these steps synchronously after changing the selection.
 
-        // AD-HOC: Setting the user validity changes which of the :user-valid and :user-invalid pseudo-classes match.
-        CSS::Invalidation::invalidate_style_after_validity_change(*this);
+    // 1. Set the select element's user validity to true.
+    m_user_validity = true;
 
-        // 2. Run update a select's selectedcontent given element.
-        MUST(update_selectedcontent());
+    // AD-HOC: Setting the user validity changes which of the :user-valid and :user-invalid pseudo-classes match.
+    CSS::Invalidation::invalidate_style_after_validity_change(*this);
 
-        // 3. Run clone selected option into select button given element.
-        clone_selected_option_into_select_button();
+    // 2. Run update a select's selectedcontent given element.
+    MUST(update_selectedcontent());
 
-        // 4. Fire an event named input at element, with the bubbles and composed attributes initialized to true.
-        auto input_event = DOM::Event::create(realm(), HTML::EventNames::input);
-        input_event->set_bubbles(true);
-        input_event->set_composed(true);
-        dispatch_event(input_event);
+    // 3. Run clone selected option into select button given element.
+    clone_selected_option_into_select_button();
 
-        // 5. Fire an event named change at element, with the bubbles attribute initialized to true.
-        auto change_event = DOM::Event::create(realm(), HTML::EventNames::change);
-        change_event->set_bubbles(true);
-        dispatch_event(*change_event);
-    });
+    // 4. Fire an event named input at element, with the bubbles and composed attributes initialized to true.
+    auto input_event = DOM::Event::create(realm(), HTML::EventNames::input);
+    input_event->set_bubbles(true);
+    input_event->set_composed(true);
+    dispatch_event(input_event);
+
+    // 5. Fire an event named change at element, with the bubbles attribute initialized to true.
+    auto change_event = DOM::Event::create(realm(), HTML::EventNames::change);
+    change_event->set_bubbles(true);
+    dispatch_event(*change_event);
 }
 
 void HTMLSelectElement::set_is_open(bool open)
@@ -586,16 +584,19 @@ void HTMLSelectElement::show_the_picker_if_applicable()
                 for (auto const& child : opt_group_element->children_as_vector()) {
                     if (auto const& option_element = as_if<HTMLOptionElement>(*child)) {
                         if (!option_element->has_attribute(Web::HTML::AttributeNames::hidden))
-                            option_group_items.append(SelectItemOption { id_counter++, option_element->selected(), option_element->disabled(), option_element, MUST(Infra::strip_and_collapse_whitespace(option_element->label())), option_element->value().to_utf8_but_should_be_ported_to_utf16() });
+                            option_group_items.append(SelectItemOption { id_counter++, option_element->selected(), option_element->disabled(), option_element, Infra::strip_and_collapse_whitespace(option_element->label()), option_element->value() });
                     }
                 }
-                m_select_items.append(SelectItemOptionGroup { opt_group_element->get_attribute(AttributeNames::label).value_or(String {}), option_group_items });
+                auto label = opt_group_element->get_attribute(AttributeNames::label);
+                m_select_items.append(SelectItemOptionGroup {
+                    label.has_value() ? label.release_value() : Utf16String {},
+                    move(option_group_items) });
             }
         }
 
         if (auto const& option_element = as_if<HTMLOptionElement>(*child)) {
             if (!option_element->has_attribute(Web::HTML::AttributeNames::hidden))
-                m_select_items.append(SelectItemOption { id_counter++, option_element->selected(), option_element->disabled(), option_element, MUST(Infra::strip_and_collapse_whitespace(option_element->label())), option_element->value().to_utf8_but_should_be_ported_to_utf16() });
+                m_select_items.append(SelectItemOption { id_counter++, option_element->selected(), option_element->disabled(), option_element, Infra::strip_and_collapse_whitespace(option_element->label()), option_element->value() });
         }
 
         if (auto const* hr_element = as_if<HTMLHRElement>(*child)) {
@@ -682,7 +683,7 @@ void HTMLSelectElement::form_associated_element_was_inserted()
     create_shadow_tree_if_needed();
 }
 
-void HTMLSelectElement::form_associated_element_attribute_changed(FlyString const& name, Optional<String> const&, Optional<String> const& value, Optional<FlyString> const&)
+void HTMLSelectElement::form_associated_element_attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const&, Optional<Utf16String> const& value, Optional<Utf16FlyString> const&)
 {
     if (name == HTML::AttributeNames::multiple) {
         // If the multiple attribute is absent then update the selectedness of the option elements.
@@ -700,11 +701,13 @@ void HTMLSelectElement::computed_properties_changed()
 {
     // Hide chevron icon when appearance is none
     if (m_chevron_icon_element) {
-        auto appearance = computed_properties()->appearance();
+        auto appearance = computed_values()->appearance();
         if (appearance == CSS::Appearance::None) {
-            MUST(m_chevron_icon_element->style_for_bindings()->set_property(CSS::PropertyID::Display, "none"_string));
+            MUST(m_chevron_icon_element->style_for_bindings()->set_property(CSS::PropertyID::Display, u"none"sv));
+            MUST(m_inner_text_element->style_for_bindings()->set_property(CSS::PropertyID::MarginInlineEnd, u"0"sv));
         } else {
-            MUST(m_chevron_icon_element->style_for_bindings()->set_property(CSS::PropertyID::Display, "block"_string));
+            MUST(m_chevron_icon_element->style_for_bindings()->set_property(CSS::PropertyID::Display, u"block"sv));
+            MUST(m_inner_text_element->style_for_bindings()->set_property(CSS::PropertyID::MarginInlineEnd, u"20px"sv));
         }
     }
 }
@@ -723,30 +726,36 @@ void HTMLSelectElement::create_shadow_tree_if_needed()
         display: flex;
         align-items: center;
         height: 100%;
-    )~~~"_string);
+        position: relative;
+    )~~~"_utf16);
     MUST(shadow_root->append_child(border));
 
     m_inner_text_element = DOM::create_element(document(), HTML::TagNames::div, Namespace::HTML).release_value_but_fixme_should_propagate_errors();
     m_inner_text_element->set_attribute_value(HTML::AttributeNames::style, R"~~~(
         flex: 1;
-    )~~~"_string);
+        margin-inline-end: 20px;
+    )~~~"_utf16);
     MUST(border->append_child(*m_inner_text_element));
 
+    // NB: The chevron icon is positioned out of flow so that the label is the wrapper's only flex item, keeping the
+    //     baseline of the select derived from the label text. The label's margin-inline-end reserves its space.
     m_chevron_icon_element = DOM::create_element(document(), HTML::TagNames::div, Namespace::HTML).release_value_but_fixme_should_propagate_errors();
     m_chevron_icon_element->set_attribute_value(HTML::AttributeNames::style, R"~~~(
+        position: absolute;
+        inset-inline-end: 0;
+        top: calc(50% - 8px);
         width: 16px;
         height: 16px;
-        margin-left: 4px;
-    )~~~"_string);
+    )~~~"_utf16);
 
     auto chevron_svg_element = DOM::create_element(document(), SVG::TagNames::svg, Namespace::SVG).release_value_but_fixme_should_propagate_errors();
-    chevron_svg_element->set_attribute_value(SVG::AttributeNames::xmlns, Namespace::SVG.to_string());
-    chevron_svg_element->set_attribute_value(SVG::AttributeNames::viewBox, "0 0 24 24"_string);
+    chevron_svg_element->set_attribute_value(SVG::AttributeNames::xmlns, Namespace::SVG.to_utf16_string());
+    chevron_svg_element->set_attribute_value(SVG::AttributeNames::viewBox, "0 0 24 24"_utf16);
     MUST(m_chevron_icon_element->append_child(chevron_svg_element));
 
     auto chevron_path_element = DOM::create_element(document(), SVG::TagNames::path, Namespace::SVG).release_value_but_fixme_should_propagate_errors();
-    chevron_path_element->set_attribute_value(SVG::AttributeNames::fill, "currentcolor"_string);
-    chevron_path_element->set_attribute_value(SVG::AttributeNames::d, "M7.41,8.58L12,13.17L16.59,8.58L18,10L12,16L6,10L7.41,8.58Z"_string);
+    chevron_path_element->set_attribute_value(SVG::AttributeNames::fill, "currentcolor"_utf16);
+    chevron_path_element->set_attribute_value(SVG::AttributeNames::d, "M7.41,8.58L12,13.17L16.59,8.58L18,10L12,16L6,10L7.41,8.58Z"_utf16);
     MUST(chevron_svg_element->append_child(chevron_path_element));
 
     MUST(border->append_child(*m_chevron_icon_element));
@@ -773,7 +782,7 @@ void HTMLSelectElement::clone_selected_option_into_select_button()
 
     // 3. If option is not null, then set text to option's label.
     if (option.has_value())
-        text = Utf16String::from_utf8((*option)->label());
+        text = (*option)->label();
 
     // 4. Set select's select fallback button text to text.
     m_inner_text_element->string_replace_all(move(text));

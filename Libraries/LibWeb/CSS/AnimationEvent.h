@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <AK/Utf16String.h>
 #include <LibWeb/Bindings/AnimationEvent.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/DOM/Event.h>
@@ -18,28 +19,34 @@ class AnimationEvent : public DOM::Event {
     GC_DECLARE_ALLOCATOR(AnimationEvent);
 
 public:
-    [[nodiscard]] static GC::Ref<AnimationEvent> create(JS::Realm&, FlyString const& type, Bindings::AnimationEventInit const& event_init = {});
-    static WebIDL::ExceptionOr<GC::Ref<AnimationEvent>> construct_impl(JS::Realm&, FlyString const& type, Bindings::AnimationEventInit const& event_init);
+    [[nodiscard]] static GC::Ref<AnimationEvent> create(JS::Realm&, Utf16FlyString const& type, Bindings::AnimationEventInit const& event_init = {});
+    static WebIDL::ExceptionOr<GC::Ref<AnimationEvent>> construct_impl(JS::Realm&, Utf16FlyString const& type, Bindings::AnimationEventInit const& event_init);
 
     virtual ~AnimationEvent() override = default;
 
-    FlyString const& animation_name() const { return m_animation_name; }
+    Utf16String const& animation_name() const { return m_animation_name; }
     double elapsed_time() const { return m_elapsed_time; }
-    FlyString const& pseudo_element() const { return m_pseudo_element; }
+    Utf16String const& pseudo_element() const { return m_pseudo_element; }
+    GC::Ptr<CSSAnimation> animation() const { return m_animation; }
+
+    virtual void visit_edges(Cell::Visitor&) override;
 
 private:
-    AnimationEvent(JS::Realm&, FlyString const& type, Bindings::AnimationEventInit const& event_init);
+    AnimationEvent(JS::Realm&, Utf16FlyString const& type, Bindings::AnimationEventInit const& event_init);
 
     virtual void initialize(JS::Realm&) override;
 
     // https://www.w3.org/TR/css-animations-1/#dom-animationevent-animationname
-    FlyString m_animation_name {};
+    Utf16String m_animation_name {};
 
     // https://www.w3.org/TR/css-animations-1/#dom-animationevent-elapsedtime
     double m_elapsed_time { 0.0 };
 
     // https://www.w3.org/TR/css-animations-1/#dom-animationevent-pseudoelement
-    FlyString m_pseudo_element {};
+    Utf16String m_pseudo_element {};
+
+    // https://drafts.csswg.org/css-animations-2/#dom-animationevent-animation
+    GC::Ptr<CSSAnimation> m_animation;
 };
 
 }

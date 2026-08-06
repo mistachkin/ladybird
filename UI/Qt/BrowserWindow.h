@@ -11,6 +11,7 @@
 #include <LibWeb/HTML/ActivateTab.h>
 #include <LibWeb/HTML/AudioPlayState.h>
 #include <LibWebView/Forward.h>
+#include <LibWebView/PrivateBrowsing.h>
 #include <LibWebView/Settings.h>
 #include <UI/Qt/Tab.h>
 #include <UI/Qt/TabBar.h>
@@ -18,7 +19,6 @@
 #include <QIcon>
 #include <QMainWindow>
 #include <QPushButton>
-#include <QRect>
 #include <QTabBar>
 
 class QPropertyAnimation;
@@ -93,25 +93,61 @@ public:
         No,
         Yes,
     };
+    class TabLocation {
+        friend class BrowserWindow;
 
-    BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow is_popup_window = IsPopupWindow::No, Tab* parent_tab = nullptr, Optional<u64> page_index = {});
+    private:
+        enum class Kind {
+            End,
+            AfterCurrentTab,
+            AfterTab,
+        };
+
+    public:
+        static TabLocation end() { return { Kind::End, nullptr }; }
+        static TabLocation after_current_tab() { return { Kind::AfterCurrentTab, nullptr }; }
+        static TabLocation after_tab(Tab& tab) { return { Kind::AfterTab, &tab }; }
+
+    private:
+        Kind kind() const { return m_kind; }
+        Tab* tab() const { return m_tab; }
+
+        TabLocation(Kind kind, Tab* tab)
+            : m_kind(kind)
+            , m_tab(tab)
+        {
+        }
+
+        Kind m_kind;
+        Tab* m_tab { nullptr };
+    };
+
+    BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow is_popup_window = IsPopupWindow::No, WebView::IsPrivate = WebView::IsPrivate::No, Tab* parent_tab = nullptr, Optional<u64> page_index = {});
     virtual ~BrowserWindow() override;
 
     WebContentView& view() const { return m_current_tab->view(); }
+    WebView::IsPrivate is_private() const { return m_is_private; }
 
     int tab_count() { return m_tabs_container->count(); }
     int tab_index(Tab*);
 
-    Tab& create_new_tab(Web::HTML::ActivateTab activate_tab);
+    Tab& create_new_tab(Web::HTML::ActivateTab activate_tab, TabLocation);
     Tab* current_tab() const { return m_current_tab; }
     bool activate_tab_with_url(URL::URL const&);
     FullscreenMode& fullscreen_mode();
 
     QMenu& hamburger_menu() const { return *m_hamburger_menu; }
-    static bool uses_client_side_decorations();
+    static bool has_chrome_in_titlebar();
 
     QAction& new_window_action() const { return *m_new_window_action; }
     QAction& find_action() const { return *m_find_in_page_action; }
+
+    template<typename Callback>
+    void for_each_tab(Callback&& callback)
+    {
+        for (int i = 0; i < m_tabs_container->count(); ++i)
+            callback(*m_tabs_container->tab(i));
+    }
 
     void update_tabs_display();
 
@@ -135,7 +171,7 @@ public slots:
     void tab_title_changed(int index, QString const&);
     void tab_favicon_changed(int index, QIcon const& icon);
     void tab_audio_play_state_changed(int index, Web::HTML::AudioPlayState);
-    Tab& new_tab_from_url(URL::URL const&, Web::HTML::ActivateTab);
+    Tab& new_tab_from_url(URL::URL const&, Web::HTML::ActivateTab, TabLocation);
     Tab& new_child_tab(Web::HTML::ActivateTab, Tab& parent, Optional<u64> page_index);
     void activate_tab(int index);
     bool definitely_close_tab(int index);
@@ -166,28 +202,17 @@ private:
     Tab& create_new_tab(Web::HTML::ActivateTab, Tab& parent, Optional<u64> page_index);
     void initialize_tab(Tab*);
     void uninitialize_tab(Tab*);
+    void update_window_title(QString const&);
 
     void set_current_tab(Tab* tab);
-    bool position_is_in_rounded_corner_cutout(QPoint const&) const;
     Qt::Edges resize_edges_for_position(QPoint const&) const;
     Optional<Qt::CursorShape> resize_cursor_for_edges(Qt::Edges) const;
-    bool start_window_resize(Qt::Edges, QPoint const& global_position);
-    void update_window_resize(QPoint const& global_position);
-    void finish_window_resize();
+    bool filter_native_window_event(QWindow&, QEvent&);
     void update_resize_cursor(QPoint const&);
     void refresh_resize_cursor_at_current_position(bool force_reapply = false);
     void clear_resize_cursor();
-    void update_window_corners();
-    void update_appkit_window_resizability();
     bool should_draw_window_border() const;
     void update_window_border();
-
-    template<typename Callback>
-    void for_each_tab(Callback&& callback)
-    {
-        for (int i = 0; i < m_tabs_container->count(); ++i)
-            callback(*m_tabs_container->tab(i));
-    }
 
     void initialize_tab_buttons(Tab*);
     void create_menu_bar_window_controls();
@@ -196,6 +221,7 @@ private:
     void update_menu_bar_visibility();
     void update_menu_bar_window_control_icons();
     void update_window_decoration_state();
+    static bool uses_client_side_decorations();
     void toggle_window_maximized();
     bool start_window_move();
     bool connect_window_screen_changed_signal();
@@ -214,6 +240,8 @@ private:
     double m_device_pixel_ratio { 0 };
     double m_refresh_rate { 60.0 };
 
+    WebView::IsPrivate m_is_private { WebView::IsPrivate::No };
+
     TabWidget* m_tabs_container { nullptr };
     Tab* m_current_tab { nullptr };
     DevToolsBanner* m_devtools_banner { nullptr };
@@ -228,6 +256,7 @@ private:
 
     QAction* m_new_tab_action { nullptr };
     QAction* m_new_window_action { nullptr };
+    QAction* m_new_private_window_action { nullptr };
     QAction* m_reopen_recently_closed_tab_action { nullptr };
     QAction* m_find_in_page_action { nullptr };
 
@@ -239,10 +268,6 @@ private:
     bool m_restore_to_maximized { false };
     bool m_should_record_closed_window_on_close { true };
     bool m_resize_cursor_active { false };
-    bool m_is_resizing_window { false };
-    Qt::Edges m_resize_edges {};
-    QPoint m_resize_start_global_position;
-    QRect m_resize_start_geometry;
 };
 
 }

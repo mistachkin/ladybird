@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <AK/Utf16FlyString.h>
 #include <LibWeb/ARIA/Roles.h>
 #include <LibWeb/DOM/HTMLCollection.h>
 #include <LibWeb/HTML/HTMLElement.h>
@@ -20,10 +21,9 @@ class HTMLFieldSetElement final
 public:
     virtual ~HTMLFieldSetElement() override;
 
-    String const& type() const
+    Utf16FlyString type() const
     {
-        static String const& fieldset = *new String("fieldset"_string);
-        return fieldset;
+        return "fieldset"_utf16_fly_string;
     }
 
     bool is_disabled() const;
@@ -42,7 +42,7 @@ public:
 
     virtual Optional<ARIA::Role> default_role() const override { return ARIA::Role::group; }
 
-    virtual RefPtr<Layout::Node> create_layout_node(CSS::ComputedProperties const&) override;
+    virtual RefPtr<Layout::Node> create_layout_node(NonnullRefPtr<CSS::ComputedValues const>) override;
     Layout::FieldSetBox* layout_node();
     Layout::FieldSetBox const* layout_node() const;
 
@@ -52,7 +52,7 @@ private:
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Cell::Visitor&) override;
 
-    virtual void attribute_changed(FlyString const&, Optional<String> const&, Optional<String> const&, Optional<FlyString> const&) override;
+    virtual void attribute_changed(Utf16FlyString const&, Optional<Utf16String> const&, Optional<Utf16String> const&, Optional<Utf16FlyString> const&) override;
 
     virtual bool is_html_fieldset_element() const override { return true; }
 

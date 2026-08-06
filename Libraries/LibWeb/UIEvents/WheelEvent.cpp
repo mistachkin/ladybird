@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Math.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/Bindings/WheelEvent.h>
 #include <LibWeb/HTML/EventNames.h>
@@ -17,12 +18,19 @@ namespace Web::UIEvents {
 
 GC_DEFINE_ALLOCATOR(WheelEvent);
 
-WheelEvent::WheelEvent(JS::Realm& realm, FlyString const& event_name, Bindings::WheelEventInit const& event_init, double page_x, double page_y, double offset_x, double offset_y)
+static WebIDL::Long legacy_wheel_delta_from_delta(double delta)
+{
+    return AK::clamp_to<WebIDL::Long>(-delta);
+}
+
+WheelEvent::WheelEvent(JS::Realm& realm, Utf16FlyString const& event_name, Bindings::WheelEventInit const& event_init, double page_x, double page_y, double offset_x, double offset_y)
     : MouseEvent(realm, event_name, event_init, page_x, page_y, offset_x, offset_y)
     , m_delta_x(event_init.delta_x)
     , m_delta_y(event_init.delta_y)
     , m_delta_z(event_init.delta_z)
     , m_delta_mode(event_init.delta_mode)
+    , m_wheel_delta_x(event_init.wheel_delta_x ? event_init.wheel_delta_x : legacy_wheel_delta_from_delta(event_init.delta_x))
+    , m_wheel_delta_y(event_init.wheel_delta_y ? event_init.wheel_delta_y : legacy_wheel_delta_from_delta(event_init.delta_y))
 {
 }
 
@@ -34,17 +42,17 @@ void WheelEvent::initialize(JS::Realm& realm)
     Base::initialize(realm);
 }
 
-GC::Ref<WheelEvent> WheelEvent::construct_impl(JS::Realm& realm, FlyString const& event_name, Bindings::WheelEventInit const& wheel_event_init)
+GC::Ref<WheelEvent> WheelEvent::construct_impl(JS::Realm& realm, Utf16FlyString const& event_name, Bindings::WheelEventInit const& wheel_event_init)
 {
     return create(realm, event_name, wheel_event_init, wheel_event_init.client_x, wheel_event_init.client_y, wheel_event_init.client_x, wheel_event_init.client_y);
 }
 
-GC::Ref<WheelEvent> WheelEvent::create(JS::Realm& realm, FlyString const& event_name, Bindings::WheelEventInit const& event_init, double page_x, double page_y, double offset_x, double offset_y)
+GC::Ref<WheelEvent> WheelEvent::create(JS::Realm& realm, Utf16FlyString const& event_name, Bindings::WheelEventInit const& event_init, double page_x, double page_y, double offset_x, double offset_y)
 {
     return realm.create<WheelEvent>(realm, event_name, event_init, page_x, page_y, offset_x, offset_y);
 }
 
-WebIDL::ExceptionOr<GC::Ref<WheelEvent>> WheelEvent::create_from_platform_event(JS::Realm& realm, GC::Ptr<HTML::WindowProxy> window_proxy, FlyString const& event_name, CSSPixelPoint screen, CSSPixelPoint page, CSSPixelPoint client, CSSPixelPoint offset, double delta_x, double delta_y, unsigned button, unsigned buttons, unsigned modifiers, WheelEventIsCancelable is_cancelable)
+WebIDL::ExceptionOr<GC::Ref<WheelEvent>> WheelEvent::create_from_platform_event(JS::Realm& realm, GC::Ptr<HTML::WindowProxy> window_proxy, Utf16FlyString const& event_name, CSSPixelPoint screen, CSSPixelPoint page, CSSPixelPoint client, CSSPixelPoint offset, double delta_x, double delta_y, unsigned button, unsigned buttons, unsigned modifiers, WheelEventIsCancelable is_cancelable)
 {
     Bindings::WheelEventInit event_init {};
     event_init.ctrl_key = modifiers & Mod_Ctrl;

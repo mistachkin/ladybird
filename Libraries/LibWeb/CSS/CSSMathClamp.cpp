@@ -36,7 +36,7 @@ WebIDL::ExceptionOr<GC::Ref<CSSMathClamp>> CSSMathClamp::construct_impl(JS::Real
                     .added_to(value_rectified->type())
                     .map([&](auto&& type) { return type.added_to(upper_rectified->type()); });
     if (!type.has_value()) {
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Cannot create a CSSMathClamp with values of incompatible types"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Cannot create a CSSMathClamp with values of incompatible types"_utf16 };
     }
 
     // 3. Return a new CSSMathClamp whose lower, value, and upper internal slots are set to lower, value, and upper, respectively.
@@ -145,12 +145,12 @@ Optional<SumValue> CSSMathClamp::create_a_sum_value() const
     };
 }
 
-WebIDL::ExceptionOr<NonnullRefPtr<CalculationNode const>> CSSMathClamp::create_calculation_node(CalculationContext const& context) const
+WebIDL::ExceptionOr<CalcNodeRef> CSSMathClamp::create_calculation_node(CalculationContext const& context) const
 {
     auto lower = TRY(m_lower->create_calculation_node(context));
     auto value = TRY(m_value->create_calculation_node(context));
     auto upper = TRY(m_upper->create_calculation_node(context));
-    return ClampCalculationNode::create(move(lower), move(value), move(upper));
+    return CalcNodeRef::clamp(move(lower), move(value), move(upper));
 }
 
 }

@@ -124,7 +124,9 @@ bool RequestClient::stop_request(Badge<Request>, Request& request)
     if (!stopped_request.has_value())
         return false;
 
-    (void)IPCProxy::stop_request(request.id());
+    // This is sent asynchronously so that stopping a request whose RequestServer connection has been lost does not
+    // crash on a synchronous send to a dead connection.
+    async_stop_request(request.id());
     return true;
 }
 
@@ -208,14 +210,14 @@ void RequestClient::request_finished(u64 request_id, u64 total_size, RequestTimi
     }
 }
 
-void RequestClient::headers_became_available(u64 request_id, Vector<HTTP::Header> response_headers, Optional<u32> status_code, Optional<String> reason_phrase, Optional<IPC::File> javascript_bytecode_file, u64 javascript_bytecode_size, Optional<u64> javascript_bytecode_cache_vary_key)
+void RequestClient::headers_became_available(u64 request_id, Vector<HTTP::Header> response_headers, Optional<u32> status_code, Optional<String> reason_phrase, Optional<IPC::File> javascript_bytecode_file, u64 javascript_bytecode_size, Optional<u64> javascript_bytecode_cache_vary_key, CameFromCache came_from_cache)
 {
     Optional<Core::ImmutableBytes> javascript_bytecode;
     if (javascript_bytecode_file.has_value())
         javascript_bytecode = map_javascript_bytecode_file(javascript_bytecode_file->take_fd(), javascript_bytecode_size);
 
     if (auto request = m_requests.get(request_id); request.has_value())
-        (*request)->did_receive_headers({}, HTTP::HeaderList::create(move(response_headers)), status_code, reason_phrase, move(javascript_bytecode), javascript_bytecode_cache_vary_key);
+        (*request)->did_receive_headers({}, HTTP::HeaderList::create(move(response_headers)), status_code, reason_phrase, move(javascript_bytecode), javascript_bytecode_cache_vary_key, came_from_cache);
     else
         warnln("Received headers for non-existent request {}", request_id);
 }
@@ -229,12 +231,12 @@ void RequestClient::request_transferred(u64 request_id)
     (*request)->did_transfer({});
 }
 
-void RequestClient::retrieve_http_cookie(int client_id, u64 request_id, RequestServer::RequestType request_type, URL::URL url)
+void RequestClient::retrieve_http_cookie(int client_id, u64 request_id, RequestServer::RequestType request_type, URL::URL url, RequestServer::IsPrivate is_private)
 {
     String cookie;
 
     if (on_retrieve_http_cookie)
-        cookie = on_retrieve_http_cookie(url);
+        cookie = on_retrieve_http_cookie(url, is_private);
 
     async_retrieved_http_cookie(client_id, request_id, request_type, cookie);
 }

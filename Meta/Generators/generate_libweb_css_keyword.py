@@ -30,8 +30,10 @@ def write_header_file(out: TextIO, keyword_data: list) -> None:
     out.write(f"""
 #pragma once
 
-#include <AK/StringView.h>
 #include <AK/Traits.h>
+#include <AK/StringView.h>
+#include <AK/Utf16FlyString.h>
+#include <AK/Utf16View.h>
 #include <LibWeb/Export.h>
 
 namespace Web::CSS {{
@@ -45,11 +47,18 @@ enum class Keyword : {underlying_type} {{
     {keyword_name(name)},
 """)
 
-    out.write("""
-};
+    out.write(f"""
+}};
 
+// Invalid plus every generated keyword.
+static constexpr size_t number_of_keywords = {len(keyword_data) + 1};
+""")
+
+    out.write("""
 WEB_API Optional<Keyword> keyword_from_string(StringView);
+WEB_API Optional<Keyword> keyword_from_string(Utf16View);
 StringView string_from_keyword(Keyword);
+Utf16FlyString utf16_fly_string_from_keyword(Keyword);
 
 // https://www.w3.org/TR/css-values-4/#common-keywords
 // https://drafts.csswg.org/css-cascade-4/#valdef-all-revert
@@ -62,6 +71,20 @@ inline bool is_css_wide_keyword(StringView name)
         || name.equals_ignoring_ascii_case("unset"sv);
 }
 
+inline bool is_css_wide_keyword(Keyword keyword)
+{
+    switch (keyword) {
+    case Keyword::Inherit:
+    case Keyword::Initial:
+    case Keyword::Revert:
+    case Keyword::RevertLayer:
+    case Keyword::Unset:
+        return true;
+    default:
+        return false;
+    }
+}
+
 }
 
 """)
@@ -72,6 +95,7 @@ def write_implementation_file(out: TextIO, keyword_data: list) -> None:
 #include <AK/Assertions.h>
 #include <AK/HashMap.h>
 #include <AK/NeverDestroyed.h>
+#include <AK/Utf16FlyString.h>
 #include <LibWeb/CSS/Keyword.h>
 
 namespace Web::CSS {
@@ -96,6 +120,24 @@ Optional<Keyword> keyword_from_string(StringView string)
     return stringview_to_keyword_map().get(string);
 }
 
+Optional<Keyword> keyword_from_string(Utf16View string)
+{
+    if (string.has_ascii_storage()) {
+        auto span = string.ascii_span();
+        return keyword_from_string(StringView { span.data(), span.size() });
+    }
+""")
+
+    for name in keyword_data:
+        out.write(f"""
+    if (string.equals_ignoring_ascii_case("{name}"_utf16_fly_string.view()))
+        return Keyword::{keyword_name(name)};
+""")
+
+    out.write("""
+    return {};
+}
+
 StringView string_from_keyword(Keyword keyword) {
     switch (keyword) {
 """)
@@ -109,6 +151,22 @@ StringView string_from_keyword(Keyword keyword) {
     out.write("""
     default:
         return "(invalid CSS::Keyword)"sv;
+    }
+}
+
+Utf16FlyString utf16_fly_string_from_keyword(Keyword keyword) {
+    switch (keyword) {
+""")
+
+    for name in keyword_data:
+        out.write(f"""
+    case Keyword::{keyword_name(name)}:
+        return "{name}"_utf16_fly_string;
+        """)
+
+    out.write("""
+    default:
+        return "(invalid CSS::Keyword)"_utf16_fly_string;
     }
 }
 

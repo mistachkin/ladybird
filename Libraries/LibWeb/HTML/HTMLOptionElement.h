@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <AK/Utf16View.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/HTML/HTMLElement.h>
 
@@ -26,13 +27,13 @@ public:
 
     Utf16String value() const;
     virtual Utf16String form_value() const override { return value(); }
-    void set_value(Utf16String const&);
+    void set_value(Utf16View);
 
     Utf16String text() const;
-    void set_text(Utf16String const&);
+    void set_text(Utf16View);
 
-    [[nodiscard]] String label() const;
-    void set_label(String const&);
+    [[nodiscard]] Utf16String label() const;
+    void set_label(Utf16View);
 
     int index() const;
 
@@ -61,7 +62,7 @@ private:
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Cell::Visitor&) override;
 
-    virtual void attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
+    virtual void attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_) override;
 
     virtual void inserted() override;
     virtual void removed_from(IsSubtreeRoot, Node* old_ancestor, Node& old_root) override;

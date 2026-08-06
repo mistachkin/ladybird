@@ -16,18 +16,20 @@ class PopStateEvent final : public DOM::Event {
     GC_DECLARE_ALLOCATOR(PopStateEvent);
 
 public:
-    [[nodiscard]] static GC::Ref<PopStateEvent> create(JS::Realm&, FlyString const& event_name, Bindings::PopStateEventInit const&);
-    [[nodiscard]] static GC::Ref<PopStateEvent> construct_impl(JS::Realm&, FlyString const& event_name, Bindings::PopStateEventInit const&);
+    [[nodiscard]] static GC::Ref<PopStateEvent> create(JS::Realm&, Utf16FlyString const& event_name, Bindings::PopStateEventInit const&);
+    [[nodiscard]] static GC::Ref<PopStateEvent> construct_impl(JS::Realm&, Utf16FlyString const& event_name, Bindings::PopStateEventInit const&);
 
     JS::Value const& state() const { return m_state; }
+    bool has_ua_visual_transition() const { return m_has_ua_visual_transition; }
 
 private:
-    PopStateEvent(JS::Realm&, FlyString const& event_name, Bindings::PopStateEventInit const& event_init);
+    PopStateEvent(JS::Realm&, Utf16FlyString const& event_name, Bindings::PopStateEventInit const& event_init);
 
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(JS::Cell::Visitor& visitor) override;
 
     JS::Value m_state { JS::js_null() };
+    bool m_has_ua_visual_transition { false };
 };
 
 }

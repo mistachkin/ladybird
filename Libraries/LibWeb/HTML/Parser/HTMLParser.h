@@ -6,10 +6,16 @@
 
 #pragma once
 
+#include <AK/Utf16String.h>
+#include <AK/Utf16View.h>
 #include <LibGfx/Color.h>
 #include <LibJS/Heap/Cell.h>
+#include <LibURL/Forward.h>
+#include <LibWeb/CSS/Parser/Parser.h>
+#include <LibWeb/DOM/DocumentFragment.h>
 #include <LibWeb/DOM/FragmentSerializationMode.h>
 #include <LibWeb/Export.h>
+#include <LibWeb/Forward.h>
 #include <LibWeb/HTML/Parser/HTMLTokenizer.h>
 #include <LibWeb/HTML/Parser/ParserScriptingMode.h>
 #include <LibWeb/MimeSniff/MimeType.h>
@@ -40,33 +46,42 @@ public:
     static GC::Ref<HTMLParser> create_for_scripting(DOM::Document&);
     static GC::Ref<HTMLParser> create_with_open_input_stream(DOM::Document&);
     static GC::Ref<HTMLParser> create_with_uncertain_encoding(DOM::Document&, ByteBuffer const& input, Optional<MimeSniff::MimeType> maybe_mime_type = {});
-    static GC::Ref<HTMLParser> create(DOM::Document&, StringView input, ParserScriptingMode, StringView encoding);
-    static GC::Ref<HTMLParser> create_for_decoded_string(DOM::Document&, StringView input, ParserScriptingMode, StringView encoding);
+    static GC::Ref<HTMLParser> create_from_byte_string(DOM::Document&, StringView input, ParserScriptingMode, StringView encoding);
+    static GC::Ref<HTMLParser> create_for_decoded_string(DOM::Document&, Utf16View input, ParserScriptingMode, Utf16View encoding);
 
     void run(HTMLTokenizer::StopAtInsertionPoint = HTMLTokenizer::StopAtInsertionPoint::No);
     void run(URL::URL const&, HTMLTokenizer::StopAtInsertionPoint = HTMLTokenizer::StopAtInsertionPoint::No);
     void run_until_completion(HTMLTokenizer::StopAtInsertionPoint = HTMLTokenizer::StopAtInsertionPoint::No);
     void pop_all_open_elements();
 
-    static void the_end(GC::Ref<DOM::Document>, GC::Ptr<HTMLParser> = nullptr);
+    struct ParserlessCompletionToken {
+        u64 parser_generation;
+    };
+    static ParserlessCompletionToken parserless_completion_token(DOM::Document const&);
+    static void the_end(GC::Ref<DOM::Document>, ParserlessCompletionToken);
+    static void the_end(GC::Ref<DOM::Document>, GC::Ptr<HTMLParser>);
 
     DOM::Document& document();
     enum class AllowDeclarativeShadowRoots {
         No,
         Yes,
     };
-    static WebIDL::ExceptionOr<Vector<GC::Root<DOM::Node>>> parse_html_fragment(DOM::Element& context_element, StringView markup, AllowDeclarativeShadowRoots = AllowDeclarativeShadowRoots::No, ParserScriptingMode = ParserScriptingMode::Inert);
+
+    static WebIDL::ExceptionOr<GC::Ref<DOM::DocumentFragment>> parse_html_fragment(Variant<GC::Ref<DOM::Element>, GC::Ref<DOM::DocumentFragment>> target, Utf16View markup,
+        AllowDeclarativeShadowRoots = AllowDeclarativeShadowRoots::No, ParserScriptingMode = ParserScriptingMode::Inert);
 
     enum class SerializableShadowRoots {
         No,
         Yes,
     };
-    static String serialize_html_fragment(DOM::Node const&, SerializableShadowRoots, ReadonlySpan<GC::Ref<DOM::ShadowRoot>>, DOM::FragmentSerializationMode = DOM::FragmentSerializationMode::Inner);
+    static Utf16String serialize_html_fragment(DOM::Node const&, SerializableShadowRoots, ReadonlySpan<GC::Ref<DOM::ShadowRoot>>, DOM::FragmentSerializationMode = DOM::FragmentSerializationMode::Inner);
 
     HTMLTokenizer& tokenizer() { return m_tokenizer; }
 
+    void set_allow_declarative_shadow_roots(AllowDeclarativeShadowRoots allow) { m_allow_declarative_shadow_roots = allow; }
+
     void configure_element_created_by_rust_parser(DOM::Element&);
-    GC::Ref<DOM::Element> create_element_for_rust_parser(HTMLToken const&, Optional<FlyString> const& namespace_, DOM::Node& intended_parent, bool had_duplicate_attribute, GC::Ptr<HTMLFormElement>, bool has_template_element_on_stack);
+    GC::Ref<DOM::Element> create_element_for_rust_parser(HTMLToken const&, Optional<Utf16FlyString> const& namespace_, DOM::Node& intended_parent, bool had_duplicate_attribute, GC::Ptr<HTMLFormElement>, bool has_template_element_on_stack);
     void prepare_svg_script_for_rust_parser(SVG::SVGScriptElement&, size_t source_line_number);
     void set_script_source_line_from_rust_parser(DOM::Element&, size_t source_line_number);
     void mark_script_already_started_from_rust_parser(HTMLScriptElement&);
@@ -94,7 +109,8 @@ private:
         Yes,
     };
 
-    HTMLParser(DOM::Document&, ParserScriptingMode, StringView input, StringView encoding, HTMLTokenizer::InputType = HTMLTokenizer::InputType::EncodedBytes);
+    HTMLParser(DOM::Document&, ParserScriptingMode, StringView input, StringView encoding);
+    HTMLParser(DOM::Document&, ParserScriptingMode, Utf16View input, Utf16View encoding);
     HTMLParser(DOM::Document&, ParserScriptingMode, ScriptCreatedParser);
 
     virtual void visit_edges(Cell::Visitor&) override;
@@ -108,12 +124,13 @@ private:
     // https://html.spec.whatwg.org/multipage/parsing.html#stop-the-speculative-html-parser
     void stop_the_speculative_html_parser();
 
-    GC::Ref<DOM::Element> create_element_for(HTMLToken const&, Optional<FlyString> const& namespace_, DOM::Node& intended_parent);
+    GC::Ref<DOM::Element> create_element_for(HTMLToken const&, Optional<Utf16FlyString> const& namespace_, DOM::Node& intended_parent);
     void increment_script_nesting_level();
     void decrement_script_nesting_level();
 
     void resume_after_parser_blocking_script();
     void invoke_post_parse_action();
+    static void the_end(GC::Ref<DOM::Document>, GC::Ptr<HTMLParser>, u64 parser_generation);
 
     HTMLTokenizer m_tokenizer;
     RustFfiHtmlParserHandle* m_rust_parser { nullptr };
@@ -122,6 +139,10 @@ private:
 
     // https://html.spec.whatwg.org/multipage/parsing.html#scripting-mode
     ParserScriptingMode m_scripting_mode {};
+
+    // https://html.spec.whatwg.org/multipage/parsing.html#allow-declarative-shadow-roots
+    AllowDeclarativeShadowRoots m_allow_declarative_shadow_roots { AllowDeclarativeShadowRoots::No };
+
     bool m_script_created { false };
 
     bool m_aborted { false };
@@ -138,6 +159,9 @@ private:
     GC::Ptr<HTMLFormElement> m_form_element;
     GC::Ptr<DOM::Element> m_context_element;
 
+    // https://html.spec.whatwg.org/multipage/parsing.html#root-insertion-target
+    GC::Ptr<DOM::DocumentFragment> m_root_insertion_target;
+
     // https://html.spec.whatwg.org/multipage/parsing.html#active-speculative-html-parser
     GC::Ptr<SpeculativeHTMLParser> m_active_speculative_html_parser;
 };
@@ -147,24 +171,27 @@ class HTMLParserEndState final : public JS::Cell {
     GC_DECLARE_ALLOCATOR(HTMLParserEndState);
 
 public:
-    static GC::Ref<HTMLParserEndState> create(GC::Ref<DOM::Document>, GC::Ptr<HTMLParser>);
+    static GC::Ref<HTMLParserEndState> create(GC::Ref<DOM::Document>, GC::Ptr<HTMLParser>, u64 parser_generation);
 
+    void cancel();
     void schedule_progress_check();
 
 private:
     enum class Phase {
         WaitingForDeferredScripts,
+        WaitingForDOMContentLoaded,
         WaitingForASAPScripts,
         WaitingForLoadEventDelay,
         Completed,
+        Cancelled,
     };
 
-    HTMLParserEndState(GC::Ref<DOM::Document>, GC::Ptr<HTMLParser>);
+    HTMLParserEndState(GC::Ref<DOM::Document>, GC::Ptr<HTMLParser>, u64 parser_generation);
 
     virtual void visit_edges(Cell::Visitor&) override;
 
     void check_progress();
-    void advance_to_asap_scripts_phase();
+    void advance_to_dom_content_loaded_phase();
     void complete();
 
     Phase m_phase { Phase::WaitingForDeferredScripts };
@@ -172,12 +199,13 @@ private:
 
     GC::Ref<DOM::Document> m_document;
     GC::Ptr<HTMLParser> m_parser;
+    u64 m_parser_generation { 0 };
     GC::Ref<Platform::Timer> m_timeout;
 };
 
-RefPtr<CSS::StyleValue const> parse_dimension_value(StringView);
-RefPtr<CSS::StyleValue const> parse_nonzero_dimension_value(StringView);
-Optional<Color> parse_legacy_color_value(StringView);
-RefPtr<CSS::StyleValue const> parse_table_child_element_align_value(StringView);
+RefPtr<CSS::StyleValue const> parse_dimension_value(Utf16View);
+RefPtr<CSS::StyleValue const> parse_nonzero_dimension_value(Utf16View);
+Optional<Color> parse_legacy_color_value(Utf16View);
+RefPtr<CSS::StyleValue const> parse_table_child_element_align_value(Utf16View);
 
 }

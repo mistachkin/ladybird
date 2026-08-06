@@ -43,18 +43,13 @@ void Clipboard::initialize(JS::Realm& realm)
 }
 
 // https://w3c.github.io/clipboard-apis/#os-specific-well-known-format
-static String os_specific_well_known_format(StringView mime_type_string)
+static String os_specific_well_known_format(MimeSniff::MimeType const& mime_type)
 {
-    // NOTE: Here we always takes the Linux case, and defer to the browser process to handle OS specific implementations.
-    auto mime_type = MimeSniff::MimeType::parse(mime_type_string);
-    if (!mime_type.has_value())
-        return {};
-
     // 1. Let wellKnownFormat be an empty string.
     String well_known_format {};
 
     // 2. If mimeType’s essence is "text/plain", then
-    if (auto const& essence = mime_type->essence(); essence == "text/plain"sv) {
+    if (auto const& essence = mime_type.essence(); essence == "text/plain"sv) {
         // On Windows, follow the convention described below:
         //     Assign CF_UNICODETEXT to wellKnownFormat.
         // On MacOS, follow the convention described below:
@@ -88,10 +83,31 @@ static String os_specific_well_known_format(StringView mime_type_string)
     return well_known_format;
 }
 
+static String os_specific_well_known_format(StringView mime_type_string)
+{
+    // NOTE: Here we always takes the Linux case, and defer to the browser process to handle OS specific implementations.
+    auto mime_type = MimeSniff::MimeType::parse(mime_type_string);
+    if (!mime_type.has_value())
+        return {};
+
+    return os_specific_well_known_format(*mime_type);
+}
+
+static String os_specific_well_known_format(Utf16View mime_type_string)
+{
+    // NOTE: Here we always takes the Linux case, and defer to the browser process to handle OS specific implementations.
+    auto mime_type = MimeSniff::MimeType::parse(mime_type_string);
+    if (!mime_type.has_value())
+        return {};
+
+    return os_specific_well_known_format(*mime_type);
+}
+
 // https://w3c.github.io/clipboard-apis/#write-blobs-and-option-to-the-clipboard
 static void write_blobs_and_option_to_clipboard(JS::Realm& realm, ReadonlySpan<GC::Ref<FileAPI::Blob>> items, Utf16String const& presentation_style)
 {
     auto& window = as<HTML::Window>(realm.global_object());
+    Vector<SystemClipboardRepresentation> representations;
 
     // FIXME: 1. Let webCustomFormats be a sequence<Blob>.
 
@@ -118,8 +134,10 @@ static void write_blobs_and_option_to_clipboard(JS::Realm& realm, ReadonlySpan<G
         auto payload = MUST(TextCodec::convert_input_to_utf8_using_given_decoder_unless_there_is_a_byte_order_mark(*decoder, item->raw_bytes()));
 
         // 4. Insert payload and presentationStyle into the system clipboard using formatString as the native clipboard format.
-        window.page().client().page_did_insert_clipboard_entry({ payload.to_byte_string(), move(format_string) }, presentation_style.to_byte_string());
+        representations.empend(payload.to_byte_string(), move(format_string));
     }
+
+    window.page().client().page_did_insert_clipboard_item({ move(representations) }, presentation_style.to_byte_string());
 
     // FIXME: 3. Write web custom formats given webCustomFormats.
 }
@@ -231,7 +249,7 @@ GC::Ref<WebIDL::Promise> Clipboard::read(Bindings::ClipboardUnsanitizedFormats f
                     // 3. Let representation be a new representation.
                     ClipboardItem::Representation representation {
                         // 4. Set representation’s MIME type to mimeType.
-                        .mime_type = move(mime_type),
+                        .mime_type = Utf16String::from_utf8(mime_type),
 
                         // 7. Resolve representation’s data with systemClipboardRepresentation’s data.
                         .data = WebIDL::create_resolved_promise(realm, JS::PrimitiveString::create(realm.vm(), Utf16String::from_utf8(string))),
@@ -459,7 +477,7 @@ GC::Ref<WebIDL::Promise> Clipboard::write(GC::RootVector<GC::Ref<ClipboardItem>>
                                 auto const& data_as_bytes = value.as_string().utf16_string_view().to_utf8_but_should_be_ported_to_utf16();
 
                                 // 2. Let blobData be a Blob created using dataAsBytes with its type set to representation’s MIME type.
-                                auto blob_data = FileAPI::Blob::create(realm, MUST(ByteBuffer::copy(data_as_bytes.bytes())), move(mime_type));
+                                auto blob_data = FileAPI::Blob::create(realm, MUST(ByteBuffer::copy(data_as_bytes.bytes())), mime_type);
 
                                 // 3. Add blobData to itemList.
                                 item_list.append(blob_data);
@@ -538,7 +556,7 @@ GC::Ref<WebIDL::Promise> Clipboard::write(GC::RootVector<GC::Ref<ClipboardItem>>
 }
 
 // https://w3c.github.io/clipboard-apis/#dom-clipboard-writetext
-GC::Ref<WebIDL::Promise> Clipboard::write_text(String data)
+GC::Ref<WebIDL::Promise> Clipboard::write_text(Utf16String data)
 {
     // 1. Let realm be this's relevant realm.
     auto& realm = HTML::relevant_realm(*this);
@@ -572,7 +590,8 @@ GC::Ref<WebIDL::Promise> Clipboard::write_text(String data)
             // 2. Let textBlob be a new Blob created with: type attribute set to "text/plain;charset=utf-8", and its
             //    underlying byte sequence set to the UTF-8 encoding of data.
             //    Note: On Windows replace `\n` characters with `\r\n` in data before creating textBlob.
-            auto text_blob = FileAPI::Blob::create(realm, MUST(ByteBuffer::copy(data.bytes())), "text/plain;charset=utf-8"_string);
+            auto data_as_utf8 = data.to_utf8();
+            auto text_blob = FileAPI::Blob::create(realm, MUST(ByteBuffer::copy(data_as_utf8.bytes())), "text/plain;charset=utf-8"_utf16);
 
             // 3. Add textBlob to itemList.
             item_list.append(text_blob);

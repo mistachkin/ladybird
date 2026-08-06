@@ -28,7 +28,7 @@
 #include <LibWeb/Internals/Internals.h>
 #include <LibWeb/Loader/GeneratedPagesLoader.h>
 #include <LibWeb/Loader/ResourceLoader.h>
-#include <LibWeb/Painting/PaintableBox.h>
+#include <LibWeb/Painting/Paintable.h>
 #include <LibWeb/Platform/EventLoopPlugin.h>
 #include <LibWeb/Platform/FontPlugin.h>
 #include <LibWeb/WebIDL/Tracing.h>
@@ -131,6 +131,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
     Web::Platform::EventLoopPlugin::install(*new Web::Platform::EventLoopPlugin);
 
     auto config_path = WebView::s_ladybird_resource_root;
+    StringView cache_path;
     StringView mach_server_name {};
     Vector<ByteString> certificates;
     bool enable_test_mode = false;
@@ -147,7 +148,6 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
     bool disable_scrollbar_painting = false;
     bool disable_async_scrolling = false;
     bool disable_sandbox = false;
-    bool report_session_history_updates_in_test_mode = false;
     StringView echo_server_port_string_view {};
     StringView default_time_zone {};
     StringView style_invalidation_counter_dump_interval {};
@@ -155,6 +155,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
 
     Core::ArgsParser args_parser;
     args_parser.add_option(config_path, "Ladybird configuration path", "config-path", 0, "config_path");
+    args_parser.add_option(cache_path, "Path to the profile cache", "cache-path", 0, "path");
     args_parser.add_option(enable_test_mode, "Enable test mode", "test-mode");
     args_parser.add_option(expose_experimental_interfaces, "Expose experimental IDL interfaces", "expose-experimental-interfaces");
     args_parser.add_option(expose_internals_object, "Expose internals object", "expose-internals-object");
@@ -183,7 +184,6 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
     args_parser.add_option(disable_scrollbar_painting, "Don't paint horizontal or vertical viewport scrollbars", "disable-scrollbar-painting");
     args_parser.add_option(disable_async_scrolling, "Disable async scrolling", "disable-async-scrolling");
     args_parser.add_option(disable_sandbox, "Disable process sandboxing", "disable-sandbox");
-    args_parser.add_option(report_session_history_updates_in_test_mode, "Report session history updates in test mode", "report-session-history-updates-in-test-mode");
     args_parser.add_option(echo_server_port_string_view, "Echo server port used in test internals", "echo-server-port", 0, "echo_server_port");
     args_parser.add_option(is_headless, "Report that the browser is running in headless mode", "headless");
     args_parser.add_option(default_time_zone, "Default time zone", "default-time-zone", 0, "time-zone-id");
@@ -214,6 +214,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
     auto& font_provider = static_cast<Gfx::PathFontProvider&>(Gfx::FontDatabase::the().install_system_font_provider(make<Gfx::PathFontProvider>()));
     if (force_fontconfig) {
         font_provider.set_name_but_fixme_should_create_custom_system_font_provider("FontConfig"_string);
+        Gfx::FontDatabase::the().set_force_freetype_rasterization(true);
     }
     font_provider.load_all_fonts_from_uri("resource://fonts"sv);
 
@@ -226,7 +227,6 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
 
     Web::Painting::set_paint_viewport_scrollbars(!disable_scrollbar_painting);
     WebContent::PageClient::set_async_scrolling_enabled(!disable_async_scrolling);
-    WebContent::PageClient::set_should_report_session_history_updates_in_test_mode(report_session_history_updates_in_test_mode);
 
     if (!echo_server_port_string_view.is_empty()) {
         if (auto maybe_echo_server_port = echo_server_port_string_view.to_number<u16>(); maybe_echo_server_port.has_value())
@@ -257,7 +257,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
     }
 
     if (!disable_sandbox)
-        TRY(RendererSandbox::apply_sandbox(config_path));
+        TRY(RendererSandbox::apply_sandbox(config_path, cache_path));
 
 #if defined(AK_OS_MACOS)
     auto browser_port = TRY(Core::MachPort::look_up_from_bootstrap_server(ByteString { mach_server_name }));

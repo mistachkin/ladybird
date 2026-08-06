@@ -25,7 +25,7 @@ TimeValue TimeValue::from_css_numberish(CSS::CSSNumberish const& time, CSS::Comp
             return { Type::Milliseconds, unit_value->value() };
 
         if (unit_value->type().matches_time({}))
-            return { Type::Milliseconds, MUST(unit_value->to("ms"_fly_string))->value() };
+            return { Type::Milliseconds, MUST(unit_value->to("ms"_utf16_fly_string))->value() };
 
         if (unit_value->type().matches_percentage())
             return { Type::Percentage, unit_value->value() };
@@ -33,11 +33,12 @@ TimeValue TimeValue::from_css_numberish(CSS::CSSNumberish const& time, CSS::Comp
         VERIFY_NOT_REACHED();
     }
 
-    auto const& calculation_node = MUST(numeric_value->create_calculation_node({}));
+    auto calculation_node = MUST(numeric_value->create_calculation_node({}));
 
-    VERIFY(calculation_node->numeric_type().has_value());
+    auto numeric_type = calculation_node.determine_type({});
+    VERIFY(numeric_type.has_value());
 
-    auto style_value = CSS::CalculatedStyleValue::create(calculation_node, calculation_node->numeric_type().value(), {});
+    auto style_value = CSS::CalculatedStyleValue::create(move(calculation_node), numeric_type.release_value(), {});
 
     auto calculation_resolution_context = CSS::CalculationResolutionContext::from_computation_context(computation_context);
 
@@ -67,7 +68,7 @@ CSS::CSSNumberish TimeValue::as_css_numberish(JS::Realm& realm) const
     case Type::Milliseconds:
         return value;
     case Type::Percentage:
-        GC::Ref<CSS::CSSNumericValue> numeric_value = CSS::CSSUnitValue::create(realm, value, "percent"_fly_string);
+        GC::Ref<CSS::CSSNumericValue> numeric_value = CSS::CSSUnitValue::create(realm, value, "percent"_utf16_fly_string);
         return numeric_value;
     }
 

@@ -6,7 +6,7 @@
 
 #pragma once
 
-#include <AK/OwnPtr.h>
+#include <AK/NumericLimits.h>
 #include <LibJS/Heap/Cell.h>
 #include <LibWeb/CSS/Sizing.h>
 #include <LibWeb/Export.h>
@@ -14,25 +14,27 @@
 
 namespace Web::Layout {
 
+enum class RequireExistingPaintable : u8 {
+    No,
+    Yes,
+};
+
 struct LineBoxFragmentCoordinate {
     size_t line_box_index { 0 };
     size_t fragment_index { 0 };
 };
 
-struct IntrinsicSizes {
-    Optional<CSSPixels> min_content_width;
-    Optional<CSSPixels> max_content_width;
-    HashMap<CSSPixels, Optional<CSSPixels>> min_content_height;
-    HashMap<CSSPixels, Optional<CSSPixels>> max_content_height;
-};
-
 class WEB_API Box : public NodeWithStyleAndBoxModelMetrics {
-    GC_CELL(Box, NodeWithStyleAndBoxModelMetrics);
-    GC_DECLARE_ALLOCATOR(Box);
+    LAYOUT_NODE(Box, NodeWithStyleAndBoxModelMetrics);
 
 public:
-    RefPtr<Painting::PaintableBox const> paintable_box() const;
-    RefPtr<Painting::PaintableBox> paintable_box();
+    RefPtr<Painting::Paintable const> paintable_box() const;
+    RefPtr<Painting::Paintable> paintable_box();
+
+    // A partial relayout boundary is a box whose subtree can be re-laid out in
+    // isolation: its own used size and position are guaranteed not to change
+    // when layout is invalidated somewhere inside its subtree.
+    bool is_partial_relayout_boundary(RequireExistingPaintable = RequireExistingPaintable::Yes) const;
 
     // https://www.w3.org/TR/css-images-3/#natural-dimensions
     virtual CSS::SizeWithAspectRatio natural_size() const { return {}; }
@@ -43,7 +45,6 @@ public:
     // available) or may be computed from fallback sizing. Don't confuse this with the CSS preferred
     // aspect ratio.
     CSS::SizeWithAspectRatio auto_content_box_size() const;
-    virtual bool has_auto_content_box_size() const { return false; }
 
     // https://www.w3.org/TR/css-sizing-4/#preferred-aspect-ratio
     Optional<CSSPixelFraction> preferred_aspect_ratio() const;
@@ -55,20 +56,34 @@ public:
 
     virtual RefPtr<Painting::Paintable> create_paintable() const override;
 
-    void add_contained_abspos_child(Node& child) { m_contained_abspos_children.append(child.make_weak_ptr()); }
-    void clear_contained_abspos_children() { m_contained_abspos_children.clear(); }
-    Vector<WeakPtr<Node>> const& contained_abspos_children() const { return m_contained_abspos_children; }
+    bool has_saved_abspos_layout_inputs() const { return has_flag(RustFFI::NodeFlag::HasSavedAbsposLayoutInputs); }
+    bool saved_abspos_cb_derives_from_own_computed_values() const { return has_flag(RustFFI::NodeFlag::SavedAbsposCbDerivesFromOwnComputedValues); }
+    bool saved_abspos_alignment_derives_from_own_computed_values() const { return has_flag(RustFFI::NodeFlag::SavedAbsposAlignmentDerivesFromOwnComputedValues); }
 
-    IntrinsicSizes& cached_intrinsic_sizes() const
+    // Whether an absolutely or fixed positioned descendant of this box has its containing
+    // block outside this box's subtree, so the descendant's layout escapes the subtree.
+    // Re-derived whenever containing block pointers are recomputed.
+    bool abspos_descendant_escapes() const { return has_flag(RustFFI::NodeFlag::AbsposDescendantEscapes); }
+    void set_abspos_descendant_escapes(bool value) { set_flag(RustFFI::NodeFlag::AbsposDescendantEscapes, value); }
+
+    void set_default_scroll_shift(WeakPtr<Node> anchor, bool compensates_for_horizontal_scroll, bool compensates_for_vertical_scroll)
     {
-        if (!m_cached_intrinsic_sizes)
-            m_cached_intrinsic_sizes = make<IntrinsicSizes>();
-        return *m_cached_intrinsic_sizes;
+        m_default_scroll_shift_anchor = move(anchor);
+        set_flag(RustFFI::NodeFlag::CompensatesForHorizontalScroll, compensates_for_horizontal_scroll);
+        set_flag(RustFFI::NodeFlag::CompensatesForVerticalScroll, compensates_for_vertical_scroll);
     }
-    void reset_cached_intrinsic_sizes() const { m_cached_intrinsic_sizes.clear(); }
+    Node* default_scroll_shift_anchor() const { return m_default_scroll_shift_anchor.ptr(); }
+    bool compensates_for_horizontal_scroll() const { return has_flag(RustFFI::NodeFlag::CompensatesForHorizontalScroll); }
+    bool compensates_for_vertical_scroll() const { return has_flag(RustFFI::NodeFlag::CompensatesForVerticalScroll); }
 
-    Box(DOM::Document&, DOM::Node*, CSS::ComputedProperties const&);
-    Box(DOM::Document&, DOM::Node*, NonnullOwnPtr<CSS::ComputedValues>);
+    void reset_cached_intrinsic_sizes()
+    {
+        auto& epoch = node_data().intrinsic_cache_epoch;
+        if (epoch != NumericLimits<u16>::max())
+            ++epoch;
+    }
+
+    Box(DOM::Document&, DOM::Node*, NonnullRefPtr<CSS::ComputedValues const>);
 
 protected:
     virtual CSS::SizeWithAspectRatio compute_auto_content_box_size() const { return natural_size(); }
@@ -76,9 +91,7 @@ protected:
 private:
     virtual bool is_box() const final { return true; }
 
-    Vector<WeakPtr<Node>> m_contained_abspos_children;
-
-    OwnPtr<IntrinsicSizes> mutable m_cached_intrinsic_sizes;
+    WeakPtr<Node> m_default_scroll_shift_anchor;
 };
 
 template<>

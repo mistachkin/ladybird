@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <AK/Utf16View.h>
 #include <LibWeb/ARIA/Roles.h>
 #include <LibWeb/HTML/HTMLElement.h>
 #include <LibWeb/HTML/PopoverTargetAttributes.h>
@@ -37,10 +38,10 @@ public:
     };
 
     TypeAttributeState type_state() const;
-    String type_for_bindings() const;
-    void set_type_for_bindings(String const&);
+    Utf16FlyString type_for_bindings() const;
+    void set_type_for_bindings(Utf16View);
 
-    virtual void form_associated_element_attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
+    virtual void form_associated_element_attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_) override;
 
     // ^EventTarget
     // https://html.spec.whatwg.org/multipage/interaction.html#the-tabindex-attribute:the-button-element
@@ -76,13 +77,13 @@ public:
 
     Utf16String value() const;
     virtual Utf16String form_value() const override { return value(); }
-    virtual Optional<String> optional_value() const override;
+    virtual Optional<Utf16String> optional_value() const override;
 
     virtual bool has_activation_behavior() const override;
     virtual void activation_behavior(DOM::Event const&) override;
 
-    String command() const;
-    void set_command(String const&);
+    Utf16String command() const;
+    void set_command(Utf16View);
 
     GC::Ptr<DOM::Element> command_for_element() { return m_command_for_element; }
     void set_command_for_element(GC::Ptr<DOM::Element> value) { m_command_for_element = value; }

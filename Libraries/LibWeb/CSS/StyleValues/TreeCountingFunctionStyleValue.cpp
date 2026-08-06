@@ -5,6 +5,7 @@
  */
 
 #include "TreeCountingFunctionStyleValue.h"
+#include <LibWeb/CSS/StyleValues/CalcNodeRef.h>
 #include <LibWeb/CSS/StyleValues/CalculatedStyleValue.h>
 #include <LibWeb/CSS/StyleValues/IntegerStyleValue.h>
 #include <LibWeb/CSS/StyleValues/NumberStyleValue.h>
@@ -14,7 +15,7 @@ namespace Web::CSS {
 
 void TreeCountingFunctionStyleValue::serialize(StringBuilder& builder, SerializationMode) const
 {
-    switch (m_function) {
+    switch (function()) {
     case TreeCountingFunction::SiblingCount:
         builder.append("sibling-count()"sv);
         break;
@@ -30,7 +31,7 @@ size_t TreeCountingFunctionStyleValue::resolve(DOM::AbstractElement const& abstr
 
     auto tree_counting_function_resolution_context = abstract_element.tree_counting_function_resolution_context();
 
-    switch (m_function) {
+    switch (function()) {
     case TreeCountingFunction::SiblingCount:
         return tree_counting_function_resolution_context.sibling_count;
     case TreeCountingFunction::SiblingIndex:
@@ -40,12 +41,12 @@ size_t TreeCountingFunctionStyleValue::resolve(DOM::AbstractElement const& abstr
     VERIFY_NOT_REACHED();
 }
 
-RefPtr<CalculationNode const> TreeCountingFunctionStyleValue::resolve_to_calculation_node(CalculationContext const& calculation_context, CalculationResolutionContext const& calculation_resolution_context) const
+Optional<CalcNodeRef> TreeCountingFunctionStyleValue::resolve_to_calculation_node(CalculationContext const&, CalculationResolutionContext const& calculation_resolution_context) const
 {
     if (!calculation_resolution_context.abstract_element.has_value())
-        return nullptr;
+        return {};
 
-    return NumericCalculationNode::create(Number { Number::Type::Number, static_cast<double>(resolve(calculation_resolution_context.abstract_element.value())) }, calculation_context);
+    return CalcNodeRef::numeric(Number { Number::Type::Number, static_cast<double>(resolve(calculation_resolution_context.abstract_element.value())) });
 }
 
 ValueComparingNonnullRefPtr<StyleValue const> TreeCountingFunctionStyleValue::absolutized(ComputationContext const& computation_context) const
@@ -55,7 +56,7 @@ ValueComparingNonnullRefPtr<StyleValue const> TreeCountingFunctionStyleValue::ab
 
     size_t value = resolve(computation_context.abstract_element.value());
 
-    switch (m_computed_type) {
+    switch (computed_type()) {
     case ComputedType::Integer:
         return IntegerStyleValue::create(value);
     case ComputedType::Number:
@@ -72,7 +73,7 @@ bool TreeCountingFunctionStyleValue::equals(StyleValue const& other) const
 
     auto const& other_tree_counting_function = other.as_tree_counting_function();
 
-    return m_function == other_tree_counting_function.m_function && m_computed_type == other_tree_counting_function.m_computed_type;
+    return function() == other_tree_counting_function.function() && computed_type() == other_tree_counting_function.computed_type();
 }
 
 }

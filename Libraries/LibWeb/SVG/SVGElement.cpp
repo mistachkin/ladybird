@@ -10,10 +10,11 @@
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/Bindings/SVGElement.h>
 #include <LibWeb/CSS/ComputedProperties.h>
-#include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/ShadowRoot.h>
+#include <LibWeb/Painting/SVGSVGPaintable.h>
+#include <LibWeb/SVG/SVGAnimatedLength.h>
 #include <LibWeb/SVG/SVGDescElement.h>
 #include <LibWeb/SVG/SVGElement.h>
 #include <LibWeb/SVG/SVGForeignObjectElement.h>
@@ -39,20 +40,20 @@ void SVGElement::initialize(JS::Realm& realm)
 }
 
 struct NamedPropertyID {
-    NamedPropertyID(CSS::PropertyID property_id, FlyString name, Vector<FlyString> supported_elements = {})
+    NamedPropertyID(CSS::PropertyID property_id, Utf16FlyString name, std::initializer_list<Utf16FlyString> supported_elements = {})
         : id(property_id)
         , name(move(name))
-        , supported_elements(move(supported_elements))
+        , supported_elements(supported_elements)
     {
     }
-    NamedPropertyID(CSS::PropertyID property_id, Vector<FlyString> supported_elements = {})
-        : NamedPropertyID(property_id, CSS::string_from_property_id(property_id).to_utf16_string().to_utf8_but_should_be_ported_to_utf16(), move(supported_elements))
+    NamedPropertyID(CSS::PropertyID property_id, std::initializer_list<Utf16FlyString> supported_elements = {})
+        : NamedPropertyID(property_id, CSS::string_from_property_id(property_id).to_utf16_string(), supported_elements)
     {
     }
 
     CSS::PropertyID id;
-    FlyString name;
-    Vector<FlyString> supported_elements;
+    Utf16FlyString name;
+    Vector<Utf16FlyString> supported_elements;
 };
 
 static ReadonlySpan<NamedPropertyID> attribute_style_properties()
@@ -70,6 +71,7 @@ static ReadonlySpan<NamedPropertyID> attribute_style_properties()
         NamedPropertyID(CSS::PropertyID::Cursor),
         NamedPropertyID(CSS::PropertyID::Cx, { SVG::TagNames::circle, SVG::TagNames::ellipse }),
         NamedPropertyID(CSS::PropertyID::Cy, { SVG::TagNames::circle, SVG::TagNames::ellipse }),
+        NamedPropertyID(CSS::PropertyID::D, { SVG::TagNames::path }),
         NamedPropertyID(CSS::PropertyID::Direction),
         NamedPropertyID(CSS::PropertyID::Display),
         NamedPropertyID(CSS::PropertyID::DominantBaseline),
@@ -83,7 +85,7 @@ static ReadonlySpan<NamedPropertyID> attribute_style_properties()
         NamedPropertyID(CSS::PropertyID::FontStyle),
         NamedPropertyID(CSS::PropertyID::FontVariant),
         NamedPropertyID(CSS::PropertyID::FontWeight),
-        NamedPropertyID(CSS::PropertyID::FontWidth, "font-stretch"_fly_string),
+        NamedPropertyID(CSS::PropertyID::FontWidth, "font-stretch"_utf16_fly_string),
         NamedPropertyID(CSS::PropertyID::Height, { SVG::TagNames::foreignObject, SVG::TagNames::image, SVG::TagNames::rect, SVG::TagNames::svg, SVG::TagNames::symbol, SVG::TagNames::use }),
         NamedPropertyID(CSS::PropertyID::ImageRendering),
         NamedPropertyID(CSS::PropertyID::LetterSpacing),
@@ -107,12 +109,13 @@ static ReadonlySpan<NamedPropertyID> attribute_style_properties()
         NamedPropertyID(CSS::PropertyID::StrokeMiterlimit),
         NamedPropertyID(CSS::PropertyID::StrokeOpacity),
         NamedPropertyID(CSS::PropertyID::StrokeWidth),
+        NamedPropertyID(CSS::PropertyID::VectorEffect),
         NamedPropertyID(CSS::PropertyID::TextAnchor),
         NamedPropertyID(CSS::PropertyID::TextDecoration),
         NamedPropertyID(CSS::PropertyID::TextRendering),
         NamedPropertyID(CSS::PropertyID::TextOverflow),
-        NamedPropertyID(CSS::PropertyID::Transform, SVG::AttributeNames::gradientTransform, { SVG::TagNames::linearGradient, SVG::TagNames::radialGradient }),
-        NamedPropertyID(CSS::PropertyID::Transform, SVG::AttributeNames::patternTransform, { SVG::TagNames::pattern }),
+        NamedPropertyID(CSS::PropertyID::Transform, "gradientTransform"_utf16_fly_string, { SVG::TagNames::linearGradient, SVG::TagNames::radialGradient }),
+        NamedPropertyID(CSS::PropertyID::Transform, "patternTransform"_utf16_fly_string, { SVG::TagNames::pattern }),
         NamedPropertyID(CSS::PropertyID::TransformOrigin),
         NamedPropertyID(CSS::PropertyID::UnicodeBidi),
         NamedPropertyID(CSS::PropertyID::Visibility),
@@ -126,32 +129,47 @@ static ReadonlySpan<NamedPropertyID> attribute_style_properties()
     return properties;
 }
 
-bool SVGElement::is_presentational_hint(FlyString const& name) const
+static Optional<CSS::PropertyID> property_id_for_presentational_attribute(Utf16FlyString const& name, Utf16FlyString const& tag_name)
+{
+    for (auto const& property : attribute_style_properties()) {
+        if (!property.name.equals_ignoring_ascii_case(name))
+            continue;
+
+        if (!property.supported_elements.is_empty() && !property.supported_elements.contains_slow(tag_name))
+            continue;
+
+        return property.id;
+    }
+
+    return {};
+}
+
+bool SVGElement::is_presentational_hint(Utf16FlyString const& name) const
 {
     if (Base::is_presentational_hint(name))
         return true;
 
-    return any_of(attribute_style_properties(), [&](auto& property) { return name.equals_ignoring_ascii_case(property.name); });
+    return property_id_for_presentational_attribute(name, local_name()).has_value();
 }
 
 void SVGElement::apply_presentational_hints(Vector<CSS::StyleProperty>& properties) const
 {
     Base::apply_presentational_hints(properties);
     CSS::Parser::ParsingParams parsing_context { document(), CSS::Parser::ParsingMode::SVGPresentationAttribute };
-    for_each_attribute([&](auto& name, auto& value) {
-        for (auto& property : attribute_style_properties()) {
-            if (!name.equals_ignoring_ascii_case(property.name))
-                continue;
-            if (!property.supported_elements.is_empty() && !property.supported_elements.contains_slow(local_name()))
-                continue;
-            if (property.id == CSS::PropertyID::Mask) {
-                if (auto style_value = parse_css_value(parsing_context, value, CSS::PropertyID::Mask))
-                    properties.append({ .property_id = CSS::PropertyID::Mask, .value = style_value.release_nonnull() });
-            } else {
-                if (auto style_value = parse_css_value(parsing_context, value, property.id))
-                    properties.append({ .property_id = property.id, .value = style_value.release_nonnull() });
-            }
-            break;
+    for_each_attribute([&](Utf16FlyString const& name, Utf16View const& value) {
+        if (auto property_id = property_id_for_presentational_attribute(name, local_name()); property_id.has_value()) {
+            auto style_value = [&] {
+                // NB: <path>'s `d` presentational attribute is a special case - the attribute and the CSS properties
+                //     syntaxes differ with the attribute being a raw path string but the CSS property only accepting a
+                //     path() function. To account for this we wrap the attribute value in a path function before parsing.
+                if (property_id == CSS::PropertyID::D)
+                    return parse_css_value(parsing_context, Utf16String::formatted("path({})", CSS::serialize_a_string(value)), property_id.value());
+
+                return parse_css_value(parsing_context, value, property_id.value());
+            }();
+
+            if (style_value)
+                properties.append({ .property_id = property_id.value(), .value = style_value.release_nonnull() });
         }
     });
 }
@@ -170,9 +188,9 @@ bool SVGElement::should_include_in_accessibility_tree() const
     // https://w3c.github.io/svg-aam/#include_elements
     // TODO: Add support for the SVG tabindex attribute, and include a check for it here.
     return has_title_or_desc
-        || (aria_label().has_value() && !aria_label()->bytes_as_string_view().trim_whitespace().is_empty())
-        || (aria_labelled_by().has_value() && !aria_labelled_by()->bytes_as_string_view().trim_whitespace().is_empty())
-        || (aria_described_by().has_value() && !aria_described_by()->bytes_as_string_view().trim_whitespace().is_empty())
+        || (aria_label().has_value() && !aria_label()->utf16_view().trim_ascii_whitespace().is_empty())
+        || (aria_labelled_by().has_value() && !aria_labelled_by()->utf16_view().trim_ascii_whitespace().is_empty())
+        || (aria_described_by().has_value() && !aria_described_by()->utf16_view().trim_ascii_whitespace().is_empty())
         || (role.has_value() && ARIA::is_abstract_role(role.value()) && role != ARIA::Role::none && role != ARIA::Role::presentation);
 }
 
@@ -199,9 +217,10 @@ void SVGElement::visit_edges(Cell::Visitor& visitor)
     Base::visit_edges(visitor);
     HTMLOrSVGOrMathMLElement::visit_edges(visitor);
     visitor.visit(m_class_name_animated_string);
+    visitor.visit(m_reflected_attribute_cache);
 }
 
-void SVGElement::attribute_changed(FlyString const& local_name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
+void SVGElement::attribute_changed(Utf16FlyString const& local_name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_)
 {
     Base::attribute_changed(local_name, old_value, value, namespace_);
     HTMLOrSVGOrMathMLElement::attribute_changed(local_name, old_value, value, namespace_);
@@ -272,10 +291,33 @@ void SVGElement::removed_from(IsSubtreeRoot is_subtree_root, Node* old_ancestor,
     remove_from_use_element_that_reference_this();
 
     // A <mask>, <clipPath>, or <pattern> referenced via url(#id) is laid out as a resource box attached to the
-    // referencing element's layout subtree. So it outlives this element's own DOM node. Rebuild the layout tree
-    // while this element is still alive — so those stale resource boxes are dropped before this node is collected.
+    // referencing element's layout subtree. So it outlives this element's own DOM node. Rebuild those referencing
+    // subtrees while this element is still alive — so the stale resource boxes are dropped before this node is
+    // collected.
+    mark_resource_box_referencing_elements_for_layout_tree_update();
+
+    // References that resolve during display list recording (e.g. gradient or filter url(#id) references) don't
+    // build resource boxes, so there may be no layout invalidation to trigger re-recording. Request it explicitly
+    // to drop the visual effects of the removed element.
     if (id().has_value())
-        document().set_needs_full_layout_tree_update(true);
+        document().set_needs_repaint(Badge<SVGElement> {}, InvalidateDisplayList::Yes);
+}
+
+void SVGElement::register_resource_box_referencing_element(Badge<Layout::LayoutTreeBuilderAccess>, DOM::Element& referencing_element)
+{
+    m_resource_box_referencing_elements.remove_all_matching([&](auto& weak_element) {
+        return !weak_element || weak_element == &referencing_element;
+    });
+    m_resource_box_referencing_elements.append(referencing_element);
+}
+
+void SVGElement::mark_resource_box_referencing_elements_for_layout_tree_update()
+{
+    for (auto& weak_referencing_element : m_resource_box_referencing_elements) {
+        if (auto referencing_element = weak_referencing_element.ptr())
+            referencing_element->set_needs_layout_tree_update(true, DOM::SetNeedsLayoutTreeUpdateReason::SVGResourceElementRemoved);
+    }
+    m_resource_box_referencing_elements.clear();
 }
 
 void SVGElement::remove_from_use_element_that_reference_this()
@@ -352,30 +394,57 @@ GC::Ptr<SVGElement> SVGElement::viewport_element()
     return nullptr;
 }
 
-GC::Ref<SVGAnimatedLength> SVGElement::fake_animated_length_fixme() const
+Gfx::Size<double> SVGElement::viewport_size_for_percentage_resolution()
 {
-    // FIXME: All callers of this method must implement their animated length correctly.
-    auto base_length = SVGLength::create(realm(), 0, 0, SVGLength::ReadOnly::No);
-    auto anim_length = SVGLength::create(realm(), 0, 0, SVGLength::ReadOnly::Yes);
-    return SVGAnimatedLength::create(realm(), base_length, anim_length);
+    auto viewport_size_from_layout = [&](SVGSVGElement const& viewport_element) -> Gfx::Size<double> {
+        // NB: A disconnected element may have stale layout objects from before it was removed.
+        if (!viewport_element.is_connected())
+            return {};
+
+        if (auto const* svg_paintable = as_if<Painting::SVGSVGPaintable>(viewport_element.paintable().ptr()))
+            return svg_paintable->svg_viewport_size().to_type<double>();
+
+        return {};
+    };
+
+    // NB: Percentages for SVGSVGElements are resolved irrespective of it's own viewBox (which only affects the internal
+    //     coordinate system)
+    if (auto* svg_element = as_if<SVGSVGElement>(*this)) {
+        auto const* parent = svg_element->parent_or_shadow_host_element();
+
+        // https://w3c.github.io/svgwg/svg2-draft/coords.html#InitialViewport
+        if (!parent || !is<SVGElement>(*parent))
+            return viewport_size_from_layout(*svg_element);
+
+        // https://w3c.github.io/svgwg/svg2-draft/coords.html#EstablishingANewSVGViewport
+        if (is<SVGForeignObjectElement>(*parent))
+            return viewport_size_from_layout(*svg_element);
+    }
+
+    auto const& viewport_element = const_cast<SVGElement*>(this)->owner_svg_element().ptr();
+
+    if (!viewport_element)
+        return {};
+
+    if (auto view_box = viewport_element->active_view_box(); view_box.has_value() && view_box->width > 0 && view_box->height > 0)
+        return { view_box->width, view_box->height };
+
+    return viewport_size_from_layout(*viewport_element);
 }
 
-GC::Ref<SVGAnimatedLength> SVGElement::svg_animated_length_for_property(CSS::PropertyID property) const
+GC::Ref<SVGAnimatedLength> SVGElement::svg_animated_length_for_attribute(Utf16FlyString const& attribute_name, SVGLength::Directionality directionality, NonnullRefPtr<CSS::StyleValue const>&& default_value)
 {
-    // FIXME: Create a proper animated value when animations are supported.
-    auto make_length = [&](SVGLength::ReadOnly read_only) {
-        if (auto const computed_properties = this->computed_properties()) {
-            auto const& style_value = computed_properties->property(property);
+    if (auto cached = m_reflected_attribute_cache.get(attribute_name); cached.has_value())
+        return as<SVGAnimatedLength>(*cached.value());
 
-            if (!style_value.has_auto() && (style_value.is_length() || style_value.is_percentage() || style_value.is_calculated()))
-                return SVGLength::from_length_percentage(realm(), CSS::LengthPercentage::from_style_value(style_value), read_only);
-        }
-        return SVGLength::create(realm(), 0, 0, read_only);
-    };
-    return SVGAnimatedLength::create(
-        realm(),
-        make_length(SVGLength::ReadOnly::No),
-        make_length(SVGLength::ReadOnly::Yes));
+    auto base_length = SVGLength::create_reflected_attribute(realm(), *this, attribute_name, directionality, SVGLength::ReflectedAttributeType::BaseValue, default_value, SVGLength::ReadOnly::No);
+    // AD-HOC: The spec says this should reflect the base value of the attribute but other browsers reflect the SMIL
+    //         animated value instead.
+    auto anim_length = SVGLength::create_reflected_attribute(realm(), *this, attribute_name, directionality, SVGLength::ReflectedAttributeType::AnimatedValue, default_value, SVGLength::ReadOnly::Yes);
+
+    auto animated_length = SVGAnimatedLength::create(realm(), base_length, anim_length);
+    m_reflected_attribute_cache.set(attribute_name, animated_length);
+    return animated_length;
 }
 
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026-present, the Ladybird developers
+ * Copyright (c) 2026-present, the Ladybird developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -17,7 +17,7 @@ namespace Web::CSS::Invalidation {
 
 struct MediaQueryRuleInvalidation {
     StyleSheetInvalidationSet style_sheet_invalidation_set;
-    Vector<FlyString> keyframes_animation_names;
+    Vector<Utf16FlyString> keyframes_animation_names;
 
     void add_rule(CSSRule const& rule)
     {
@@ -51,8 +51,10 @@ void evaluate_media_rules_and_invalidate_style(DOM::Document& document)
     document.style_scope().for_each_active_css_style_sheet([&](CSS::CSSStyleSheet& style_sheet) {
         if (style_sheet.evaluate_media_queries(document, [&](CSSRule const& changed_rule) {
                 document_invalidation.add_rule(changed_rule);
-            }))
+            })) {
             document_media_queries_changed_match_state = true;
+            style_sheet.reload_fonts_after_media_query_change();
+        }
     });
 
     document.for_each_shadow_root([&](auto& shadow_root) {
@@ -61,8 +63,10 @@ void evaluate_media_rules_and_invalidate_style(DOM::Document& document)
         shadow_root.style_scope().for_each_active_css_style_sheet([&](CSS::CSSStyleSheet& style_sheet) {
             if (style_sheet.evaluate_media_queries(document, [&](CSSRule const& changed_rule) {
                     shadow_root_invalidation.add_rule(changed_rule);
-                }))
+                })) {
                 shadow_root_media_queries_changed_match_state = true;
+                style_sheet.reload_fonts_after_media_query_change();
+            }
         });
 
         if (!shadow_root_media_queries_changed_match_state)

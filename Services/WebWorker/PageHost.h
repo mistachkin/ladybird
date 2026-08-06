@@ -39,15 +39,22 @@ public:
     virtual HTTP::Cookie::VersionedCookie page_did_request_cookie(URL::URL const&, HTTP::Cookie::Source) override;
     virtual void page_did_store_hsts_policy(String const&, HTTP::HSTS::ParsedHSTSPolicy const&) override;
     virtual bool page_did_is_known_hsts_host(String const&) override;
-    virtual void page_did_report_worker_exception(String const& message, String const& filename, u32 lineno, u32 colno) override;
+    virtual void page_did_report_worker_exception(Utf16String const& message, Utf16String const& filename, u32 lineno, u32 colno) override;
     virtual void page_did_post_broadcast_channel_message(Web::HTML::BroadcastChannelMessage const& message) override;
     virtual void request_file(Web::FileRequest) override;
     virtual Web::HTML::WorkerAgentId start_worker_agent(Web::HTML::WorkerAgentStartRequest&&) override;
     virtual void close_worker_agent(Web::HTML::WorkerAgentId, Web::HTML::WorkerAgentOwnerToken) override;
+    virtual bool supports_compositor() const override { return true; }
+    virtual void ensure_compositor_host() override;
+    virtual Web::Compositor::CompositorHost* compositor_host() override { return m_compositor_host.ptr(); }
+    virtual Web::Compositor::CompositorHost const* compositor_host() const override { return m_compositor_host.ptr(); }
+    void compositor_process_lost();
     virtual bool is_headless() const override { VERIFY_NOT_REACHED(); }
     virtual Queue<Web::QueuedInputEvent>& input_event_queue() override { VERIFY_NOT_REACHED(); }
     virtual void report_finished_handling_input_event([[maybe_unused]] u64 page_id, [[maybe_unused]] Web::EventResult event_was_handled) override { VERIFY_NOT_REACHED(); }
     virtual void request_frame() override { VERIFY_NOT_REACHED(); }
+    virtual double maximum_frames_per_second() const override { return m_maximum_frames_per_second; }
+    void set_maximum_frames_per_second(double maximum_frames_per_second) { m_maximum_frames_per_second = maximum_frames_per_second; }
     void did_finish_loading_worker_script(bool worker_is_secure_context);
     void did_fail_loading_worker_script();
 
@@ -58,8 +65,10 @@ private:
     void setup_palette();
 
     ConnectionFromClient& m_client;
+    OwnPtr<Web::Compositor::CompositorHost> m_compositor_host;
     GC::Ref<Web::Page> m_page;
     RefPtr<Gfx::PaletteImpl> m_palette_impl;
+    double m_maximum_frames_per_second { 60.0 };
 };
 
 }

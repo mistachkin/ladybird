@@ -11,7 +11,7 @@
 #include <LibGC/Cell.h>
 #include <LibGfx/Font/Font.h>
 #include <LibGfx/Rect.h>
-#include <LibWeb/CSS/ComputedProperties.h>
+#include <LibWeb/CSS/ComputedValues.h>
 #include <LibWeb/CSS/FontComputer.h>
 #include <LibWeb/CSS/Length.h>
 #include <LibWeb/CSS/Percentage.h>
@@ -21,7 +21,7 @@
 #include <LibWeb/HTML/LocalNavigable.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/Layout/Node.h>
-#include <LibWeb/Painting/PaintableBox.h>
+#include <LibWeb/Painting/Paintable.h>
 
 namespace Web::CSS {
 
@@ -51,7 +51,7 @@ static ContainerRelativeAxis logical_axis_to_physical_axis(bool inline_axis_is_h
 
 static bool query_container_is_eligible_for_axis(DOM::Element const& container, ContainerRelativeAxis axis)
 {
-    auto style = container.computed_properties();
+    auto style = container.computed_values();
     if (!style)
         return false;
 
@@ -119,36 +119,7 @@ CSSPixels Length::font_relative_length_to_px(Length::FontMetrics const& font_met
 
 double Length::font_relative_length_to_px_without_rounding(Length::FontMetrics const& font_metrics, Length::FontMetrics const& root_font_metrics) const
 {
-    switch (m_unit) {
-    case LengthUnit::Em:
-        return m_value * font_metrics.font_size.to_double();
-    case LengthUnit::Rem:
-        return m_value * root_font_metrics.font_size.to_double();
-    case LengthUnit::Ex:
-        return m_value * font_metrics.x_height.to_double();
-    case LengthUnit::Rex:
-        return m_value * root_font_metrics.x_height.to_double();
-    case LengthUnit::Cap:
-        return m_value * font_metrics.cap_height.to_double();
-    case LengthUnit::Rcap:
-        return m_value * root_font_metrics.cap_height.to_double();
-    case LengthUnit::Ch:
-        return m_value * font_metrics.zero_advance.to_double();
-    case LengthUnit::Rch:
-        return m_value * root_font_metrics.zero_advance.to_double();
-    case LengthUnit::Ic:
-        // FIXME: Use the "advance measure of the “水” (CJK water ideograph, U+6C34) glyph"
-        return m_value * font_metrics.font_size.to_double();
-    case LengthUnit::Ric:
-        // FIXME: Use the "advance measure of the “水” (CJK water ideograph, U+6C34) glyph"
-        return m_value * root_font_metrics.font_size.to_double();
-    case LengthUnit::Lh:
-        return m_value * font_metrics.line_height.to_double();
-    case LengthUnit::Rlh:
-        return m_value * root_font_metrics.line_height.to_double();
-    default:
-        VERIFY_NOT_REACHED();
-    }
+    return ratio_between_font_relative_unit_and_px(m_unit, font_metrics, root_font_metrics) * m_value;
 }
 
 CSSPixels Length::viewport_relative_length_to_px(CSSPixelRect const& viewport_rect) const
@@ -158,42 +129,7 @@ CSSPixels Length::viewport_relative_length_to_px(CSSPixelRect const& viewport_re
 
 double Length::viewport_relative_length_to_px_without_rounding(CSSPixelRect const& viewport_rect) const
 {
-    switch (m_unit) {
-    case LengthUnit::Vw:
-    case LengthUnit::Svw:
-    case LengthUnit::Lvw:
-    case LengthUnit::Dvw:
-        return viewport_rect.width() * m_value / 100;
-    case LengthUnit::Vh:
-    case LengthUnit::Svh:
-    case LengthUnit::Lvh:
-    case LengthUnit::Dvh:
-        return viewport_rect.height() * m_value / 100;
-    case LengthUnit::Vi:
-    case LengthUnit::Svi:
-    case LengthUnit::Lvi:
-    case LengthUnit::Dvi:
-        // FIXME: Select the width or height based on which is the inline axis.
-        return viewport_rect.width() * m_value / 100;
-    case LengthUnit::Vb:
-    case LengthUnit::Svb:
-    case LengthUnit::Lvb:
-    case LengthUnit::Dvb:
-        // FIXME: Select the width or height based on which is the block axis.
-        return viewport_rect.height() * m_value / 100;
-    case LengthUnit::Vmin:
-    case LengthUnit::Svmin:
-    case LengthUnit::Lvmin:
-    case LengthUnit::Dvmin:
-        return min(viewport_rect.width(), viewport_rect.height()) * m_value / 100;
-    case LengthUnit::Vmax:
-    case LengthUnit::Svmax:
-    case LengthUnit::Lvmax:
-    case LengthUnit::Dvmax:
-        return max(viewport_rect.width(), viewport_rect.height()) * m_value / 100;
-    default:
-        VERIFY_NOT_REACHED();
-    }
+    return ratio_between_viewport_relative_unit_and_px(m_unit, viewport_rect) * m_value;
 }
 
 double Length::container_relative_length_to_px_without_rounding(ResolutionContext const& context) const
@@ -220,7 +156,10 @@ double Length::container_relative_length_to_px_without_rounding(ResolutionContex
 
         auto paintable_box = query_container->unsafe_paintable_box();
         if (!paintable_box) {
-            if (!subject.document().layout_is_up_to_date())
+            // A running partial relayout pass reports layout as up to date, but a container
+            // with no paintable yet still needs the post-layout evaluation, which routes the
+            // follow-up pass to the full layout path that resolves the container's size.
+            if (!subject.document().layout_is_up_to_date() || subject.document().is_running_update_layout())
                 const_cast<DOM::Document&>(subject.document()).set_needs_container_query_evaluation_after_layout(*query_container);
             return 0.0;
         }
@@ -263,17 +202,19 @@ Length::ResolutionContext Length::ResolutionContext::for_element(DOM::AbstractEl
 {
     auto const* root_element = element.element().document().document_element();
 
-    VERIFY(element.computed_properties());
+    auto const* computed_values = element.computed_values();
+    VERIFY(computed_values);
     VERIFY(root_element);
-    VERIFY(root_element->computed_properties());
+    auto root_computed_values = root_element->computed_values();
+    VERIFY(root_computed_values);
 
     return Length::ResolutionContext {
         .viewport_rect = element.element().navigable()->viewport_rect(),
-        .font_metrics = { element.computed_properties()->font_size(), element.computed_properties()->first_available_computed_font(element.document().font_computer())->pixel_metrics(), element.computed_properties()->line_height() },
-        .root_font_metrics = { root_element->computed_properties()->font_size(), root_element->computed_properties()->first_available_computed_font(element.document().font_computer())->pixel_metrics(), element.computed_properties()->line_height() },
-        .font_metrics_depend_on_viewport_metrics = element.computed_properties()->font_metrics_depend_on_viewport_metrics(),
-        .root_font_metrics_depend_on_viewport_metrics = root_element->computed_properties()->font_metrics_depend_on_viewport_metrics(),
-        .subject_inline_axis_is_horizontal = inline_axis_is_horizontal(element.computed_properties()->writing_mode()),
+        .font_metrics = { computed_values->font_size(), computed_values->font_list().font_for_code_point(' ').pixel_metrics(), computed_values->line_height() },
+        .root_font_metrics = { root_computed_values->font_size(), root_computed_values->font_list().font_for_code_point(' ').pixel_metrics(), root_computed_values->line_height() },
+        .font_metrics_depend_on_viewport_metrics = computed_values->font_metrics_depend_on_viewport_metrics(),
+        .root_font_metrics_depend_on_viewport_metrics = root_computed_values->font_metrics_depend_on_viewport_metrics(),
+        .subject_inline_axis_is_horizontal = inline_axis_is_horizontal(computed_values->writing_mode()),
         .subject_element = &element.element(),
     };
 }
@@ -296,9 +237,9 @@ Length::ResolutionContext Length::ResolutionContext::for_document(DOM::Document 
     };
 }
 
-Length::ResolutionContext Length::ResolutionContext::for_layout_node(Layout::Node const& node)
+Length::ResolutionContext Length::ResolutionContext::for_layout_node(Layout::NodeWithStyle const& node)
 {
-    Layout::Node const* root_layout_node;
+    Layout::NodeWithStyle const* root_layout_node;
     DOM::Element const* subject_element = nullptr;
 
     if (is<DOM::Document>(node.dom_node())) {
@@ -328,7 +269,7 @@ CSSPixels Length::to_px(ResolutionContext const& context) const
     return CSSPixels::nearest_value_for(to_px_without_rounding(context));
 }
 
-CSSPixels Length::to_px_slow_case(Layout::Node const& layout_node) const
+CSSPixels Length::to_px_slow_case(Layout::NodeWithStyle const& layout_node) const
 {
     if (!layout_node.document().browsing_context())
         return 0;
@@ -347,6 +288,24 @@ void Length::serialize(StringBuilder& builder, SerializationMode serialization_m
     if (serialization_mode == SerializationMode::ResolvedValue && is_absolute() && m_unit != LengthUnit::Px) {
         serialize_a_number(builder, absolute_length_to_px().to_double());
         builder.append("px"sv);
+        return;
+    }
+    serialize_a_number(builder, m_value);
+    builder.append(unit_name());
+}
+
+void Length::serialize(Utf16StringBuilder& builder, SerializationMode serialization_mode) const
+{
+    // https://drafts.csswg.org/cssom/#serialize-a-css-value
+    // -> <length>
+    // The <number> component serialized as per <number> followed by the unit in its canonical form as defined in its
+    // respective specification.
+
+    // FIXME: Manually skip this for px so we avoid rounding errors in absolute_length_to_px.
+    //        Maybe provide alternative functions that don't produce CSSPixels?
+    if (serialization_mode == SerializationMode::ResolvedValue && is_absolute() && m_unit != LengthUnit::Px) {
+        serialize_a_number(builder, absolute_length_to_px().to_double());
+        builder.append_ascii("px"sv);
         return;
     }
     serialize_a_number(builder, m_value);
@@ -397,6 +356,84 @@ LengthOrAuto LengthOrAuto::from_style_value(NonnullRefPtr<StyleValue const> cons
     if (style_value->has_auto())
         return make_auto();
     return LengthOrAuto { Length::from_style_value(style_value, percentage_basis) };
+}
+
+double ratio_between_font_relative_unit_and_px(LengthUnit font_relative_unit, Length::FontMetrics const& font_metrics, Length::FontMetrics const& root_font_metrics)
+{
+    switch (font_relative_unit) {
+    case LengthUnit::Em:
+        return font_metrics.font_size.to_double();
+    case LengthUnit::Rem:
+        return root_font_metrics.font_size.to_double();
+    case LengthUnit::Ex:
+        return font_metrics.x_height.to_double();
+    case LengthUnit::Rex:
+        return root_font_metrics.x_height.to_double();
+    case LengthUnit::Cap:
+        return font_metrics.cap_height.to_double();
+    case LengthUnit::Rcap:
+        return root_font_metrics.cap_height.to_double();
+    case LengthUnit::Ch:
+        return font_metrics.zero_advance.to_double();
+    case LengthUnit::Rch:
+        return root_font_metrics.zero_advance.to_double();
+    case LengthUnit::Ic:
+        // FIXME: Use the "advance measure of the “水” (CJK water ideograph, U+6C34) glyph"
+        return font_metrics.font_size.to_double();
+    case LengthUnit::Ric:
+        // FIXME: Use the "advance measure of the “水” (CJK water ideograph, U+6C34) glyph"
+        return root_font_metrics.font_size.to_double();
+    case LengthUnit::Lh:
+        return font_metrics.line_height.to_double();
+    case LengthUnit::Rlh:
+        return root_font_metrics.line_height.to_double();
+    default:
+        break;
+    }
+
+    VERIFY_NOT_REACHED();
+}
+
+double ratio_between_viewport_relative_unit_and_px(LengthUnit viewport_relative_unit, CSSPixelRect const& viewport_rect)
+{
+    switch (viewport_relative_unit) {
+    case LengthUnit::Vw:
+    case LengthUnit::Svw:
+    case LengthUnit::Lvw:
+    case LengthUnit::Dvw:
+        return viewport_rect.width().to_double() / 100;
+    case LengthUnit::Vh:
+    case LengthUnit::Svh:
+    case LengthUnit::Lvh:
+    case LengthUnit::Dvh:
+        return viewport_rect.height().to_double() / 100;
+    case LengthUnit::Vi:
+    case LengthUnit::Svi:
+    case LengthUnit::Lvi:
+    case LengthUnit::Dvi:
+        // FIXME: Select the width or height based on which is the inline axis.
+        return viewport_rect.width().to_double() / 100;
+    case LengthUnit::Vb:
+    case LengthUnit::Svb:
+    case LengthUnit::Lvb:
+    case LengthUnit::Dvb:
+        // FIXME: Select the width or height based on which is the block axis.
+        return viewport_rect.height().to_double() / 100;
+    case LengthUnit::Vmin:
+    case LengthUnit::Svmin:
+    case LengthUnit::Lvmin:
+    case LengthUnit::Dvmin:
+        return min(viewport_rect.width(), viewport_rect.height()).to_double() / 100;
+    case LengthUnit::Vmax:
+    case LengthUnit::Svmax:
+    case LengthUnit::Lvmax:
+    case LengthUnit::Dvmax:
+        return max(viewport_rect.width(), viewport_rect.height()).to_double() / 100;
+    default:
+        break;
+    }
+
+    VERIFY_NOT_REACHED();
 }
 
 }

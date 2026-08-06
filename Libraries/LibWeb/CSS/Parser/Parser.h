@@ -10,6 +10,7 @@
 #include <AK/Error.h>
 #include <AK/NonnullRawPtr.h>
 #include <AK/RefPtr.h>
+#include <AK/Utf16String.h>
 #include <AK/Vector.h>
 #include <LibGC/Ptr.h>
 #include <LibGfx/Font/UnicodeRange.h>
@@ -17,6 +18,7 @@
 #include <LibWeb/CSS/CSSStyleDeclaration.h>
 #include <LibWeb/CSS/Descriptor.h>
 #include <LibWeb/CSS/DescriptorID.h>
+#include <LibWeb/CSS/Enums.h>
 #include <LibWeb/CSS/MediaQuery.h>
 #include <LibWeb/CSS/PageSelector.h>
 #include <LibWeb/CSS/ParsedFontFace.h>
@@ -28,6 +30,7 @@
 #include <LibWeb/CSS/Parser/Types.h>
 #include <LibWeb/CSS/Selector.h>
 #include <LibWeb/CSS/StyleValues/AbstractImageStyleValue.h>
+#include <LibWeb/CSS/StyleValues/CalcNodeRef.h>
 #include <LibWeb/CSS/StyleValues/ShadowStyleValue.h>
 #include <LibWeb/CSS/StyleValues/StyleValue.h>
 #include <LibWeb/CSS/StyleValues/TreeCountingFunctionStyleValue.h>
@@ -37,6 +40,8 @@
 #include <LibWeb/Forward.h>
 
 namespace Web::CSS::Parser {
+
+Optional<FeatureComparison> parse_feature_comparison(TokenStream<ComponentValue>&);
 
 namespace CalcParsing {
 
@@ -64,7 +69,11 @@ struct NegateNode {
 }
 
 struct FunctionContext {
-    StringView name;
+    Utf16FlyString name;
+};
+
+struct RelativeColorParseContext {
+    Array<bool, to_underlying(ChannelKeyword::Z) + 1> allowed_channels {};
 };
 struct DescriptorContext {
     AtRuleID at_rule;
@@ -77,7 +86,7 @@ enum SpecialContext : u8 {
     OnScreenCanvasContextFontValue
 };
 // FIXME: Use PropertyNameAndID instead of PropertyID as the context, for registered custom properties.
-using ValueParsingContext = Variant<PropertyID, FunctionContext, DescriptorContext, SpecialContext>;
+using ValueParsingContext = Variant<PropertyID, FunctionContext, DescriptorContext, SpecialContext, RelativeColorParseContext>;
 
 enum class ParsingMode {
     Normal,
@@ -100,15 +109,14 @@ struct WEB_API ParsingParams {
     GC::Ptr<DOM::Document const> document;
     ParsingMode mode { ParsingMode::Normal };
     IsUAStyleSheet is_ua_style_sheet { IsUAStyleSheet::No };
-    ComputedProperties const* computed_style_for_custom_property_resolution { nullptr };
 
     Vector<ValueParsingContext> value_context;
     Vector<RuleContext> rule_context;
-    HashTable<FlyString> declared_namespaces;
+    HashTable<Utf16FlyString> declared_namespaces;
 };
 
 struct DevToolsStyleDeclaration {
-    FlyString name;
+    Utf16FlyString name;
     String value;
     Important important { Important::No };
     bool is_custom_property { false };
@@ -117,6 +125,7 @@ struct DevToolsStyleDeclaration {
 };
 
 WEB_API Vector<DevToolsStyleDeclaration> parse_css_declaration_block_for_devtools(ParsingParams const&, StringView);
+WEB_API Vector<DevToolsStyleDeclaration> parse_css_declaration_block_for_devtools(ParsingParams const&, Utf16View);
 
 // The very large CSS Parser implementation code is broken up among several .cpp files:
 // Parser.cpp contains the core parser algorithms, defined in https://drafts.csswg.org/css-syntax
@@ -127,6 +136,7 @@ class Parser {
 
 public:
     static Parser create(ParsingParams const&, StringView input, StringView encoding = "utf-8"sv);
+    static Parser create(ParsingParams const&, Utf16View input);
 
     GC::RootVector<GC::Ref<CSSRule>> convert_rules(Vector<Rule> const& raw_rules);
     GC::Ref<CSS::CSSStyleSheet> parse_as_css_stylesheet(Optional<::URL::URL> location, GC::Ptr<MediaList> = {});
@@ -139,7 +149,8 @@ public:
     Vector<DevToolsStyleDeclaration> parse_as_devtools_property_declaration_block();
     Vector<Descriptor> parse_as_descriptor_declaration_block(AtRuleID);
     CSSRule* parse_as_css_rule(bool nested = false);
-    Optional<StyleProperty> parse_as_supports_condition();
+    GC::Ptr<CSSKeyframeRule> parse_as_keyframe_rule();
+    Vector<Percentage> parse_as_keyframe_selectors();
     GC::RootVector<GC::Ref<CSSRule>> parse_as_stylesheet_contents();
 
     enum class SelectorParsingMode {
@@ -165,17 +176,22 @@ public:
     RefPtr<StyleValue const> parse_as_css_value(PropertyID);
     RefPtr<StyleValue const> parse_as_descriptor_value(AtRuleID, DescriptorNameAndID const&);
     RefPtr<StyleValue const> parse_as_type(ValueType);
+    RefPtr<StyleValue const> parse_entirely_as_type(ValueType);
 
     Optional<ComponentValue> parse_as_component_value();
 
     Vector<ComponentValue> parse_as_list_of_component_values();
 
-    static NonnullRefPtr<StyleValue const> resolve_unresolved_style_value(ParsingParams const&, DOM::AbstractElement, PropertyNameAndID const&, UnresolvedStyleValue const&, Optional<GuardedSubstitutionContexts&> = {});
+    static NonnullRefPtr<StyleValue const> resolve_unresolved_style_value(ParsingParams const&, AbstractOrHypotheticalElement, ArbitrarySubstitutionReplacementContext const&, PropertyNameAndID const&, UnresolvedStyleValue const&, Optional<GuardedSubstitutionContexts&> = {});
 
     [[nodiscard]] NonnullRefPtr<StyleValue const> parse_as_sizes_attribute(DOM::Element const& element, HTML::HTMLImageElement const* img = nullptr);
 
+    enum class DisallowTopLevelCurlyBlocks : u8 {
+        No,
+        Yes,
+    };
     static Optional<Vector<ComponentValue>> parse_declaration_value(TokenStream<ComponentValue>&, Optional<Token::Type> end_token_type = {});
-    static Optional<ReadonlySpan<ComponentValue>> parse_declaration_value_as_span(TokenStream<ComponentValue>&, Optional<Token::Type> end_token_type = {});
+    static Optional<ReadonlySpan<ComponentValue>> parse_declaration_value_as_span(TokenStream<ComponentValue>&, Optional<Token::Type> end_token_type = {}, DisallowTopLevelCurlyBlocks = DisallowTopLevelCurlyBlocks::No);
 
     NonnullRefPtr<StyleValue const> parse_with_a_syntax(Vector<ComponentValue> const& input, SyntaxNode const& syntax);
 
@@ -297,11 +313,11 @@ private:
         No,
         Yes,
     };
-    Optional<FlyString> parse_layer_name(TokenStream<ComponentValue>&, AllowBlankLayerName);
-    Optional<Vector<FlyString>> parse_comma_separated_family_name_list(TokenStream<ComponentValue>&);
+    Optional<Utf16FlyString> parse_layer_name(TokenStream<ComponentValue>&, AllowBlankLayerName);
+    Optional<Vector<Utf16FlyString>> parse_comma_separated_family_name_list(TokenStream<ComponentValue>&);
 
     struct FunctionPrelude {
-        FlyString name;
+        Utf16FlyString name;
         Vector<FunctionParameterInternal> parameters;
         NonnullRefPtr<SyntaxNode> return_type;
     };
@@ -310,6 +326,8 @@ private:
     bool is_valid_in_the_current_context(Declaration const&) const;
     bool is_valid_in_the_current_context(AtRule const&) const;
     bool is_valid_in_the_current_context(QualifiedRule const&) const;
+
+    Vector<Percentage> parse_keyframe_selectors(TokenStream<ComponentValue>&);
 
     template<typename NestedDeclarationsRule>
     GC::Ptr<CSSRule> convert_to_rule(Rule const&, Nested);
@@ -320,6 +338,7 @@ private:
     GC::Ptr<CSSFontFaceRule> convert_to_font_face_rule(AtRule const&);
     GC::Ptr<CSSFontFeatureValuesRule> convert_to_font_feature_values_rule(AtRule const&);
     GC::Ptr<CSSFunctionRule> convert_to_function_rule(AtRule const&);
+    GC::Ptr<CSSKeyframeRule> convert_to_keyframe_rule(QualifiedRule const&);
     GC::Ptr<CSSKeyframesRule> convert_to_keyframes_rule(AtRule const&);
     GC::Ptr<CSSImportRule> convert_to_import_rule(AtRule const&);
 
@@ -345,7 +364,6 @@ private:
     RefPtr<StyleValue const> parse_source_size_value(TokenStream<ComponentValue>&);
     Optional<Gfx::UnicodeRange> parse_unicode_range(TokenStream<ComponentValue>&);
     Optional<Gfx::UnicodeRange> parse_unicode_range(StringView);
-    Vector<Gfx::UnicodeRange> parse_unicode_ranges(TokenStream<ComponentValue>&);
     RefPtr<UnicodeRangeStyleValue const> parse_unicode_range_value(TokenStream<ComponentValue>&);
 
     RefPtr<StyleValue const> parse_value(ValueType, TokenStream<ComponentValue>&);
@@ -408,25 +426,31 @@ private:
     };
     Optional<PropertyAndValue> parse_css_value_for_properties(ReadonlySpan<PropertyID>, TokenStream<ComponentValue>&);
     RefPtr<StyleValue const> parse_builtin_value(TokenStream<ComponentValue>&);
-    Optional<FlyString> parse_custom_ident(TokenStream<ComponentValue>&, ReadonlySpan<StringView> blacklist);
-    RefPtr<CustomIdentStyleValue const> parse_custom_ident_value(TokenStream<ComponentValue>&, ReadonlySpan<StringView> blacklist = {});
-    Optional<FlyString> parse_dashed_ident(TokenStream<ComponentValue>&);
+    Optional<Utf16FlyString> parse_custom_ident(TokenStream<ComponentValue>&, ReadonlySpan<Utf16View> blacklist);
+    RefPtr<CustomIdentStyleValue const> parse_custom_ident_value(TokenStream<ComponentValue>&, ReadonlySpan<Utf16View> blacklist = {});
+    Optional<Utf16FlyString> parse_dashed_ident(TokenStream<ComponentValue>&);
     RefPtr<CustomIdentStyleValue const> parse_dashed_ident_value(TokenStream<ComponentValue>&);
     RefPtr<RandomValueSharingStyleValue const> parse_random_value_sharing(TokenStream<ComponentValue>&);
     // NOTE: Implemented in generated code. (GenerateCSSMathFunctions.cpp)
-    RefPtr<CalculationNode const> parse_math_function(Function const&, CalculationContext const&);
-    RefPtr<CalculationNode const> parse_a_calc_function_node(Function const&, CalculationContext const&);
+    Optional<CalcNodeRef> parse_math_function(Function const&, CalculationContext const&);
+    Optional<CalcNodeRef> parse_a_calc_function_node(Function const&, CalculationContext const&);
     RefPtr<StyleValue const> parse_keyword_value(TokenStream<ComponentValue>&);
     RefPtr<StyleValue const> parse_specific_keyword_value(TokenStream<ComponentValue>&, ReadonlySpan<Keyword>);
     RefPtr<StyleValue const> parse_hue_none_value(TokenStream<ComponentValue>&);
     RefPtr<StyleValue const> parse_solidus_and_alpha_value(TokenStream<ComponentValue>&);
+    RefPtr<StyleValue const> parse_relative_color_origin(TokenStream<ComponentValue>&);
+    RelativeColorParseContext const* current_relative_color_context() const;
     RefPtr<StyleValue const> parse_rgb_color_value(TokenStream<ComponentValue>&);
     RefPtr<StyleValue const> parse_hsl_color_value(TokenStream<ComponentValue>&);
     RefPtr<StyleValue const> parse_hwb_color_value(TokenStream<ComponentValue>&);
-    Optional<Array<RefPtr<StyleValue const>, 4>> parse_lab_like_color_value(TokenStream<ComponentValue>&, StringView);
+    struct LabOrLchColorValue {
+        Array<RefPtr<StyleValue const>, 4> components;
+        RefPtr<StyleValue const> origin_color;
+    };
+    Optional<LabOrLchColorValue> parse_lab_like_color_value(TokenStream<ComponentValue>&, Utf16View);
     RefPtr<StyleValue const> parse_lab_color_value(TokenStream<ComponentValue>&);
     RefPtr<StyleValue const> parse_oklab_color_value(TokenStream<ComponentValue>&);
-    Optional<Array<RefPtr<StyleValue const>, 4>> parse_lch_like_color_value(TokenStream<ComponentValue>&, StringView);
+    Optional<LabOrLchColorValue> parse_lch_like_color_value(TokenStream<ComponentValue>&, Utf16View);
     RefPtr<StyleValue const> parse_lch_color_value(TokenStream<ComponentValue>&);
     RefPtr<StyleValue const> parse_oklch_color_value(TokenStream<ComponentValue>&);
     RefPtr<StyleValue const> parse_color_function(TokenStream<ComponentValue>&);
@@ -437,7 +461,7 @@ private:
     RefPtr<StyleValue const> parse_color_scheme_value(TokenStream<ComponentValue>&);
     RefPtr<StyleValue const> parse_corner_shape_value(TokenStream<ComponentValue>&);
     RefPtr<StyleValue const> parse_counter_value(TokenStream<ComponentValue>&);
-    Optional<FlyString> parse_counter_style_name(TokenStream<ComponentValue>&);
+    Optional<Utf16FlyString> parse_counter_style_name(TokenStream<ComponentValue>&);
     RefPtr<StyleValue const> parse_counter_style_value(TokenStream<ComponentValue>&);
     RefPtr<StyleValue const> parse_nonnegative_integer_symbol_pair_value(TokenStream<ComponentValue>&);
     enum class AllowReversed {
@@ -518,6 +542,7 @@ private:
     RefPtr<StyleValue const> parse_counter_reset_value(TokenStream<ComponentValue>&);
     RefPtr<StyleValue const> parse_counter_set_value(TokenStream<ComponentValue>&);
     RefPtr<StyleValue const> parse_cursor_value(TokenStream<ComponentValue>&);
+    RefPtr<StyleValue const> parse_d_value(TokenStream<ComponentValue>&);
     RefPtr<StyleValue const> parse_display_value(TokenStream<ComponentValue>&);
     RefPtr<StyleValue const> parse_flex_shorthand_value(TokenStream<ComponentValue>&);
     RefPtr<StyleValue const> parse_flex_flow_value(TokenStream<ComponentValue>&);
@@ -593,8 +618,8 @@ private:
     ENUMERATE_GENERATED_CSS_VALUE_TYPES
 #undef __ENUMERATE_GENERATED_CSS_VALUE_TYPE
 
-    RefPtr<CalculationNode const> convert_to_calculation_node(CalcParsing::Node const&, CalculationContext const&);
-    RefPtr<CalculationNode const> parse_a_calculation(TokenStream<ComponentValue>&, CalculationContext const&);
+    Optional<CalcNodeRef> convert_to_calculation_node(CalcParsing::Node const&, CalculationContext const&);
+    Optional<CalcNodeRef> parse_a_calculation(TokenStream<ComponentValue>&, CalculationContext const&);
 
     ParseErrorOr<NonnullRefPtr<Selector>> parse_complex_selector(TokenStream<ComponentValue>&, SelectorType);
     ParseErrorOr<Selector::CompoundSelector> parse_compound_selector(TokenStream<ComponentValue>&);
@@ -616,6 +641,8 @@ private:
     Optional<FeatureValue> parse_media_feature_value(MediaFeatureID, TokenStream<ComponentValue>&);
     OwnPtr<SizeFeature> parse_size_feature(TokenStream<ComponentValue>&);
     Optional<FeatureValue> parse_size_feature_value(SizeFeatureID, TokenStream<ComponentValue>&);
+    OwnPtr<BooleanExpression> parse_style_query(TokenStream<ComponentValue>&, MatchResult result_for_general_enclosed);
+    OwnPtr<BooleanExpression> parse_style_feature(TokenStream<ComponentValue>&);
 
     template<typename FeatureID, typename FeatureAcceptsKeyword, typename FeatureAcceptsType>
     Optional<FeatureValue> parse_feature_value(FeatureID, TokenStream<ComponentValue>&, FeatureAcceptsKeyword, FeatureAcceptsType);
@@ -632,11 +659,11 @@ private:
     OwnPtr<BooleanExpression> parse_container_query_feature(TokenStream<ComponentValue>&);
     RefPtr<ContainerQuery> parse_container_query(TokenStream<ComponentValue>&);
 
-    NonnullRefPtr<StyleValue const> resolve_unresolved_style_value(DOM::AbstractElement, GuardedSubstitutionContexts&, PropertyNameAndID const&, UnresolvedStyleValue const&);
+    NonnullRefPtr<StyleValue const> resolve_unresolved_style_value(AbstractOrHypotheticalElement, GuardedSubstitutionContexts&, ArbitrarySubstitutionReplacementContext const&, PropertyNameAndID const&, UnresolvedStyleValue const&);
 
     RefPtr<StyleValue const> parse_according_to_syntax_node(TokenStream<ComponentValue>& tokens, SyntaxNode const& syntax_node);
 
-    static bool has_ignored_vendor_prefix(StringView);
+    static bool has_ignored_vendor_prefix(Utf16View);
 
     void extract_property(Declaration const&, Parser::PropertiesAndCustomProperties&);
 
@@ -650,7 +677,6 @@ private:
     GC::Ptr<JS::Realm> m_realm;
     ParsingMode m_parsing_mode { ParsingMode::Normal };
     IsUAStyleSheet m_is_ua_style_sheet { IsUAStyleSheet::No };
-    ComputedProperties const* m_computed_style_for_custom_property_resolution { nullptr };
 
     Vector<Token> m_tokens;
     TokenStream<Token> m_token_stream;
@@ -668,38 +694,57 @@ private:
                 m_random_function_index = 0;
         } };
     }
+    auto push_relative_color_parsing_context(RefPtr<StyleValue const> const& origin_color, ReadonlySpan<ChannelKeyword> allowed_channels)
+    {
+        if (origin_color) {
+            RelativeColorParseContext context {};
+            for (auto channel : allowed_channels)
+                context.allowed_channels[to_underlying(channel)] = true;
+            context.allowed_channels[to_underlying(ChannelKeyword::Alpha)] = true;
+            m_value_context.append(context);
+        }
+        return ScopeGuard { [this, pushed = !origin_color.is_null()] {
+            if (pushed)
+                m_value_context.take_last();
+        } };
+    }
     bool context_allows_quirky_length() const;
     bool context_allows_tree_counting_functions() const;
     bool context_allows_random_functions() const;
-    FlyString random_value_sharing_auto_name() const;
+    Utf16FlyString random_value_sharing_auto_name() const;
 
     Vector<RuleContext> m_rule_context;
-    HashTable<FlyString> m_declared_namespaces;
+    HashTable<Utf16FlyString> m_declared_namespaces;
 
     Vector<PseudoClass> m_pseudo_class_context; // Stack of pseudo-class functions we're currently inside
 };
+
+GC::Ptr<CSSKeyframeRule> parse_keyframe_rule(ParsingParams const&, Utf16View);
+Vector<Percentage> parse_keyframe_selectors(ParsingParams const&, Utf16View);
 
 }
 
 namespace Web {
 
 GC::Ref<CSS::CSSStyleSheet> parse_css_stylesheet(CSS::Parser::ParsingParams const&, StringView, Optional<::URL::URL> location = {}, GC::Ptr<CSS::MediaList> media_list = {});
-CSS::Parser::Parser::PropertiesAndCustomProperties parse_css_property_declaration_block(CSS::Parser::ParsingParams const&, StringView);
-Vector<CSS::Descriptor> parse_css_descriptor_declaration_block(CSS::Parser::ParsingParams const&, CSS::AtRuleID, StringView);
+GC::Ref<CSS::CSSStyleSheet> parse_css_stylesheet(CSS::Parser::ParsingParams const&, Utf16View, Optional<::URL::URL> location = {}, GC::Ptr<CSS::MediaList> media_list = {});
+CSS::Parser::Parser::PropertiesAndCustomProperties parse_css_property_declaration_block(CSS::Parser::ParsingParams const&, Utf16View);
+Vector<CSS::Descriptor> parse_css_descriptor_declaration_block(CSS::Parser::ParsingParams const&, CSS::AtRuleID, Utf16View);
 RefPtr<CSS::StyleValue const> parse_css_value(CSS::Parser::ParsingParams const&, StringView, CSS::PropertyID);
-RefPtr<CSS::StyleValue const> parse_css_type(CSS::Parser::ParsingParams const&, StringView, CSS::ValueType);
-RefPtr<CSS::StyleValue const> parse_css_descriptor(CSS::Parser::ParsingParams const&, CSS::AtRuleID, CSS::DescriptorNameAndID const&, StringView);
-Optional<CSS::SelectorList> parse_selector(CSS::Parser::ParsingParams const&, StringView);
-Optional<CSS::SelectorList> parse_selector_for_nested_style_rule(CSS::Parser::ParsingParams const&, StringView, CSS::StyleNestingParent);
-Optional<CSS::PageSelectorList> parse_page_selector_list(CSS::Parser::ParsingParams const&, StringView);
-Optional<CSS::Selector::PseudoElementSelector> parse_pseudo_element_selector(CSS::Parser::ParsingParams const&, StringView);
-CSS::CSSRule* parse_css_rule(CSS::Parser::ParsingParams const&, StringView, bool nested = false);
-RefPtr<CSS::MediaQuery> parse_media_query(CSS::Parser::ParsingParams const&, StringView);
-Vector<NonnullRefPtr<CSS::MediaQuery>> parse_media_query_list(CSS::Parser::ParsingParams const&, StringView);
-RefPtr<CSS::Supports> parse_css_supports(CSS::Parser::ParsingParams const&, StringView);
-Vector<CSS::Parser::ComponentValue> parse_component_values_list(CSS::Parser::ParsingParams const&, StringView);
+RefPtr<CSS::StyleValue const> parse_css_value(CSS::Parser::ParsingParams const&, Utf16View, CSS::PropertyID);
+RefPtr<CSS::StyleValue const> parse_css_type(CSS::Parser::ParsingParams const&, Utf16View, CSS::ValueType);
+RefPtr<CSS::StyleValue const> parse_css_descriptor(CSS::Parser::ParsingParams const&, CSS::AtRuleID, CSS::DescriptorNameAndID const&, Utf16View);
+Optional<CSS::SelectorList> parse_selector(CSS::Parser::ParsingParams const&, Utf16View);
+Optional<CSS::SelectorList> parse_selector_for_nested_style_rule(CSS::Parser::ParsingParams const&, Utf16View, CSS::StyleNestingParent);
+Optional<CSS::PageSelectorList> parse_page_selector_list(CSS::Parser::ParsingParams const&, Utf16View);
+Optional<CSS::Selector::PseudoElementSelector> parse_pseudo_element_selector(CSS::Parser::ParsingParams const&, Utf16View);
+CSS::CSSRule* parse_css_rule(CSS::Parser::ParsingParams const&, Utf16View, bool nested = false);
+RefPtr<CSS::MediaQuery> parse_media_query(CSS::Parser::ParsingParams const&, Utf16View);
+Vector<NonnullRefPtr<CSS::MediaQuery>> parse_media_query_list(CSS::Parser::ParsingParams const&, Utf16View);
+RefPtr<CSS::Supports> parse_css_supports(CSS::Parser::ParsingParams const&, Utf16View);
+Vector<CSS::Parser::ComponentValue> parse_component_values_list(CSS::Parser::ParsingParams const&, Utf16View);
 GC::Ref<JS::Realm> internal_css_realm();
-ErrorOr<String> css_decode_bytes(Optional<StringView> const& environment_encoding, Optional<String> mime_type_charset, ReadonlyBytes encoded_string);
-bool is_valid_custom_ident(FlyString const&, ReadonlySpan<StringView> const& blacklist);
+ErrorOr<Utf16String> css_decode_bytes(Optional<StringView> const& environment_encoding, Optional<StringView> mime_type_charset, ReadonlyBytes encoded_string);
+bool is_valid_custom_ident(Utf16View, ReadonlySpan<Utf16View> const& blacklist);
 
 }

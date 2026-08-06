@@ -271,12 +271,6 @@ void ResourceLoader::handle_file_load_request(LoadRequest& request, FileHandler 
             return;
         }
 
-        auto st_or_error = Core::System::fstat(fd);
-        if (st_or_error.is_error()) {
-            on_error(ByteString::formatted("{}", st_or_error.error()));
-            return;
-        }
-
         auto maybe_file = Core::File::adopt_fd(fd, Core::File::OpenMode::Read);
         if (maybe_file.is_error()) {
             on_error(ByteString::formatted("{}", maybe_file.error()));
@@ -284,6 +278,12 @@ void ResourceLoader::handle_file_load_request(LoadRequest& request, FileHandler 
         }
 
         auto file = maybe_file.release_value();
+
+        auto st_or_error = file->stat();
+        if (st_or_error.is_error()) {
+            on_error(ByteString::formatted("{}", st_or_error.error()));
+            return;
+        }
         auto maybe_data = file->read_until_eof();
         if (maybe_data.is_error()) {
             on_error(ByteString::formatted("{}", maybe_data.error()));
@@ -304,8 +304,8 @@ void ResourceLoader::handle_file_load_request(LoadRequest& request, FileHandler 
         on_load_counter_change();
 }
 
-template<typename Callback>
-void ResourceLoader::handle_about_load_request(LoadRequest const& request, Callback callback)
+template<typename ResourceHandler, typename ErrorHandler>
+void ResourceLoader::handle_about_load_request(LoadRequest const& request, ResourceHandler on_resource, ErrorHandler on_error)
 {
     auto const& url = request.url().value();
 
@@ -327,16 +327,15 @@ void ResourceLoader::handle_about_load_request(LoadRequest const& request, Callb
         if (!resource.is_error()) {
             auto const& buffer = resource.value()->data();
             ReadonlyBytes data(buffer.data(), buffer.size());
-            callback(data, timing_info, response_headers);
+            on_resource(data, timing_info, response_headers);
             return;
         }
     }
 
     Platform::EventLoopPlugin::the().deferred_invoke(GC::create_function(
         m_heap,
-        [callback, timing_info, response_headers = move(response_headers)]() mutable {
-            auto buffer = ByteString::empty().to_byte_buffer();
-            callback(buffer.bytes(), timing_info, response_headers);
+        [on_error, error_message = ByteString::formatted("No such about page: {}", serialized_path)]() {
+            on_error(error_message);
         }));
 }
 
@@ -398,11 +397,16 @@ RefPtr<Requests::Request> ResourceLoader::load(LoadRequest& request, GC::Root<On
     if (url.scheme() == "about"sv) {
         handle_about_load_request(
             request,
-            [on_headers_received = move(on_headers_received), on_data_received = move(on_data_received), on_complete = move(on_complete), request](ReadonlyBytes data, Requests::RequestTimingInfo const& timing_info, HTTP::HeaderList const& response_headers) {
+            [on_headers_received = move(on_headers_received), on_data_received = move(on_data_received), on_complete, request](ReadonlyBytes data, Requests::RequestTimingInfo const& timing_info, HTTP::HeaderList const& response_headers) {
                 log_success(request);
-                on_headers_received->function()(nullptr, response_headers, {}, {}, {}, {});
+                on_headers_received->function()(nullptr, response_headers, {}, {}, {}, {}, Requests::CameFromCache::No);
                 on_data_received->function()(Requests::ResponseData::from_bytes(data));
                 on_complete->function()(true, timing_info, {});
+            },
+            [on_complete, request](ByteString const& message) {
+                log_failure(request, message);
+                Requests::RequestTimingInfo fixme_implement_timing_info {};
+                on_complete->function()(false, fixme_implement_timing_info, StringView(message));
             });
         return nullptr;
     }
@@ -411,7 +415,7 @@ RefPtr<Requests::Request> ResourceLoader::load(LoadRequest& request, GC::Root<On
         handle_resource_load_request(
             request,
             [on_headers_received = move(on_headers_received), on_data_received = move(on_data_received), on_complete](FileLoadResult const& load_result) {
-                on_headers_received->function()(nullptr, load_result.response_headers, {}, {}, {}, {});
+                on_headers_received->function()(nullptr, load_result.response_headers, {}, {}, {}, {}, Requests::CameFromCache::No);
                 on_data_received->function()(Requests::ResponseData::from_bytes(load_result.data));
                 on_complete->function()(true, load_result.timing_info, {});
             },
@@ -427,7 +431,7 @@ RefPtr<Requests::Request> ResourceLoader::load(LoadRequest& request, GC::Root<On
             request,
             [request, on_headers_received = move(on_headers_received), on_data_received = move(on_data_received), on_complete](FileLoadResult const& load_result) {
                 log_success(request);
-                on_headers_received->function()(nullptr, load_result.response_headers, {}, {}, {}, {});
+                on_headers_received->function()(nullptr, load_result.response_headers, {}, {}, {}, {}, Requests::CameFromCache::No);
                 on_data_received->function()(Requests::ResponseData::from_bytes(load_result.data));
                 on_complete->function()(true, load_result.timing_info, {});
             },
@@ -452,13 +456,13 @@ RefPtr<Requests::Request> ResourceLoader::load(LoadRequest& request, GC::Root<On
         return nullptr;
     }
 
-    auto protocol_headers_received = [this, on_headers_received = move(on_headers_received), request, &protocol_request = *protocol_request](auto const& response_headers, auto status_code, auto const& reason_phrase, auto javascript_bytecode, auto javascript_bytecode_cache_vary_key) {
+    auto protocol_headers_received = [this, on_headers_received = move(on_headers_received), request, &protocol_request = *protocol_request](auto const& response_headers, auto status_code, auto const& reason_phrase, auto javascript_bytecode, auto javascript_bytecode_cache_vary_key, auto came_from_cache) {
         handle_network_response_headers(request, response_headers);
 
         if (auto page = request.page())
-            page->client().page_did_receive_network_response_headers(protocol_request.id(), status_code.value_or(0), reason_phrase, response_headers->headers());
+            page->client().page_did_receive_network_response_headers(protocol_request.id(), status_code.value_or(0), reason_phrase, response_headers->headers(), came_from_cache);
 
-        on_headers_received->function()(&protocol_request, response_headers, move(status_code), reason_phrase, move(javascript_bytecode), javascript_bytecode_cache_vary_key);
+        on_headers_received->function()(&protocol_request, response_headers, move(status_code), reason_phrase, move(javascript_bytecode), javascript_bytecode_cache_vary_key, came_from_cache);
     };
 
     auto protocol_data_received = [on_data_received = move(on_data_received), request, request_id = protocol_request->id()](auto data) {
@@ -519,8 +523,9 @@ RefPtr<Requests::Request> ResourceLoader::start_network_request(LoadRequest cons
     if (auto page = request.page()) {
         Optional<String> initiator_type_string;
         if (request.initiator_type().has_value())
-            initiator_type_string = Fetch::Infrastructure::initiator_type_to_string(request.initiator_type().value()).to_string();
-        page->client().page_did_start_network_request(protocol_request->id(), request.url().value(), request.method(), request.headers().headers(), request.body(), move(initiator_type_string));
+            initiator_type_string = MUST(Fetch::Infrastructure::initiator_type_to_string(request.initiator_type().value()).view().to_utf8());
+        auto referrer_policy = MUST(String::from_utf8(ReferrerPolicy::to_string(request.referrer_policy())));
+        page->client().page_did_start_network_request(protocol_request->id(), request.url().value(), request.method(), request.headers().headers(), request.body(), move(initiator_type_string), referrer_policy, request.is_navigation_request(), request.priority());
     }
 
     ++m_pending_loads;

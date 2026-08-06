@@ -14,6 +14,7 @@
 #include <LibWeb/HTML/ActivateTab.h>
 #include <LibWeb/HTML/AudioPlayState.h>
 #include <LibWebView/Forward.h>
+#include <LibWebView/PrivateBrowsing.h>
 
 #import <Cocoa/Cocoa.h>
 
@@ -26,12 +27,12 @@
                       activateTab:(Web::HTML::ActivateTab)activate_tab
                         pageIndex:(u64)page_index;
 
-- (void)onLoadStart:(URL::URL const&)url isRedirect:(BOOL)is_redirect;
-- (void)onLoadFinish:(URL::URL const&)url;
+- (void)onLoadStart;
+- (void)onLoadFinish;
 
 - (void)onURLChange:(URL::URL const&)url;
 - (void)onTitleChange:(Utf16String const&)title;
-- (void)onFaviconChange:(Gfx::Bitmap const&)bitmap;
+- (void)onFaviconChange:(Optional<Gfx::Bitmap const&>)bitmap;
 - (void)onAudioPlayStateChange:(Web::HTML::AudioPlayState)play_state;
 
 - (void)onEnterFullscreenWindow;
@@ -44,7 +45,8 @@
 
 @interface LadybirdWebView : NSView <NSMenuDelegate, NSTextInputClient>
 
-- (instancetype)init:(id<LadybirdWebViewObserver>)observer;
+- (instancetype)init:(id<LadybirdWebViewObserver>)observer
+           isPrivate:(WebView::IsPrivate)is_private;
 - (instancetype)initAsChild:(id<LadybirdWebViewObserver>)observer
                      parent:(LadybirdWebView*)parent
                   pageIndex:(u64)page_index;

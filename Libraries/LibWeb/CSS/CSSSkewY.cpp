@@ -30,7 +30,7 @@ WebIDL::ExceptionOr<GC::Ref<CSSSkewY>> CSSSkewY::construct_impl(JS::Realm& realm
 
     // 1. If ay does not match <angle>, throw a TypeError.
     if (!ay->type().matches_angle({}))
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "CSSSkewY ay component doesn't match <angle>"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "CSSSkewY ay component doesn't match <angle>"_utf16 };
 
     // 2. Return a new CSSSkewY object with its ay internal slot set to ay, and its is2D internal slot set to true.
     return CSSSkewY::create(realm, ay);
@@ -85,7 +85,7 @@ WebIDL::ExceptionOr<GC::Ref<Geometry::DOMMatrix>> CSSSkewY::to_matrix() const
     auto matrix = Geometry::DOMMatrix::create(realm());
 
     // NB: to() throws a TypeError if the conversion can't be done.
-    auto ay_rad = TRY(m_ay->to("rad"_fly_string))->value();
+    auto ay_rad = TRY(m_ay->to("rad"_utf16_fly_string))->value();
     matrix->set_m12(tanf(ay_rad));
 
     // 2. Return matrix.
@@ -97,7 +97,7 @@ WebIDL::ExceptionOr<void> CSSSkewY::set_ay(GC::Ref<CSSNumericValue> ay)
     // AD-HOC: Not specced. https://github.com/w3c/css-houdini-drafts/issues/1153
     //         WPT expects this to throw for invalid values.
     if (!ay->type().matches_angle({}))
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "CSSSkewY ay component doesn't match <angle>"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "CSSSkewY ay component doesn't match <angle>"_utf16 };
     m_ay = ay;
     return {};
 }

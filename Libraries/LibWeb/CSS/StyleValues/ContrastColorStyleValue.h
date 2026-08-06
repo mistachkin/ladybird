@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, Ladybird contributors
+ * Copyright (c) 2026-present, the Ladybird developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -20,22 +20,27 @@ public:
         return adopt_ref(*new (nothrow) ContrastColorStyleValue(move(color)));
     }
 
-    virtual bool equals(StyleValue const&) const override;
-    virtual Optional<Color> to_color(ColorResolutionContext) const override;
-    virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const override;
-    virtual void serialize(StringBuilder&, SerializationMode) const override;
-
-    virtual bool is_computationally_independent() const override
-    {
-        return m_color->is_computationally_independent();
-    }
+    bool equals(StyleValue const&) const;
+    Optional<Color> to_color(ColorResolutionContext) const;
+    ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const;
+    void serialize(StringBuilder&, SerializationMode) const;
 
 private:
+    friend class StyleValue;
+
     explicit ContrastColorStyleValue(ValueComparingNonnullRefPtr<StyleValue const> color)
-        : ColorStyleValue({}, ColorSyntax::Modern)
+        : ColorStyleValue(StyleValueFFI::rust_style_value_create_contrast_color(false, 0, to_underlying(ColorSyntax::Modern), StyleValueFFI::rust_style_value_retain(color->rust_style_value_data())))
         , m_color(move(color))
     {
     }
+
+    explicit ContrastColorStyleValue(StyleValueFFI::StyleValueData const* data)
+        : ColorStyleValue(data)
+        , m_color(StyleValue::adopt_rust_style_value_data(StyleValueFFI::rust_style_value_retain(static_cast<StyleValueFFI::StyleValueData const*>(data->contrast_color.color.pointer))))
+    {
+    }
+
+    ValueComparingNonnullRefPtr<StyleValue const> color() const { return m_color; }
 
     ValueComparingNonnullRefPtr<StyleValue const> m_color;
 };

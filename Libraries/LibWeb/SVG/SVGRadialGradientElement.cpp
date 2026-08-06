@@ -25,24 +25,24 @@ void SVGRadialGradientElement::initialize(JS::Realm& realm)
     Base::initialize(realm);
 }
 
-void SVGRadialGradientElement::attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
+void SVGRadialGradientElement::attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_)
 {
     Base::attribute_changed(name, old_value, value, namespace_);
 
     // FIXME: These are <length> or <coordinate> in the spec, but all examples seem to allow percentages
     // and unitless values.
     if (name == SVG::AttributeNames::cx) {
-        m_cx = AttributeParser::parse_number_percentage(value.value_or(String {}));
+        m_cx = AttributeParser::parse_number_percentage(value.value_or({}));
     } else if (name == SVG::AttributeNames::cy) {
-        m_cy = AttributeParser::parse_number_percentage(value.value_or(String {}));
+        m_cy = AttributeParser::parse_number_percentage(value.value_or({}));
     } else if (name == SVG::AttributeNames::fx) {
-        m_fx = AttributeParser::parse_number_percentage(value.value_or(String {}));
+        m_fx = AttributeParser::parse_number_percentage(value.value_or({}));
     } else if (name == SVG::AttributeNames::fy) {
-        m_fy = AttributeParser::parse_number_percentage(value.value_or(String {}));
+        m_fy = AttributeParser::parse_number_percentage(value.value_or({}));
     } else if (name == SVG::AttributeNames::fr) {
-        m_fr = AttributeParser::parse_number_percentage(value.value_or(String {}));
+        m_fr = AttributeParser::parse_number_percentage(value.value_or({}));
     } else if (name == SVG::AttributeNames::r) {
-        m_r = AttributeParser::parse_number_percentage(value.value_or(String {}));
+        m_r = AttributeParser::parse_number_percentage(value.value_or({}));
     }
 }
 
@@ -207,36 +207,6 @@ Optional<Painting::PaintStyle> SVGRadialGradientElement::to_gfx_paint_style(SVGP
     paint_style.set_spread_method(to_painting_spread_method(spread_method()));
     paint_style.set_color_space(color_space());
     return Painting::PaintStyle { move(paint_style) };
-}
-
-GC::Ref<SVGAnimatedLength> SVGRadialGradientElement::cx() const
-{
-    return fake_animated_length_fixme();
-}
-
-GC::Ref<SVGAnimatedLength> SVGRadialGradientElement::cy() const
-{
-    return fake_animated_length_fixme();
-}
-
-GC::Ref<SVGAnimatedLength> SVGRadialGradientElement::fx() const
-{
-    return fake_animated_length_fixme();
-}
-
-GC::Ref<SVGAnimatedLength> SVGRadialGradientElement::fy() const
-{
-    return fake_animated_length_fixme();
-}
-
-GC::Ref<SVGAnimatedLength> SVGRadialGradientElement::fr() const
-{
-    return fake_animated_length_fixme();
-}
-
-GC::Ref<SVGAnimatedLength> SVGRadialGradientElement::r() const
-{
-    return fake_animated_length_fixme();
 }
 
 }

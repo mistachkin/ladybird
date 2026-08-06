@@ -11,8 +11,8 @@ set(SOURCES
     EventLoopImplementation.cpp
     EventReceiver.cpp
     File.cpp
+    GeolocationProvider.cpp
     ImmutableBytes.cpp
-    MappedFile.cpp
     MimeData.cpp
     Notifier.cpp
     ReportTime.cpp
@@ -29,11 +29,20 @@ set(SOURCES
     Version.cpp
 )
 
+if (APPLE)
+    list(APPEND SOURCES GeolocationProviderCoreLocation.mm)
+    set_source_files_properties(GeolocationProviderCoreLocation.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+else()
+    list(APPEND SOURCES GeolocationProviderUnimplemented.cpp)
+endif()
+
 if (WIN32)
     list(APPEND SOURCES
         AnonymousBufferWindows.cpp
         EventLoopImplementationWindows.cpp
+        FileWindows.cpp
         LocalServerWindows.cpp
+        MappedFileWindows.cpp
         ProcessWindows.cpp
         SocketWindows.cpp
         SocketpairWindows.cpp
@@ -45,7 +54,9 @@ else()
     list(APPEND SOURCES
         AnonymousBuffer.cpp
         EventLoopImplementationUnix.cpp
+        FilePosix.cpp
         LocalServer.cpp
+        MappedFile.cpp
         Process.cpp
         Socket.cpp
         System.cpp
@@ -110,6 +121,7 @@ endif()
 
 if (APPLE)
     target_link_libraries(LibCore PUBLIC "-framework CoreFoundation")
+    target_link_libraries(LibCore PUBLIC "-framework CoreLocation")
     target_link_libraries(LibCore PUBLIC "-framework CoreServices")
     target_link_libraries(LibCore PUBLIC "-framework Foundation")
     target_link_libraries(LibCore PUBLIC "-framework IOSurface")

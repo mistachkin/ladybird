@@ -9,7 +9,6 @@
 #include <AK/JsonObject.h>
 #include <AK/Random.h>
 #include <LibCore/File.h>
-#include <LibCore/StandardPaths.h>
 #include <LibFileSystem/FileSystem.h>
 #include <LibURL/Parser.h>
 #include <LibWebView/Application.h>
@@ -170,11 +169,8 @@ static Vector<BookmarkItem> create_default_bookmarks()
     };
 }
 
-BookmarkStore BookmarkStore::create(Badge<Application>)
+BookmarkStore BookmarkStore::create(ByteString bookmarks_path)
 {
-    auto bookmarks_directory = ByteString::formatted("{}/Ladybird", Core::StandardPaths::config_directory());
-    auto bookmarks_path = ByteString::formatted("{}/Bookmarks.json", bookmarks_directory);
-
     BookmarkStore store { move(bookmarks_path) };
 
     if (!FileSystem::exists(store.m_bookmarks_path)) {
@@ -280,7 +276,7 @@ void BookmarkStore::add_bookmark(URL::URL url, Optional<String> title, Optional<
     notify_observers();
 }
 
-void BookmarkStore::add_folder(Optional<String> title, Optional<String const&> target_folder_id)
+String BookmarkStore::add_folder(Optional<String> title, Optional<String const&> target_folder_id)
 {
     BookmarkItem item {
         .id = generate_random_uuid(),
@@ -292,10 +288,12 @@ void BookmarkStore::add_folder(Optional<String> title, Optional<String const&> t
         },
     };
 
+    auto id = item.id;
     find_target_folder(m_items, target_folder_id).append(move(item));
 
     persist_bookmarks();
     notify_observers();
+    return id;
 }
 
 void BookmarkStore::import_items(JsonArray const& items_array)

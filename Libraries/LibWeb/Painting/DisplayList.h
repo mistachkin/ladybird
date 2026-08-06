@@ -24,6 +24,7 @@
 #include <LibWeb/Forward.h>
 #include <LibWeb/Painting/AccumulatedVisualContext.h>
 #include <LibWeb/Painting/DisplayListCommand.h>
+#include <LibWeb/Painting/DisplayListCommandRange.h>
 #include <LibWeb/Painting/DisplayListResourceStorage.h>
 #include <LibWeb/Painting/ScrollState.h>
 
@@ -66,10 +67,11 @@ private:
     ENUMERATE_DISPLAY_LIST_COMMANDS(DECLARE_PLAY_COMMAND)
 #undef DECLARE_PLAY_COMMAND
     virtual void play_command(ApplyEffects const&, Gfx::Filter const*) = 0;
-    virtual void apply_transform(Gfx::FloatPoint origin, Gfx::FloatMatrix4x4 const&) = 0;
+    virtual void set_matrix(Gfx::FloatMatrix4x4 const&) = 0;
+    virtual Gfx::FloatMatrix4x4 canvas_matrix() const = 0;
     virtual bool would_be_fully_clipped_by_painter(Gfx::IntRect) const = 0;
 
-    virtual void add_clip_path(Gfx::Path const&) = 0;
+    virtual void add_clip_path(Gfx::Path const&, Gfx::WindingRule) = 0;
 
     DisplayList const* m_active_display_list { nullptr };
     AccumulatedVisualContextTree const* m_active_visual_context_tree { nullptr };
@@ -77,6 +79,17 @@ private:
     CanvasSurfaceRegistry const* m_canvas_surface_registry { nullptr };
     RefPtr<Gfx::PaintingSurface> m_surface;
     ReadonlyBytes m_current_command_payload;
+
+    // Scratch for the per-replay transform palette, retained so steady-state replays reuse warm
+    // capacity; execute_impl moves it out for the duration of a replay, letting re-entrant nested
+    // replays build their own palettes without clobbering the outer one.
+    struct ReplayPaletteStorage {
+        Vector<Gfx::FloatMatrix4x4> to_root_matrices;
+        Vector<VisualContextIndex> nearest_spatial_nodes;
+        Vector<VisualContextIndex> nearest_frame_nodes;
+        Vector<bool> backface_culled;
+    };
+    ReplayPaletteStorage m_replay_palette_storage;
 };
 
 class DisplayList : public AtomicRefCounted<DisplayList> {
@@ -94,7 +107,7 @@ public:
     }
 
     template<DisplayListCommand Command>
-    bool append(Command const& command, AccumulatedVisualContextTree const& visual_context_tree, VisualContextIndex context_index, ReadonlyBytes inline_data = {})
+    bool append(Command const& command, AccumulatedVisualContextTree const& visual_context_tree, VisualContextIndex context_index, bool context_geometry_only, ReadonlyBytes inline_data = {})
     {
         return append_bytes(
             Command::command_type,
@@ -102,6 +115,7 @@ public:
             inline_data,
             visual_context_tree,
             context_index,
+            context_geometry_only,
             command_bounding_rectangle(command),
             command_is_clip(command));
     }
@@ -110,8 +124,13 @@ public:
     u64 id() const { return m_id; }
 
     ReadonlyBytes command_bytes() const { return m_command_bytes.span(); }
+    void set_surface_clear_color(Gfx::Color color) { m_surface_clear_color = color; }
+    Optional<Gfx::Color> surface_clear_color() const { return m_surface_clear_color; }
     void set_async_scrolling_metadata(AsyncScrollingMetadata metadata) { m_async_scrolling_metadata = metadata; }
     Optional<AsyncScrollingMetadata> const& async_scrolling_metadata() const { return m_async_scrolling_metadata; }
+    Optional<DisplayListResourceId> mask_display_list_id(VisualContextIndex context_index) const { return m_mask_display_lists.get(context_index); }
+    void set_mask_display_list_id(VisualContextIndex context_index, DisplayListResourceId display_list_id) { m_mask_display_lists.set(context_index, display_list_id); }
+    HashMap<VisualContextIndex, DisplayListResourceId> const& mask_display_lists() const { return m_mask_display_lists; }
 
     static constexpr size_t command_alignment = 16;
 
@@ -136,13 +155,12 @@ public:
         for_each_command_header(command_bytes(), move(callback));
     }
 
-    void append_command_sequence(ReadonlyBytes, AccumulatedVisualContextTree const&, VisualContextIndex);
-    ByteBuffer copy_command_bytes_from(size_t command_start_offset) const;
+    u32 append_command_range_from(DisplayList const& source_display_list, DisplayListCommandRange, AccumulatedVisualContextTree const&, VisualContextIndex recorded_context_index, VisualContextIndex current_context_index);
     size_t command_byte_size() const { return m_command_bytes.size(); }
 
 private:
     explicit DisplayList(u64 compatible_visual_context_tree_version);
-    DisplayList(u64 compatible_visual_context_tree_version, u64 id, ByteBuffer&& command_bytes, Optional<AsyncScrollingMetadata>);
+    DisplayList(u64 compatible_visual_context_tree_version, u64 id, ByteBuffer&& command_bytes, Optional<Gfx::Color> surface_clear_color, Optional<AsyncScrollingMetadata>, HashMap<VisualContextIndex, DisplayListResourceId>&& mask_display_lists);
 
     static Optional<Gfx::IntRect> command_bounding_rectangle(auto const& command)
     {
@@ -166,13 +184,16 @@ private:
         ReadonlyBytes inline_data,
         AccumulatedVisualContextTree const&,
         VisualContextIndex context_index,
+        bool context_geometry_only,
         Optional<Gfx::IntRect> bounding_rect,
         bool is_clip);
 
     u64 m_compatible_visual_context_tree_version { 0 };
     u64 m_id { 0 };
     ByteBuffer m_command_bytes;
+    Optional<Gfx::Color> m_surface_clear_color;
     Optional<AsyncScrollingMetadata> m_async_scrolling_metadata;
+    HashMap<VisualContextIndex, DisplayListResourceId> m_mask_display_lists;
 
     template<typename T>
     friend ErrorOr<void> IPC::encode(IPC::Encoder&, T const&);

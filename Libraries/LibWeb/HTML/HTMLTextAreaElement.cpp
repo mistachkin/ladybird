@@ -14,6 +14,7 @@
 #include <LibWeb/CSS/CSSStyleProperties.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/Invalidation/FormControlInvalidator.h>
+#include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/StyleValues/DisplayStyleValue.h>
 #include <LibWeb/CSS/StyleValues/LengthStyleValue.h>
 #include <LibWeb/DOM/Document.h>
@@ -89,11 +90,11 @@ void HTMLTextAreaElement::did_lose_focus()
 
     // The change event fires when the value is committed, if that makes sense for the control,
     // or else when the control loses focus
-    queue_an_element_task(HTML::Task::Source::UserInteraction, [this] {
-        auto change_event = DOM::Event::create(realm(), HTML::EventNames::change);
-        change_event->set_bubbles(true);
-        dispatch_event(change_event);
-    });
+    // https://github.com/whatwg/html/issues/1080
+    // INTEROP: Other engines synchronously notify script when the control loses focus.
+    auto change_event = DOM::Event::create(realm(), HTML::EventNames::change);
+    change_event->set_bubbles(true);
+    dispatch_event(change_event);
 }
 
 // https://html.spec.whatwg.org/multipage/interaction.html#dom-tabindex
@@ -132,13 +133,13 @@ void HTMLTextAreaElement::clear_algorithm()
 
     // Unlike their associated reset algorithms, changes made to form controls as part of these algorithms do count as
     // changes caused by the user (and thus, e.g. do cause input events to fire).
-    queue_an_element_task(HTML::Task::Source::UserInteraction, [this]() {
-        Bindings::InputEventInit input_event_init;
-        input_event_init.bubbles = true;
-        input_event_init.composed = true;
-        auto input_event = UIEvents::InputEvent::create_from_platform_event(realm(), HTML::EventNames::input, input_event_init);
-        dispatch_event(input_event);
-    });
+    // https://github.com/whatwg/html/issues/1080
+    // INTEROP: Other engines dispatch this event synchronously after clearing the value.
+    Bindings::InputEventInit input_event_init;
+    input_event_init.bubbles = true;
+    input_event_init.composed = true;
+    auto input_event = UIEvents::InputEvent::create_from_platform_event(realm(), HTML::EventNames::input, input_event_init);
+    dispatch_event(input_event);
 }
 
 // https://html.spec.whatwg.org/multipage/forms.html#the-textarea-element:concept-node-clone-ext
@@ -167,7 +168,7 @@ Utf16String HTMLTextAreaElement::default_value() const
 }
 
 // https://html.spec.whatwg.org/multipage/form-elements.html#dom-textarea-defaultvalue
-void HTMLTextAreaElement::set_default_value(Utf16String const& default_value)
+void HTMLTextAreaElement::set_default_value(Utf16View default_value)
 {
     // The defaultValue attribute's setter must string replace all with the given value within this element.
     string_replace_all(default_value);
@@ -181,13 +182,13 @@ Utf16String HTMLTextAreaElement::value() const
 }
 
 // https://html.spec.whatwg.org/multipage/form-elements.html#dom-textarea-value
-void HTMLTextAreaElement::set_value(Utf16String const& value)
+void HTMLTextAreaElement::set_value(Utf16View value)
 {
     // 1. Let oldAPIValue be this element's API value.
     auto old_api_value = api_value();
 
     // 2. Set this element's raw value to the new value.
-    set_raw_value(value);
+    set_raw_value(Utf16String::from_utf16(value));
 
     // 3. Set this element's dirty value flag to true.
     m_dirty_value = true;
@@ -225,7 +226,7 @@ Utf16String HTMLTextAreaElement::api_value() const
 }
 
 // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#concept-textarea/input-relevant-value
-WebIDL::ExceptionOr<void> HTMLTextAreaElement::set_relevant_value(Utf16String const& value)
+WebIDL::ExceptionOr<void> HTMLTextAreaElement::set_relevant_value(Utf16View value)
 {
     set_value(value);
     return {};
@@ -290,7 +291,7 @@ void HTMLTextAreaElement::set_cols(WebIDL::UnsignedLong cols)
     if (cols == 0 || cols > 2147483647)
         cols = 20;
 
-    set_attribute_value(HTML::AttributeNames::cols, String::number(cols));
+    set_attribute_value(HTML::AttributeNames::cols, Utf16String::number(cols));
 }
 
 // https://html.spec.whatwg.org/multipage/form-elements.html#dom-textarea-rows
@@ -309,7 +310,7 @@ void HTMLTextAreaElement::set_rows(WebIDL::UnsignedLong rows)
     if (rows == 0 || rows > 2147483647)
         rows = 2;
 
-    set_attribute_value(HTML::AttributeNames::rows, String::number(rows));
+    set_attribute_value(HTML::AttributeNames::rows, Utf16String::number(rows));
 }
 
 WebIDL::UnsignedLong HTMLTextAreaElement::selection_start_binding() const
@@ -332,12 +333,12 @@ WebIDL::ExceptionOr<void> HTMLTextAreaElement::set_selection_end_binding(WebIDL:
     return FormAssociatedTextControlElement::set_selection_end_binding(value);
 }
 
-String HTMLTextAreaElement::selection_direction_binding() const
+Utf16FlyString HTMLTextAreaElement::selection_direction_binding() const
 {
     return selection_direction().value();
 }
 
-void HTMLTextAreaElement::set_selection_direction_binding(String const& direction)
+void HTMLTextAreaElement::set_selection_direction_binding(Utf16View direction)
 {
     // NOTE: The selectionDirection setter never returns an error for textarea elements.
     MUST(static_cast<FormAssociatedTextControlElement&>(*this).set_selection_direction_binding(direction));
@@ -353,9 +354,25 @@ void HTMLTextAreaElement::create_shadow_tree_if_needed()
     set_shadow_root(shadow_root);
 
     auto element = MUST(DOM::create_element(document(), HTML::TagNames::div, Namespace::HTML));
+    {
+        static auto& style = *new GC::Root<CSS::CSSStyleProperties>;
+        if (!style) {
+            style = CSS::CSSStyleProperties::create(internal_css_realm(), {}, {});
+            style->set_declarations_from_text(u"display: flex;"sv);
+        }
+        element->set_inline_style(*style);
+    }
     MUST(shadow_root->append_child(element));
 
     m_inner_text_element = MUST(DOM::create_element(document(), HTML::TagNames::div, Namespace::HTML));
+    {
+        static auto& style = *new GC::Root<CSS::CSSStyleProperties>;
+        if (!style) {
+            style = CSS::CSSStyleProperties::create(internal_css_realm(), {}, {});
+            style->set_declarations_from_text(u"width: 100%;"sv);
+        }
+        m_inner_text_element->set_inline_style(*style);
+    }
     MUST(element->append_child(*m_inner_text_element));
 
     // NOTE: If `children_changed()` was called before now, `m_raw_value` will hold the text content.
@@ -368,7 +385,7 @@ void HTMLTextAreaElement::create_shadow_tree_if_needed()
     MUST(element->append_child(*m_placeholder_element));
     m_placeholder_element->set_associated_shadow_host_pseudo_element(CSS::PseudoElement::Placeholder);
 
-    m_placeholder_text_node = realm().create<DOM::Text>(document(), Utf16String::from_utf8(get_attribute_value(HTML::AttributeNames::placeholder)));
+    m_placeholder_text_node = realm().create<DOM::Text>(document(), get_attribute_value(HTML::AttributeNames::placeholder));
     MUST(m_placeholder_element->append_child(*m_placeholder_text_node));
 
     update_placeholder_visibility();
@@ -387,6 +404,32 @@ void HTMLTextAreaElement::handle_maxlength_attribute()
     }
 }
 
+static GC::Ref<CSS::CSSStyleProperties> placeholder_style_when_visible()
+{
+    static auto& style = *new GC::Root<CSS::CSSStyleProperties>;
+    if (!style) {
+        style = CSS::CSSStyleProperties::create(internal_css_realm(), {}, {});
+        style->set_declarations_from_text(uR"~~~(
+                width: 100%;
+                overflow: hidden;
+                margin-inline-start: -100%;
+                pointer-events: none;
+                user-select: none;
+            )~~~"sv);
+    }
+    return *style;
+}
+
+static GC::Ref<CSS::CSSStyleProperties> placeholder_style_when_hidden()
+{
+    static auto& style = *new GC::Root<CSS::CSSStyleProperties>;
+    if (!style) {
+        style = CSS::CSSStyleProperties::create(internal_css_realm(), {}, {});
+        style->set_declarations_from_text(u"display: none;"sv);
+    }
+    return *style;
+}
+
 void HTMLTextAreaElement::update_placeholder_visibility()
 {
     if (!m_placeholder_element)
@@ -394,13 +437,10 @@ void HTMLTextAreaElement::update_placeholder_visibility()
     if (!m_text_node)
         return;
     auto placeholder_text = get_attribute(AttributeNames::placeholder);
-    if (placeholder_text.has_value() && m_text_node->data().is_empty()) {
-        MUST(m_inner_text_element->style_for_bindings()->set_property(CSS::PropertyID::Display, "inline"sv));
-        MUST(m_placeholder_element->style_for_bindings()->set_property(CSS::PropertyID::Display, "inline"sv));
-    } else {
-        MUST(m_inner_text_element->style_for_bindings()->set_property(CSS::PropertyID::Display, "block"sv));
-        MUST(m_placeholder_element->style_for_bindings()->set_property(CSS::PropertyID::Display, "none"sv));
-    }
+    if (placeholder_text.has_value() && m_text_node->data().is_empty())
+        m_placeholder_element->set_inline_style(placeholder_style_when_visible());
+    else
+        m_placeholder_element->set_inline_style(placeholder_style_when_hidden());
 }
 
 // https://html.spec.whatwg.org/multipage/form-elements.html#the-textarea-element:children-changed-steps
@@ -418,11 +458,11 @@ void HTMLTextAreaElement::children_changed(ChildrenChangedMetadata const& metada
     }
 }
 
-void HTMLTextAreaElement::form_associated_element_attribute_changed(FlyString const& name, Optional<String> const&, Optional<String> const& value, Optional<FlyString> const&)
+void HTMLTextAreaElement::form_associated_element_attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const&, Optional<Utf16String> const& value, Optional<Utf16FlyString> const&)
 {
     if (name == HTML::AttributeNames::placeholder) {
         if (m_placeholder_text_node)
-            m_placeholder_text_node->set_data(Utf16String::from_utf8(value.value_or(String {})));
+            m_placeholder_text_node->set_data(value.has_value() ? value->utf16_view() : u""sv);
         update_placeholder_visibility();
     } else if (name == HTML::AttributeNames::maxlength) {
         handle_maxlength_attribute();
@@ -434,7 +474,7 @@ void HTMLTextAreaElement::form_associated_element_attribute_changed(FlyString co
         CSS::Invalidation::invalidate_style_after_validity_change(*this);
 }
 
-void HTMLTextAreaElement::did_edit_text_node(FlyString const& input_type, Optional<Utf16String> const& data)
+void HTMLTextAreaElement::did_edit_text_node(Utf16FlyString const& input_type, Optional<Utf16String> const& data)
 {
     VERIFY(m_text_node);
     set_raw_value(m_text_node->data());
@@ -442,18 +482,17 @@ void HTMLTextAreaElement::did_edit_text_node(FlyString const& input_type, Option
     // AD-HOC: Editing the value may change which validity pseudo-classes match.
     CSS::Invalidation::invalidate_style_after_validity_change(*this);
 
-    // Any time the user causes the element's raw value to change, the user agent must queue an element task on the user
-    // interaction task source given the textarea element to fire an event named input at the textarea element, with the
-    // bubbles and composed attributes initialized to true.
-    queue_an_element_task(HTML::Task::Source::UserInteraction, [this, input_type, data]() {
-        Bindings::InputEventInit input_event_init;
-        input_event_init.bubbles = true;
-        input_event_init.composed = true;
-        input_event_init.input_type = input_type.to_string();
-        input_event_init.data = data;
-        auto input_event = UIEvents::InputEvent::create_from_platform_event(realm(), HTML::EventNames::input, input_event_init);
-        dispatch_event(input_event);
-    });
+    // https://html.spec.whatwg.org/multipage/form-elements.html#the-textarea-element
+    // https://github.com/whatwg/html/issues/1080
+    // INTEROP: Although HTML specifies queuing this event, other engines dispatch it synchronously for text edits.
+    //          Controlled textareas rely on observing each edit before rendering can restore an older value.
+    Bindings::InputEventInit input_event_init;
+    input_event_init.bubbles = true;
+    input_event_init.composed = true;
+    input_event_init.input_type = input_type;
+    input_event_init.data = data;
+    auto input_event = UIEvents::InputEvent::create_from_platform_event(realm(), HTML::EventNames::input, input_event_init);
+    dispatch_event(input_event);
 
     // A textarea element's dirty value flag must be set to true whenever the user interacts with the control in a way that changes the raw value.
     m_dirty_value = true;
@@ -461,7 +500,7 @@ void HTMLTextAreaElement::did_edit_text_node(FlyString const& input_type, Option
     update_placeholder_visibility();
 }
 
-EventResult HTMLTextAreaElement::handle_return_key(FlyString const& input_type)
+EventResult HTMLTextAreaElement::handle_return_key(Utf16FlyString const& input_type)
 {
     handle_insert(input_type, Utf16String::from_code_point(0x0A)); // Avoid the platform codepoint
     return EventResult::Handled;
@@ -488,7 +527,7 @@ bool HTMLTextAreaElement::is_mutable() const
 }
 
 // https://html.spec.whatwg.org/multipage/form-elements.html#attr-textarea-placeholder
-Optional<String> HTMLTextAreaElement::placeholder_value() const
+Optional<Utf16String> HTMLTextAreaElement::placeholder_value() const
 {
     if (!m_text_node || !m_text_node->data().is_empty())
         return {};
@@ -497,7 +536,7 @@ Optional<String> HTMLTextAreaElement::placeholder_value() const
     return get_attribute_value(HTML::AttributeNames::placeholder);
 }
 
-RefPtr<Layout::Node> HTMLTextAreaElement::create_layout_node(CSS::ComputedProperties const& style)
+RefPtr<Layout::Node> HTMLTextAreaElement::create_layout_node(NonnullRefPtr<CSS::ComputedValues const> style)
 {
     return make_ref_counted<Layout::TextAreaBox>(document(), *this, style);
 }

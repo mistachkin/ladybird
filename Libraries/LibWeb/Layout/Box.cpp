@@ -9,24 +9,74 @@
 #include <LibWeb/HTML/HTMLHtmlElement.h>
 #include <LibWeb/Layout/BlockContainer.h>
 #include <LibWeb/Layout/Box.h>
-#include <LibWeb/Layout/FormattingContext.h>
+#include <LibWeb/Layout/LayoutRustBridge.h>
 #include <LibWeb/Layout/TableWrapper.h>
-#include <LibWeb/Painting/PaintableBox.h>
+#include <LibWeb/Painting/Paintable.h>
 
 namespace Web::Layout {
 
-Box::Box(DOM::Document& document, DOM::Node* node, CSS::ComputedProperties const& style)
-    : NodeWithStyleAndBoxModelMetrics(document, node, style)
-{
-}
-
-Box::Box(DOM::Document& document, DOM::Node* node, NonnullOwnPtr<CSS::ComputedValues> computed_values)
+Box::Box(DOM::Document& document, DOM::Node* node, NonnullRefPtr<CSS::ComputedValues const> computed_values)
     : NodeWithStyleAndBoxModelMetrics(document, node, move(computed_values))
 {
 }
 
 Box::~Box()
 {
+}
+
+bool Box::is_partial_relayout_boundary(RequireExistingPaintable require_existing_paintable) const
+{
+    // An absolutely or fixed positioned descendant whose containing block is outside this
+    // box's subtree is laid out by a formatting context outside it, which makes subtree
+    // isolation impossible for any kind of boundary.
+    if (abspos_descendant_escapes())
+        return false;
+
+    // A nested <svg> never qualifies: its subtree is laid out in the outer SVG's
+    // viewBox-transformed coordinate system, which a relayout rooted at the inner <svg> cannot
+    // reproduce.
+    bool is_outermost_svg_root = is_svg_svg_box() && !(parent() && (parent()->is_svg_box() || parent()->is_svg_svg_box()));
+
+    // An in-flow SVG root's used size is determined solely by its own attributes and outer
+    // context, never by its children, so its size and position from the previous layout can be
+    // reused. An absolutely positioned SVG root's placement is not frozen, so it must qualify
+    // through the saved-inputs replay path below instead.
+    if (is_svg_svg_box() && !is_absolutely_positioned())
+        return is_outermost_svg_root;
+
+    if (!is_absolutely_positioned())
+        return false;
+    if (is_anonymous())
+        return false;
+    if (require_existing_paintable == RequireExistingPaintable::Yes && !paintable_box())
+        return false;
+    if (dom_node() == document().document_element())
+        return false;
+    if (!has_saved_abspos_layout_inputs())
+        return false;
+
+    // Only a full layout pass resolves anchor() functions in the inset properties to plain
+    // values; a replay from saved inputs cannot.
+    if (box_inset_properties_contain_anchor_functions(*this))
+        return false;
+
+    // NOTE: Content-dependent sizing (shrink-to-fit, intrinsic constraints, aspect-ratio) does
+    //       not disqualify a boundary: replay re-solves the boundary's own size, and a resized
+    //       boundary triggers ancestor scrollable overflow recomputation after commit.
+
+    auto formatting_context_type = formatting_context_type_created_by_box(*this);
+    if (!formatting_context_type.has_value())
+        return false;
+    switch (*formatting_context_type) {
+    case RustFFI::FfiFormattingContextType::Block:
+    case RustFFI::FfiFormattingContextType::Flex:
+    case RustFFI::FfiFormattingContextType::Grid:
+        return true;
+    case RustFFI::FfiFormattingContextType::Svg:
+        return is_outermost_svg_root;
+    default:
+        return false;
+    }
 }
 
 CSS::SizeWithAspectRatio Box::auto_content_box_size() const
@@ -42,20 +92,20 @@ CSS::SizeWithAspectRatio Box::auto_content_box_size() const
 
 RefPtr<Painting::Paintable> Box::create_paintable() const
 {
-    return Painting::PaintableBox::create(*this);
+    return Painting::Paintable::create(*this);
 }
 
-RefPtr<Painting::PaintableBox> Box::paintable_box()
+RefPtr<Painting::Paintable> Box::paintable_box()
 {
-    if (auto paintable = Node::first_paintable())
-        return static_cast<Painting::PaintableBox&>(*paintable);
+    if (auto paintable = Node::paintable())
+        return static_cast<Painting::Paintable&>(*paintable);
     return nullptr;
 }
 
-RefPtr<Painting::PaintableBox const> Box::paintable_box() const
+RefPtr<Painting::Paintable const> Box::paintable_box() const
 {
-    if (auto paintable = Node::first_paintable())
-        return static_cast<Painting::PaintableBox const&>(*paintable);
+    if (auto paintable = Node::paintable())
+        return static_cast<Painting::Paintable const&>(*paintable);
     return nullptr;
 }
 

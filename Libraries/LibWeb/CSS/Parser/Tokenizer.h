@@ -10,6 +10,7 @@
 #include <AK/Optional.h>
 #include <AK/StringView.h>
 #include <AK/Types.h>
+#include <AK/Utf16View.h>
 #include <AK/Utf8View.h>
 #include <LibWeb/CSS/Parser/Token.h>
 #include <LibWeb/Export.h>
@@ -66,6 +67,7 @@ public:
 class WEB_API Tokenizer {
 public:
     static Vector<Token> tokenize(StringView input, StringView encoding, TokenizerInput = TokenizerInput::DecodedText);
+    static Vector<Token> tokenize(Utf16View input);
 
     [[nodiscard]] static Token create_eof_token();
 
@@ -91,7 +93,7 @@ private:
     [[nodiscard]] Token consume_an_ident_like_token();
     [[nodiscard]] Number consume_a_number();
     [[nodiscard]] double convert_a_string_to_a_number(StringView);
-    [[nodiscard]] FlyString consume_an_ident_sequence();
+    [[nodiscard]] Utf16FlyString consume_an_ident_sequence();
     [[nodiscard]] u32 consume_escaped_code_point();
     [[nodiscard]] Token consume_a_url_token(size_t start_byte_offset);
     void consume_the_remnants_of_a_bad_url();

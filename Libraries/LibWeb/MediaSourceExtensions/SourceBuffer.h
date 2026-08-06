@@ -48,7 +48,7 @@ public:
     // https://w3c.github.io/media-source/#dom-sourcebuffer-buffered
     WebIDL::ExceptionOr<GC::Ref<HTML::TimeRanges>> buffered();
 
-    void set_content_type(String const& type);
+    void set_content_type(Utf16View type);
 
     // https://w3c.github.io/media-source/#addsourcebuffer-method
     WebIDL::ExceptionOr<void> append_buffer(WebIDL::BufferSource);
@@ -57,10 +57,12 @@ public:
     WebIDL::ExceptionOr<void> abort();
 
     // https://w3c.github.io/media-source/#dom-sourcebuffer-changetype
-    WebIDL::ExceptionOr<void> change_type(String const& type);
+    WebIDL::ExceptionOr<void> change_type(Utf16String const& type);
 
     void set_reached_end_of_stream(Badge<MediaSource>);
     void clear_reached_end_of_stream(Badge<MediaSource>);
+
+    void abort_if_updating(Badge<MediaSource>);
 
 protected:
     SourceBuffer(JS::Realm&, MediaSource&);
@@ -71,8 +73,9 @@ protected:
     virtual void visit_edges(Cell::Visitor&) override;
 
 private:
-    WebIDL::ExceptionOr<void> prepare_append(size_t new_data_size, AK::Duration current_time);
-    void run_buffer_append_algorithm();
+    WebIDL::ExceptionOr<void> prepare_append(size_t new_data_size);
+    void run_buffer_append_algorithm(u64 append_generation);
+    void abort_buffer_append_algorithm();
     void run_append_error_algorithm();
     void on_first_initialization_segment_processed(InitializationSegmentData const&);
     void update_ready_state_and_duration_after_coded_frame_processing();
@@ -80,6 +83,10 @@ private:
 
     GC::Ref<MediaSource> m_media_source;
     NonnullRefPtr<SourceBufferProcessor> m_processor;
+
+    // NB: The generation of the current buffer-append run — captured by the run when it starts. Bumped by
+    //     abort_buffer_append_algorithm(). A run whose captured generation no longer matches does nothing further.
+    u64 m_append_generation { 0 };
 
     // https://w3c.github.io/media-source/#dom-sourcebuffer-audiotracks
     GC::Ref<HTML::AudioTrackList> m_audio_tracks;

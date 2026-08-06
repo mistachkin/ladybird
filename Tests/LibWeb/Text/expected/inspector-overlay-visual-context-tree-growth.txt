@@ -1,0 +1,2 @@
+PASS: recording with an inspector highlight does not modify the visual context tree
+PASS: visual context tree is unchanged after clearing the highlight

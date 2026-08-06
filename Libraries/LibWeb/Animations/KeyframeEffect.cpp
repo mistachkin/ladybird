@@ -6,6 +6,7 @@
 
 #include <AK/Bitmap.h>
 #include <AK/QuickSort.h>
+#include <AK/Utf16StringBuilder.h>
 #include <LibJS/Runtime/Iterator.h>
 #include <LibWeb/Animations/Animation.h>
 #include <LibWeb/Animations/KeyframeEffect.h>
@@ -69,12 +70,12 @@ static WebIDL::ExceptionOr<KeyframeType<AL>> process_a_keyframe_like_object(JS::
             return Optional<double> {};
         auto double_value = TRY(value.to_double(vm));
         if (isnan(double_value) || isinf(double_value))
-            return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, MUST(String::formatted("Invalid offset value: {}", TRY(value.to_utf16_string(vm)))) };
+            return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, Utf16String::formatted("Invalid offset value: {}", TRY(value.to_utf16_string(vm))) };
         return double_value;
     };
 
-    Function<WebIDL::ExceptionOr<String>(JS::Value)> to_string = [&vm](JS::Value value) -> WebIDL::ExceptionOr<String> {
-        return TRY(value.to_utf16_string(vm)).to_utf8_but_should_be_ported_to_utf16();
+    Function<WebIDL::ExceptionOr<Utf16String>(JS::Value)> to_string = [&vm](JS::Value value) -> WebIDL::ExceptionOr<Utf16String> {
+        return TRY(value.to_utf16_string(vm));
     };
 
     Function<WebIDL::ExceptionOr<Bindings::CompositeOperationOrAuto>(JS::Value)> to_composite_operation = [&vm](JS::Value value) -> WebIDL::ExceptionOr<Bindings::CompositeOperationOrAuto> {
@@ -91,7 +92,7 @@ static WebIDL::ExceptionOr<KeyframeType<AL>> process_a_keyframe_like_object(JS::
         if (string_value == "auto"sv)
             return Bindings::CompositeOperationOrAuto::Auto;
 
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Invalid composite value"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Invalid composite value"_utf16 };
     };
 
     // 1. Run the procedure to convert an ECMAScript value to a dictionary type with keyframe input as the ECMAScript
@@ -120,10 +121,10 @@ static WebIDL::ExceptionOr<KeyframeType<AL>> process_a_keyframe_like_object(JS::
 
         auto easing_maybe_list = TRY(convert_value_to_maybe_list(realm, easing, to_string));
         easing_maybe_list.visit(
-            [&](String const& value) {
+            [&](Utf16String const& value) {
                 keyframe_output.easing = EasingValue { value };
             },
-            [&](Vector<String> const& values) {
+            [&](Vector<Utf16String> const& values) {
                 Vector<EasingValue> easing_values;
                 for (auto& easing_value : values)
                     easing_values.append(easing_value);
@@ -152,13 +153,13 @@ static WebIDL::ExceptionOr<KeyframeType<AL>> process_a_keyframe_like_object(JS::
     //    <custom-property-name> production.
     auto input_properties = TRY(keyframe_object.enumerable_own_property_names(JS::Object::PropertyKind::Key));
 
-    Vector<String> animation_properties;
+    Vector<Utf16FlyString> animation_properties;
 
     for (auto const& input_property : input_properties) {
         if (!input_property.is_string())
             continue;
 
-        auto name = input_property.as_string().utf16_string_view().to_utf8_but_should_be_ported_to_utf16();
+        auto name = Utf16FlyString::from_utf16(input_property.as_string().utf16_string_view());
 
         // Handle the two special cases
         if (name == "cssFloat"sv || name == "cssOffset"sv) {
@@ -179,10 +180,10 @@ static WebIDL::ExceptionOr<KeyframeType<AL>> process_a_keyframe_like_object(JS::
         // 1. Let raw value be the result of calling the [[Get]] internal method on keyframe input, with property name
         //    as the property key and keyframe input as the receiver.
         // 2. Check the completion record of raw value.
-        JS::PropertyKey key { Utf16FlyString::from_utf8(property_name), JS::PropertyKey::StringMayBeNumber::No };
+        JS::PropertyKey key { property_name, JS::PropertyKey::StringMayBeNumber::No };
         auto raw_value = TRY(keyframe_object.get(key));
 
-        using PropertyValuesType = Conditional<AL == AllowLists::Yes, Vector<String>, String>;
+        using PropertyValuesType = Conditional<AL == AllowLists::Yes, Vector<Utf16String>, Utf16String>;
         PropertyValuesType property_values;
 
         // 3. Convert raw value to a DOMString or sequence of DOMStrings property values as follows:
@@ -195,16 +196,16 @@ static WebIDL::ExceptionOr<KeyframeType<AL>> process_a_keyframe_like_object(JS::
 
             // If property values is a single DOMString, replace property values with a sequence of DOMStrings with the
             // original value of property values as the only element.
-            if (intermediate_property_values.has<String>())
-                property_values = Vector { intermediate_property_values.get<String>() };
+            if (intermediate_property_values.has<Utf16String>())
+                property_values = Vector { intermediate_property_values.get<Utf16String>() };
             else
-                property_values = intermediate_property_values.get<Vector<String>>();
+                property_values = intermediate_property_values.get<Vector<Utf16String>>();
         }
         // -> Otherwise,
         else {
             // Let property values be the result of converting raw value to a DOMString using the procedure for
             // converting an ECMAScript value to a DOMString [WEBIDL].
-            property_values = TRY(raw_value.to_utf16_string(vm)).to_utf8_but_should_be_ported_to_utf16();
+            property_values = TRY(raw_value.to_utf16_string(vm));
         }
 
         // 4. Calculate the normalized property name as the result of applying the IDL attribute name to animation
@@ -445,7 +446,7 @@ static WebIDL::ExceptionOr<Vector<BaseKeyframe>> process_a_keyframes_argument(JS
         // 8. If easings is an empty sequence, let it be a sequence of length one containing the single value "linear",
         //    i.e. « "linear" ».
         if (easings.is_empty())
-            easings.append("linear"_string);
+            easings.append("linear"_utf16);
 
         // 9. If easings has fewer items than processed keyframes, repeat the elements in easings successively starting
         //    from the beginning of the list until easings has as many items as processed keyframes.
@@ -497,7 +498,7 @@ static WebIDL::ExceptionOr<Vector<BaseKeyframe>> process_a_keyframes_argument(JS
 
     // 6. If processed keyframes is not loosely sorted by offset, throw a TypeError and abort these steps.
     if (!is_loosely_sorted_by_offset(processed_keyframes))
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Keyframes are not in ascending order based on offset"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Keyframes are not in ascending order based on offset"_utf16 };
 
     // 7. If there exist any keyframe in processed keyframes whose keyframe offset is non-null and less than zero or
     //    greater than one, throw a TypeError and abort these steps.
@@ -508,7 +509,7 @@ static WebIDL::ExceptionOr<Vector<BaseKeyframe>> process_a_keyframes_argument(JS
 
         auto offset = keyframe.offset.value();
         if (offset < 0.0 || offset > 1.0)
-            return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, MUST(String::formatted("Keyframe {} has invalid offset value {}", i, offset)) };
+            return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, Utf16String::formatted("Keyframe {} has invalid offset value {}", i, offset) };
     }
 
     // 8. For each frame in processed keyframes, perform the following steps:
@@ -550,11 +551,11 @@ static WebIDL::ExceptionOr<Vector<BaseKeyframe>> process_a_keyframes_argument(JS
         //    syntax defined for the easing member of the EffectTiming dictionary.
         //
         //    If parsing the "easing" property fails, throw a TypeError and abort this procedure.
-        auto easing_string = keyframe.easing.get<String>();
+        auto easing_string = keyframe.easing.get<Utf16String>();
         auto easing_value = AnimationEffect::parse_easing_string(easing_string);
 
         if (!easing_value.has_value())
-            return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, MUST(String::formatted("Invalid animation easing value: \"{}\"", easing_string)) };
+            return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, Utf16String::formatted("Invalid animation easing value: \"{}\"", easing_string) };
 
         keyframe.easing.set(easing_value.value());
     }
@@ -562,10 +563,10 @@ static WebIDL::ExceptionOr<Vector<BaseKeyframe>> process_a_keyframes_argument(JS
     // 9. Parse each of the values in unused easings using the CSS syntax defined for easing member of the EffectTiming
     //    interface, and if any of the values fail to parse, throw a TypeError and abort this procedure.
     for (auto& unused_easing : unused_easings) {
-        auto easing_string = unused_easing.get<String>();
+        auto easing_string = unused_easing.get<Utf16String>();
         auto easing_value = AnimationEffect::parse_easing_string(easing_string);
         if (!easing_value.has_value())
-            return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, MUST(String::formatted("Invalid animation easing value: \"{}\"", easing_string)) };
+            return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, Utf16String::formatted("Invalid animation easing value: \"{}\"", easing_string) };
     }
 
     return processed_keyframes;
@@ -712,7 +713,7 @@ WebIDL::ExceptionOr<GC::Ref<KeyframeEffect>> KeyframeEffect::construct_impl(
     //       the spec may enable setting the duration as a CSSNumeric value, where the unit is a valid time unit or
     //       percent.
     if (timing_input.duration.has<GC::Ref<CSS::CSSNumericValue>>())
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Setting duration as a CSSNumericValue is not supported"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Setting duration as a CSSNumericValue is not supported"_utf16 };
 
     // 5. Call the procedure to update the timing properties of an animation effect of effect from timing input.
     //    If that procedure causes an exception to be thrown, propagate the exception and abort this procedure.
@@ -802,15 +803,17 @@ void KeyframeEffect::set_target(DOM::Element* target)
     //        it will remain "stuck" until it's style is fully invalidated for some other reason.
 }
 
-Optional<String> KeyframeEffect::pseudo_element() const
+Optional<Utf16String> KeyframeEffect::pseudo_element() const
 {
     if (!m_target_pseudo_selector.has_value())
         return {};
-    return m_target_pseudo_selector->serialize();
+    Utf16StringBuilder builder;
+    m_target_pseudo_selector->serialize_to(builder);
+    return builder.to_string();
 }
 
 // https://drafts.csswg.org/web-animations-1/#dom-keyframeeffect-pseudoelement
-WebIDL::ExceptionOr<void> KeyframeEffect::set_pseudo_element(Optional<String> value)
+WebIDL::ExceptionOr<void> KeyframeEffect::set_pseudo_element(Optional<Utf16String> value)
 {
     // On setting, sets the target pseudo-selector of the animation effect to the result of
     // pseudo-element parsing on the provided value, defined as the following:
@@ -831,9 +834,14 @@ Optional<DOM::AbstractElement> KeyframeEffect::target_abstract_element() const
     return {};
 }
 
-void KeyframeEffect::set_target(DOM::AbstractElement abstract_element)
+void KeyframeEffect::set_target(DOM::AbstractElement abstract_element, InvalidateEffect invalidate)
 {
-    set_target(&abstract_element.element());
+    if (invalidate == InvalidateEffect::Yes) {
+        set_target(&abstract_element.element());
+    } else {
+        VERIFY(!associated_animation());
+        m_target_element = &abstract_element.element();
+    }
     m_target_pseudo_selector = abstract_element.pseudo_element().map([](auto it) { return CSS::Selector::PseudoElementSelector { it }; });
 }
 
@@ -850,22 +858,28 @@ void KeyframeEffect::set_composite(Bindings::CompositeOperation value)
     invalidate_effect();
 }
 
+Bindings::CompositeOperation KeyframeEffect::composite_for_bindings() const
+{
+    update_style_if_needed();
+    return composite();
+}
+
 // https://www.w3.org/TR/web-animations-1/#dom-keyframeeffect-getkeyframes
 WebIDL::ExceptionOr<GC::RootVector<JS::Object*>> KeyframeEffect::get_keyframes()
 {
-    if (m_keyframe_objects.size() != m_keyframes.size()) {
+    if (m_keyframe_objects_cache.size() != m_keyframes.size()) {
         auto& vm = this->vm();
         auto& realm = this->realm();
 
         // Recalculate the keyframe objects
-        VERIFY(m_keyframe_objects.size() == 0);
+        VERIFY(m_keyframe_objects_cache.size() == 0);
 
         for (auto& keyframe : m_keyframes) {
             auto object = JS::Object::create(realm, realm.intrinsics().object_prototype());
             TRY(object->set(vm.names.offset, keyframe.offset.has_value() ? JS::Value(keyframe.offset.value()) : JS::js_null(), ShouldThrowExceptions::Yes));
             TRY(object->set(vm.names.computedOffset, JS::Value(keyframe.computed_offset.value()), ShouldThrowExceptions::Yes));
             auto easing_value = keyframe.easing.get<CSS::EasingFunction>();
-            TRY(object->set(vm.names.easing, JS::PrimitiveString::create(vm, Utf16String::from_utf8(easing_value.to_string())), ShouldThrowExceptions::Yes));
+            TRY(object->set(vm.names.easing, JS::PrimitiveString::create(vm, easing_value.to_utf16_string()), ShouldThrowExceptions::Yes));
 
             if (keyframe.composite == Bindings::CompositeOperationOrAuto::Replace) {
                 TRY(object->set(vm.names.composite, JS::PrimitiveString::create(vm, "replace"sv), ShouldThrowExceptions::Yes));
@@ -879,16 +893,16 @@ WebIDL::ExceptionOr<GC::RootVector<JS::Object*>> KeyframeEffect::get_keyframes()
 
             for (auto const& [id, value] : keyframe.parsed_properties()) {
                 auto key = CSS::camel_case_string_from_property_id(id);
-                auto value_string = JS::PrimitiveString::create(vm, Utf16String::from_utf8(value->to_string(CSS::SerializationMode::Normal)));
+                auto value_string = JS::PrimitiveString::create(vm, value->to_utf16_string(CSS::SerializationMode::Normal));
                 TRY(object->set(JS::PropertyKey { move(key), JS::PropertyKey::StringMayBeNumber::No }, value_string, ShouldThrowExceptions::Yes));
             }
 
-            m_keyframe_objects.append(object);
+            m_keyframe_objects_cache.append(object);
         }
     }
 
     GC::RootVector<JS::Object*> keyframes;
-    for (auto const& keyframe : m_keyframe_objects)
+    for (auto const& keyframe : m_keyframe_objects_cache)
         keyframes.append(keyframe);
     return keyframes;
 }
@@ -896,7 +910,7 @@ WebIDL::ExceptionOr<GC::RootVector<JS::Object*>> KeyframeEffect::get_keyframes()
 // https://www.w3.org/TR/web-animations-1/#dom-keyframeeffect-setkeyframes
 WebIDL::ExceptionOr<void> KeyframeEffect::set_keyframes(GC::Ptr<JS::Object> keyframe_object)
 {
-    m_keyframe_objects.clear();
+    m_keyframe_objects_cache.clear();
     m_keyframes = TRY(process_a_keyframes_argument(realm(), keyframe_object));
     // FIXME: After processing the keyframe argument, we need to turn the set of keyframes into a set of computed
     //        keyframes using the procedure outlined in the second half of
@@ -954,7 +968,7 @@ void KeyframeEffect::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
     visitor.visit(m_target_element);
-    visitor.visit(m_keyframe_objects);
+    visitor.visit(m_keyframe_objects_cache);
 }
 
 void KeyframeEffect::update_computed_properties(AnimationUpdateContext& context)
@@ -973,15 +987,20 @@ void KeyframeEffect::update_computed_properties(AnimationUpdateContext& context)
     target->update_animated_properties({}, pseudo_element_type(), *this, context);
 }
 
-void KeyframeEffect::update_computed_properties_for_style(AnimationUpdateContext& context, DOM::AbstractElement abstract_element, CSS::ComputedProperties& computed_properties)
+void KeyframeEffect::update_computed_properties_for_style(AnimationUpdateContext& context, DOM::AbstractElement abstract_element)
 {
-    context.elements.ensure(abstract_element, [&computed_properties] {
-        auto old_animated_properties = computed_properties.animated_properties_snapshot();
-        computed_properties.reset_non_inherited_animated_properties({});
-        return AnimationUpdateContext::ElementData { move(old_animated_properties), computed_properties };
+    auto& style_computer = abstract_element.element().document().style_computer();
+    auto& element_data = context.elements.ensure(abstract_element, [&abstract_element, &style_computer] {
+        auto computed_values = abstract_element.computed_values();
+        VERIFY(computed_values);
+        auto old_animated_properties = computed_values->animated_properties_snapshot();
+        auto computed_properties = style_computer.reconstruct_computed_properties(*computed_values);
+        computed_properties->reset_non_inherited_animated_properties({});
+        return AnimationUpdateContext::ElementData { move(old_animated_properties), move(computed_properties) };
     });
 
-    abstract_element.element().document().style_computer().collect_animation_into(abstract_element, *this, computed_properties);
+    VERIFY(element_data.target_style);
+    element_data.effects.append(*this);
 }
 
 Bindings::CompositeOperation css_animation_composition_to_bindings_composite_operation(CSS::AnimationComposition composition)

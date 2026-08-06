@@ -9,8 +9,11 @@
 #include <LibWeb/DOM/EditingHostManager.h>
 #include <LibWeb/DOM/Range.h>
 #include <LibWeb/DOM/Text.h>
+#include <LibWeb/Editing/ClipboardSanitizer.h>
 #include <LibWeb/Editing/CommandNames.h>
+#include <LibWeb/HTML/HTMLElement.h>
 #include <LibWeb/Selection/Selection.h>
+#include <LibWeb/Selection/SelectionModifier.h>
 #include <LibWeb/UIEvents/InputTypes.h>
 
 namespace Web::DOM {
@@ -34,7 +37,7 @@ void EditingHostManager::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_active_contenteditable_element);
 }
 
-void EditingHostManager::handle_insert(FlyString const&, Utf16String const& value)
+void EditingHostManager::handle_insert(Utf16FlyString const& input_type, Utf16View value)
 {
     // https://w3c.github.io/editing/docs/execCommand/#additional-requirements
     // When the user instructs the user agent to insert text inside an editing host, such as by typing on the keyboard
@@ -42,31 +45,56 @@ void EditingHostManager::handle_insert(FlyString const&, Utf16String const& valu
     // relevant document, with value equal to the text the user provided. If the user inserts multiple characters at
     // once or in quick succession, this specification does not define whether it is treated as one insertion or several
     // consecutive insertions.
-    auto editing_result = m_document->exec_command(Editing::CommandNames::insertText, false, value);
+    //
+    // NB: The user's input type is passed along so pastes fire an input event with inputType "insertFromPaste" and
+    //     form their own undo unit, even though they run the insertText command.
+    auto editing_result = m_document->exec_command_internal(Editing::CommandNames::insertText, false, value, Document::DispatchInputEvent::Yes, input_type);
     if (editing_result.is_exception())
         dbgln("handle_insert(): editing resulted in exception: {}", editing_result.exception());
 }
 
-void EditingHostManager::select_all()
+void EditingHostManager::handle_insert_from_clipboard(Utf16FlyString const& input_type, Utf16View plain_text, Optional<Utf16View> html)
 {
-    if (!m_active_contenteditable_element) {
+    auto range = m_document->get_selection()->range();
+    auto editing_host = range ? range->start_container()->editing_host() : nullptr;
+    bool accepts_rich_text = !editing_host || !is<HTML::HTMLElement>(*editing_host)
+        || as<HTML::HTMLElement>(*editing_host).content_editable_state() != HTML::ContentEditableState::PlaintextOnly;
+
+    if (!range || !html.has_value() || !accepts_rich_text) {
+        handle_insert(input_type, plain_text);
         return;
     }
-    auto selection = m_document->get_selection();
-    if (!selection->anchor_node() || !selection->focus_node()) {
+
+    auto sanitized_html = Editing::sanitize_clipboard_html(*range, *html);
+    if (sanitized_html.is_exception() || sanitized_html.value().is_empty()) {
+        handle_insert(input_type, plain_text);
         return;
     }
-    MUST(selection->set_base_and_extent(*selection->anchor_node(), 0, *selection->focus_node(), selection->focus_node()->length()));
+
+    // INTEROP: Rich editing hosts prefer text/html over text/plain when both clipboard representations are present.
+    //          Run insertHTML as one user edit so its DOM mutations and final selection form one undo unit.
+    auto editing_result = m_document->exec_command_internal(Editing::CommandNames::insertHTML, false, sanitized_html.value(), Document::DispatchInputEvent::Yes, input_type);
+    if (editing_result.is_exception())
+        dbgln("handle_insert_from_clipboard(): editing resulted in exception: {}", editing_result.exception());
 }
 
-void EditingHostManager::set_selection_anchor(GC::Ref<DOM::Node> anchor_node, size_t anchor_offset)
+void EditingHostManager::select_all()
+{
+    if (!m_active_contenteditable_element)
+        return;
+    auto selection = m_document->get_selection();
+    Selection::SelectionModifier(*selection).select_all();
+}
+
+void EditingHostManager::set_selection_anchor(GC::Ref<DOM::Node> anchor_node, size_t anchor_offset, TextAffinity affinity)
 {
     auto selection = m_document->get_selection();
     MUST(selection->collapse(*anchor_node, anchor_offset));
+    selection->set_focus_affinity(affinity);
     m_document->reset_cursor_blink_cycle();
 }
 
-void EditingHostManager::set_selection_focus(GC::Ref<DOM::Node> focus_node, size_t focus_offset)
+void EditingHostManager::set_selection_focus(GC::Ref<DOM::Node> focus_node, size_t focus_offset, TextAffinity affinity)
 {
     if (!m_active_contenteditable_element || !m_active_contenteditable_element->is_ancestor_of(*focus_node))
         return;
@@ -74,6 +102,7 @@ void EditingHostManager::set_selection_focus(GC::Ref<DOM::Node> focus_node, size
     if (!selection->anchor_node())
         return;
     MUST(selection->set_base_and_extent(*selection->anchor_node(), selection->anchor_offset(), *focus_node, focus_offset));
+    selection->set_focus_affinity(affinity);
     m_document->reset_cursor_blink_cycle();
 }
 
@@ -84,13 +113,13 @@ GC::Ptr<Selection::Selection> EditingHostManager::get_selection_for_navigation(C
     if (!selection)
         return {};
 
-    // and the focus node must be inside a text node,
+    // and the focus node must be a text node or an element directly housing the caret (e.g. an empty line),
     auto focus_node = selection->focus_node();
-    if (!is<Text>(focus_node.ptr()))
+    if (!focus_node || (!is<Text>(*focus_node) && !is<Element>(*focus_node)))
         return {};
 
     // and if we're performing collapsed navigation (i.e. moving the caret), the focus node must be editable.
-    if (collapse == CollapseSelection::Yes && !focus_node->is_editable())
+    if (collapse == CollapseSelection::Yes && !focus_node->is_editable_or_editing_host())
         return {};
 
     return selection;
@@ -101,15 +130,7 @@ void EditingHostManager::move_cursor_to_start(CollapseSelection collapse)
     auto selection = get_selection_for_navigation(collapse);
     if (!selection)
         return;
-    auto node = selection->focus_node();
-
-    if (collapse == CollapseSelection::Yes) {
-        MUST(selection->collapse(node, 0));
-        m_document->reset_cursor_blink_cycle();
-    } else {
-        MUST(selection->set_base_and_extent(*selection->anchor_node(), selection->anchor_offset(), *node, 0));
-    }
-    selection->scroll_focus_into_view();
+    Selection::SelectionModifier(*selection).modify(collapse == CollapseSelection::Yes ? Selection::SelectionAlteration::Move : Selection::SelectionAlteration::Extend, Selection::SelectionDirection::Backward, Selection::SelectionGranularity::LineBoundary);
 }
 
 void EditingHostManager::move_cursor_to_end(CollapseSelection collapse)
@@ -117,15 +138,39 @@ void EditingHostManager::move_cursor_to_end(CollapseSelection collapse)
     auto selection = get_selection_for_navigation(collapse);
     if (!selection)
         return;
-    auto node = selection->focus_node();
+    Selection::SelectionModifier(*selection).modify(collapse == CollapseSelection::Yes ? Selection::SelectionAlteration::Move : Selection::SelectionAlteration::Extend, Selection::SelectionDirection::Forward, Selection::SelectionGranularity::LineBoundary);
+}
 
-    if (collapse == CollapseSelection::Yes) {
-        m_document->reset_cursor_blink_cycle();
-        MUST(selection->collapse(node, node->length()));
-    } else {
-        MUST(selection->set_base_and_extent(*selection->anchor_node(), selection->anchor_offset(), *node, node->length()));
-    }
-    selection->scroll_focus_into_view();
+void EditingHostManager::move_cursor_to_start_of_document(CollapseSelection collapse)
+{
+    auto selection = get_selection_for_navigation(collapse);
+    if (!selection)
+        return;
+    Selection::SelectionModifier(*selection).modify(collapse == CollapseSelection::Yes ? Selection::SelectionAlteration::Move : Selection::SelectionAlteration::Extend, Selection::SelectionDirection::Backward, Selection::SelectionGranularity::DocumentBoundary);
+}
+
+void EditingHostManager::move_cursor_to_end_of_document(CollapseSelection collapse)
+{
+    auto selection = get_selection_for_navigation(collapse);
+    if (!selection)
+        return;
+    Selection::SelectionModifier(*selection).modify(collapse == CollapseSelection::Yes ? Selection::SelectionAlteration::Move : Selection::SelectionAlteration::Extend, Selection::SelectionDirection::Forward, Selection::SelectionGranularity::DocumentBoundary);
+}
+
+void EditingHostManager::move_cursor_to_previous_page(CollapseSelection collapse)
+{
+    auto selection = get_selection_for_navigation(collapse);
+    if (!selection)
+        return;
+    Selection::SelectionModifier(*selection).modify(collapse == CollapseSelection::Yes ? Selection::SelectionAlteration::Move : Selection::SelectionAlteration::Extend, Selection::SelectionDirection::Backward, Selection::SelectionGranularity::Page);
+}
+
+void EditingHostManager::move_cursor_to_next_page(CollapseSelection collapse)
+{
+    auto selection = get_selection_for_navigation(collapse);
+    if (!selection)
+        return;
+    Selection::SelectionModifier(*selection).modify(collapse == CollapseSelection::Yes ? Selection::SelectionAlteration::Move : Selection::SelectionAlteration::Extend, Selection::SelectionDirection::Forward, Selection::SelectionGranularity::Page);
 }
 
 void EditingHostManager::increment_cursor_position_offset(CollapseSelection collapse)
@@ -172,7 +217,7 @@ void EditingHostManager::decrement_cursor_position_to_previous_line(CollapseSele
         selection->move_offset_to_previous_line(collapse == CollapseSelection::Yes);
 }
 
-void EditingHostManager::handle_delete(FlyString const& input_type)
+void EditingHostManager::handle_delete(Utf16FlyString const& input_type, [[maybe_unused]] DispatchInputEvent dispatch_input_event)
 {
     // https://w3c.github.io/editing/docs/execCommand/#additional-requirements
     // When the user instructs the user agent to delete the previous character inside an editing host, such as by
@@ -181,13 +226,16 @@ void EditingHostManager::handle_delete(FlyString const& input_type)
     // When the user instructs the user agent to delete the next character inside an editing host, such as by pressing
     // the Delete key while the cursor is in an editable node, the user agent must call execCommand("forwarddelete") on
     // the relevant document.
-    auto command = input_type == UIEvents::InputTypes::deleteContentBackward ? Editing::CommandNames::delete_ : Editing::CommandNames::forwardDelete;
-    auto editing_result = m_document->exec_command(command, false, {});
+    //
+    // NB: A cut deletes the selection like Backspace does, and passes its input type along so the input event fires
+    //     with inputType "deleteByCut" and the cut forms its own undo unit.
+    auto command = input_type == UIEvents::InputTypes::deleteContentForward ? Editing::CommandNames::forwardDelete : Editing::CommandNames::delete_;
+    auto editing_result = m_document->exec_command_internal(command, false, {}, Document::DispatchInputEvent::Yes, input_type);
     if (editing_result.is_exception())
         dbgln("handle_delete(): editing resulted in exception: {}", editing_result.exception());
 }
 
-EventResult EditingHostManager::handle_return_key(FlyString const& ui_input_type)
+EventResult EditingHostManager::handle_return_key(Utf16FlyString const& ui_input_type)
 {
     VERIFY(ui_input_type == UIEvents::InputTypes::insertParagraph || ui_input_type == UIEvents::InputTypes::insertLineBreak);
 

@@ -9,15 +9,12 @@
 #include <LibWeb/CSS/CSSNestedDeclarations.h>
 #include <LibWeb/CSS/CSSStyleRule.h>
 #include <LibWeb/CSS/CSSStyleSheet.h>
-#include <LibWeb/CSS/ComputedProperties.h>
+#include <LibWeb/CSS/ComputedValues.h>
 #include <LibWeb/CSS/Invalidation/InvalidationSetMatcher.h>
 #include <LibWeb/CSS/Parser/Parser.h>
-#include <LibWeb/CSS/SelectorEngine.h>
+#include <LibWeb/CSS/SelectorMatching.h>
 #include <LibWeb/CSS/StyleScope.h>
 #include <LibWeb/CSS/StyleSheetInvalidation.h>
-#include <LibWeb/CSS/StyleValues/CustomIdentStyleValue.h>
-#include <LibWeb/CSS/StyleValues/StringStyleValue.h>
-#include <LibWeb/CSS/StyleValues/StyleValueList.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Element.h>
 #include <LibWeb/DOM/ShadowRoot.h>
@@ -352,11 +349,11 @@ static bool element_matches_anchor_rule(DOM::Element const& element, Rule const&
     if (!Invalidation::element_matches_any_invalidation_set_property(element, rule.anchor_set))
         return false;
     if (rule.anchor_selector) {
-        SelectorEngine::MatchContext context {
+        SelectorMatching::MatchContext context {
             .style_sheet_for_rule = rule.style_sheet_for_rule,
             .rule_shadow_root = rule_shadow_root,
         };
-        if (!SelectorEngine::matches(*rule.anchor_selector, element, shadow_host, context))
+        if (!SelectorMatching::matches(*rule.anchor_selector, element, shadow_host, context))
             return false;
     }
     return true;
@@ -570,6 +567,7 @@ static bool rule_requires_broad_add_or_remove_invalidation(CSSRule const& rule)
     case CSSRule::Type::CounterStyle:
     case CSSRule::Type::LayerBlock:
     case CSSRule::Type::LayerStatement:
+    case CSSRule::Type::Function:
     // @font-feature-values changes how font-variant-alternates resolves at computed-style time, so
     // a declaration-time mutation still requires a whole-subtree restyle.
     case CSSRule::Type::FontFeatureValues:
@@ -588,6 +586,43 @@ static bool rule_requires_broad_add_or_remove_invalidation(CSSRule const& rule)
     }
 
     return false;
+}
+
+void StyleSheetInvalidationSet::visit_edges(GC::Cell::Visitor& visitor) const
+{
+    for (auto const& rule : pseudo_element_rules)
+        visitor.visit(rule.style_sheet_for_rule);
+    for (auto const& rule : trailing_universal_rules)
+        visitor.visit(rule.style_sheet_for_rule);
+}
+
+CachedStyleSheetInvalidationSet const& CSSStyleSheet::cached_style_sheet_invalidation_set() const
+{
+    if (m_cached_style_sheet_invalidation_set)
+        return *m_cached_style_sheet_invalidation_set;
+
+    if (auto document = owning_document())
+        ++document->style_invalidation_counters().style_sheet_invalidation_set_builds;
+
+    // OPTIMIZATION: Build the targeted invalidation set, check for broad-invalidation-triggering rule kinds, and
+    //               collect @keyframes names in a single walk over the sheet's effective rules, so the sheet's
+    //               @media gates evaluate once and every rule is visited once.
+    auto cached = make<CachedStyleSheetInvalidationSet>();
+    for_each_effective_rule(TraversalOrder::Preorder, [&](CSSRule const& rule) {
+        // Add/remove invalidation still has to look at effective non-style rules such as @keyframes or @layer, but
+        // inactive top-level media sheets should contribute nothing at all here.
+        if (!cached->contains_broad_invalidation_rule && rule_requires_broad_add_or_remove_invalidation(rule))
+            cached->contains_broad_invalidation_rule = true;
+        if (auto const* keyframes_rule = as_if<CSSKeyframesRule>(rule))
+            cached->keyframes_names.append(keyframes_rule->name());
+        if (cached->invalidation_set.invalidation_set.needs_invalidate_whole_subtree())
+            return;
+        if (auto const* style_rule = as_if<CSSStyleRule>(rule))
+            extend_style_sheet_invalidation_set_with_style_rule(cached->invalidation_set, *style_rule);
+    });
+
+    m_cached_style_sheet_invalidation_set = move(cached);
+    return *m_cached_style_sheet_invalidation_set;
 }
 
 void invalidate_style_for_stylesheet_change(DOM::Node& document_or_shadow_root, CSSStyleSheet const& sheet, DOM::StyleInvalidationReason reason)
@@ -611,32 +646,25 @@ void invalidate_style_for_stylesheet_change(DOM::Node& document_or_shadow_root, 
         return;
     }
 
-    // OPTIMIZATION: Build the targeted invalidation set and check for broad-invalidation-triggering rule kinds in
-    //               a single walk over the sheet's effective rules, so the sheet's @media gates evaluate once and
-    //               every rule is visited once instead of twice.
-    StyleSheetInvalidationSet invalidation_set_result;
-    bool sheet_contains_broad_invalidation_rule = false;
-    sheet.for_each_effective_rule(TraversalOrder::Preorder, [&](CSSRule const& rule) {
-        // Add/remove invalidation still has to look at effective non-style rules such as @keyframes or @layer, but
-        // inactive top-level media sheets should contribute nothing at all here.
-        if (!sheet_contains_broad_invalidation_rule && rule_requires_broad_add_or_remove_invalidation(rule))
-            sheet_contains_broad_invalidation_rule = true;
-        if (invalidation_set_result.invalidation_set.needs_invalidate_whole_subtree())
-            return;
-        if (auto const* style_rule = as_if<CSSStyleRule>(rule))
-            extend_style_sheet_invalidation_set_with_style_rule(invalidation_set_result, *style_rule);
-    });
+    auto const& cached = sheet.cached_style_sheet_invalidation_set();
 
-    bool requires_broad_invalidation = invalidation_set_result.invalidation_set.needs_invalidate_whole_subtree()
-        || sheet_contains_broad_invalidation_rule;
-    add_shadow_root_stylesheet_effects_for_broad_invalidation(document_or_shadow_root, invalidation_set_result, requires_broad_invalidation);
+    bool requires_broad_invalidation = cached.invalidation_set.invalidation_set.needs_invalidate_whole_subtree()
+        || cached.contains_broad_invalidation_rule;
+    if (requires_broad_invalidation) {
+        // The broad path only consults the shadow-escape flags of the set, so merge the scope's current reach into
+        // a copy of those flags instead of mutating the cached set.
+        StyleSheetInvalidationSet broad_effects;
+        broad_effects.merge_shadow_escape_flags_from(cached.invalidation_set);
+        add_shadow_root_stylesheet_effects_for_broad_invalidation(document_or_shadow_root, broad_effects, true);
+        invalidate_root_for_style_sheet_change(document_or_shadow_root, broad_effects, reason, true);
+    } else {
+        invalidate_root_for_style_sheet_change(document_or_shadow_root, cached.invalidation_set, reason, false);
+    }
 
-    invalidate_root_for_style_sheet_change(document_or_shadow_root, invalidation_set_result, reason, requires_broad_invalidation);
-
-    // OPTIMIZATION: Walk @keyframes rules in the new sheet and dirty only the elements that already
-    //               reference each animation-name, so a sheet add carrying @keyframes does not have
-    //               to escalate to a whole-subtree restyle.
-    invalidate_root_for_keyframes_rules_in_sheet(document_or_shadow_root, sheet);
+    // OPTIMIZATION: Dirty only the elements that already reference each @keyframes animation-name in the sheet, so
+    //               a sheet add carrying @keyframes does not have to escalate to a whole-subtree restyle.
+    for (auto const& animation_name : cached.keyframes_names)
+        invalidate_root_for_keyframes_rule(document_or_shadow_root, animation_name);
 }
 
 void invalidate_owners_for_inserted_style_rule(CSSStyleSheet const& style_sheet, CSSStyleRule const& style_rule, DOM::StyleInvalidationReason reason)
@@ -678,38 +706,24 @@ static void for_each_tree_affected_by_shadow_root_stylesheet_change(
     }
 }
 
-static bool style_value_references_animation_name(StyleValue const& value, FlyString const& animation_name)
+static bool computed_values_reference_animation_name(ComputedValues const& computed_values, Utf16FlyString const& animation_name)
 {
-    if (value.is_custom_ident())
-        return value.as_custom_ident().custom_ident() == animation_name;
-    if (value.is_string())
-        return value.as_string().string_value() == animation_name;
-
-    if (!value.is_value_list())
-        return false;
-
-    for (auto const& item : value.as_value_list().values()) {
-        if (item->is_custom_ident() && item->as_custom_ident().custom_ident() == animation_name)
-            return true;
-        if (item->is_string() && item->as_string().string_value() == animation_name)
+    for (auto const& name : computed_values.animation_names()) {
+        if (name.syntax != ComputedAnimationNameSyntax::None && name.name == animation_name)
             return true;
     }
 
     return false;
 }
 
-static bool element_or_pseudo_references_animation_name(DOM::Element const& element, FlyString const& animation_name)
+static bool element_or_pseudo_references_animation_name(DOM::Element const& element, Utf16FlyString const& animation_name)
 {
-    auto references_animation_name_in_properties = [&](CSS::ComputedProperties const& computed_properties) {
-        return style_value_references_animation_name(computed_properties.property(PropertyID::AnimationName), animation_name);
-    };
-
-    if (auto computed_properties = element.computed_properties(); computed_properties && references_animation_name_in_properties(*computed_properties))
+    if (auto computed_values = element.computed_values(); computed_values && computed_values_reference_animation_name(*computed_values, animation_name))
         return true;
 
     bool synthetic_pseudo_element_references_animation_name = false;
     element.for_each_synthetic_pseudo_element([&](Web::CSS::PseudoElement, Web::DOM::SyntheticPseudoElement const& pseudo_element) {
-        if (auto computed_properties = pseudo_element.computed_properties(); computed_properties && references_animation_name_in_properties(*computed_properties)) {
+        if (auto computed_values = pseudo_element.computed_values(); computed_values && computed_values_reference_animation_name(*computed_values, animation_name)) {
             synthetic_pseudo_element_references_animation_name = true;
             return IterationDecision::Break;
         }
@@ -719,7 +733,7 @@ static bool element_or_pseudo_references_animation_name(DOM::Element const& elem
     return synthetic_pseudo_element_references_animation_name;
 }
 
-static void invalidate_elements_affected_by_inserted_keyframes_rule(DOM::Node& root, FlyString const& animation_name)
+static void invalidate_elements_affected_by_inserted_keyframes_rule(DOM::Node& root, Utf16FlyString const& animation_name)
 {
     auto invalidate_matching_element = [&](DOM::Element& element) {
         // A new @keyframes rule only matters for elements or pseudo-elements that were already referencing the
@@ -759,12 +773,12 @@ static ShadowRootStylesheetEffects determine_shadow_root_stylesheet_effects_for_
                 auto const* element = as_if<DOM::Element>(node);
                 if (!element)
                     continue;
-                SelectorEngine::MatchContext context {
+                SelectorMatching::MatchContext context {
                     .style_sheet_for_rule = style_sheet,
                     .subject = *element,
                     .rule_shadow_root = &shadow_root,
                 };
-                if (SelectorEngine::matches(selector, *element, shadow_root.host(), context))
+                if (SelectorMatching::matches(selector, *element, shadow_root.host(), context))
                     return true;
             }
         }
@@ -874,7 +888,7 @@ void invalidate_style_for_style_sheet_owners(CSSStyleSheet const& style_sheet, D
     });
 }
 
-void invalidate_root_for_keyframes_rule(DOM::Node& root, FlyString const& animation_name)
+void invalidate_root_for_keyframes_rule(DOM::Node& root, Utf16FlyString const& animation_name)
 {
     // Shadow-scoped keyframes can still affect elements outside the shadow subtree when an active rule in the same
     // scope sets `animation-name` via :host or ::slotted(...). Mirror the fan-out used by the per-rule helper so the
@@ -896,18 +910,10 @@ void invalidate_root_for_keyframes_rule(DOM::Node& root, FlyString const& animat
         });
 }
 
-void invalidate_root_for_keyframes_rules_in_sheet(DOM::Node& root, CSSStyleSheet const& sheet)
+void invalidate_owners_for_modified_keyframes_rule(CSSStyleSheet const& style_sheet, CSSKeyframesRule const& keyframes_rule)
 {
-    sheet.for_each_effective_rule(TraversalOrder::Preorder, [&](CSSRule const& rule) {
-        auto const* keyframes_rule = as_if<CSSKeyframesRule>(rule);
-        if (!keyframes_rule)
-            return;
-        invalidate_root_for_keyframes_rule(root, keyframes_rule->name());
-    });
-}
+    VERIFY(keyframes_rule.parent_style_sheet() == &style_sheet);
 
-void invalidate_owners_for_inserted_keyframes_rule(CSSStyleSheet const& style_sheet, CSSKeyframesRule const& keyframes_rule)
-{
     for (auto& document_or_shadow_root : style_sheet.owning_documents_or_shadow_roots()) {
         auto& style_scope = document_or_shadow_root->is_shadow_root()
             ? as<DOM::ShadowRoot>(*document_or_shadow_root).style_scope()

@@ -1,0 +1,4149 @@
+/*
+ * Copyright (c) 2026-present, the Ladybird developers.
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+
+//! The Rust style computation core.
+//!
+//! This module is growing into StyleComputer's cascade and compute logic. The
+//! first piece is length absolutization: resolving font-relative, viewport-
+//! relative and absolute lengths to pixels during style computation, exactly
+//! as the C++ implementation does (the resolved value is the unrounded double;
+//! CSSPixels fixed-point rounding happens later at the consumers).
+//!
+//! Container-relative units are not handled yet and report handled = false so
+//! the C++ caller falls back to its own resolution.
+
+use std::ffi::c_void;
+use std::sync::{Arc, OnceLock};
+
+use crate::abort_on_panic;
+use crate::css::cascaded_properties::CascadedPropertyStore;
+use crate::css::css_pixels::CssPixels;
+use crate::css::display::FfiDisplay;
+use crate::css::property_metadata::longhands_for_shorthand;
+use crate::css::property_metadata::property_is_inherited;
+use crate::css::property_metadata::property_is_shorthand;
+use crate::css::style_value::{GridTrackEntryKind, RetainedStyleValueData, RetainedStyleValueDataList, StyleValueData};
+
+pub use crate::css::css_enums::*;
+
+include!(concat!(env!("OUT_DIR"), "/length_units_generated.rs"));
+
+/// The font metrics needed for font-relative length resolution, as unrounded
+/// CSS pixel values.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FfiFontMetrics {
+    pub font_size: f64,
+    pub x_height: f64,
+    pub cap_height: f64,
+    pub zero_advance: f64,
+    pub line_height: f64,
+}
+
+/// Mirror of the length resolution parts of Length::ResolutionContext.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FfiLengthResolutionContext {
+    pub viewport_width: f64,
+    pub viewport_height: f64,
+    pub font_metrics: FfiFontMetrics,
+    pub root_font_metrics: FfiFontMetrics,
+    pub font_metrics_depend_on_viewport_metrics: bool,
+    pub root_font_metrics_depend_on_viewport_metrics: bool,
+    /// Optional flag owned by Length::ResolutionContext, set to true whenever a
+    /// resolution here consumed viewport metrics. Callers that report the
+    /// dependency through their return value may leave this null.
+    pub resolved_viewport_relative_length: *mut bool,
+}
+
+/// Records a viewport metric dependency on the context's tracking flag, if one is set.
+fn record_viewport_relative_length_resolution(context: &FfiLengthResolutionContext) {
+    if context.resolved_viewport_relative_length.is_null() {
+        return;
+    }
+    // SAFETY: The flag belongs to a Length::ResolutionContext that outlives this call.
+    unsafe { *context.resolved_viewport_relative_length = true };
+}
+
+/// Result of absolutizing a length.
+#[repr(C)]
+pub struct FfiAbsolutizedLength {
+    /// False when the unit is not handled in Rust yet (container-relative);
+    /// the caller must fall back to the C++ resolution.
+    pub handled: bool,
+    /// False when the length was already absolute pixels and is unchanged.
+    pub changed: bool,
+    /// True when resolving consumed viewport metrics, either directly or
+    /// through font metrics that depend on them.
+    pub resolved_viewport_relative_length: bool,
+    pub px: f64,
+}
+
+#[derive(Clone, Copy)]
+enum LengthUnitKind {
+    Px,
+    Absolute { px_per_unit: f64 },
+    FontRelative { metric: FontMetricSelector, root: bool },
+    ViewportRelative { axis: ViewportAxis },
+    ContainerRelative,
+}
+
+#[derive(Clone, Copy)]
+enum FontMetricSelector {
+    FontSize,
+    XHeight,
+    CapHeight,
+    ZeroAdvance,
+    LineHeight,
+}
+
+#[derive(Clone, Copy)]
+enum ViewportAxis {
+    Width,
+    Height,
+    Min,
+    Max,
+}
+
+pub(crate) fn px_length_unit() -> u8 {
+    static PX: OnceLock<u8> = OnceLock::new();
+    *PX.get_or_init(|| LENGTH_UNIT_NAMES.iter().position(|&name| name == "px").unwrap() as u8)
+}
+
+pub(crate) fn none_keyword() -> u16 {
+    keyword::NONE
+}
+
+pub(crate) fn current_color_keyword() -> u16 {
+    keyword::CURRENTCOLOR
+}
+
+pub(crate) fn absolute_length_to_px(value: f64, unit: u8) -> Option<f64> {
+    match length_unit_kinds().get(unit as usize)? {
+        LengthUnitKind::Px => Some(value),
+        LengthUnitKind::Absolute { px_per_unit } => Some(value * px_per_unit),
+        _ => None,
+    }
+}
+
+fn length_unit_kinds() -> &'static [LengthUnitKind] {
+    static KINDS: OnceLock<Vec<LengthUnitKind>> = OnceLock::new();
+    KINDS.get_or_init(|| {
+        LENGTH_UNIT_NAMES
+            .iter()
+            .zip(LENGTH_UNIT_CANONICAL_PX_RATIOS)
+            .map(|(&name, ratio)| match name {
+                "px" => LengthUnitKind::Px,
+                // NB: ic and ric use the font size until the CJK water ideograph
+                //     advance is available, matching the C++ FIXME.
+                "em" | "ic" => LengthUnitKind::FontRelative {
+                    metric: FontMetricSelector::FontSize,
+                    root: false,
+                },
+                "rem" | "ric" => LengthUnitKind::FontRelative {
+                    metric: FontMetricSelector::FontSize,
+                    root: true,
+                },
+                "ex" => LengthUnitKind::FontRelative {
+                    metric: FontMetricSelector::XHeight,
+                    root: false,
+                },
+                "rex" => LengthUnitKind::FontRelative {
+                    metric: FontMetricSelector::XHeight,
+                    root: true,
+                },
+                "cap" => LengthUnitKind::FontRelative {
+                    metric: FontMetricSelector::CapHeight,
+                    root: false,
+                },
+                "rcap" => LengthUnitKind::FontRelative {
+                    metric: FontMetricSelector::CapHeight,
+                    root: true,
+                },
+                "ch" => LengthUnitKind::FontRelative {
+                    metric: FontMetricSelector::ZeroAdvance,
+                    root: false,
+                },
+                "rch" => LengthUnitKind::FontRelative {
+                    metric: FontMetricSelector::ZeroAdvance,
+                    root: true,
+                },
+                "lh" => LengthUnitKind::FontRelative {
+                    metric: FontMetricSelector::LineHeight,
+                    root: false,
+                },
+                "rlh" => LengthUnitKind::FontRelative {
+                    metric: FontMetricSelector::LineHeight,
+                    root: true,
+                },
+                // NB: vi maps to the width and vb to the height until the C++
+                //     side selects by inline axis, matching the FIXME there.
+                "vw" | "svw" | "lvw" | "dvw" | "vi" | "svi" | "lvi" | "dvi" => LengthUnitKind::ViewportRelative {
+                    axis: ViewportAxis::Width,
+                },
+                "vh" | "svh" | "lvh" | "dvh" | "vb" | "svb" | "lvb" | "dvb" => LengthUnitKind::ViewportRelative {
+                    axis: ViewportAxis::Height,
+                },
+                "vmin" | "svmin" | "lvmin" | "dvmin" => LengthUnitKind::ViewportRelative {
+                    axis: ViewportAxis::Min,
+                },
+                "vmax" | "svmax" | "lvmax" | "dvmax" => LengthUnitKind::ViewportRelative {
+                    axis: ViewportAxis::Max,
+                },
+                _ if ratio.is_finite() => LengthUnitKind::Absolute { px_per_unit: ratio },
+                _ => LengthUnitKind::ContainerRelative,
+            })
+            .collect()
+    })
+}
+
+/// Whether a length unit is font-relative or container-relative, the two
+/// relativities that make a length depend on more than global information.
+pub(crate) fn length_unit_is_font_or_container_relative(unit: u8) -> bool {
+    matches!(
+        length_unit_kinds().get(unit as usize),
+        Some(LengthUnitKind::FontRelative { .. } | LengthUnitKind::ContainerRelative)
+    )
+}
+
+fn select_font_metric(metrics: &FfiFontMetrics, metric: FontMetricSelector) -> f64 {
+    match metric {
+        FontMetricSelector::FontSize => metrics.font_size,
+        FontMetricSelector::XHeight => metrics.x_height,
+        FontMetricSelector::CapHeight => metrics.cap_height,
+        FontMetricSelector::ZeroAdvance => metrics.zero_advance,
+        FontMetricSelector::LineHeight => metrics.line_height,
+    }
+}
+
+/// Crate-visible length absolutization for the calc evaluation, which needs
+/// the unrounded pixel result.
+pub(crate) fn absolutize_length_for_calc(
+    value: f64,
+    unit: usize,
+    context: &FfiLengthResolutionContext,
+) -> FfiAbsolutizedLength {
+    absolutize_length(value, unit, context)
+}
+
+fn absolutize_length(value: f64, unit: usize, context: &FfiLengthResolutionContext) -> FfiAbsolutizedLength {
+    let kinds = length_unit_kinds();
+    let unhandled = FfiAbsolutizedLength {
+        handled: false,
+        changed: false,
+        resolved_viewport_relative_length: false,
+        px: 0.0,
+    };
+    let Some(kind) = kinds.get(unit) else {
+        return unhandled;
+    };
+    match *kind {
+        LengthUnitKind::Px => FfiAbsolutizedLength {
+            handled: true,
+            changed: false,
+            resolved_viewport_relative_length: false,
+            px: value,
+        },
+        LengthUnitKind::Absolute { px_per_unit } => FfiAbsolutizedLength {
+            handled: true,
+            changed: true,
+            resolved_viewport_relative_length: false,
+            px: px_per_unit * value,
+        },
+        LengthUnitKind::FontRelative { metric, root } => {
+            let metrics = if root {
+                &context.root_font_metrics
+            } else {
+                &context.font_metrics
+            };
+            let depends_on_viewport = if root {
+                context.root_font_metrics_depend_on_viewport_metrics
+            } else {
+                context.font_metrics_depend_on_viewport_metrics
+            };
+            if depends_on_viewport {
+                record_viewport_relative_length_resolution(context);
+            }
+            FfiAbsolutizedLength {
+                handled: true,
+                changed: true,
+                resolved_viewport_relative_length: depends_on_viewport,
+                px: value * select_font_metric(metrics, metric),
+            }
+        }
+        LengthUnitKind::ViewportRelative { axis } => {
+            record_viewport_relative_length_resolution(context);
+            let basis = match axis {
+                ViewportAxis::Width => context.viewport_width,
+                ViewportAxis::Height => context.viewport_height,
+                ViewportAxis::Min => context.viewport_width.min(context.viewport_height),
+                ViewportAxis::Max => context.viewport_width.max(context.viewport_height),
+            };
+            FfiAbsolutizedLength {
+                handled: true,
+                changed: true,
+                resolved_viewport_relative_length: true,
+                px: basis * value / 100.0,
+            }
+        }
+        LengthUnitKind::ContainerRelative => unhandled,
+    }
+}
+
+/// Absolutizes a length during style computation.
+///
+/// # Safety
+/// `context` must be a valid pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_absolutize_length(
+    value: f64,
+    unit: u8,
+    context: *const FfiLengthResolutionContext,
+) -> FfiAbsolutizedLength {
+    crate::css::ffi_stats::bump(crate::css::ffi_stats::FfiOp::NestedPropertyComputeEntry);
+    abort_on_panic(|| absolutize_length(value, unit as usize, unsafe { &*context }))
+}
+
+/// Result of computing a property that resolves to a number.
+#[repr(C)]
+pub struct FfiComputedNumber {
+    /// False when the value needs C++ handling (calc).
+    pub handled: bool,
+    /// True when the absolutized value is already the computed value.
+    pub unchanged: bool,
+    pub value: f64,
+}
+
+/// Result of computing line-height: like FfiComputedNumber, but a resolved
+/// calc may produce either a pixel length or a unitless number multiplier.
+#[repr(C)]
+pub struct FfiComputedLineHeight {
+    /// False when the value needs C++ handling (calc the core cannot resolve).
+    pub handled: bool,
+    /// True when the absolutized value is already the computed value.
+    pub unchanged: bool,
+    /// True when the value is a unitless multiplier rather than pixels.
+    pub is_number: bool,
+    pub value: f64,
+}
+
+const LINE_HEIGHT_UNHANDLED: FfiComputedLineHeight = FfiComputedLineHeight {
+    handled: false,
+    unchanged: false,
+    is_number: false,
+    value: 0.0,
+};
+
+const NUMBER_UNHANDLED: FfiComputedNumber = FfiComputedNumber {
+    handled: false,
+    unchanged: false,
+    value: 0.0,
+};
+
+// https://drafts.csswg.org/css-fonts-4/#font-weight-prop
+// a number, see below
+fn compute_font_weight(value: &StyleValueData, inherited_font_weight: f64) -> FfiComputedNumber {
+    let computed = |value| FfiComputedNumber {
+        handled: true,
+        unchanged: false,
+        value,
+    };
+    match value {
+        // <number [1,1000]>
+        StyleValueData::Number { .. } => FfiComputedNumber {
+            handled: true,
+            unchanged: true,
+            value: 0.0,
+        },
+        StyleValueData::Keyword { keyword } => match *keyword {
+            // normal
+            // Same as 400.
+            keyword::NORMAL => computed(400.0),
+            // bold
+            // Same as 700.
+            keyword::BOLD => computed(700.0),
+            // Specified values of bolder and lighter indicate weights relative to the weight of the
+            // parent element. The computed weight is calculated based on the inherited font-weight
+            // value using the chart below.
+            //
+            // Inherited value (w)  bolder     lighter
+            // w < 100              400        No change
+            // 100 <= w < 350       400        100
+            // 350 <= w < 550       700        100
+            // 550 <= w < 750       900        400
+            // 750 <= w < 900       900        700
+            // 900 <= w             No change  700
+            //
+            // bolder
+            // Specifies a bolder weight than the inherited value. See 2.2.1 Relative Weights.
+            keyword::BOLDER => {
+                if inherited_font_weight < 350.0 {
+                    computed(400.0)
+                } else if inherited_font_weight < 550.0 {
+                    computed(700.0)
+                } else if inherited_font_weight < 900.0 {
+                    computed(900.0)
+                } else {
+                    computed(inherited_font_weight)
+                }
+            }
+            // lighter
+            // Specifies a lighter weight than the inherited value. See 2.2.1 Relative Weights.
+            keyword::LIGHTER => {
+                if inherited_font_weight < 100.0 {
+                    computed(inherited_font_weight)
+                } else if inherited_font_weight < 550.0 {
+                    computed(100.0)
+                } else if inherited_font_weight < 750.0 {
+                    computed(400.0)
+                } else {
+                    computed(700.0)
+                }
+            }
+            _ => NUMBER_UNHANDLED,
+        },
+        // Calc values resolve in the calc core with no external context; anything the
+        // core cannot resolve keeps the C++ caller's behavior.
+        StyleValueData::Calculated { .. } => match crate::css::calc::resolve_calculated_number_without_context(value) {
+            Some(resolved) => computed(resolved),
+            None => NUMBER_UNHANDLED,
+        },
+        _ => NUMBER_UNHANDLED,
+    }
+}
+
+// https://drafts.csswg.org/css-fonts-4/#font-width-prop
+// a percentage, see below
+fn compute_font_width(value: &StyleValueData) -> FfiComputedNumber {
+    let computed = |value| FfiComputedNumber {
+        handled: true,
+        unchanged: false,
+        value,
+    };
+    match value {
+        // <percentage [0,inf]>
+        StyleValueData::Percentage { .. } => FfiComputedNumber {
+            handled: true,
+            unchanged: true,
+            value: 0.0,
+        },
+        StyleValueData::Keyword { keyword } => match *keyword {
+            // ultra-condensed 50%
+            keyword::ULTRA_CONDENSED => computed(50.0),
+            // extra-condensed 62.5%
+            keyword::EXTRA_CONDENSED => computed(62.5),
+            // condensed 75%
+            keyword::CONDENSED => computed(75.0),
+            // semi-condensed 87.5%
+            keyword::SEMI_CONDENSED => computed(87.5),
+            // normal 100%
+            keyword::NORMAL => computed(100.0),
+            // semi-expanded 112.5%
+            keyword::SEMI_EXPANDED => computed(112.5),
+            // expanded 125%
+            keyword::EXPANDED => computed(125.0),
+            // extra-expanded 150%
+            keyword::EXTRA_EXPANDED => computed(150.0),
+            // ultra-expanded 200%
+            keyword::ULTRA_EXPANDED => computed(200.0),
+            _ => NUMBER_UNHANDLED,
+        },
+        // Calc percentages resolve in the calc core with no external context; anything
+        // the core cannot resolve keeps the C++ caller's behavior.
+        StyleValueData::Calculated { .. } => {
+            match crate::css::calc::resolve_calculated_percentage_without_context(value) {
+                Some(resolved) => computed(resolved),
+                None => NUMBER_UNHANDLED,
+            }
+        }
+        _ => NUMBER_UNHANDLED,
+    }
+}
+
+/// Computes the font-width property from its absolutized value.
+///
+/// # Safety
+/// `absolutized_value` must point at a valid StyleValueData.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_compute_font_width(absolutized_value: *const c_void) -> FfiComputedNumber {
+    crate::css::ffi_stats::bump(crate::css::ffi_stats::FfiOp::NestedPropertyComputeEntry);
+    abort_on_panic(|| {
+        let value = unsafe { &*(absolutized_value as *const StyleValueData) };
+        compute_font_width(value)
+    })
+}
+
+/// An <absolute-size> keyword refers to an entry in a table of font sizes computed and kept by
+/// the user agent. See 2.5.1 Absolute Size Keyword Mapping Table.
+fn absolute_size_font_mapping(keyword: u16, default_font_size: CssPixels) -> Option<CssPixels> {
+    let entry = |numerator: i64, denominator: i64| {
+        Some(
+            (default_font_size * CssPixels::from_integer(numerator))
+                .div_as_fraction(CssPixels::from_integer(denominator)),
+        )
+    };
+    match keyword {
+        keyword::XX_SMALL => entry(3, 5),
+        keyword::X_SMALL => entry(3, 4),
+        keyword::SMALL => entry(8, 9),
+        keyword::MEDIUM => Some(default_font_size),
+        keyword::LARGE => entry(6, 5),
+        keyword::X_LARGE => entry(3, 2),
+        keyword::XX_LARGE => Some(default_font_size * CssPixels::from_integer(2)),
+        keyword::XXX_LARGE => Some(default_font_size * CssPixels::from_integer(3)),
+        _ => None,
+    }
+}
+
+/// A <relative-size> keyword is interpreted relative to the computed font-size of the parent
+/// element. User agents may use a simple ratio, which should be around 1.2-1.5.
+fn relative_size_font_mapping(keyword: u16, inherited_font_size: CssPixels) -> Option<CssPixels> {
+    let entry = |numerator: i64, denominator: i64| {
+        Some(
+            (inherited_font_size * CssPixels::from_integer(numerator))
+                .div_as_fraction(CssPixels::from_integer(denominator)),
+        )
+    };
+    match keyword {
+        keyword::SMALLER => entry(4, 5),
+        keyword::LARGER => entry(5, 4),
+        _ => None,
+    }
+}
+
+// https://drafts.csswg.org/css-fonts/#font-size-prop
+// an absolute length
+//
+// The keyword mappings use CSSPixels fixed-point arithmetic, exactly as the
+// C++ implementation does.
+fn compute_font_size(
+    value: &StyleValueData,
+    computed_math_depth: i32,
+    inherited_font_size: CssPixels,
+    inherited_math_depth: i32,
+    default_font_size: CssPixels,
+) -> FfiComputedNumber {
+    let computed = |px: f64| FfiComputedNumber {
+        handled: true,
+        unchanged: false,
+        value: px,
+    };
+    match value {
+        // <length-percentage [0,inf]>
+        // A length value specifies an absolute font size (independent of the user agent's font
+        // table). Negative lengths are invalid.
+        StyleValueData::Length { .. } => FfiComputedNumber {
+            handled: true,
+            unchanged: true,
+            value: 0.0,
+        },
+        // A percentage value specifies an absolute font size relative to the parent element's
+        // computed font-size. Negative percentages are invalid.
+        StyleValueData::Percentage { value } => computed(inherited_font_size.to_double() * (value / 100.0)),
+        StyleValueData::Keyword { keyword } => {
+            if let Some(px) = absolute_size_font_mapping(*keyword, default_font_size) {
+                return computed(px.to_double());
+            }
+            if let Some(px) = relative_size_font_mapping(*keyword, inherited_font_size) {
+                return computed(px.to_double());
+            }
+            match *keyword {
+                // math
+                // Special mathematical scaling rules must be applied when determining the computed
+                // value of the font-size property.
+                keyword::MATH => {
+                    // https://w3c.github.io/mathml-core/#the-math-script-level-property
+                    // If the specified value font-size is math then the computed value of font-size is
+                    // obtained by multiplying the inherited value of font-size by a nonzero scale
+                    // factor calculated by the following procedure:
+                    // 1. Let A be the inherited math-depth value, B the computed math-depth value,
+                    //    C be 0.71 and S be 1.0
+                    let mut a = inherited_math_depth;
+                    let mut b = computed_math_depth;
+                    let size_ratio = 0.71f64;
+                    let mut scale = 1.0f64;
+                    let math_scaling_factor = if a == b {
+                        // 2. If A = B then return S.
+                        scale
+                    } else {
+                        // If B < A, swap A and B and set InvertScaleFactor to true.
+                        // Otherwise B > A and set InvertScaleFactor to false.
+                        let invert_scale_factor = if b < a {
+                            std::mem::swap(&mut a, &mut b);
+                            true
+                        } else {
+                            false
+                        };
+                        // 3. Let E be B - A > 0.
+                        let e = f64::from(b) - f64::from(a);
+                        // FIXME: 4. If the inherited first available font has an OpenType MATH table:
+                        //    - If A <= 0 and B >= 2 then multiply S by scriptScriptPercentScaleDown
+                        //      and decrement E by 2.
+                        //    - Otherwise if A = 1 then multiply S by scriptScriptPercentScaleDown /
+                        //      scriptPercentScaleDown and decrement E by 1.
+                        //    - Otherwise if B = 1 then multiply S by scriptPercentScaleDown and
+                        //      decrement E by 1.
+                        // 5. Multiply S by C^E.
+                        scale *= size_ratio.powf(e);
+                        // 6. Return S if InvertScaleFactor is false and 1/S otherwise.
+                        if !invert_scale_factor { scale } else { 1.0 / scale }
+                    };
+                    computed(inherited_font_size.scaled(math_scaling_factor).to_double())
+                }
+                _ => NUMBER_UNHANDLED,
+            }
+        }
+        // Calc lengths and percentages resolve in the calc core against the inherited
+        // font size; anything the core cannot resolve keeps the C++ caller's behavior.
+        StyleValueData::Calculated { .. } => {
+            match crate::css::calc::resolve_calculated_length_without_context(value, inherited_font_size.to_double()) {
+                Some(px) => computed(px),
+                None => NUMBER_UNHANDLED,
+            }
+        }
+        _ => NUMBER_UNHANDLED,
+    }
+}
+
+/// Computes the font-size property from its absolutized value. The font size
+/// inputs are raw CSSPixels values.
+///
+/// # Safety
+/// `absolutized_value` must point at a valid StyleValueData.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_compute_font_size(
+    absolutized_value: *const c_void,
+    computed_math_depth: i32,
+    inherited_font_size_raw: i32,
+    inherited_math_depth: i32,
+    default_font_size_raw: i32,
+) -> FfiComputedNumber {
+    crate::css::ffi_stats::bump(crate::css::ffi_stats::FfiOp::NestedPropertyComputeEntry);
+    abort_on_panic(|| {
+        let value = unsafe { &*(absolutized_value as *const StyleValueData) };
+        compute_font_size(
+            value,
+            computed_math_depth,
+            CssPixels::from_raw(inherited_font_size_raw),
+            inherited_math_depth,
+            CssPixels::from_raw(default_font_size_raw),
+        )
+    })
+}
+
+/// What one step of the monospace font-size time travel decided.
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FontSizeRecascadeAction {
+    /// Keep the current size and viewport-dependency flag.
+    Unchanged,
+    /// Replace the current size and viewport-dependency flag.
+    Set,
+    /// The value is a calc, which the traversal does not support yet; skip it.
+    CalcSkipped,
+    /// The value is a length the core cannot resolve, either because no
+    /// resolution context was supplied or because the unit is unsupported;
+    /// the caller resolves it.
+    NeedsLengthResolution,
+}
+
+#[repr(C)]
+pub struct FfiFontSizeRecascadeStep {
+    pub action: FontSizeRecascadeAction,
+    pub new_size_raw: i32,
+    pub depends_on_viewport_metrics: bool,
+}
+
+/// One ancestor step of the time-traveling font-size inheritance applied when
+/// the cascade ends up with `font-family: monospace`: interprets the
+/// ancestor's raw cascaded font-size against the running size, with keyword
+/// sizes mapped against the default monospace font size.
+///
+/// `length_resolution_context` may be null; a length value then reports
+/// `NeedsLengthResolution` so the caller can build the context lazily and call
+/// again, since building it involves font work the other value types never
+/// need.
+///
+/// # Safety
+/// `value` must point at a valid StyleValueData, and
+/// `length_resolution_context` must be null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_recascade_font_size_step(
+    value: *const c_void,
+    current_size_raw: i32,
+    current_depends_on_viewport_metrics: bool,
+    default_size_raw: i32,
+    length_resolution_context: *const FfiLengthResolutionContext,
+) -> FfiFontSizeRecascadeStep {
+    crate::css::ffi_stats::bump(crate::css::ffi_stats::FfiOp::NestedPropertyComputeEntry);
+    abort_on_panic(|| {
+        let value = unsafe { &*(value as *const StyleValueData) };
+        let current_size = CssPixels::from_raw(current_size_raw);
+        let default_size = CssPixels::from_raw(default_size_raw);
+        let unchanged = FfiFontSizeRecascadeStep {
+            action: FontSizeRecascadeAction::Unchanged,
+            new_size_raw: current_size_raw,
+            depends_on_viewport_metrics: current_depends_on_viewport_metrics,
+        };
+        let set = |size: CssPixels, depends_on_viewport_metrics: bool| FfiFontSizeRecascadeStep {
+            action: FontSizeRecascadeAction::Set,
+            new_size_raw: size.raw_value(),
+            depends_on_viewport_metrics,
+        };
+        let needs_length_resolution = FfiFontSizeRecascadeStep {
+            action: FontSizeRecascadeAction::NeedsLengthResolution,
+            new_size_raw: current_size_raw,
+            depends_on_viewport_metrics: current_depends_on_viewport_metrics,
+        };
+
+        match value {
+            StyleValueData::Keyword { keyword } => {
+                if *keyword == keyword::INITIAL || *keyword == keyword::UNSET {
+                    return set(default_size, false);
+                }
+                if *keyword == keyword::INHERIT {
+                    // Do nothing.
+                    return unchanged;
+                }
+                if let Some(px) = absolute_size_font_mapping(*keyword, default_size) {
+                    return set(px, false);
+                }
+                if let Some(px) = relative_size_font_mapping(*keyword, current_size) {
+                    return set(px, current_depends_on_viewport_metrics);
+                }
+                // FIXME: Resolve `font-size: math`
+                if *keyword == keyword::MATH {
+                    return unchanged;
+                }
+                // Unknown keywords fall through to the caller, which rejects them.
+                needs_length_resolution
+            }
+            StyleValueData::Percentage { value } => set(
+                CssPixels::nearest_value_for(value / 100.0 * current_size.to_double()),
+                current_depends_on_viewport_metrics,
+            ),
+            StyleValueData::Length { value, unit } => {
+                if length_resolution_context.is_null() {
+                    return needs_length_resolution;
+                }
+                let result = absolutize_length(*value, *unit as usize, unsafe { &*length_resolution_context });
+                if !result.handled {
+                    return needs_length_resolution;
+                }
+                set(
+                    CssPixels::nearest_value_for(result.px),
+                    result.resolved_viewport_relative_length,
+                )
+            }
+            StyleValueData::Calculated { .. } => FfiFontSizeRecascadeStep {
+                action: FontSizeRecascadeAction::CalcSkipped,
+                new_size_raw: current_size_raw,
+                depends_on_viewport_metrics: current_depends_on_viewport_metrics,
+            },
+            _ => needs_length_resolution,
+        }
+    })
+}
+
+/// Some pseudo-elements are generated regardless of CSS rules, so their
+/// styles must be computed even when no rules matched.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_pseudo_element_has_implicit_style(pseudo_element: u8) -> bool {
+    crate::css::ffi_stats::bump(crate::css::ffi_stats::FfiOp::NestedPropertyComputeEntry);
+    use crate::css::selector_engine::PseudoElementType;
+    abort_on_panic(|| {
+        matches!(
+            crate::css::selector_engine::pseudo_element_type_from_code(pseudo_element),
+            PseudoElementType::DetailsContent
+                | PseudoElementType::FileSelectorButton
+                | PseudoElementType::Marker
+                | PseudoElementType::Placeholder
+        )
+    })
+}
+
+/// Whether style computation for a pseudo-element bails because no
+/// pseudo-element box would be generated for the winning cascaded content
+/// value: content: none generates nothing, and content: normal (also the
+/// initial value, so an absent value counts) generates nothing for ::before
+/// and ::after.
+///
+/// # Safety
+/// `content_value` must be null or point at a valid StyleValueData.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_pseudo_element_content_bails(content_value: *const c_void, pseudo_element: u8) -> bool {
+    crate::css::ffi_stats::bump(crate::css::ffi_stats::FfiOp::NestedPropertyComputeEntry);
+    use crate::css::selector_engine::PseudoElementType;
+    abort_on_panic(|| {
+        let content_is_normal = if content_value.is_null() {
+            // NOTE: `normal` is the initial value, so the absence of a value is treated as `normal`.
+            true
+        } else {
+            match unsafe { &*(content_value as *const StyleValueData) } {
+                StyleValueData::Keyword { keyword } => {
+                    if *keyword == keyword::NONE {
+                        return true;
+                    }
+                    *keyword == keyword::NORMAL
+                }
+                _ => false,
+            }
+        };
+        content_is_normal
+            && matches!(
+                crate::css::selector_engine::pseudo_element_type_from_code(pseudo_element),
+                PseudoElementType::Before | PseudoElementType::After
+            )
+    })
+}
+
+/// https://drafts.css-houdini.org/css-properties-values-api/#computationally-independent
+/// A property value is computationally independent if it can be converted into a computed value
+/// using only the value of the property on the element, and "global" information that cannot be
+/// changed by CSS.
+///
+/// Returns None for value types that must not reach computational-independence checks. A
+/// container is likewise undecided when any nested value is unsupported.
+fn value_is_computationally_independent(value: &StyleValueData) -> Option<bool> {
+    fn grid_entries_are_computationally_independent(
+        entries: &[crate::css::style_value::RetainedGridTrackEntry],
+    ) -> Option<bool> {
+        for entry in entries {
+            let independent = match entry.kind {
+                // A line-name entry carries no style value.
+                GridTrackEntryKind::LineNames => true,
+                // A single track size.
+                GridTrackEntryKind::Size => value_is_computationally_independent(entry.size_value.data())?,
+                // A minmax() track size.
+                GridTrackEntryKind::MinMax => {
+                    value_is_computationally_independent(entry.min_value.data())?
+                        && value_is_computationally_independent(entry.max_value.data())?
+                }
+                // A repeat() track and its optional fixed repeat count.
+                GridTrackEntryKind::Repeat => {
+                    grid_entries_are_computationally_independent(entry.repeat_entries())?
+                        && match entry.repeat_count.optional_data() {
+                            Some(count) => value_is_computationally_independent(count)?,
+                            None => true,
+                        }
+                }
+            };
+            if !independent {
+                return Some(false);
+            }
+        }
+        Some(true)
+    }
+
+    let all_data_in_list = |list: &crate::css::style_value::RetainedStyleValueDataList| -> Option<bool> {
+        let mut independent = true;
+        for retained in list.as_slice() {
+            if let Some(data) = retained.optional_data() {
+                independent = independent && value_is_computationally_independent(data)?;
+            }
+        }
+        Some(independent)
+    };
+    let all_data = |children: &[&crate::css::style_value::RetainedStyleValueData]| -> Option<bool> {
+        let mut independent = true;
+        for retained in children {
+            independent = independent && value_is_computationally_independent(retained.data())?;
+        }
+        Some(independent)
+    };
+    match value {
+        StyleValueData::Keyword { keyword } => {
+            if value_is_css_wide_keyword(value) {
+                return Some(false);
+            }
+            // FIXME: Are there any other color keywords which aren't computationally independent?
+            if *keyword == keyword::ACCENTCOLOR || *keyword == keyword::ACCENTCOLORTEXT {
+                return Some(false);
+            }
+            // FIXME: Are there any other keywords which aren't computationally independent?
+            Some(true)
+        }
+        StyleValueData::Length { unit, .. } => Some(!length_unit_is_font_or_container_relative(*unit)),
+        StyleValueData::Number { .. }
+        | StyleValueData::Integer { .. }
+        | StyleValueData::Percentage { .. }
+        | StyleValueData::Angle { .. }
+        | StyleValueData::Flex { .. }
+        | StyleValueData::Frequency { .. }
+        | StyleValueData::Resolution { .. }
+        | StyleValueData::Time { .. }
+        | StyleValueData::String { .. } => Some(true),
+        // NB: anchor() and anchor-size() count as independent even though they carry a
+        //     fallback value, matching their C++ rules.
+        StyleValueData::Anchor { .. }
+        | StyleValueData::AnchorSize { .. }
+        | StyleValueData::ColorScheme { .. }
+        | StyleValueData::CounterStyle { .. }
+        | StyleValueData::CustomIdent { .. }
+        | StyleValueData::Display { .. }
+        | StyleValueData::EmptyOptional
+        | StyleValueData::GridAutoFlow { .. }
+        | StyleValueData::GridTemplateArea { .. }
+        | StyleValueData::Image { .. }
+        | StyleValueData::RepeatStyle { .. }
+        | StyleValueData::TextUnderlinePosition { .. }
+        | StyleValueData::Url { .. }
+        | StyleValueData::FontSource { .. }
+        | StyleValueData::ScrollbarGutter { .. } => Some(true),
+        StyleValueData::LightDark { .. } | StyleValueData::TreeCountingFunction { .. } => Some(false),
+        // The calculation tree decides natively; its style value leaves resolve through the
+        // same decision, falling back for the types the core cannot decide.
+        StyleValueData::Calculated { rust_calculation, .. } => {
+            Some(rust_calculation.node().is_computationally_independent(
+                &|unit| !length_unit_is_font_or_container_relative(unit),
+                &|retained| value_is_computationally_independent(retained.data()).unwrap_or_default(),
+            ))
+        }
+        StyleValueData::Ratio {
+            numerator, denominator, ..
+        } => all_data(&[numerator, denominator]),
+        StyleValueData::Edge { offset, .. } => match offset.optional_data() {
+            Some(offset) => value_is_computationally_independent(offset),
+            None => Some(true),
+        },
+        StyleValueData::Function { value, .. } => all_data(&[value]),
+        StyleValueData::OpacityValue { value } => all_data(&[value]),
+        // Auto placements carry no value; spans and lines recurse into theirs.
+        StyleValueData::GridTrackPlacement { value, .. } => match value.optional_data() {
+            Some(value) => value_is_computationally_independent(value),
+            None => Some(true),
+        },
+        StyleValueData::GridTrackSizeList { entries, .. } => {
+            grid_entries_are_computationally_independent(entries.as_slice())
+        }
+        // FIXME: Consider sub-values once we support <custom-color-space> values
+        StyleValueData::ColorInterpolationMethod { .. } => Some(true),
+        StyleValueData::ColorFunction {
+            channel_0,
+            channel_1,
+            channel_2,
+            alpha,
+            origin_color,
+            ..
+        } => {
+            let mut independent = true;
+            for value in [channel_0, channel_1, channel_2, alpha, origin_color] {
+                if let Some(value) = value.optional_data() {
+                    independent = independent && value_is_computationally_independent(value)?;
+                }
+            }
+            Some(independent)
+        }
+        StyleValueData::BorderImageSlice {
+            top,
+            right,
+            bottom,
+            left,
+            ..
+        } => all_data(&[top, right, bottom, left]),
+        StyleValueData::Content { content, alt_text } => {
+            let mut independent = value_is_computationally_independent(content.data())?;
+            if let Some(alt_text) = alt_text.optional_data() {
+                independent = independent && value_is_computationally_independent(alt_text)?;
+            }
+            Some(independent)
+        }
+        // Extent components carry no value; explicit sizes recurse into theirs.
+        StyleValueData::RadialSize {
+            component_count,
+            is_extent_0,
+            value_0,
+            is_extent_1,
+            value_1,
+            ..
+        } => {
+            let mut independent = true;
+            if !is_extent_0 {
+                independent = value_is_computationally_independent(value_0.data())?;
+            }
+            if *component_count == 2 && !is_extent_1 {
+                independent = independent && value_is_computationally_independent(value_1.data())?;
+            }
+            Some(independent)
+        }
+        // Every shape kind's rule is a conjunction over the values it uses; the
+        // unused generic fields and point list of the other kinds are absent, so
+        // one null-tolerant conjunction covers inset, xywh, rect, circle,
+        // ellipse, polygon and path exactly.
+        StyleValueData::BasicShape {
+            v0,
+            v1,
+            v2,
+            v3,
+            v4,
+            points,
+            ..
+        } => {
+            let mut independent = true;
+            for value in [v0, v1, v2, v3, v4] {
+                if let Some(value) = value.optional_data() {
+                    independent = independent && value_is_computationally_independent(value)?;
+                }
+            }
+            for point in points.as_slice() {
+                for value in point.values() {
+                    independent = independent && value_is_computationally_independent(value.data())?;
+                }
+            }
+            Some(independent)
+        }
+        // Every filter kind's rule recurses into its single value.
+        StyleValueData::Filter { value, .. } => all_data(&[value]),
+        StyleValueData::Counter { counter_style, .. } => all_data(&[counter_style]),
+        StyleValueData::OpenTypeTagged { value, .. } => all_data(&[value]),
+        StyleValueData::RandomValueSharing { fixed_value, .. } => match fixed_value.optional_data() {
+            Some(fixed_value) => value_is_computationally_independent(fixed_value),
+            None => Some(true),
+        },
+        StyleValueData::Cursor { image, x, y } => {
+            let mut independent = value_is_computationally_independent(image.data())?;
+            for coordinate in [x, y] {
+                if let Some(coordinate) = coordinate.optional_data() {
+                    independent = independent && value_is_computationally_independent(coordinate)?;
+                }
+            }
+            Some(independent)
+        }
+        // The unused fields of the non-matching easing kinds are absent, so one
+        // null-tolerant conjunction covers every kind's rule.
+        StyleValueData::Easing {
+            linear_stops,
+            x1,
+            y1,
+            x2,
+            y2,
+            number_of_intervals,
+            ..
+        } => {
+            let mut independent = true;
+            for value in [x1, y1, x2, y2, number_of_intervals] {
+                if let Some(value) = value.optional_data() {
+                    independent = independent && value_is_computationally_independent(value)?;
+                }
+            }
+            for stop in linear_stops.as_slice() {
+                for value in stop.values() {
+                    if let Some(value) = value.optional_data() {
+                        independent = independent && value_is_computationally_independent(value)?;
+                    }
+                }
+            }
+            Some(independent)
+        }
+        StyleValueData::ImageSet { options } => {
+            let mut independent = true;
+            for option in options.as_slice() {
+                independent = independent && all_data(&option.values())?;
+            }
+            Some(independent)
+        }
+        StyleValueData::CounterDefinitions { counter_definitions } => {
+            let mut independent = true;
+            for definition in counter_definitions.as_slice() {
+                if let Some(value) = definition.value().optional_data() {
+                    independent = independent && value_is_computationally_independent(value)?;
+                }
+            }
+            Some(independent)
+        }
+        StyleValueData::LinearGradient {
+            direction_value,
+            color_stop_list,
+            color_interpolation_method,
+            ..
+        } => {
+            let mut independent = true;
+            for value in [direction_value, color_interpolation_method] {
+                if let Some(value) = value.optional_data() {
+                    independent = independent && value_is_computationally_independent(value)?;
+                }
+            }
+            for stop in color_stop_list.as_slice() {
+                for value in stop.values() {
+                    if let Some(value) = value.optional_data() {
+                        independent = independent && value_is_computationally_independent(value)?;
+                    }
+                }
+            }
+            Some(independent)
+        }
+        StyleValueData::ConicGradient {
+            from_angle,
+            position,
+            color_stop_list,
+            color_interpolation_method,
+            ..
+        } => {
+            let mut independent = true;
+            for value in [from_angle, position, color_interpolation_method] {
+                if let Some(value) = value.optional_data() {
+                    independent = independent && value_is_computationally_independent(value)?;
+                }
+            }
+            for stop in color_stop_list.as_slice() {
+                for value in stop.values() {
+                    if let Some(value) = value.optional_data() {
+                        independent = independent && value_is_computationally_independent(value)?;
+                    }
+                }
+            }
+            Some(independent)
+        }
+        StyleValueData::RadialGradient {
+            size,
+            position,
+            color_stop_list,
+            color_interpolation_method,
+            ..
+        } => {
+            let mut independent = true;
+            for value in [size, position, color_interpolation_method] {
+                if let Some(value) = value.optional_data() {
+                    independent = independent && value_is_computationally_independent(value)?;
+                }
+            }
+            for stop in color_stop_list.as_slice() {
+                for value in stop.values() {
+                    if let Some(value) = value.optional_data() {
+                        independent = independent && value_is_computationally_independent(value)?;
+                    }
+                }
+            }
+            Some(independent)
+        }
+        StyleValueData::ContrastColor { color, .. } => all_data(&[color]),
+        StyleValueData::Superellipse { parameter } => all_data(&[parameter]),
+        StyleValueData::ScrollbarColor {
+            thumb_color,
+            track_color,
+            ..
+        } => all_data(&[thumb_color, track_color]),
+        StyleValueData::Rect {
+            top,
+            right,
+            bottom,
+            left,
+            ..
+        } => all_data(&[top, right, bottom, left]),
+        StyleValueData::FontStyle { angle_value, .. } => match angle_value.optional_data() {
+            Some(angle_value) => value_is_computationally_independent(angle_value),
+            None => Some(true),
+        },
+        StyleValueData::TextIndent { length_percentage, .. } => all_data(&[length_percentage]),
+        StyleValueData::OverflowClipMargin { offset, .. } => all_data(&[offset]),
+        StyleValueData::BackgroundSize { size_x, size_y, .. } => all_data(&[size_x, size_y]),
+        StyleValueData::Position { edge_x, edge_y, .. } => all_data(&[edge_x, edge_y]),
+        StyleValueData::Shadow {
+            color,
+            offset_x,
+            offset_y,
+            blur_radius,
+            spread_distance,
+            ..
+        } => {
+            let mut independent = value_is_computationally_independent(offset_x.data())?
+                && value_is_computationally_independent(offset_y.data())?;
+            for value in [color, blur_radius, spread_distance] {
+                if let Some(value) = value.optional_data() {
+                    independent = independent && value_is_computationally_independent(value)?;
+                }
+            }
+            Some(independent)
+        }
+        StyleValueData::ColorMix {
+            color_interpolation_method,
+            first_color,
+            first_percentage,
+            second_color,
+            second_percentage,
+            ..
+        } => {
+            let mut independent = true;
+            for value in [
+                color_interpolation_method,
+                first_color,
+                first_percentage,
+                second_color,
+                second_percentage,
+            ] {
+                if let Some(value) = value.optional_data() {
+                    independent = independent && value_is_computationally_independent(value)?;
+                }
+            }
+            Some(independent)
+        }
+        StyleValueData::Shorthand { values, .. }
+        | StyleValueData::ValueList { values, .. }
+        | StyleValueData::Tuple { values }
+        | StyleValueData::Transformation { values, .. } => all_data_in_list(values),
+        StyleValueData::BorderRadiusRect {
+            top_left,
+            top_right,
+            bottom_right,
+            bottom_left,
+            ..
+        } => all_data(&[top_left, top_right, bottom_right, bottom_left]),
+        StyleValueData::BorderRadius {
+            horizontal_radius,
+            vertical_radius,
+            ..
+        } => all_data(&[horizontal_radius, vertical_radius]),
+        _ => None,
+    }
+}
+
+/// # Safety
+/// `data` must point at a valid StyleValueData.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_style_value_is_computationally_independent(data: *const c_void) -> bool {
+    crate::css::ffi_stats::bump(crate::css::ffi_stats::FfiOp::StyleValueQueryEntry);
+    abort_on_panic(|| {
+        value_is_computationally_independent(unsafe { &*(data as *const StyleValueData) })
+            .expect("computational independence requested for an unsupported value")
+    })
+}
+
+// The computed value of the math-depth value is determined as follows:
+fn compute_math_depth(
+    value: &StyleValueData,
+    inherited_math_depth: i32,
+    inherited_math_style_is_compact: bool,
+) -> FfiComputedNumber {
+    let computed = |depth: i32| FfiComputedNumber {
+        handled: true,
+        unchanged: false,
+        value: depth as f64,
+    };
+    match value {
+        // - If the specified value of math-depth is auto-add and the inherited value of math-style
+        //   is compact then the computed value of math-depth of the element is its inherited value
+        //   plus one.
+        StyleValueData::Keyword { keyword } if *keyword == keyword::AUTO_ADD && inherited_math_style_is_compact => {
+            computed(inherited_math_depth.saturating_add(1))
+        }
+        // - If the specified value of math-depth is of the form <integer> then the computed value
+        //   of math-depth of the element is the specified integer.
+        StyleValueData::Integer { value } => computed(*value),
+        // Calc values resolve to an integer in the calc core with no external context;
+        // anything the core cannot resolve keeps the C++ caller's behavior.
+        StyleValueData::Calculated { .. } => {
+            match crate::css::calc::resolve_calculated_integer_without_context(value) {
+                Some(int) => computed(int),
+                None => NUMBER_UNHANDLED,
+            }
+        }
+        // AD-HOC: the add(<integer>) function form is resolved by the C++ caller.
+        StyleValueData::Function { .. } => NUMBER_UNHANDLED,
+        // - Otherwise, the computed value of math-depth of the element is the inherited one.
+        _ => computed(inherited_math_depth),
+    }
+}
+
+/// Computes the math-depth property from its absolutized value.
+///
+/// # Safety
+/// `absolutized_value` must point at a valid StyleValueData.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_compute_math_depth(
+    absolutized_value: *const c_void,
+    inherited_math_depth: i32,
+    inherited_math_style_is_compact: bool,
+) -> FfiComputedNumber {
+    crate::css::ffi_stats::bump(crate::css::ffi_stats::FfiOp::NestedPropertyComputeEntry);
+    abort_on_panic(|| {
+        let value = unsafe { &*(absolutized_value as *const StyleValueData) };
+        compute_math_depth(value, inherited_math_depth, inherited_math_style_is_compact)
+    })
+}
+
+// https://drafts.csswg.org/css-inline-3/#line-height-property
+fn compute_line_height(value: &StyleValueData, computed_font_size: CssPixels) -> FfiComputedLineHeight {
+    match value {
+        // normal
+        // <length [0,inf]>
+        // <number [0,inf]>
+        StyleValueData::Keyword { keyword } if *keyword == keyword::NORMAL => FfiComputedLineHeight {
+            handled: true,
+            unchanged: true,
+            is_number: false,
+            value: 0.0,
+        },
+        StyleValueData::Length { .. } | StyleValueData::Number { .. } => FfiComputedLineHeight {
+            handled: true,
+            unchanged: true,
+            is_number: false,
+            value: 0.0,
+        },
+        // <percentage [0,inf]>
+        StyleValueData::Percentage { value } => FfiComputedLineHeight {
+            handled: true,
+            unchanged: false,
+            is_number: false,
+            value: computed_font_size.to_double() * (value / 100.0),
+        },
+        // Calc lengths, percentages, and numbers resolve in the calc core against the
+        // computed font size; anything the core cannot resolve keeps the C++ caller's
+        // behavior. Any other value would be unreachable there.
+        StyleValueData::Calculated { .. } => {
+            match crate::css::calc::resolve_calculated_line_height_without_context(
+                value,
+                computed_font_size.to_double(),
+            ) {
+                Some(crate::css::calc::ResolvedLineHeightCalc::Px(px)) => FfiComputedLineHeight {
+                    handled: true,
+                    unchanged: false,
+                    is_number: false,
+                    value: px,
+                },
+                Some(crate::css::calc::ResolvedLineHeightCalc::Number(number)) => FfiComputedLineHeight {
+                    handled: true,
+                    unchanged: false,
+                    is_number: true,
+                    value: number,
+                },
+                None => LINE_HEIGHT_UNHANDLED,
+            }
+        }
+        _ => LINE_HEIGHT_UNHANDLED,
+    }
+}
+
+/// Computes the line-height property from its absolutized value. The computed
+/// font size is a raw CSSPixels value.
+///
+/// # Safety
+/// `absolutized_value` must point at a valid StyleValueData.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_compute_line_height(
+    absolutized_value: *const c_void,
+    computed_font_size_raw: i32,
+) -> FfiComputedLineHeight {
+    crate::css::ffi_stats::bump(crate::css::ffi_stats::FfiOp::NestedPropertyComputeEntry);
+    abort_on_panic(|| {
+        let value = unsafe { &*(absolutized_value as *const StyleValueData) };
+        compute_line_height(value, CssPixels::from_raw(computed_font_size_raw))
+    })
+}
+
+// https://drafts.csswg.org/css-backgrounds/#border-width
+// absolute length, snapped as a border width
+fn compute_border_or_outline_width(value: &StyleValueData, device_pixels_per_css_pixel: f64) -> FfiComputedNumber {
+    let absolute_length = match value {
+        // The thin, medium, and thick keywords are equivalent to 1px, 3px, and 5px, respectively.
+        // https://drafts.csswg.org/css-backgrounds/#typedef-line-width
+        StyleValueData::Keyword { keyword } => match *keyword {
+            keyword::THIN => CssPixels::from_integer(1),
+            keyword::MEDIUM => CssPixels::from_integer(3),
+            keyword::THICK => CssPixels::from_integer(5),
+            _ => return NUMBER_UNHANDLED,
+        },
+        StyleValueData::Length { value, unit } => {
+            let kinds = length_unit_kinds();
+            match kinds.get(*unit as usize) {
+                Some(LengthUnitKind::Px) => CssPixels::nearest_value_for(*value),
+                Some(LengthUnitKind::Absolute { px_per_unit }) => CssPixels::nearest_value_for(px_per_unit * value),
+                _ => return NUMBER_UNHANDLED,
+            }
+        }
+        _ => return NUMBER_UNHANDLED,
+    };
+    FfiComputedNumber {
+        handled: true,
+        unchanged: false,
+        value: snap_a_length_as_a_border_width(device_pixels_per_css_pixel, absolute_length).to_double(),
+    }
+}
+
+// https://drafts.csswg.org/css-backgrounds/#compute-a-border-width
+fn snap_a_length_as_a_border_width(device_pixels_per_css_pixel: f64, length: CssPixels) -> CssPixels {
+    // 1. Assert: len is non-negative.
+    // NB: The caller guarantees this; negative widths are invalid at parse time.
+
+    // 2. If len is an integer number of device pixels, do nothing.
+    let device_pixels = length.to_double() * device_pixels_per_css_pixel;
+    if device_pixels == device_pixels.trunc() {
+        return length;
+    }
+
+    // 3. If len is greater than zero, but less than 1 device pixel, round len up to 1 device pixel.
+    if device_pixels > 0.0 && device_pixels < 1.0 {
+        return CssPixels::nearest_value_for(1.0 / device_pixels_per_css_pixel);
+    }
+
+    // 4. If len is greater than 1 device pixel, round it down to the nearest integer number of
+    //    device pixels.
+    if device_pixels > 1.0 {
+        return CssPixels::nearest_value_for(device_pixels.floor() / device_pixels_per_css_pixel);
+    }
+
+    length
+}
+
+/// Computes a border or outline width property from its absolutized value.
+///
+/// # Safety
+/// `absolutized_value` must point at a valid StyleValueData.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_compute_border_or_outline_width(
+    absolutized_value: *const c_void,
+    device_pixels_per_css_pixel: f64,
+) -> FfiComputedNumber {
+    crate::css::ffi_stats::bump(crate::css::ffi_stats::FfiOp::NestedPropertyComputeEntry);
+    abort_on_panic(|| {
+        let value = unsafe { &*(absolutized_value as *const StyleValueData) };
+        compute_border_or_outline_width(value, device_pixels_per_css_pixel)
+    })
+}
+
+// https://drafts.csswg.org/css-borders-4/#propdef-corner-top-left-shape
+// the corresponding superellipse() value
+fn compute_corner_shape_parameter(value: &StyleValueData) -> FfiComputedNumber {
+    let computed = |parameter: f64| FfiComputedNumber {
+        handled: true,
+        unchanged: false,
+        value: parameter,
+    };
+    match value {
+        StyleValueData::Keyword { keyword } => match *keyword {
+            // The corner shape is a quarter of a convex ellipse. Equivalent to superellipse(1).
+            keyword::ROUND => computed(1.0),
+            // The corner shape is a quarter of a "squircle", a convex curve between round and
+            // square. Equivalent to superellipse(2).
+            keyword::SQUIRCLE => computed(2.0),
+            // The corner shape is a convex 90deg angle. Equivalent to superellipse(infinity).
+            keyword::SQUARE => computed(f64::INFINITY),
+            // The corner shape is a straight diagonal line, neither convex nor concave.
+            // Equivalent to superellipse(0).
+            keyword::BEVEL => computed(0.0),
+            // The corner shape is a concave quarter-ellipse. Equivalent to superellipse(-1).
+            keyword::SCOOP => computed(-1.0),
+            // The corner shape is a concave 90deg angle. Equivalent to superellipse(-infinity).
+            keyword::NOTCH => computed(f64::NEG_INFINITY),
+            _ => NUMBER_UNHANDLED,
+        },
+        // Superellipse values are already computed.
+        StyleValueData::Superellipse { .. } => FfiComputedNumber {
+            handled: true,
+            unchanged: true,
+            value: 0.0,
+        },
+        _ => NUMBER_UNHANDLED,
+    }
+}
+
+/// Computes the superellipse parameter for a corner shape property.
+///
+/// # Safety
+/// `absolutized_value` must point at a valid StyleValueData.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_compute_corner_shape_parameter(absolutized_value: *const c_void) -> FfiComputedNumber {
+    crate::css::ffi_stats::bump(crate::css::ffi_stats::FfiOp::NestedPropertyComputeEntry);
+    abort_on_panic(|| {
+        let value = unsafe { &*(absolutized_value as *const StyleValueData) };
+        compute_corner_shape_parameter(value)
+    })
+}
+
+/// Whether a font-family value is a single monospace keyword, which triggers
+/// the monospace font-size recascade. The list entry's keyword is read through
+/// the nested value's shared Rust data handle.
+///
+/// # Safety
+/// `data` must point at a valid StyleValueData.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_font_family_is_monospace(data: *const c_void) -> bool {
+    crate::css::ffi_stats::bump(crate::css::ffi_stats::FfiOp::NestedPropertyComputeEntry);
+    abort_on_panic(|| {
+        let StyleValueData::ValueList { values, .. } = (unsafe { &*(data as *const StyleValueData) }) else {
+            return false;
+        };
+        let values = values.as_slice();
+        if values.len() != 1 {
+            return false;
+        }
+        matches!(
+            values[0].data(),
+            StyleValueData::Keyword { keyword } if *keyword == keyword::MONOSPACE
+        )
+    })
+}
+
+/// Computes a font-feature-settings or font-variation-settings value list:
+/// deduplicate by tag with the later occurrence taking precedence, then sort
+/// the survivors ascending by tag.
+/// https://drafts.csswg.org/css-fonts/#font-feature-settings-prop
+///
+/// # Safety
+/// `data` must point at a value list of OpenType tagged values.
+#[unsafe(no_mangle)]
+#[allow(clippy::arc_with_non_send_sync)]
+pub unsafe extern "C" fn rust_compute_font_feature_settings(data: *const c_void) -> *const c_void {
+    crate::css::ffi_stats::bump(crate::css::ffi_stats::FfiOp::NestedPropertyComputeEntry);
+    abort_on_panic(|| {
+        let StyleValueData::ValueList {
+            values,
+            separator,
+            collapsible,
+        } = (unsafe { &*data.cast::<StyleValueData>() })
+        else {
+            unreachable!("font feature settings must be a value list")
+        };
+        let values = values.as_slice();
+        let packed_tag = |index: usize| match values[index].data() {
+            StyleValueData::OpenTypeTagged { packed_tag, .. } => *packed_tag,
+            _ => unreachable!("font feature settings must contain OpenType tagged values"),
+        };
+
+        // Keep the last occurrence of each tag; later declarations take precedence.
+        let mut survivors: Vec<usize> = (0..values.len())
+            .filter(|&i| !((i + 1)..values.len()).any(|j| packed_tag(i) == packed_tag(j)))
+            .collect();
+        survivors.sort_unstable_by_key(|&index| packed_tag(index));
+        let values = survivors
+            .into_iter()
+            .map(|index| values[index].clone_retained())
+            .collect();
+        Arc::into_raw(Arc::new(StyleValueData::ValueList {
+            values: crate::css::style_value::RetainedStyleValueDataList::from_retained_values(values),
+            separator: *separator,
+            collapsible: *collapsible,
+        }))
+        .cast()
+    })
+}
+
+/// Whether a value contains a percentage, either directly or inside a
+/// calculation tree; the shared core of the two font predicates below.
+fn value_contains_percentage(value: &StyleValueData) -> bool {
+    match value {
+        StyleValueData::Percentage { .. } => true,
+        StyleValueData::Calculated { rust_calculation, .. } => rust_calculation.node().contains_percentage(),
+        _ => false,
+    }
+}
+
+/// Whether a value's computed value depends on inherited font metrics because
+/// of the property it belongs to: a font-weight of bolder or lighter (relative
+/// to the inherited weight), a font-size that is a percentage, a percentage-
+/// bearing calc(), or one of larger/smaller/math (relative to the inherited
+/// size), or a line-height that is a percentage or percentage-bearing calc()
+/// (relative to the computed font size). This is the property-specific part of
+/// the flow's inheritance-dependency decision; the property-agnostic parts
+/// (depends-on-current-color and computational independence) stay with the
+/// value's own operations.
+///
+/// # Safety
+/// `value` must point at a valid StyleValueData.
+pub(crate) fn value_depends_on_inherited_info_for_property(value: &StyleValueData, property_id: u16) -> bool {
+    use crate::css::property_metadata::property_id as prop;
+    match property_id {
+        prop::FONT_WEIGHT => {
+            matches!(value, StyleValueData::Keyword { keyword } if matches!(*keyword, keyword::BOLDER | keyword::LIGHTER))
+        }
+        prop::FONT_SIZE => {
+            value_contains_percentage(value)
+                || matches!(value, StyleValueData::Keyword { keyword }
+                    if matches!(*keyword, keyword::LARGER | keyword::SMALLER | keyword::MATH))
+        }
+        prop::LINE_HEIGHT => value_contains_percentage(value),
+        _ => false,
+    }
+}
+
+/// # Safety
+/// `value` must point at a valid StyleValueData.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_value_depends_on_inherited_info_for_property(
+    value: *const c_void,
+    property_id: u16,
+) -> bool {
+    crate::css::ffi_stats::bump(crate::css::ffi_stats::FfiOp::StyleValueQueryEntry);
+    abort_on_panic(|| {
+        value_depends_on_inherited_info_for_property(unsafe { &*(value as *const StyleValueData) }, property_id)
+    })
+}
+
+/// The outcome of the font-style computation: whether a keyword was mapped to
+/// a font-style keyword the caller should construct, and that keyword's code.
+#[repr(C)]
+pub struct FfiFontStyleComputation {
+    pub is_keyword: bool,
+    pub font_style_keyword: u8,
+}
+
+/// Computes font-style: a bare keyword maps to a font-style keyword (the caller
+/// constructs the FontStyleStyleValue from it); any other value is already the
+/// computed value. Font-style normally parses straight to a FontStyleStyleValue;
+/// this keyword arm is reached when StylePropertyMap sets a keyword directly.
+/// https://drafts.csswg.org/css-fonts-4/#font-style-prop
+///
+/// # Safety
+/// `absolutized_value` must point at a valid StyleValueData.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_compute_font_style(absolutized_value: *const c_void) -> FfiFontStyleComputation {
+    crate::css::ffi_stats::bump(crate::css::ffi_stats::FfiOp::NestedPropertyComputeEntry);
+    abort_on_panic(|| {
+        if let StyleValueData::Keyword { keyword } = (unsafe { &*(absolutized_value as *const StyleValueData) })
+            && let Some(font_style_keyword) = keyword_to_font_style_keyword(*keyword)
+        {
+            return FfiFontStyleComputation {
+                is_keyword: true,
+                font_style_keyword,
+            };
+        }
+        FfiFontStyleComputation {
+            is_keyword: false,
+            font_style_keyword: 0,
+        }
+    })
+}
+
+/// Computes letter-spacing or word-spacing: the normal keyword computes to a
+/// zero length, and any other value is already the computed value.
+///
+/// # Safety
+/// `absolutized_value` must point at a valid StyleValueData.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_compute_letter_or_word_spacing(absolutized_value: *const c_void) -> FfiComputedNumber {
+    crate::css::ffi_stats::bump(crate::css::ffi_stats::FfiOp::NestedPropertyComputeEntry);
+    abort_on_panic(|| compute_letter_or_word_spacing_value(unsafe { &*(absolutized_value as *const StyleValueData) }))
+}
+
+fn compute_letter_or_word_spacing_value(absolutized_value: &StyleValueData) -> FfiComputedNumber {
+    match absolutized_value {
+        StyleValueData::Keyword { keyword } if *keyword == keyword::NORMAL => FfiComputedNumber {
+            handled: true,
+            unchanged: false,
+            value: 0.0,
+        },
+        _ => FfiComputedNumber {
+            handled: true,
+            unchanged: true,
+            value: 0.0,
+        },
+    }
+}
+
+fn position_area_short_keyword(keyword: u16) -> u16 {
+    match keyword {
+        keyword::BLOCK_START | keyword::INLINE_START => keyword::START,
+        keyword::BLOCK_END | keyword::INLINE_END => keyword::END,
+        keyword::SELF_BLOCK_START | keyword::SELF_INLINE_START => keyword::SELF_START,
+        keyword::SELF_BLOCK_END | keyword::SELF_INLINE_END => keyword::SELF_END,
+        keyword::SPAN_BLOCK_START | keyword::SPAN_INLINE_START => keyword::SPAN_START,
+        keyword::SPAN_BLOCK_END | keyword::SPAN_INLINE_END => keyword::SPAN_END,
+        keyword::SPAN_SELF_BLOCK_START | keyword::SPAN_SELF_INLINE_START => keyword::SPAN_SELF_START,
+        keyword::SPAN_SELF_BLOCK_END | keyword::SPAN_SELF_INLINE_END => keyword::SPAN_SELF_END,
+        _ => keyword,
+    }
+}
+
+fn position_area_span_all_remap(block_keyword: u16, inline_keyword: u16) -> Option<u16> {
+    if block_keyword == keyword::SPAN_ALL {
+        return match inline_keyword {
+            keyword::START => Some(keyword::INLINE_START),
+            keyword::END => Some(keyword::INLINE_END),
+            keyword::SELF_START => Some(keyword::SELF_INLINE_START),
+            keyword::SELF_END => Some(keyword::SELF_INLINE_END),
+            keyword::SPAN_START => Some(keyword::SPAN_INLINE_START),
+            keyword::SPAN_END => Some(keyword::SPAN_INLINE_END),
+            keyword::SPAN_SELF_START => Some(keyword::SPAN_SELF_INLINE_START),
+            keyword::SPAN_SELF_END => Some(keyword::SPAN_SELF_INLINE_END),
+            _ => None,
+        };
+    }
+    if inline_keyword == keyword::SPAN_ALL {
+        return match block_keyword {
+            keyword::START => Some(keyword::BLOCK_START),
+            keyword::END => Some(keyword::BLOCK_END),
+            keyword::SELF_START => Some(keyword::SELF_BLOCK_START),
+            keyword::SELF_END => Some(keyword::SELF_BLOCK_END),
+            keyword::SPAN_START => Some(keyword::SPAN_BLOCK_START),
+            keyword::SPAN_END => Some(keyword::SPAN_BLOCK_END),
+            keyword::SPAN_SELF_START => Some(keyword::SPAN_SELF_BLOCK_START),
+            keyword::SPAN_SELF_END => Some(keyword::SPAN_SELF_BLOCK_END),
+            _ => None,
+        };
+    }
+    None
+}
+
+// https://drafts.csswg.org/css-anchor-position/#position-area-computed
+#[allow(clippy::arc_with_non_send_sync)]
+fn compute_position_area(value: &StyleValueData) -> Option<Arc<StyleValueData>> {
+    // The computed value of a <position-area> value is the two keywords indicating the selected tracks in each axis,
+    // with the long (block-start) and short (start) logical keywords treated as equivalent. It serializes in the order
+    // given in the grammar (above), with the logical keywords serialized in their short forms (e.g. start start
+    // instead of block-start inline-start).
+    let StyleValueData::ValueList {
+        values,
+        separator,
+        collapsible,
+    } = value
+    else {
+        return None;
+    };
+    let [block_value, inline_value] = values.as_slice() else {
+        unreachable!("position-area must contain two keywords")
+    };
+    let StyleValueData::Keyword { keyword: block_keyword } = block_value.data() else {
+        unreachable!("position-area must contain keywords")
+    };
+    let StyleValueData::Keyword {
+        keyword: inline_keyword,
+    } = inline_value.data()
+    else {
+        unreachable!("position-area must contain keywords")
+    };
+
+    if let Some(keyword) = position_area_span_all_remap(*block_keyword, *inline_keyword) {
+        return Some(Arc::new(StyleValueData::Keyword { keyword }));
+    }
+    let short_block_keyword = position_area_short_keyword(*block_keyword);
+    let short_inline_keyword = position_area_short_keyword(*inline_keyword);
+    if short_block_keyword == *block_keyword && short_inline_keyword == *inline_keyword {
+        return None;
+    }
+
+    let retained_keyword = |keyword| unsafe {
+        RetainedStyleValueData::from_retained_pointer(Arc::into_raw(Arc::new(StyleValueData::Keyword { keyword })))
+    };
+    Some(Arc::new(StyleValueData::ValueList {
+        values: RetainedStyleValueDataList::from_retained_values(vec![
+            retained_keyword(short_block_keyword),
+            retained_keyword(short_inline_keyword),
+        ]),
+        separator: *separator,
+        collapsible: *collapsible,
+    }))
+}
+
+/// The per-longhand initial values as shared Rust value identities.
+struct InitialValueTable(Vec<crate::css::style_value::RetainedStyleValueData>);
+
+// SAFETY: The entries reference immortal, immutable style values.
+unsafe impl Send for InitialValueTable {}
+unsafe impl Sync for InitialValueTable {}
+
+static INITIAL_VALUE_TABLE: std::sync::OnceLock<InitialValueTable> = std::sync::OnceLock::new();
+
+/// Installs the initial value table, one entry per longhand in property id
+/// order.
+///
+/// # Safety
+/// `entries` must point at `length` transferred strong references.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_style_metadata_set_initial_value_table(entries: *const *const c_void, length: usize) {
+    abort_on_panic(|| {
+        let entries = unsafe { std::slice::from_raw_parts(entries, length) }
+            .iter()
+            .map(|entry| unsafe {
+                crate::css::style_value::RetainedStyleValueData::from_retained_pointer(
+                    (*entry).cast::<crate::css::style_value::StyleValueData>(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            length,
+            crate::css::property_metadata::NUMBER_OF_LONGHAND_PROPERTIES,
+            "initial value table has one entry per longhand"
+        );
+        assert!(
+            INITIAL_VALUE_TABLE.set(InitialValueTable(entries)).is_ok(),
+            "initial value table installed twice"
+        );
+    });
+}
+
+/// Returns the initial value data of a longhand property.
+pub(crate) fn initial_value_data(property_id: u16) -> *const crate::css::style_value::StyleValueData {
+    use crate::css::property_metadata::FIRST_LONGHAND_PROPERTY_ID;
+    let table = INITIAL_VALUE_TABLE.get().expect("initial value table not installed");
+    table.0[(property_id - FIRST_LONGHAND_PROPERTY_ID) as usize].pointer()
+}
+
+/// FFI accessor for the parity test on the C++ side.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_style_metadata_initial_value(property_id: u16) -> *const c_void {
+    abort_on_panic(|| initial_value_data(property_id).cast())
+}
+
+/// One bit per keyword marking the color keywords, installed once from the
+/// C++ side's KeywordStyleValue::is_color classification.
+static COLOR_KEYWORD_BITMAP: std::sync::OnceLock<Vec<u64>> = std::sync::OnceLock::new();
+
+/// Installs the color keyword bitmap.
+///
+/// # Safety
+/// `words` must point at `length` valid words.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_style_metadata_set_color_keyword_bitmap(words: *const u64, length: usize) {
+    abort_on_panic(|| {
+        let words = unsafe { std::slice::from_raw_parts(words, length) }.to_vec();
+        assert!(
+            COLOR_KEYWORD_BITMAP.set(words).is_ok(),
+            "color keyword bitmap installed twice"
+        );
+    });
+}
+
+pub(crate) fn keyword_is_color(keyword: u16) -> bool {
+    let Some(bitmap) = COLOR_KEYWORD_BITMAP.get() else {
+        return false;
+    };
+    let index = keyword as usize;
+    bitmap
+        .get(index / 64)
+        .is_some_and(|word| word & (1 << (index % 64)) != 0)
+}
+
+/// The inherit-or-initial decision for one longhand in the property
+/// computation loop.
+#[repr(C)]
+pub struct FfiLonghandDecision {
+    pub should_inherit: bool,
+    pub explicitly_inherits_non_inherited_property: bool,
+    /// True when, absent a successful inheritance fetch, the value falls back
+    /// to the property's initial value.
+    pub use_initial_without_inherit: bool,
+}
+
+fn longhand_decision(value: Option<&StyleValueData>, property_id: u16) -> FfiLonghandDecision {
+    let keyword = match value {
+        Some(StyleValueData::Keyword { keyword }) => Some(*keyword),
+        _ => None,
+    };
+    let is_inherit = keyword == Some(keyword::INHERIT);
+    let is_unset = keyword == Some(keyword::UNSET);
+    let is_initial = keyword == Some(keyword::INITIAL);
+    let inherited_property = property_is_inherited(property_id);
+
+    let explicitly_inherits_non_inherited_property = is_inherit && !inherited_property;
+    let mut should_inherit = value.is_none() && inherited_property;
+
+    // https://www.w3.org/TR/css-cascade-4/#inherit
+    // If the cascaded value of a property is the inherit keyword, the property's specified and
+    // computed values are the inherited value.
+    should_inherit |= is_inherit;
+
+    // https://www.w3.org/TR/css-cascade-4/#inherit-initial
+    // If the cascaded value of a property is the unset keyword, then if it is an inherited
+    // property, this is treated as inherit, and if it is not, this is treated as initial.
+    should_inherit |= is_unset && inherited_property;
+
+    // https://www.w3.org/TR/css-color-4/#resolving-other-colors
+    // In the color property, the used value of currentcolor is the resolved inherited value.
+    should_inherit |=
+        property_id == crate::css::property_metadata::property_id::COLOR && keyword == Some(keyword::CURRENTCOLOR);
+
+    FfiLonghandDecision {
+        should_inherit,
+        explicitly_inherits_non_inherited_property,
+        use_initial_without_inherit: value.is_none() || is_initial || is_unset || should_inherit,
+    }
+}
+
+/// The logical-alias-to-physical-property mapping, marshalled once from the
+/// C++ generated mapping function so the two sides cannot drift: for each
+/// longhand, one physical property id per (writing-mode, direction) pair, with
+/// zero marking properties that are not logical aliases.
+pub const WRITING_MODE_COUNT: usize = 5;
+pub const DIRECTION_COUNT: usize = 2;
+
+static LOGICAL_ALIAS_TABLE: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
+
+/// Installs the logical alias mapping table. `table` holds one entry per
+/// (longhand, writing-mode, direction) triple in row-major order.
+///
+/// # Safety
+/// `table` must point at `longhand_count * WRITING_MODE_COUNT * DIRECTION_COUNT` entries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_style_metadata_set_logical_alias_table(table: *const u16, length: usize) {
+    abort_on_panic(|| {
+        let entries = unsafe { std::slice::from_raw_parts(table, length) }.to_vec();
+        assert!(
+            LOGICAL_ALIAS_TABLE.set(entries).is_ok(),
+            "logical alias table installed twice"
+        );
+    });
+}
+
+/// Maps a logical alias longhand to its physical property for the given
+/// writing mode and direction, or returns the property itself when it is not
+/// a logical alias.
+pub fn map_logical_alias_to_physical(property_id: u16, writing_mode: u8, direction: u8) -> u16 {
+    use crate::css::property_metadata::FIRST_LONGHAND_PROPERTY_ID;
+    let Some(table) = LOGICAL_ALIAS_TABLE.get() else {
+        return property_id;
+    };
+    let longhand_index = (property_id - FIRST_LONGHAND_PROPERTY_ID) as usize;
+    let index = (longhand_index * WRITING_MODE_COUNT + writing_mode as usize) * DIRECTION_COUNT + direction as usize;
+    match table.get(index) {
+        Some(&physical) if physical != 0 => physical,
+        _ => property_id,
+    }
+}
+
+/// FFI accessor for the parity test on the C++ side.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_map_logical_alias_to_physical(property_id: u16, writing_mode: u8, direction: u8) -> u16 {
+    map_logical_alias_to_physical(property_id, writing_mode, direction)
+}
+
+static PHYSICAL_TO_LOGICAL_TABLE: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
+
+/// Installs the physical-to-logical-alias mapping table, in the same layout as
+/// the logical alias table.
+///
+/// # Safety
+/// `table` must point at `longhand_count * WRITING_MODE_COUNT * DIRECTION_COUNT` entries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_style_metadata_set_physical_to_logical_table(table: *const u16, length: usize) {
+    abort_on_panic(|| {
+        let entries = unsafe { std::slice::from_raw_parts(table, length) }.to_vec();
+        assert!(
+            PHYSICAL_TO_LOGICAL_TABLE.set(entries).is_ok(),
+            "physical to logical table installed twice"
+        );
+    });
+}
+
+/// Maps a physical longhand to its logical alias for the given writing mode
+/// and direction, or returns the property itself when it has no logical alias.
+pub fn map_physical_to_logical_alias(property_id: u16, writing_mode: u8, direction: u8) -> u16 {
+    use crate::css::property_metadata::FIRST_LONGHAND_PROPERTY_ID;
+    let Some(table) = PHYSICAL_TO_LOGICAL_TABLE.get() else {
+        return property_id;
+    };
+    let longhand_index = (property_id - FIRST_LONGHAND_PROPERTY_ID) as usize;
+    let index = (longhand_index * WRITING_MODE_COUNT + writing_mode as usize) * DIRECTION_COUNT + direction as usize;
+    match table.get(index) {
+        Some(&logical) if logical != 0 => logical,
+        _ => property_id,
+    }
+}
+
+/// FFI accessor for the parity test on the C++ side.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_map_physical_to_logical_alias(property_id: u16, writing_mode: u8, direction: u8) -> u16 {
+    map_physical_to_logical_alias(property_id, writing_mode, direction)
+}
+
+/// One deferred store operation for a longhand whose selected value needs no
+/// computation: the value identity and the flags driving the C++ side effects
+/// (animated-inheritance copy and inheritance-dependent bookkeeping).
+#[repr(C)]
+pub struct FfiComputedStoreEntry {
+    pub property_id: u16,
+    pub inherited_property_id: u16,
+    /// The selected specified value; also the stored value unless a computed
+    /// pixel length or keyword replaces it.
+    pub data: *const c_void,
+    /// The C++ declaration-source slot for a cascaded value, or -1.
+    pub source_slot: i64,
+    /// Whether the selected cascaded facade carried stylesheet context.
+    pub has_style_sheet_context: bool,
+    pub inheritance_dependent: bool,
+    pub inherited: bool,
+    /// An owned replacement style value when `computed_kind` is
+    /// `COMPUTED_KIND_STYLE_VALUE`. The C++ callback adopts this reference.
+    pub computed_data: *const c_void,
+    /// How the natively computed value crosses: with COMPUTED_KIND_UNCHANGED
+    /// the stored value is `data` itself; the other kinds carry a replacement
+    /// in `value` while `data` remains the specified value for the
+    /// inheritance-dependence bookkeeping.
+    pub computed_kind: u8,
+    pub value: f64,
+}
+
+pub const COMPUTED_KIND_UNCHANGED: u8 = 0;
+/// A pixel length of `value`.
+pub const COMPUTED_KIND_PX_LENGTH: u8 = 1;
+/// An integer of `value`.
+pub const COMPUTED_KIND_INTEGER: u8 = 2;
+/// A superellipse with parameter `value`.
+pub const COMPUTED_KIND_SUPERELLIPSE: u8 = 3;
+/// A number of `value`.
+pub const COMPUTED_KIND_NUMBER: u8 = 4;
+/// A percentage of `value`.
+pub const COMPUTED_KIND_PERCENTAGE: u8 = 5;
+/// A font-style value of the font-style keyword code in `value`.
+pub const COMPUTED_KIND_FONT_STYLE: u8 = 6;
+/// The value still needs computation, which the C++ flush handler performs in
+/// entry order; deferring it into the batch preserves the store sequence and
+/// the reads later computations make, since those reads only happen inside
+/// callbacks the driver invokes after flushing.
+pub const COMPUTED_KIND_COMPUTE_IN_CPP: u8 = 7;
+/// A keyword whose numeric code is carried in `value`.
+pub const COMPUTED_KIND_KEYWORD: u8 = 8;
+/// A display value encoded as tag | first << 8 | second << 16 | third << 24.
+pub const COMPUTED_KIND_DISPLAY: u8 = 9;
+/// A complete Rust-owned style value transferred through `computed_data`.
+pub const COMPUTED_KIND_STYLE_VALUE: u8 = 10;
+
+pub const LONGHAND_BATCH_REQUEST_NONE: u8 = 0;
+pub const LONGHAND_BATCH_REQUEST_LENGTH_CONTEXT: u8 = 1;
+pub const LONGHAND_BATCH_REQUEST_PARENT_VALUE: u8 = 2;
+pub const LONGHAND_BATCH_REQUEST_POST_COMPUTE_ADJUSTMENTS: u8 = 3;
+
+#[repr(C)]
+pub struct FfiLonghandBatchRequest {
+    pub property_id: u16,
+    pub out_context: *mut FfiLengthResolutionContext,
+    pub out_data: *mut *const c_void,
+    pub display_before: FfiDisplay,
+    pub float_before: u16,
+    pub overflow_x_before: u16,
+    pub overflow_y_before: u16,
+    pub text_align_before: u16,
+    pub position_before: u16,
+    pub check_input_line_height: bool,
+    pub out_input_line_height_metrics: *mut FfiInputLineHeightMetrics,
+}
+
+fn empty_longhand_batch_request() -> FfiLonghandBatchRequest {
+    FfiLonghandBatchRequest {
+        property_id: 0,
+        out_context: std::ptr::null_mut(),
+        out_data: std::ptr::null_mut(),
+        display_before: FfiDisplay::block(),
+        float_before: 0,
+        overflow_x_before: 0,
+        overflow_y_before: 0,
+        text_align_before: 0,
+        position_before: 0,
+        check_input_line_height: false,
+        out_input_line_height_metrics: std::ptr::null_mut(),
+    }
+}
+
+/// The leaf callbacks the C++ side provides to the property computation
+/// driver. The driver selects each longhand's cascaded, inherited or initial
+/// value natively and calls back only to flush store batches and to fetch
+/// the rare context a batch entry needs.
+#[repr(C)]
+pub struct FfiLonghandCallbacks {
+    pub context: *mut c_void,
+    /// Applies one ordered action batch. It first stores the selected values,
+    /// including each entry's side effects and any remaining C++ computation,
+    /// then stores a nonnegative effective color scheme and constructs a
+    /// requested length context. The ordering lets a returned context observe
+    /// everything computed before its request. Every entry's value stays alive
+    /// for the duration of the drive: cascaded data is retained by the store,
+    /// initial values are immortal, and parent shells are pinned by the
+    /// snapshot or the fetch below.
+    pub execute_computation_batch: unsafe extern "C" fn(
+        context: *mut c_void,
+        entries: *const FfiComputedStoreEntry,
+        count: usize,
+        effective_color_scheme: i16,
+        request_kind: u8,
+        request: *const FfiLonghandBatchRequest,
+    ),
+}
+
+/// Document-level inputs to used color-scheme resolution. Scheme values use
+/// the C++ PreferredColorScheme discriminants: auto, dark, and light.
+#[repr(C)]
+pub struct FfiEffectiveColorSchemeInput {
+    pub preferred_color_scheme: u8,
+    pub has_document_supported_schemes: bool,
+    pub document_supported_scheme_codes: *const u8,
+    pub document_supported_scheme_count: usize,
+}
+
+impl FfiEffectiveColorSchemeInput {
+    /// # Safety
+    /// The document-supported scheme storage must be valid for the returned
+    /// slice's lifetime.
+    unsafe fn document_supported_schemes(&self) -> Option<&[u8]> {
+        self.has_document_supported_schemes.then(|| {
+            if self.document_supported_scheme_count == 0 {
+                &[][..]
+            } else {
+                unsafe {
+                    std::slice::from_raw_parts(
+                        self.document_supported_scheme_codes,
+                        self.document_supported_scheme_count,
+                    )
+                }
+            }
+        })
+    }
+}
+
+/// The computation-context kind a property's lengths resolve against,
+/// mirroring StyleComputer::get_computation_context_for_property until the
+/// context construction moves into the core.
+#[derive(Clone, Copy, PartialEq)]
+enum ComputationContextKind {
+    Font,
+    LineHeight,
+    Generic,
+}
+
+fn computation_context_kind(property_id: u16) -> ComputationContextKind {
+    use crate::css::property_metadata::property_id as prop;
+    match property_id {
+        prop::COLOR_SCHEME
+        | prop::FONT_FAMILY
+        | prop::FONT_FEATURE_SETTINGS
+        | prop::FONT_KERNING
+        | prop::FONT_OPTICAL_SIZING
+        | prop::FONT_SIZE
+        | prop::FONT_STYLE
+        | prop::FONT_VARIANT_ALTERNATES
+        | prop::FONT_VARIANT_CAPS
+        | prop::FONT_VARIANT_EAST_ASIAN
+        | prop::FONT_VARIANT_EMOJI
+        | prop::FONT_VARIANT_LIGATURES
+        | prop::FONT_VARIANT_NUMERIC
+        | prop::FONT_VARIANT_POSITION
+        | prop::FONT_VARIATION_SETTINGS
+        | prop::FONT_WEIGHT
+        | prop::FONT_WIDTH
+        | prop::MATH_DEPTH
+        | prop::TEXT_RENDERING => ComputationContextKind::Font,
+        prop::LINE_HEIGHT => ComputationContextKind::LineHeight,
+        _ => ComputationContextKind::Generic,
+    }
+}
+
+/// Whether a value's absolutization is the identity, so the specified value
+/// is already the computed value. Mirrors the value types that fall through
+/// to the default arm of StyleValue::absolutized, plus keywords that resolve
+/// to themselves: the currentcolor keyword computes to itself, and only
+/// color keywords resolve to something else at computed-value time.
+fn absolutization_is_identity(value: &StyleValueData) -> bool {
+    match value {
+        StyleValueData::Keyword { keyword } => *keyword == keyword::CURRENTCOLOR || !keyword_is_color(*keyword),
+        StyleValueData::Number { .. }
+        | StyleValueData::Integer { .. }
+        | StyleValueData::String { .. }
+        | StyleValueData::CustomIdent { .. }
+        | StyleValueData::Percentage { .. }
+        | StyleValueData::Flex { .. }
+        | StyleValueData::UnicodeRange { .. }
+        | StyleValueData::Url { .. } => true,
+        _ => false,
+    }
+}
+
+/// Properties with a dedicated computed-value rule in the C++ dispatcher
+/// (StyleComputer::compute_value_of_property); everything else computes as
+/// plain absolutization. Mirrors the C++ switch until the dispatch moves
+/// into the core.
+fn property_has_dedicated_compute_rule(property_id: u16) -> bool {
+    use crate::css::property_metadata::property_id as prop;
+    matches!(
+        property_id,
+        prop::ANIMATION_NAME
+            | prop::BACKGROUND_ATTACHMENT
+            | prop::BACKGROUND_CLIP
+            | prop::BACKGROUND_ORIGIN
+            | prop::BACKGROUND_POSITION_X
+            | prop::BACKGROUND_POSITION_Y
+            | prop::BACKGROUND_REPEAT
+            | prop::BACKGROUND_SIZE
+            | prop::BORDER_BOTTOM_WIDTH
+            | prop::BORDER_LEFT_WIDTH
+            | prop::BORDER_RIGHT_WIDTH
+            | prop::BORDER_TOP_WIDTH
+            | prop::OUTLINE_WIDTH
+            | prop::CORNER_BOTTOM_LEFT_SHAPE
+            | prop::CORNER_BOTTOM_RIGHT_SHAPE
+            | prop::CORNER_TOP_LEFT_SHAPE
+            | prop::CORNER_TOP_RIGHT_SHAPE
+            | prop::FONT_SIZE
+            | prop::FONT_STYLE
+            | prop::FONT_WEIGHT
+            | prop::FONT_WIDTH
+            | prop::FONT_FEATURE_SETTINGS
+            | prop::FONT_VARIATION_SETTINGS
+            | prop::LETTER_SPACING
+            | prop::WORD_SPACING
+            | prop::LINE_HEIGHT
+            | prop::MATH_DEPTH
+            | prop::POSITION_AREA
+    )
+}
+
+/// The parent's inheritable computed values, prepared once per element: one
+/// shared Rust data identity per inherited-by-default longhand in property id
+/// order. Null entries mark values the parent could not provide. The C++ side
+/// pins every owning facade for the duration of the drive.
+#[repr(C)]
+pub struct FfiParentSnapshot {
+    pub entries: *const *const c_void,
+    pub entry_count: usize,
+    pub font_metrics_depend_on_viewport_metrics: bool,
+}
+
+/// Bulk results of one longhand drive, applied by C++ after the loop instead
+/// of once per longhand. The bitmap storage is provided by the caller, one
+/// bit per longhand in property id order.
+#[repr(C)]
+pub struct FfiLonghandDriverResults {
+    pub important_words: *mut u64,
+    pub inherited_words: *mut u64,
+    pub word_count: usize,
+    /// The raw winning cascaded font-size value data, or null; borrowed from the
+    /// cascaded property store.
+    pub raw_cascaded_font_size_data: *const c_void,
+    pub depends_on_viewport_metrics: bool,
+    pub font_metrics_depend_on_viewport_metrics: bool,
+    pub explicitly_inherited_non_inherited_property: bool,
+}
+
+fn table_row_maps(table: &std::sync::OnceLock<Vec<u16>>, property_id: u16) -> bool {
+    use crate::css::property_metadata::FIRST_LONGHAND_PROPERTY_ID;
+    let Some(table) = table.get() else {
+        return false;
+    };
+    let start = (property_id - FIRST_LONGHAND_PROPERTY_ID) as usize * WRITING_MODE_COUNT * DIRECTION_COUNT;
+    table[start..start + WRITING_MODE_COUNT * DIRECTION_COUNT]
+        .iter()
+        .any(|&entry| entry != 0)
+}
+
+fn value_is_initial_or_unset(value: *const c_void) -> bool {
+    if value.is_null() {
+        return false;
+    }
+    match unsafe { &*(value as *const StyleValueData) } {
+        StyleValueData::Keyword { keyword } => *keyword == keyword::INITIAL || *keyword == keyword::UNSET,
+        _ => false,
+    }
+}
+
+fn set_longhand_bit(words: &mut [u64], property_id: u16) {
+    use crate::css::property_metadata::FIRST_LONGHAND_PROPERTY_ID;
+    let index = (property_id - FIRST_LONGHAND_PROPERTY_ID) as usize;
+    words[index / 64] |= 1 << (index % 64);
+}
+
+fn clear_longhand_bit(words: &mut [u64], property_id: u16) {
+    use crate::css::property_metadata::FIRST_LONGHAND_PROPERTY_ID;
+    let index = (property_id - FIRST_LONGHAND_PROPERTY_ID) as usize;
+    words[index / 64] &= !(1 << (index % 64));
+}
+
+/// Drives the property computation loop: iterates every longhand in
+/// computation order, resolves logical pairing, reads the winning cascaded
+/// declarations straight from the store, selects between the cascaded,
+/// inherited and initial values, decides inheritance dependence, and calls
+/// back into C++ once per longhand to compute and store the result. The
+/// importance and inheritance flags and the other per-element side effects
+/// accumulate in `results` for bulk application after the loop.
+///
+/// # Safety
+/// `callbacks` must point at a valid callback table, `store` at a valid
+/// cascaded property store, `parent_snapshot` at a valid snapshot or null,
+/// `box_type_input` and `color_scheme_input` at valid element and document
+/// facts, and `results` at a results block whose bitmap storage covers every
+/// longhand; the callbacks must not mutate the store for the duration of the
+/// call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_drive_property_computation(
+    callbacks: *const FfiLonghandCallbacks,
+    store: *const CascadedPropertyStore,
+    parent_snapshot: *const FfiParentSnapshot,
+    box_type_input: *const FfiBoxTypeTransformationInput,
+    color_scheme_input: *const FfiEffectiveColorSchemeInput,
+    is_th_element: bool,
+    has_new_font_size: bool,
+    device_pixels_per_css_pixel: f64,
+    initial_font_size_raw: i32,
+    default_font_size_raw: i32,
+    results: *mut FfiLonghandDriverResults,
+) {
+    crate::css::ffi_stats::bump(crate::css::ffi_stats::FfiOp::LonghandDriverEntry);
+    abort_on_panic(|| {
+        use crate::css::property_metadata::{
+            FIRST_INHERITED_PROPERTY_ID, NUMBER_OF_LONGHAND_PROPERTIES, REQUIRES_COMPUTATION_ALWAYS,
+            REQUIRES_COMPUTATION_CASCADED, REQUIRES_COMPUTATION_NON_INHERITED, property_id as prop,
+            property_is_inherited, property_requires_computation_level,
+        };
+
+        let callbacks = unsafe { &*callbacks };
+        let context = callbacks.context;
+        let store = unsafe { &*store };
+        let snapshot = if parent_snapshot.is_null() {
+            None
+        } else {
+            Some(unsafe { &*parent_snapshot })
+        };
+        let has_inheritance_parent = snapshot.is_some();
+        let color_scheme_input = unsafe { &*color_scheme_input };
+        let results = unsafe { &mut *results };
+        assert!(results.word_count * 64 >= NUMBER_OF_LONGHAND_PROPERTIES);
+        let important_words = unsafe { std::slice::from_raw_parts_mut(results.important_words, results.word_count) };
+        let inherited_words = unsafe { std::slice::from_raw_parts_mut(results.inherited_words, results.word_count) };
+        let mut cached_writing_mode_and_direction: Option<(u8, u8)> = None;
+
+        // Store operations queued for properties that need no computation, flushed in one
+        // crossing before any callback that may read the stored values.
+        let mut pending_stores: Vec<FfiComputedStoreEntry> = Vec::new();
+        let mut pending_effective_color_scheme: i16 = -1;
+        // Length resolution contexts fetched from C++ on first use, one per kind, like
+        // the C++ side's per-element computation context caches.
+        let mut cached_length_resolution_contexts: [Option<FfiLengthResolutionContext>; 3] = [None; 3];
+        fn flush_pending_stores(
+            callbacks: &FfiLonghandCallbacks,
+            context: *mut c_void,
+            pending_stores: &mut Vec<FfiComputedStoreEntry>,
+            pending_effective_color_scheme: &mut i16,
+        ) {
+            if pending_stores.is_empty() && *pending_effective_color_scheme < 0 {
+                return;
+            }
+            crate::css::ffi_stats::bump(crate::css::ffi_stats::FfiOp::LonghandStoreBatchCallback);
+            // SAFETY: The entries and their values stay alive for the call; the callback
+            // table outlives the drive.
+            unsafe {
+                (callbacks.execute_computation_batch)(
+                    context,
+                    pending_stores.as_ptr(),
+                    pending_stores.len(),
+                    *pending_effective_color_scheme,
+                    LONGHAND_BATCH_REQUEST_NONE,
+                    std::ptr::null(),
+                );
+            };
+            pending_stores.clear();
+            *pending_effective_color_scheme = -1;
+        }
+
+        fn fetch_length_resolution_context<'a>(
+            caches: &'a mut [Option<FfiLengthResolutionContext>; 3],
+            callbacks: &FfiLonghandCallbacks,
+            context: *mut c_void,
+            pending_stores: &mut Vec<FfiComputedStoreEntry>,
+            pending_effective_color_scheme: &mut i16,
+            kind: usize,
+            property_id: u16,
+        ) -> &'a FfiLengthResolutionContext {
+            if caches[kind].is_none() {
+                // Building a context on the C++ side reads stored values, so request it
+                // as part of the same ordered action batch that applies those values.
+                crate::css::ffi_stats::bump(crate::css::ffi_stats::FfiOp::LonghandStoreBatchCallback);
+                let mut fetched = std::mem::MaybeUninit::<FfiLengthResolutionContext>::uninit();
+                // SAFETY: The callback applies the entries in order and then fills the
+                // requested context before returning.
+                caches[kind] = Some(unsafe {
+                    let mut request = empty_longhand_batch_request();
+                    request.property_id = property_id;
+                    request.out_context = fetched.as_mut_ptr();
+                    (callbacks.execute_computation_batch)(
+                        context,
+                        pending_stores.as_ptr(),
+                        pending_stores.len(),
+                        *pending_effective_color_scheme,
+                        LONGHAND_BATCH_REQUEST_LENGTH_CONTEXT,
+                        &raw const request,
+                    );
+                    pending_stores.clear();
+                    *pending_effective_color_scheme = -1;
+                    fetched.assume_init()
+                });
+            }
+            caches[kind].as_ref().unwrap()
+        }
+
+        /// The Rust-owned data of a parent snapshot entry.
+        fn snapshot_entry_data(snapshot: &FfiParentSnapshot, property_id: u16) -> Option<&StyleValueData> {
+            use crate::css::property_metadata::FIRST_INHERITED_PROPERTY_ID;
+            let index = (property_id - FIRST_INHERITED_PROPERTY_ID) as usize;
+            assert!(index < snapshot.entry_count);
+            // SAFETY: Snapshot entries are valid for the drive.
+            unsafe { ((*snapshot.entries.add(index)) as *const StyleValueData).as_ref() }
+        }
+
+        // The computed math-depth, remembered for the font-size rule; None when C++
+        // computed it, in which case font-size falls back as well.
+        let mut computed_math_depth: Option<i32> = None;
+        // The background-image list length, for the coordinated background properties.
+        let mut background_image_list_length: Option<usize> = None;
+        // The computed writing-mode and direction, tracked for logical alias pairing;
+        // both properties only take keywords, whose computed value is the specified one.
+        let mut computed_writing_mode: Option<u8> = None;
+        let mut computed_direction: Option<u8> = None;
+        let mut computed_overflow_x: Option<u16> = None;
+        let mut computed_overflow_y: Option<u16> = None;
+        let mut computed_text_align_before_adjustment: Option<u16> = None;
+        let mut computed_text_align: Option<u16> = None;
+        let mut computed_display: Option<FfiDisplay> = None;
+        let mut computed_float: Option<u16> = None;
+        let mut computed_position: Option<u16> = None;
+
+        for &property_id in crate::css::property_metadata::property_computation_order() {
+            let mut cascaded_property_id = property_id;
+            let mut inherited_property_id = property_id;
+
+            // https://drafts.csswg.org/css-logical/#box
+            // Within each logical property group, corresponding flow-relative and physical
+            // properties are paired using the element's own computed writing mode; the computed
+            // value of both properties in the pair is derived from the specified value of the
+            // property declared with higher priority in the CSS cascade. A longhand is in a
+            // logical property group exactly when either mapping table maps it.
+            let is_logical_alias = table_row_maps(&LOGICAL_ALIAS_TABLE, property_id);
+            if is_logical_alias || table_row_maps(&PHYSICAL_TO_LOGICAL_TABLE, property_id) {
+                let (writing_mode, direction) = *cached_writing_mode_and_direction.get_or_insert_with(|| {
+                    // Direction and writing-mode precede every logical property in the
+                    // generated computation order and only accept keywords, so their
+                    // selected values are their computed mapping inputs.
+                    (
+                        computed_writing_mode.expect("writing-mode must precede logical properties"),
+                        computed_direction.expect("direction must precede logical properties"),
+                    )
+                });
+                let counterpart_property_id = if is_logical_alias {
+                    let physical = map_logical_alias_to_physical(property_id, writing_mode, direction);
+                    // AD-HOC: While the spec says that inheritance of logical aliases should be
+                    // direct, other browsers instead inherit from the physical counterpart - the
+                    // CSSWG has resolved to update the spec to reflect this -
+                    // see https://github.com/w3c/csswg-drafts/issues/3029
+                    inherited_property_id = physical;
+                    physical
+                } else {
+                    map_physical_to_logical_alias(property_id, writing_mode, direction)
+                };
+                cascaded_property_id = store.property_with_higher_priority(property_id, counterpart_property_id);
+            }
+
+            let mut value = std::ptr::null();
+            let mut source_slot = -1;
+            let mut has_style_sheet_context = false;
+            if let Some((value_data, important, cascaded_source_slot, cascaded_has_style_sheet_context)) =
+                store.winning_declaration(cascaded_property_id)
+            {
+                value = value_data;
+                source_slot = i64::from(cascaded_source_slot);
+                has_style_sheet_context = cascaded_has_style_sheet_context;
+                if important {
+                    set_longhand_bit(important_words, property_id);
+                }
+                // Keep the raw winning cascaded font-size for the monospace font-size
+                // recascade (see recascade_font_size_if_needed on the C++ side).
+                if property_id == crate::css::property_metadata::property_id::FONT_SIZE {
+                    results.raw_cascaded_font_size_data = value_data;
+                }
+            } else if property_id == crate::css::property_metadata::property_id::FONT_SIZE && has_new_font_size {
+                // NOTE: The recascaded font-size has already been stored before the loop.
+                continue;
+            }
+
+            let decision = longhand_decision(
+                if value.is_null() {
+                    None
+                } else {
+                    Some(unsafe { &*(value as *const StyleValueData) })
+                },
+                property_id,
+            );
+
+            // The computation-need level to compare against depends on which source wins;
+            // cascaded is the baseline and is overridden by the inherit and initial paths.
+            let mut required_level = REQUIRES_COMPUTATION_CASCADED;
+
+            let inherit_fetch_attempted = decision.should_inherit && has_inheritance_parent;
+            if inherit_fetch_attempted {
+                source_slot = -1;
+                has_style_sheet_context = false;
+                let snapshot = snapshot.unwrap();
+                set_longhand_bit(inherited_words, property_id);
+                if decision.explicitly_inherits_non_inherited_property {
+                    results.explicitly_inherited_non_inherited_property = true;
+                }
+                value = if property_is_inherited(inherited_property_id) {
+                    let index = (inherited_property_id - FIRST_INHERITED_PROPERTY_ID) as usize;
+                    assert!(index < snapshot.entry_count);
+                    unsafe { *snapshot.entries.add(index) }
+                } else {
+                    crate::css::ffi_stats::bump(crate::css::ffi_stats::FfiOp::LonghandParentValueFetchCallback);
+                    let mut parent_data = std::ptr::null();
+                    let mut request = empty_longhand_batch_request();
+                    request.property_id = inherited_property_id;
+                    request.out_data = &raw mut parent_data;
+                    unsafe {
+                        (callbacks.execute_computation_batch)(
+                            context,
+                            std::ptr::null(),
+                            0,
+                            -1,
+                            LONGHAND_BATCH_REQUEST_PARENT_VALUE,
+                            &raw const request,
+                        );
+                    };
+                    parent_data
+                };
+                if property_affects_font_metrics(inherited_property_id)
+                    && snapshot.font_metrics_depend_on_viewport_metrics
+                {
+                    results.font_metrics_depend_on_viewport_metrics = true;
+                }
+                required_level = REQUIRES_COMPUTATION_ALWAYS;
+            }
+
+            let use_initial = if inherit_fetch_attempted {
+                value.is_null() || value_is_initial_or_unset(value)
+            } else {
+                decision.use_initial_without_inherit
+            };
+            if use_initial {
+                source_slot = -1;
+                has_style_sheet_context = false;
+                value = initial_value_data(property_id).cast();
+                required_level = REQUIRES_COMPUTATION_NON_INHERITED;
+            }
+
+            let requires_computation = property_requires_computation_level(property_id) >= required_level;
+
+            // Whether the computed value depends on inherited information, so the specified
+            // value must be kept for re-resolution when an ancestor changes.
+            let value_data = unsafe { &*(value as *const StyleValueData) };
+
+            if inherited_property_id == crate::css::property_metadata::property_id::BACKGROUND_IMAGE
+                && let StyleValueData::ValueList { values, .. } = value_data
+            {
+                background_image_list_length = Some(values.as_slice().len());
+            }
+            if let StyleValueData::Keyword { keyword } = value_data {
+                if property_id == crate::css::property_metadata::property_id::WRITING_MODE {
+                    computed_writing_mode = keyword_to_writing_mode(*keyword);
+                } else if property_id == crate::css::property_metadata::property_id::DIRECTION {
+                    computed_direction = keyword_to_direction(*keyword);
+                }
+            }
+            let inheritance_dependent = crate::css::style_value::value_depends_on_current_color(value_data)
+                || !value_is_computationally_independent(value_data)
+                    .expect("computational independence requested for an unsupported value")
+                || value_depends_on_inherited_info_for_property(value_data, property_id);
+
+            if requires_computation {
+                // Plain length values of properties without a dedicated computed-value rule
+                // absolutize natively; everything else still computes through C++.
+                // The specified value absolutized natively when the core can:
+                // Some(None) leaves the value unchanged, Some(Some(px)) resolves it to
+                // a pixel length, and None means C++ must handle it.
+                let absolutized: Option<Option<f64>> = if absolutization_is_identity(value_data) {
+                    Some(None)
+                } else if let StyleValueData::Length {
+                    value: length_value,
+                    unit,
+                } = value_data
+                {
+                    let kind = computation_context_kind(inherited_property_id) as usize;
+                    let resolution_context = fetch_length_resolution_context(
+                        &mut cached_length_resolution_contexts,
+                        callbacks,
+                        context,
+                        &mut pending_stores,
+                        &mut pending_effective_color_scheme,
+                        kind,
+                        inherited_property_id,
+                    );
+                    let result = absolutize_length(*length_value, *unit as usize, resolution_context);
+                    if result.handled {
+                        if result.resolved_viewport_relative_length {
+                            results.depends_on_viewport_metrics = true;
+                            if property_affects_font_metrics(inherited_property_id) {
+                                results.font_metrics_depend_on_viewport_metrics = true;
+                            }
+                        }
+                        Some(result.changed.then_some(result.px))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                // The computed value: for properties without a dedicated rule the
+                // absolutized value is the computed value; the dedicated rules that
+                // have moved into the core run over the absolutized value here.
+                enum NativeValue {
+                    Unsupported,
+                    Unchanged,
+                    Px(f64),
+                    Integer(i32),
+                    Superellipse(f64),
+                    Number(f64),
+                    Percentage(f64),
+                    FontStyle(u8),
+                    StyleValue(Arc<StyleValueData>),
+                }
+                use crate::css::property_metadata::property_id as prop;
+                let synthesized_px_length = |absolutized: Option<f64>| {
+                    absolutized.map(|px| StyleValueData::Length {
+                        value: px,
+                        unit: px_length_unit(),
+                    })
+                };
+                let native = match (absolutized, inherited_property_id) {
+                    (
+                        Some(absolutized),
+                        prop::BORDER_BOTTOM_WIDTH
+                        | prop::BORDER_LEFT_WIDTH
+                        | prop::BORDER_RIGHT_WIDTH
+                        | prop::BORDER_TOP_WIDTH
+                        | prop::OUTLINE_WIDTH,
+                    ) => {
+                        let synthesized = synthesized_px_length(absolutized);
+                        let result = compute_border_or_outline_width(
+                            synthesized.as_ref().unwrap_or(value_data),
+                            device_pixels_per_css_pixel,
+                        );
+                        if result.handled {
+                            NativeValue::Px(result.value)
+                        } else {
+                            NativeValue::Unsupported
+                        }
+                    }
+                    (
+                        Some(_),
+                        prop::CORNER_BOTTOM_LEFT_SHAPE
+                        | prop::CORNER_BOTTOM_RIGHT_SHAPE
+                        | prop::CORNER_TOP_LEFT_SHAPE
+                        | prop::CORNER_TOP_RIGHT_SHAPE,
+                    ) => {
+                        // Corner shape values are keywords or superellipses; only keywords
+                        // reach here since superellipse absolutization stays with C++.
+                        let result = compute_corner_shape_parameter(value_data);
+                        if result.handled && !result.unchanged {
+                            NativeValue::Superellipse(result.value)
+                        } else if result.handled {
+                            NativeValue::Unchanged
+                        } else {
+                            NativeValue::Unsupported
+                        }
+                    }
+                    (Some(_), prop::MATH_DEPTH) => {
+                        // The inherited math-depth and math-style come from the parent
+                        // snapshot; without an inheritance parent the initial values apply
+                        // (math-depth 0, math-style normal).
+                        let (inherited_math_depth, inherited_math_style_is_compact) = match snapshot {
+                            Some(snapshot) => {
+                                let math_depth = match snapshot_entry_data(snapshot, prop::MATH_DEPTH) {
+                                    Some(StyleValueData::Integer { value }) => *value,
+                                    _ => 0,
+                                };
+                                let compact = matches!(
+                                    snapshot_entry_data(snapshot, prop::MATH_STYLE),
+                                    Some(StyleValueData::Keyword { keyword }) if *keyword == keyword::COMPACT
+                                );
+                                (math_depth, compact)
+                            }
+                            None => (0, false),
+                        };
+                        let result =
+                            compute_math_depth(value_data, inherited_math_depth, inherited_math_style_is_compact);
+                        if result.handled {
+                            computed_math_depth = Some(result.value as i32);
+                            NativeValue::Integer(result.value as i32)
+                        } else {
+                            NativeValue::Unsupported
+                        }
+                    }
+                    (Some(absolutized), prop::FONT_SIZE) => {
+                        if let Some(computed_math_depth) = computed_math_depth {
+                            // A font-size relative to the inherited size also inherits the
+                            // parent's viewport dependence of its font metrics.
+                            if value_depends_on_inherited_info_for_property(value_data, prop::FONT_SIZE)
+                                && snapshot.is_some_and(|snapshot| snapshot.font_metrics_depend_on_viewport_metrics)
+                            {
+                                results.depends_on_viewport_metrics = true;
+                                results.font_metrics_depend_on_viewport_metrics = true;
+                            }
+                            let inherited = match snapshot {
+                                Some(snapshot) => match snapshot_entry_data(snapshot, prop::FONT_SIZE) {
+                                    Some(StyleValueData::Length { value, unit }) if *unit == px_length_unit() => {
+                                        let math_depth = match snapshot_entry_data(snapshot, prop::MATH_DEPTH) {
+                                            Some(StyleValueData::Integer { value }) => *value,
+                                            _ => 0,
+                                        };
+                                        Some((CssPixels::nearest_value_for(*value), math_depth))
+                                    }
+                                    _ => None,
+                                },
+                                None => Some((CssPixels::from_raw(initial_font_size_raw), 0)),
+                            };
+                            match inherited {
+                                Some((inherited_font_size, inherited_math_depth)) => {
+                                    let synthesized = synthesized_px_length(absolutized);
+                                    let result = compute_font_size(
+                                        synthesized.as_ref().unwrap_or(value_data),
+                                        computed_math_depth,
+                                        inherited_font_size,
+                                        inherited_math_depth,
+                                        CssPixels::from_raw(default_font_size_raw),
+                                    );
+                                    if result.handled {
+                                        if result.unchanged {
+                                            match absolutized {
+                                                Some(px) => NativeValue::Px(px),
+                                                None => NativeValue::Unchanged,
+                                            }
+                                        } else {
+                                            NativeValue::Px(result.value)
+                                        }
+                                    } else {
+                                        NativeValue::Unsupported
+                                    }
+                                }
+                                None => NativeValue::Unsupported,
+                            }
+                        } else {
+                            NativeValue::Unsupported
+                        }
+                    }
+                    (Some(_), prop::FONT_WEIGHT) => {
+                        let inherited_font_weight = match snapshot {
+                            Some(snapshot) => match snapshot_entry_data(snapshot, prop::FONT_WEIGHT) {
+                                Some(StyleValueData::Number { value }) => Some(*value),
+                                _ => None,
+                            },
+                            None => Some(400.0),
+                        };
+                        match inherited_font_weight {
+                            Some(inherited_font_weight) => {
+                                let result = compute_font_weight(value_data, inherited_font_weight);
+                                if result.handled {
+                                    if result.unchanged {
+                                        NativeValue::Unchanged
+                                    } else {
+                                        NativeValue::Number(result.value)
+                                    }
+                                } else {
+                                    NativeValue::Unsupported
+                                }
+                            }
+                            None => NativeValue::Unsupported,
+                        }
+                    }
+                    (Some(_), prop::FONT_STYLE) => match value_data {
+                        StyleValueData::Keyword { keyword } => match keyword_to_font_style_keyword(*keyword) {
+                            Some(font_style_keyword) => NativeValue::FontStyle(font_style_keyword),
+                            None => NativeValue::Unchanged,
+                        },
+                        _ => NativeValue::Unchanged,
+                    },
+                    (Some(_), prop::FONT_WIDTH) => {
+                        let result = compute_font_width(value_data);
+                        if result.handled {
+                            if result.unchanged {
+                                NativeValue::Unchanged
+                            } else {
+                                NativeValue::Percentage(result.value)
+                            }
+                        } else {
+                            NativeValue::Unsupported
+                        }
+                    }
+                    (Some(_), prop::FONT_FEATURE_SETTINGS | prop::FONT_VARIATION_SETTINGS)
+                        if matches!(value_data, StyleValueData::Keyword { .. }) =>
+                    {
+                        NativeValue::Unchanged
+                    }
+                    (Some(absolutized), prop::LINE_HEIGHT) => {
+                        let result = if matches!(value_data, StyleValueData::Percentage { .. }) {
+                            let resolution_context = fetch_length_resolution_context(
+                                &mut cached_length_resolution_contexts,
+                                callbacks,
+                                context,
+                                &mut pending_stores,
+                                &mut pending_effective_color_scheme,
+                                ComputationContextKind::LineHeight as usize,
+                                prop::LINE_HEIGHT,
+                            );
+                            compute_line_height(
+                                value_data,
+                                CssPixels::nearest_value_for(resolution_context.font_metrics.font_size),
+                            )
+                        } else {
+                            let synthesized = synthesized_px_length(absolutized);
+                            compute_line_height(synthesized.as_ref().unwrap_or(value_data), CssPixels::from_raw(0))
+                        };
+                        if result.handled {
+                            if result.unchanged {
+                                match absolutized {
+                                    Some(px) => NativeValue::Px(px),
+                                    None => NativeValue::Unchanged,
+                                }
+                            } else if result.is_number {
+                                NativeValue::Number(result.value)
+                            } else {
+                                NativeValue::Px(result.value)
+                            }
+                        } else {
+                            NativeValue::Unsupported
+                        }
+                    }
+                    (None, prop::FONT_FAMILY) if matches!(value_data, StyleValueData::ValueList { .. }) => {
+                        // A font-family list only ever holds keywords, strings and custom
+                        // identifiers, whose absolutization is the identity.
+                        NativeValue::Unchanged
+                    }
+                    (
+                        None,
+                        prop::BACKGROUND_ATTACHMENT
+                        | prop::BACKGROUND_CLIP
+                        | prop::BACKGROUND_ORIGIN
+                        | prop::BACKGROUND_REPEAT,
+                    ) => {
+                        // These coordinated lists only ever hold keywords and repeat-style
+                        // values, whose absolutization is the identity; the coordination is
+                        // the identity too when the list already matches the layer count.
+                        match (value_data, background_image_list_length) {
+                            (StyleValueData::ValueList { values, .. }, Some(layer_count))
+                                if values.as_slice().len() == layer_count =>
+                            {
+                                NativeValue::Unchanged
+                            }
+                            _ => NativeValue::Unsupported,
+                        }
+                    }
+                    (Some(_), prop::ANIMATION_NAME)
+                        if matches!(
+                            value_data,
+                            StyleValueData::Keyword { .. } | StyleValueData::CustomIdent { .. }
+                        ) =>
+                    {
+                        NativeValue::Unchanged
+                    }
+                    (Some(absolutized), prop::LETTER_SPACING | prop::WORD_SPACING) => {
+                        let synthesized = synthesized_px_length(absolutized);
+                        let result = compute_letter_or_word_spacing_value(synthesized.as_ref().unwrap_or(value_data));
+                        if result.handled {
+                            if result.unchanged {
+                                match absolutized {
+                                    Some(px) => NativeValue::Px(px),
+                                    None => NativeValue::Unchanged,
+                                }
+                            } else {
+                                NativeValue::Px(result.value)
+                            }
+                        } else {
+                            NativeValue::Unsupported
+                        }
+                    }
+                    (_, prop::POSITION_AREA) => match compute_position_area(value_data) {
+                        Some(value) => NativeValue::StyleValue(value),
+                        None => NativeValue::Unchanged,
+                    },
+                    (Some(absolutized), _) if !property_has_dedicated_compute_rule(inherited_property_id) => {
+                        match absolutized {
+                            Some(px) => NativeValue::Px(px),
+                            None => NativeValue::Unchanged,
+                        }
+                    }
+                    _ => NativeValue::Unsupported,
+                };
+
+                let (computed_kind, computed_value, computed_data) = match native {
+                    NativeValue::Px(px) => (COMPUTED_KIND_PX_LENGTH, px, std::ptr::null()),
+                    NativeValue::Integer(integer) => (COMPUTED_KIND_INTEGER, integer as f64, std::ptr::null()),
+                    NativeValue::Superellipse(parameter) => (COMPUTED_KIND_SUPERELLIPSE, parameter, std::ptr::null()),
+                    NativeValue::Number(number) => (COMPUTED_KIND_NUMBER, number, std::ptr::null()),
+                    NativeValue::Percentage(percentage) => (COMPUTED_KIND_PERCENTAGE, percentage, std::ptr::null()),
+                    NativeValue::FontStyle(font_style_keyword) => {
+                        (COMPUTED_KIND_FONT_STYLE, font_style_keyword as f64, std::ptr::null())
+                    }
+                    NativeValue::StyleValue(value) => (COMPUTED_KIND_STYLE_VALUE, 0.0, Arc::into_raw(value).cast()),
+                    NativeValue::Unchanged => (COMPUTED_KIND_UNCHANGED, 0.0, std::ptr::null()),
+                    NativeValue::Unsupported => {
+                        crate::css::ffi_stats::bump(crate::css::ffi_stats::FfiOp::LonghandCppComputeFallback);
+                        (COMPUTED_KIND_COMPUTE_IN_CPP, 0.0, std::ptr::null())
+                    }
+                };
+                pending_stores.push(FfiComputedStoreEntry {
+                    property_id,
+                    inherited_property_id,
+                    data: value,
+                    source_slot,
+                    has_style_sheet_context,
+                    inheritance_dependent,
+                    inherited: inherit_fetch_attempted,
+                    computed_data,
+                    computed_kind,
+                    value: computed_value,
+                });
+            } else {
+                pending_stores.push(FfiComputedStoreEntry {
+                    property_id,
+                    inherited_property_id,
+                    data: value,
+                    source_slot,
+                    has_style_sheet_context,
+                    inheritance_dependent,
+                    inherited: inherit_fetch_attempted,
+                    computed_data: std::ptr::null(),
+                    computed_kind: COMPUTED_KIND_UNCHANGED,
+                    value: 0.0,
+                });
+            }
+
+            if property_id == prop::OVERFLOW_X {
+                if let StyleValueData::Keyword { keyword } = value_data {
+                    computed_overflow_x = Some(*keyword);
+                }
+            } else if property_id == prop::OVERFLOW_Y
+                && let (Some(overflow_x), StyleValueData::Keyword { keyword: overflow_y }) =
+                    (computed_overflow_x, value_data)
+            {
+                computed_overflow_y = Some(*overflow_y);
+                let effective_overflow = resolve_effective_overflow_keywords(overflow_x, *overflow_y);
+                for entry in pending_stores.iter_mut().rev() {
+                    if entry.property_id == prop::OVERFLOW_X && effective_overflow.changed_x {
+                        debug_assert_eq!(entry.computed_kind, COMPUTED_KIND_UNCHANGED);
+                        entry.computed_kind = COMPUTED_KIND_KEYWORD;
+                        entry.value = effective_overflow.x_keyword as f64;
+                        clear_longhand_bit(important_words, prop::OVERFLOW_X);
+                        clear_longhand_bit(inherited_words, prop::OVERFLOW_X);
+                    } else if entry.property_id == prop::OVERFLOW_Y && effective_overflow.changed_y {
+                        debug_assert_eq!(entry.computed_kind, COMPUTED_KIND_UNCHANGED);
+                        entry.computed_kind = COMPUTED_KIND_KEYWORD;
+                        entry.value = effective_overflow.y_keyword as f64;
+                        clear_longhand_bit(important_words, prop::OVERFLOW_Y);
+                        clear_longhand_bit(inherited_words, prop::OVERFLOW_Y);
+                    }
+                    if entry.property_id == prop::OVERFLOW_X {
+                        break;
+                    }
+                }
+            } else if property_id == prop::TEXT_ALIGN
+                && let StyleValueData::Keyword { keyword: text_align } = value_data
+            {
+                computed_text_align_before_adjustment = Some(*text_align);
+                let (has_parent_with_computed_values, parent_text_align, parent_direction_is_ltr) =
+                    if let Some(snapshot) = snapshot {
+                        let parent_text_align = match snapshot_entry_data(snapshot, prop::TEXT_ALIGN) {
+                            Some(StyleValueData::Keyword { keyword }) => *keyword,
+                            _ => unreachable!("parent text-align must be a keyword"),
+                        };
+                        let parent_direction_is_ltr = match snapshot_entry_data(snapshot, prop::DIRECTION) {
+                            Some(StyleValueData::Keyword {
+                                keyword: parent_direction,
+                            }) => *parent_direction == keyword::LTR,
+                            _ => unreachable!("parent direction must be a keyword"),
+                        };
+                        (true, parent_text_align, parent_direction_is_ltr)
+                    } else {
+                        (false, 0, true)
+                    };
+                let adjustment = compute_text_align_adjustment(
+                    *text_align,
+                    is_th_element,
+                    has_parent_with_computed_values,
+                    parent_text_align,
+                    parent_direction_is_ltr,
+                );
+                if adjustment.changed {
+                    let entry = pending_stores.last_mut().unwrap();
+                    debug_assert_eq!(entry.property_id, prop::TEXT_ALIGN);
+                    debug_assert_eq!(entry.computed_kind, COMPUTED_KIND_UNCHANGED);
+                    entry.computed_kind = COMPUTED_KIND_KEYWORD;
+                    entry.value = adjustment.keyword as f64;
+                    clear_longhand_bit(important_words, property_id);
+                    clear_longhand_bit(inherited_words, property_id);
+                    if adjustment.inherited {
+                        set_longhand_bit(inherited_words, property_id);
+                    }
+                }
+                computed_text_align = Some(if adjustment.changed {
+                    adjustment.keyword
+                } else {
+                    *text_align
+                });
+            } else if property_id == prop::COLOR_SCHEME
+                && let StyleValueData::ColorScheme { scheme_codes, .. } = value_data
+            {
+                let color_scheme = resolve_effective_color_scheme(
+                    scheme_codes.as_slice(),
+                    color_scheme_input.preferred_color_scheme,
+                    unsafe { color_scheme_input.document_supported_schemes() },
+                );
+                pending_effective_color_scheme = i16::from(color_scheme);
+            }
+
+            match (property_id, value_data) {
+                (prop::DISPLAY, StyleValueData::Display { raw }) => {
+                    computed_display = Some(FfiDisplay::from_raw(*raw));
+                }
+                (prop::FLOAT, StyleValueData::Keyword { keyword }) => {
+                    computed_float = Some(*keyword);
+                }
+                (prop::POSITION, StyleValueData::Keyword { keyword }) => {
+                    computed_position = Some(*keyword);
+                }
+                _ => {}
+            }
+        }
+
+        flush_pending_stores(
+            callbacks,
+            context,
+            &mut pending_stores,
+            &mut pending_effective_color_scheme,
+        );
+        let display_before = computed_display.expect("display must be computed by the longhand driver");
+        let mut box_type_input = unsafe { *box_type_input };
+        box_type_input.display = display_before;
+        let float_before = computed_float.expect("float must be computed by the longhand driver");
+        box_type_input.float_value = float_before;
+        box_type_input.position = computed_position.expect("position must be computed by the longhand driver");
+        let transformation = transform_box_type(&box_type_input);
+        let display_after_box_type_transformation = if transformation.changed_display {
+            transformation.display
+        } else {
+            display_before
+        };
+        let text_align = computed_text_align.expect("text-align must be computed by the longhand driver");
+        let element_adjustment =
+            adjust_element_style(&box_type_input, display_after_box_type_transformation, text_align);
+        if transformation.set_float_none {
+            clear_longhand_bit(important_words, prop::FLOAT);
+            clear_longhand_bit(inherited_words, prop::FLOAT);
+        }
+        if transformation.changed_display {
+            clear_longhand_bit(important_words, prop::DISPLAY);
+            clear_longhand_bit(inherited_words, prop::DISPLAY);
+        }
+        if element_adjustment.changed_display {
+            clear_longhand_bit(important_words, prop::DISPLAY);
+            clear_longhand_bit(inherited_words, prop::DISPLAY);
+        }
+        if element_adjustment.set_position_static {
+            clear_longhand_bit(important_words, prop::POSITION);
+            clear_longhand_bit(inherited_words, prop::POSITION);
+        }
+        if element_adjustment.changed_text_align {
+            clear_longhand_bit(important_words, prop::TEXT_ALIGN);
+            clear_longhand_bit(inherited_words, prop::TEXT_ALIGN);
+        }
+        crate::css::ffi_stats::bump(crate::css::ffi_stats::FfiOp::LonghandStoreBatchCallback);
+        let mut input_line_height_metrics = std::mem::MaybeUninit::<FfiInputLineHeightMetrics>::uninit();
+        let mut request = empty_longhand_batch_request();
+        request.display_before = display_before;
+        request.float_before = float_before;
+        request.overflow_x_before = computed_overflow_x.expect("overflow-x must be computed by the longhand driver");
+        request.overflow_y_before = computed_overflow_y.expect("overflow-y must be computed by the longhand driver");
+        request.text_align_before =
+            computed_text_align_before_adjustment.expect("text-align must be computed by the longhand driver");
+        request.position_before = box_type_input.position;
+        request.check_input_line_height = element_adjustment.check_input_line_height;
+        request.out_input_line_height_metrics = input_line_height_metrics.as_mut_ptr();
+        unsafe {
+            (callbacks.execute_computation_batch)(
+                context,
+                std::ptr::null(),
+                0,
+                -1,
+                LONGHAND_BATCH_REQUEST_POST_COMPUTE_ADJUSTMENTS,
+                &raw const request,
+            );
+        }
+        let input_line_height_metrics = unsafe { input_line_height_metrics.assume_init() };
+        let clamp_input_line_height = should_clamp_input_line_height(&element_adjustment, &input_line_height_metrics);
+
+        let adjusted_display = if element_adjustment.changed_display {
+            element_adjustment.display
+        } else {
+            display_after_box_type_transformation
+        };
+        let adjusted_entry = |property_id, computed_kind, value| FfiComputedStoreEntry {
+            property_id,
+            inherited_property_id: property_id,
+            data: initial_value_data(property_id).cast(),
+            source_slot: -1,
+            has_style_sheet_context: false,
+            inheritance_dependent: false,
+            inherited: false,
+            computed_data: std::ptr::null(),
+            computed_kind,
+            value,
+        };
+        let mut adjustments = Vec::new();
+        if transformation.set_float_none {
+            adjustments.push(adjusted_entry(prop::FLOAT, COMPUTED_KIND_KEYWORD, keyword::NONE as f64));
+        }
+        if adjusted_display != display_before {
+            adjustments.push(adjusted_entry(
+                prop::DISPLAY,
+                COMPUTED_KIND_DISPLAY,
+                adjusted_display.encoded() as f64,
+            ));
+        }
+        let line_height_changed = element_adjustment.set_line_height_normal || clamp_input_line_height;
+        if line_height_changed {
+            adjustments.push(adjusted_entry(
+                prop::LINE_HEIGHT,
+                COMPUTED_KIND_KEYWORD,
+                keyword::NORMAL as f64,
+            ));
+        }
+        if element_adjustment.set_position_static {
+            adjustments.push(adjusted_entry(
+                prop::POSITION,
+                COMPUTED_KIND_KEYWORD,
+                keyword::STATIC as f64,
+            ));
+        }
+        if element_adjustment.changed_text_align {
+            adjustments.push(adjusted_entry(
+                prop::TEXT_ALIGN,
+                COMPUTED_KIND_KEYWORD,
+                element_adjustment.text_align as f64,
+            ));
+        }
+        if !adjustments.is_empty() {
+            crate::css::ffi_stats::bump(crate::css::ffi_stats::FfiOp::LonghandStoreBatchCallback);
+            unsafe {
+                (callbacks.execute_computation_batch)(
+                    context,
+                    adjustments.as_ptr(),
+                    adjustments.len(),
+                    -1,
+                    LONGHAND_BATCH_REQUEST_NONE,
+                    std::ptr::null(),
+                );
+            };
+        }
+        if line_height_changed {
+            clear_longhand_bit(important_words, prop::LINE_HEIGHT);
+            clear_longhand_bit(inherited_words, prop::LINE_HEIGHT);
+        }
+    });
+}
+
+fn property_affects_font_metrics(property_id: u16) -> bool {
+    property_id == crate::css::property_metadata::property_id::FONT_SIZE
+        || property_id == crate::css::property_metadata::property_id::LINE_HEIGHT
+}
+
+/// Callback for each longhand produced by shorthand expansion. Values are
+/// borrowed shared Rust data handles valid for the duration of the call.
+#[repr(C)]
+pub struct FfiShorthandExpansionCallbacks {
+    pub context: *mut c_void,
+    pub set_longhand_property: unsafe extern "C" fn(context: *mut c_void, property_id: u16, data: *const c_void),
+}
+
+pub(crate) fn value_is_css_wide_keyword(value: &StyleValueData) -> bool {
+    match value {
+        StyleValueData::Keyword { keyword } => matches!(
+            *keyword,
+            keyword::INHERIT | keyword::INITIAL | keyword::UNSET | keyword::REVERT | keyword::REVERT_LAYER
+        ),
+        _ => false,
+    }
+}
+
+/// The expansion recursion over shared Rust value data. `has_style_sheet_context`
+/// follows boundary values through CSS-wide propagation, while nested shorthand
+/// values have no facade-local resource context.
+pub(crate) fn expand_shorthands_with<Sink>(
+    property_id: u16,
+    data: *const c_void,
+    has_style_sheet_context: bool,
+    sink: &mut Sink,
+) where
+    Sink: FnMut(u16, *const c_void, bool),
+{
+    let value = unsafe { &*(data as *const StyleValueData) };
+    let is_shorthand = property_is_shorthand(property_id);
+
+    if is_shorthand
+        && matches!(
+            value,
+            StyleValueData::Unresolved { .. } | StyleValueData::PendingSubstitution { .. }
+        )
+    {
+        // If a shorthand property contains an arbitrary substitution function in its value, the
+        // longhand properties it's associated with must instead be filled in with a special,
+        // unobservable-to-authors pending-substitution value that indicates the shorthand
+        // contains an arbitrary substitution function, and thus the longhand's value can't be
+        // determined until after substituted.
+        // https://drafts.csswg.org/css-values-5/#pending-substitution-value
+        // Ensure we keep the longhand around until it can be resolved.
+        sink(property_id, data, has_style_sheet_context);
+        let retained_data = unsafe { crate::css::style_value::rust_style_value_retain(data.cast::<StyleValueData>()) };
+        let pending_data =
+            unsafe { crate::css::style_value::rust_style_value_create_pending_substitution(retained_data) };
+        let pending = unsafe { RetainedStyleValueData::from_retained_pointer(pending_data) };
+        for &longhand in longhands_for_shorthand(property_id) {
+            expand_shorthands_with(longhand, pending.pointer().cast(), has_style_sheet_context, sink);
+        }
+        return;
+    }
+
+    if let StyleValueData::Shorthand {
+        sub_properties, values, ..
+    } = value
+    {
+        for (&sub_property, sub_value) in sub_properties.as_slice().iter().zip(values.as_slice()) {
+            let sub_data = sub_value.pointer().cast();
+            expand_shorthands_with(sub_property, sub_data, false, sink);
+        }
+        return;
+    }
+
+    if is_shorthand {
+        // ShorthandStyleValue was handled already, as were unresolved shorthands. That means the
+        // only values we should see are the CSS-wide keywords, or the guaranteed-invalid value.
+        // Both should be applied to our longhand properties. We do not directly set the longhand
+        // because the longhands might have longhands of their own.
+        assert!(value_is_css_wide_keyword(value) || matches!(value, StyleValueData::GuaranteedInvalid));
+        for &longhand in longhands_for_shorthand(property_id) {
+            expand_shorthands_with(longhand, data, has_style_sheet_context, sink);
+        }
+        return;
+    }
+
+    sink(property_id, data, has_style_sheet_context);
+}
+
+fn expand_shorthands(callbacks: &FfiShorthandExpansionCallbacks, property_id: u16, data: *const c_void) {
+    let context = callbacks.context;
+    expand_shorthands_with(property_id, data, false, &mut |longhand_id, longhand_data, _| {
+        crate::css::ffi_stats::bump(crate::css::ffi_stats::FfiOp::ShorthandSetLonghandCallback);
+        unsafe { (callbacks.set_longhand_property)(context, longhand_id, longhand_data) };
+    });
+}
+
+/// Expands a declared property into longhand assignments, recursing through
+/// shorthand and pending-substitution values.
+///
+/// # Safety
+/// `callbacks` must be a valid callback table and `data` valid Rust-owned
+/// style value data.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_for_each_property_expanding_shorthands(
+    callbacks: *const FfiShorthandExpansionCallbacks,
+    property_id: u16,
+    data: *const c_void,
+) {
+    crate::css::ffi_stats::bump(crate::css::ffi_stats::FfiOp::ShorthandExpansionEntry);
+    abort_on_panic(|| expand_shorthands(unsafe { &*callbacks }, property_id, data));
+}
+
+pub(crate) fn display_is_none(raw: u32) -> bool {
+    FfiDisplay::from_raw(raw).is_none()
+}
+
+/// The element facts the box type transformation needs, marshalled by the C++
+/// side. The parent display is the first non-`display: contents` ancestor's.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FfiBoxTypeTransformationInput {
+    pub display: FfiDisplay,
+    /// Computed position and float keywords.
+    pub position: u16,
+    pub float_value: u16,
+    pub is_br_element: bool,
+    pub is_document_element: bool,
+    pub is_mathml_element: bool,
+    pub is_mathml_mtable: bool,
+    pub is_mathml_mtr: bool,
+    pub is_mathml_mtd: bool,
+    pub has_parent_display: bool,
+    pub parent_display: FfiDisplay,
+    pub is_wbr_element: bool,
+    pub disallow_display_contents: bool,
+    pub rewrite_inline_flow: bool,
+    pub is_button_element: bool,
+    pub force_line_height_normal: bool,
+    pub check_input_line_height: bool,
+    pub hide_audio_without_controls: bool,
+    pub is_table_element: bool,
+    pub force_position_static: bool,
+    pub force_symbol_display_inline: bool,
+}
+
+/// Result of the box type transformation: whether float must be reset to none,
+/// and the possibly replaced display.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FfiBoxTypeTransformation {
+    pub set_float_none: bool,
+    pub changed_display: bool,
+    pub display: FfiDisplay,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FfiElementStyleAdjustment {
+    pub changed_display: bool,
+    pub display: FfiDisplay,
+    pub set_line_height_normal: bool,
+    pub check_input_line_height: bool,
+    pub set_position_static: bool,
+    pub changed_text_align: bool,
+    pub text_align: u16,
+}
+
+#[repr(C)]
+pub struct FfiInputLineHeightMetrics {
+    pub current_line_height: f64,
+    pub minimum_line_height: f64,
+}
+
+fn should_clamp_input_line_height(adjustment: &FfiElementStyleAdjustment, metrics: &FfiInputLineHeightMetrics) -> bool {
+    adjustment.check_input_line_height && metrics.current_line_height < metrics.minimum_line_height
+}
+
+fn adjust_element_style(
+    input: &FfiBoxTypeTransformationInput,
+    display: FfiDisplay,
+    text_align: u16,
+) -> FfiElementStyleAdjustment {
+    let mut new_display = display;
+    if input.is_wbr_element && display.is_contents() {
+        new_display = FfiDisplay::none();
+    }
+    if input.disallow_display_contents && new_display.is_contents() {
+        new_display = FfiDisplay::none();
+    }
+    if input.rewrite_inline_flow && new_display.is_inline_outside() && new_display.inside == display_inside::FLOW {
+        new_display = FfiDisplay::inline_block();
+    }
+    if input.is_button_element
+        && !(new_display.is_flex_inside()
+            || new_display.is_grid_inside()
+            || new_display.is_none()
+            || new_display.is_contents())
+    {
+        new_display = if new_display.is_inline_outside() {
+            FfiDisplay::inline_block()
+        } else {
+            FfiDisplay::flow_root()
+        };
+    }
+    if input.is_br_element {
+        new_display = if new_display.is_contents() {
+            FfiDisplay::none()
+        } else if new_display.is_none() {
+            new_display
+        } else {
+            FfiDisplay::inline()
+        };
+    }
+    if input.hide_audio_without_controls {
+        new_display = FfiDisplay::none();
+    }
+    if input.force_symbol_display_inline {
+        new_display = FfiDisplay::inline();
+    }
+
+    let new_text_align = if input.is_table_element
+        && matches!(
+            text_align,
+            keyword::_LIBWEB_LEFT | keyword::_LIBWEB_CENTER | keyword::_LIBWEB_RIGHT
+        ) {
+        keyword::START
+    } else {
+        text_align
+    };
+
+    FfiElementStyleAdjustment {
+        changed_display: new_display != display,
+        display: new_display,
+        set_line_height_normal: input.force_line_height_normal,
+        check_input_line_height: input.check_input_line_height,
+        set_position_static: input.force_position_static,
+        changed_text_align: new_text_align != text_align,
+        text_align: new_text_align,
+    }
+}
+
+// NB: css-display-3 also defines inlinification, but nothing triggers it yet (the only
+//     candidate is the ruby containment FIXME below), so only blockification is modelled.
+enum BoxTypeTransformation {
+    None,
+    Blockify,
+}
+
+fn required_box_type_transformation(input: &FfiBoxTypeTransformationInput) -> BoxTypeTransformation {
+    // NOTE: We never blockify <br> elements. They are always inline.
+    //       There is currently no way to express in CSS how a <br> element really behaves.
+    //       Spec issue: https://github.com/whatwg/html/issues/2291
+    if input.is_br_element {
+        return BoxTypeTransformation::None;
+    }
+
+    // Absolute positioning or floating an element blockifies the box's display type. [CSS2]
+    if input.position == keyword::ABSOLUTE || input.position == keyword::FIXED || input.float_value != keyword::NONE {
+        return BoxTypeTransformation::Blockify;
+    }
+
+    // FIXME: Containment in a ruby container inlinifies the box's display type, as described in [CSS-RUBY-1].
+
+    // A parent with a grid or flex display value blockifies the box's display type. [CSS-GRID-1] [CSS-FLEXBOX-1]
+    // NB: The C++ side supplies the first ancestor that is not `display: contents`; for a
+    //     pseudo-element that climb starts at the originating element itself.
+    if input.has_parent_display && (input.parent_display.is_grid_inside() || input.parent_display.is_flex_inside()) {
+        return BoxTypeTransformation::Blockify;
+    }
+
+    BoxTypeTransformation::None
+}
+
+/// https://drafts.csswg.org/css-display/#transformations
+/// 2.7. Automatic Box Type Transformations
+fn transform_box_type(input: &FfiBoxTypeTransformationInput) -> FfiBoxTypeTransformation {
+    let display = input.display;
+    let unchanged = |set_float_none: bool| FfiBoxTypeTransformation {
+        set_float_none,
+        changed_display: false,
+        display,
+    };
+
+    // Some layout effects require blockification or inlinification of the box type,
+    // which sets the box's computed outer display type to block or inline (respectively).
+    // (This has no effect on display types that generate no box at all, such as none or contents.)
+    if display.is_none() || (display.is_contents() && !input.is_document_element) {
+        return unchanged(false);
+    }
+
+    // https://drafts.csswg.org/css-display/#root
+    // The root element's display type is always blockified, and its principal box always establishes an independent formatting context.
+    if input.is_document_element && !display.is_block_outside() {
+        return FfiBoxTypeTransformation {
+            set_float_none: false,
+            changed_display: true,
+            display: FfiDisplay::block(),
+        };
+    }
+
+    let mut new_display = display;
+
+    if display.is_math_inside() {
+        // https://w3c.github.io/mathml-core/#new-display-math-value
+        // For elements that are not MathML elements, if the specified value of display is inline math or block math
+        // then the computed value is block flow and inline flow respectively.
+        if !input.is_mathml_element {
+            new_display = FfiDisplay::outside_and_inside(display.outside, display_inside::FLOW, display.list_item);
+        }
+        // For the mtable element the computed value is block table and inline table respectively.
+        else if input.is_mathml_mtable {
+            new_display = FfiDisplay::outside_and_inside(display.outside, display_inside::TABLE, display.list_item);
+        }
+        // For the mtr element, the computed value is table-row.
+        else if input.is_mathml_mtr {
+            new_display = FfiDisplay::internal(display_internal::TABLE_ROW);
+        }
+        // For the mtd element, the computed value is table-cell.
+        else if input.is_mathml_mtd {
+            new_display = FfiDisplay::internal(display_internal::TABLE_CELL);
+        }
+    }
+
+    // https://www.w3.org/TR/CSS2/visuren.html#dis-pos-flo
+    // If 'position' has the value 'absolute' or 'fixed', [...] 'float' is set to 'none'
+    let set_float_none = input.position == keyword::ABSOLUTE || input.position == keyword::FIXED;
+
+    match required_box_type_transformation(input) {
+        BoxTypeTransformation::None => {}
+        BoxTypeTransformation::Blockify => {
+            if display.is_block_outside() {
+                return unchanged(set_float_none);
+            }
+            // If a layout-internal box is blockified, its inner display type converts to flow so that it becomes a block container.
+            if display.is_internal() {
+                new_display = FfiDisplay::block();
+            } else {
+                assert!(display.is_outside_and_inside());
+
+                // For legacy reasons, if an inline block box (inline flow-root) is blockified, it becomes a block box (losing its flow-root nature).
+                // For consistency, a run-in flow-root box also blockifies to a block box.
+                if display.is_inline_block() {
+                    new_display =
+                        FfiDisplay::outside_and_inside(display_outside::BLOCK, display_inside::FLOW, display.list_item);
+                } else {
+                    new_display =
+                        FfiDisplay::outside_and_inside(display_outside::BLOCK, display.inside, display.list_item);
+                }
+            }
+        }
+    }
+
+    FfiBoxTypeTransformation {
+        set_float_none,
+        changed_display: new_display != display,
+        display: new_display,
+    }
+}
+
+/// # Safety
+/// `input` must be a valid pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_transform_box_type(
+    input: *const FfiBoxTypeTransformationInput,
+) -> FfiBoxTypeTransformation {
+    crate::css::ffi_stats::bump(crate::css::ffi_stats::FfiOp::NestedPropertyComputeEntry);
+    abort_on_panic(|| transform_box_type(unsafe { &*input }))
+}
+
+/// Result of resolving the effective overflow pair: each axis' possibly
+/// replaced computed keyword.
+#[repr(C)]
+pub struct FfiEffectiveOverflow {
+    pub changed_x: bool,
+    pub x_keyword: u16,
+    pub changed_y: bool,
+    pub y_keyword: u16,
+}
+
+/// https://www.w3.org/TR/css-overflow-3/#overflow-control
+/// The visible/clip values of overflow compute to auto/hidden (respectively) if one of overflow-x or
+/// overflow-y is neither visible nor clip.
+fn resolve_effective_overflow_keywords(overflow_x: u16, overflow_y: u16) -> FfiEffectiveOverflow {
+    let is_visible_or_clip = |keyword: u16| keyword == keyword::VISIBLE || keyword == keyword::CLIP;
+    let mut result = FfiEffectiveOverflow {
+        changed_x: false,
+        x_keyword: overflow_x,
+        changed_y: false,
+        y_keyword: overflow_y,
+    };
+    if !is_visible_or_clip(overflow_x) || !is_visible_or_clip(overflow_y) {
+        if overflow_x == keyword::VISIBLE {
+            result.changed_x = true;
+            result.x_keyword = keyword::AUTO;
+        }
+        if overflow_x == keyword::CLIP {
+            result.changed_x = true;
+            result.x_keyword = keyword::HIDDEN;
+        }
+        if overflow_y == keyword::VISIBLE {
+            result.changed_y = true;
+            result.y_keyword = keyword::AUTO;
+        }
+        if overflow_y == keyword::CLIP {
+            result.changed_y = true;
+            result.y_keyword = keyword::HIDDEN;
+        }
+    }
+    result
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_resolve_effective_overflow_keywords(overflow_x: u16, overflow_y: u16) -> FfiEffectiveOverflow {
+    crate::css::ffi_stats::bump(crate::css::ffi_stats::FfiOp::NestedPropertyComputeEntry);
+    abort_on_panic(|| resolve_effective_overflow_keywords(overflow_x, overflow_y))
+}
+
+// https://drafts.csswg.org/css-color-adjust-1/#determine-the-used-color-scheme
+fn resolve_effective_color_scheme(
+    schemes: &[u8],
+    preferred_scheme: u8,
+    document_supported_schemes: Option<&[u8]>,
+) -> u8 {
+    const AUTO: u8 = 0;
+    const LIGHT: u8 = 2;
+
+    // To determine the used color scheme of an element:
+
+    // 1. If the user’s preferred color scheme, as indicated by the prefers-color-scheme media feature,
+    //    is present among the listed color schemes, and is supported by the user agent,
+    //    that’s the element’s used color scheme.
+    if preferred_scheme != AUTO && schemes.contains(&preferred_scheme) {
+        return preferred_scheme;
+    }
+
+    // 2. Otherwise, if the user has indicated an overriding preference for their chosen color scheme,
+    //    and the only keyword is not present in color-scheme for the element,
+    //    the user agent must override the color scheme with the user’s preferred color scheme.
+    //    See § 2.3 Overriding the Color Scheme.
+    // FIXME: We don't currently support setting an "overriding preference" for color schemes.
+
+    // 3. Otherwise, if the user agent supports at least one of the listed color schemes,
+    //    the used color scheme is the first supported color scheme in the list.
+    if let Some(first_supported) = schemes.iter().find(|scheme| **scheme != AUTO) {
+        return *first_supported;
+    }
+
+    // 4. Otherwise, the used color scheme is the browser default. (Same as normal.)
+    // `normal` indicates that the element supports the page’s supported color schemes, if they are set
+    if let Some(document_supported_schemes) = document_supported_schemes {
+        if preferred_scheme != AUTO && document_supported_schemes.contains(&preferred_scheme) {
+            return preferred_scheme;
+        }
+        if let Some(first_supported) = document_supported_schemes.iter().find(|scheme| **scheme != AUTO) {
+            return *first_supported;
+        }
+    }
+
+    LIGHT
+}
+
+/// Resolves the used color scheme for a value that required C++ computation.
+///
+/// # Safety
+/// `value` must point at valid ColorScheme StyleValueData and `input` at valid
+/// document inputs for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_resolve_effective_color_scheme(
+    value: *const c_void,
+    input: *const FfiEffectiveColorSchemeInput,
+) -> u8 {
+    abort_on_panic(|| {
+        let StyleValueData::ColorScheme { scheme_codes, .. } = (unsafe { &*(value as *const StyleValueData) }) else {
+            unreachable!("computed color-scheme must have color-scheme data");
+        };
+        let input = unsafe { &*input };
+        resolve_effective_color_scheme(scheme_codes.as_slice(), input.preferred_color_scheme, unsafe {
+            input.document_supported_schemes()
+        })
+    })
+}
+
+/// Result of the text-align adjustment: the replacement keyword and whether it
+/// counts as inherited.
+#[repr(C)]
+pub struct FfiTextAlignAdjustment {
+    pub changed: bool,
+    pub keyword: u16,
+    pub inherited: bool,
+}
+
+/// Decides the text-align adjustments applied after computation. The parent
+/// arguments are only read when `has_parent_with_computed_values` is set.
+fn compute_text_align_adjustment(
+    text_align: u16,
+    is_th_element: bool,
+    has_parent_with_computed_values: bool,
+    parent_text_align: u16,
+    parent_direction_is_ltr: bool,
+) -> FfiTextAlignAdjustment {
+    let unchanged = FfiTextAlignAdjustment {
+        changed: false,
+        keyword: text_align,
+        inherited: false,
+    };
+    let replace = |keyword: u16| FfiTextAlignAdjustment {
+        changed: true,
+        keyword,
+        inherited: false,
+    };
+
+    // https://drafts.csswg.org/css-text-4/#valdef-text-align-match-parent
+    // This value behaves the same as inherit (computes to its parent's computed value) except that an inherited
+    // value of start or end is interpreted against the parent's direction value and results in a computed value of
+    // either left or right. Computes to start when specified on the root element.
+    if text_align == keyword::MATCH_PARENT {
+        if !has_parent_with_computed_values {
+            return replace(keyword::START);
+        }
+        return match parent_text_align {
+            keyword::START if parent_direction_is_ltr => replace(keyword::LEFT),
+            keyword::START => replace(keyword::RIGHT),
+            keyword::END if parent_direction_is_ltr => replace(keyword::RIGHT),
+            keyword::END => replace(keyword::LEFT),
+            _ => replace(parent_text_align),
+        };
+    }
+
+    // AD-HOC: The -libweb-inherit-or-center style defaults to centering, unless the parent element has a
+    //         non-initial computed text-align value. This is used to support the ad-hoc default <th>
+    //         text-align behavior.
+    if text_align == keyword::_LIBWEB_INHERIT_OR_CENTER && is_th_element {
+        if has_parent_with_computed_values && parent_text_align != keyword::START {
+            return FfiTextAlignAdjustment {
+                changed: true,
+                keyword: parent_text_align,
+                inherited: true,
+            };
+        }
+        return replace(keyword::CENTER);
+    }
+
+    unchanged
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_compute_text_align(
+    text_align: u16,
+    is_th_element: bool,
+    has_parent_with_computed_values: bool,
+    parent_text_align: u16,
+    parent_direction_is_ltr: bool,
+) -> FfiTextAlignAdjustment {
+    crate::css::ffi_stats::bump(crate::css::ffi_stats::FfiOp::NestedPropertyComputeEntry);
+    abort_on_panic(|| {
+        compute_text_align_adjustment(
+            text_align,
+            is_th_element,
+            has_parent_with_computed_values,
+            parent_text_align,
+            parent_direction_is_ltr,
+        )
+    })
+}
+
+/// Computes the font-weight property from its absolutized value.
+///
+/// # Safety
+/// `absolutized_value` must point at a valid StyleValueData.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_compute_font_weight(
+    absolutized_value: *const c_void,
+    inherited_font_weight: f64,
+) -> FfiComputedNumber {
+    crate::css::ffi_stats::bump(crate::css::ffi_stats::FfiOp::NestedPropertyComputeEntry);
+    abort_on_panic(|| {
+        let value = unsafe { &*(absolutized_value as *const StyleValueData) };
+        compute_font_weight(value, inherited_font_weight)
+    })
+}
+
+// The exported computed-values FFI shares one header; keep an anchor so the
+// context types stay in the generated bindings even without other references.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_style_compute_context_anchor(_context: *const c_void) {}
+
+// The standalone cargo test binary has no C++ side, so the release callbacks
+// that StyleValueData's retained members call on drop are stubbed out here.
+#[cfg(test)]
+mod ffi_test_stubs {
+    #[unsafe(no_mangle)]
+    extern "C" fn ladybird_utf16_fly_string_unref(_raw: usize) {}
+    #[unsafe(no_mangle)]
+    extern "C" fn ladybird_utf16_fly_string_ref(_raw: usize) {}
+    #[unsafe(no_mangle)]
+    extern "C" fn ladybird_string_unref(_raw: usize) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effective_overflow_keywords_compute_together() {
+        let result = resolve_effective_overflow_keywords(keyword::VISIBLE, keyword::AUTO);
+        assert!(result.changed_x);
+        assert_eq!(result.x_keyword, keyword::AUTO);
+        assert!(!result.changed_y);
+        assert_eq!(result.y_keyword, keyword::AUTO);
+
+        let result = resolve_effective_overflow_keywords(keyword::CLIP, keyword::SCROLL);
+        assert!(result.changed_x);
+        assert_eq!(result.x_keyword, keyword::HIDDEN);
+        assert!(!result.changed_y);
+        assert_eq!(result.y_keyword, keyword::SCROLL);
+
+        let result = resolve_effective_overflow_keywords(keyword::VISIBLE, keyword::CLIP);
+        assert!(!result.changed_x);
+        assert!(!result.changed_y);
+    }
+
+    #[test]
+    fn effective_color_scheme_follows_element_and_document_preferences() {
+        const AUTO: u8 = 0;
+        const DARK: u8 = 1;
+        const LIGHT: u8 = 2;
+
+        assert_eq!(resolve_effective_color_scheme(&[LIGHT, DARK], DARK, None), DARK);
+        assert_eq!(resolve_effective_color_scheme(&[DARK, LIGHT], LIGHT, None), LIGHT);
+        assert_eq!(resolve_effective_color_scheme(&[DARK, LIGHT], AUTO, None), DARK);
+        assert_eq!(
+            resolve_effective_color_scheme(&[AUTO], DARK, Some(&[LIGHT, DARK])),
+            DARK
+        );
+        assert_eq!(resolve_effective_color_scheme(&[], AUTO, Some(&[DARK])), DARK);
+        assert_eq!(resolve_effective_color_scheme(&[], AUTO, None), LIGHT);
+    }
+
+    #[test]
+    fn text_align_adjusts_match_parent_and_table_header_defaults() {
+        let result = compute_text_align_adjustment(keyword::MATCH_PARENT, false, true, keyword::START, false);
+        assert!(result.changed);
+        assert_eq!(result.keyword, keyword::RIGHT);
+        assert!(!result.inherited);
+
+        let result =
+            compute_text_align_adjustment(keyword::_LIBWEB_INHERIT_OR_CENTER, true, true, keyword::JUSTIFY, true);
+        assert!(result.changed);
+        assert_eq!(result.keyword, keyword::JUSTIFY);
+        assert!(result.inherited);
+
+        let result = compute_text_align_adjustment(keyword::_LIBWEB_INHERIT_OR_CENTER, true, false, 0, true);
+        assert!(result.changed);
+        assert_eq!(result.keyword, keyword::CENTER);
+        assert!(!result.inherited);
+    }
+
+    fn element_adjustment_input() -> FfiBoxTypeTransformationInput {
+        FfiBoxTypeTransformationInput {
+            display: FfiDisplay::inline(),
+            position: keyword::STATIC,
+            float_value: keyword::NONE,
+            is_br_element: false,
+            is_document_element: false,
+            is_mathml_element: false,
+            is_mathml_mtable: false,
+            is_mathml_mtr: false,
+            is_mathml_mtd: false,
+            has_parent_display: false,
+            parent_display: FfiDisplay::block(),
+            is_wbr_element: false,
+            disallow_display_contents: false,
+            rewrite_inline_flow: false,
+            is_button_element: false,
+            force_line_height_normal: false,
+            check_input_line_height: false,
+            hide_audio_without_controls: false,
+            is_table_element: false,
+            force_position_static: false,
+            force_symbol_display_inline: false,
+        }
+    }
+
+    #[test]
+    fn element_styles_adjust_from_marshaled_facts() {
+        let mut input = element_adjustment_input();
+        input.disallow_display_contents = true;
+        let adjustment = adjust_element_style(&input, FfiDisplay::contents(), keyword::LEFT);
+        assert!(adjustment.changed_display);
+        assert!(adjustment.display.is_none());
+
+        input = element_adjustment_input();
+        input.is_button_element = true;
+        let adjustment = adjust_element_style(&input, FfiDisplay::inline(), keyword::LEFT);
+        assert!(adjustment.changed_display);
+        assert!(adjustment.display.is_inline_block());
+
+        input = element_adjustment_input();
+        input.is_table_element = true;
+        let adjustment = adjust_element_style(&input, FfiDisplay::block(), keyword::_LIBWEB_CENTER);
+        assert!(adjustment.changed_text_align);
+        assert_eq!(adjustment.text_align, keyword::START);
+
+        input = element_adjustment_input();
+        input.check_input_line_height = true;
+        let adjustment = adjust_element_style(&input, FfiDisplay::inline(), keyword::LEFT);
+        assert!(should_clamp_input_line_height(
+            &adjustment,
+            &FfiInputLineHeightMetrics {
+                current_line_height: 12.0,
+                minimum_line_height: 16.0,
+            }
+        ));
+        assert!(!should_clamp_input_line_height(
+            &adjustment,
+            &FfiInputLineHeightMetrics {
+                current_line_height: 18.0,
+                minimum_line_height: 16.0,
+            }
+        ));
+    }
+
+    fn test_context() -> FfiLengthResolutionContext {
+        FfiLengthResolutionContext {
+            viewport_width: 800.0,
+            viewport_height: 600.0,
+            font_metrics: FfiFontMetrics {
+                font_size: 16.0,
+                x_height: 8.0,
+                cap_height: 11.0,
+                zero_advance: 7.5,
+                line_height: 19.0,
+            },
+            root_font_metrics: FfiFontMetrics {
+                font_size: 20.0,
+                x_height: 10.0,
+                cap_height: 14.0,
+                zero_advance: 9.0,
+                line_height: 24.0,
+            },
+            font_metrics_depend_on_viewport_metrics: false,
+            root_font_metrics_depend_on_viewport_metrics: true,
+            resolved_viewport_relative_length: std::ptr::null_mut(),
+        }
+    }
+
+    fn unit_code(name: &str) -> usize {
+        LENGTH_UNIT_NAMES.iter().position(|&n| n == name).unwrap()
+    }
+
+    #[test]
+    fn px_is_unchanged() {
+        let result = absolutize_length(4.0, unit_code("px"), &test_context());
+        assert!(result.handled);
+        assert!(!result.changed);
+    }
+
+    #[test]
+    fn font_relative_units_resolve() {
+        let context = test_context();
+        let em = absolutize_length(2.0, unit_code("em"), &context);
+        assert!(em.changed);
+        assert_eq!(em.px, 32.0);
+        assert!(!em.resolved_viewport_relative_length);
+
+        let rem = absolutize_length(2.0, unit_code("rem"), &context);
+        assert_eq!(rem.px, 40.0);
+        assert!(rem.resolved_viewport_relative_length);
+
+        assert_eq!(absolutize_length(1.0, unit_code("lh"), &context).px, 19.0);
+        assert_eq!(absolutize_length(1.0, unit_code("rch"), &context).px, 9.0);
+    }
+
+    #[test]
+    fn viewport_relative_units_resolve() {
+        let context = test_context();
+        let vw = absolutize_length(50.0, unit_code("vw"), &context);
+        assert_eq!(vw.px, 400.0);
+        assert!(vw.resolved_viewport_relative_length);
+        assert_eq!(absolutize_length(50.0, unit_code("vmin"), &context).px, 300.0);
+        assert_eq!(absolutize_length(50.0, unit_code("dvmax"), &context).px, 400.0);
+    }
+
+    #[test]
+    fn absolute_units_resolve() {
+        let context = test_context();
+        let inch = absolutize_length(1.0, unit_code("in"), &context);
+        assert!(inch.changed);
+        assert_eq!(inch.px, 96.0);
+    }
+
+    #[test]
+    fn font_weight_keywords_compute() {
+        let bolder = StyleValueData::Keyword {
+            keyword: keyword::BOLDER,
+        };
+        assert_eq!(compute_font_weight(&bolder, 300.0).value, 400.0);
+        assert_eq!(compute_font_weight(&bolder, 400.0).value, 700.0);
+        assert_eq!(compute_font_weight(&bolder, 700.0).value, 900.0);
+        assert_eq!(compute_font_weight(&bolder, 900.0).value, 900.0);
+
+        let lighter = StyleValueData::Keyword {
+            keyword: keyword::LIGHTER,
+        };
+        assert_eq!(compute_font_weight(&lighter, 50.0).value, 50.0);
+        assert_eq!(compute_font_weight(&lighter, 400.0).value, 100.0);
+        assert_eq!(compute_font_weight(&lighter, 700.0).value, 400.0);
+        assert_eq!(compute_font_weight(&lighter, 900.0).value, 700.0);
+
+        assert_eq!(
+            compute_font_weight(
+                &StyleValueData::Keyword {
+                    keyword: keyword::NORMAL
+                },
+                700.0
+            )
+            .value,
+            400.0
+        );
+        assert_eq!(
+            compute_font_weight(&StyleValueData::Keyword { keyword: keyword::BOLD }, 100.0).value,
+            700.0
+        );
+        assert!(compute_font_weight(&StyleValueData::Number { value: 512.0 }, 100.0).unchanged);
+    }
+
+    #[test]
+    fn font_width_keywords_compute() {
+        assert_eq!(
+            compute_font_width(&StyleValueData::Keyword {
+                keyword: keyword::ULTRA_CONDENSED
+            })
+            .value,
+            50.0
+        );
+        assert_eq!(
+            compute_font_width(&StyleValueData::Keyword {
+                keyword: keyword::SEMI_EXPANDED
+            })
+            .value,
+            112.5
+        );
+        assert_eq!(
+            compute_font_width(&StyleValueData::Keyword {
+                keyword: keyword::NORMAL
+            })
+            .value,
+            100.0
+        );
+        assert!(compute_font_width(&StyleValueData::Percentage { value: 80.0 }).unchanged);
+    }
+
+    #[test]
+    fn font_size_keywords_compute() {
+        let sixteen = CssPixels::from_integer(16);
+        let medium = compute_font_size(
+            &StyleValueData::Keyword {
+                keyword: keyword::MEDIUM,
+            },
+            0,
+            sixteen,
+            0,
+            sixteen,
+        );
+        assert_eq!(medium.value, 16.0);
+        let large = compute_font_size(
+            &StyleValueData::Keyword {
+                keyword: keyword::LARGE,
+            },
+            0,
+            sixteen,
+            0,
+            sixteen,
+        );
+        assert_eq!(large.value, 19.1875); // 16 * 6 / 5 in 6-bit fixed point
+        let percent = compute_font_size(&StyleValueData::Percentage { value: 150.0 }, 0, sixteen, 0, sixteen);
+        assert_eq!(percent.value, 24.0);
+        let math = compute_font_size(
+            &StyleValueData::Keyword { keyword: keyword::MATH },
+            1,
+            sixteen,
+            0,
+            sixteen,
+        );
+        assert_eq!(math.value, CssPixels::from_integer(16).scaled(0.71).to_double());
+        let math_two_levels = compute_font_size(
+            &StyleValueData::Keyword { keyword: keyword::MATH },
+            2,
+            sixteen,
+            0,
+            sixteen,
+        );
+        assert_eq!(
+            math_two_levels.value,
+            CssPixels::from_integer(16).scaled(0.71f64.powi(2)).to_double()
+        );
+    }
+
+    #[test]
+    fn math_depth_computes() {
+        let auto_add = StyleValueData::Keyword {
+            keyword: keyword::AUTO_ADD,
+        };
+        assert_eq!(compute_math_depth(&auto_add, 2, true).value, 3.0);
+        assert_eq!(compute_math_depth(&auto_add, 2, false).value, 2.0);
+        assert_eq!(
+            compute_math_depth(&StyleValueData::Integer { value: 5 }, 2, true).value,
+            5.0
+        );
+        assert_eq!(
+            compute_math_depth(&StyleValueData::Keyword { keyword: keyword::AUTO }, 4, true).value,
+            4.0
+        );
+    }
+
+    #[test]
+    fn line_height_computes() {
+        let sixteen = CssPixels::from_integer(16);
+        assert!(
+            compute_line_height(
+                &StyleValueData::Keyword {
+                    keyword: keyword::NORMAL
+                },
+                sixteen
+            )
+            .unchanged
+        );
+        assert!(compute_line_height(&StyleValueData::Number { value: 1.5 }, sixteen).unchanged);
+        assert_eq!(
+            compute_line_height(&StyleValueData::Percentage { value: 150.0 }, sixteen).value,
+            24.0
+        );
+    }
+
+    #[test]
+    fn border_width_snaps() {
+        // 2.5px at 2 dppx is an integer number of device pixels: unchanged.
+        let length = StyleValueData::Length {
+            value: 2.5,
+            unit: unit_code("px") as u8,
+        };
+        assert_eq!(compute_border_or_outline_width(&length, 2.0).value, 2.5);
+        // 0.4px at 1 dppx rounds up to 1 device pixel.
+        let thin = StyleValueData::Length {
+            value: 0.4,
+            unit: unit_code("px") as u8,
+        };
+        assert_eq!(compute_border_or_outline_width(&thin, 1.0).value, 1.0);
+        // medium is 3px.
+        assert_eq!(
+            compute_border_or_outline_width(
+                &StyleValueData::Keyword {
+                    keyword: keyword::MEDIUM
+                },
+                1.0
+            )
+            .value,
+            3.0
+        );
+    }
+
+    #[test]
+    fn corner_shapes_map_to_superellipse_parameters() {
+        assert_eq!(
+            compute_corner_shape_parameter(&StyleValueData::Keyword {
+                keyword: keyword::ROUND
+            })
+            .value,
+            1.0
+        );
+        assert_eq!(
+            compute_corner_shape_parameter(&StyleValueData::Keyword {
+                keyword: keyword::NOTCH
+            })
+            .value,
+            f64::NEG_INFINITY
+        );
+    }
+
+    #[test]
+    fn longhand_decisions() {
+        use crate::css::property_metadata::{FIRST_INHERITED_PROPERTY_ID, LAST_LONGHAND_PROPERTY_ID};
+        let inherited_id = FIRST_INHERITED_PROPERTY_ID;
+        let reset_id = LAST_LONGHAND_PROPERTY_ID;
+
+        // Missing value: inherited properties inherit, reset properties go initial.
+        let missing_inherited = longhand_decision(None, inherited_id);
+        assert!(missing_inherited.should_inherit);
+        let missing_reset = longhand_decision(None, reset_id);
+        assert!(!missing_reset.should_inherit);
+        assert!(missing_reset.use_initial_without_inherit);
+
+        // Explicit inherit on a reset property is flagged.
+        let inherit = StyleValueData::Keyword {
+            keyword: keyword::INHERIT,
+        };
+        let explicit = longhand_decision(Some(&inherit), reset_id);
+        assert!(explicit.should_inherit);
+        assert!(explicit.explicitly_inherits_non_inherited_property);
+
+        // unset: inherit for inherited properties, initial for reset ones.
+        let unset = StyleValueData::Keyword {
+            keyword: keyword::UNSET,
+        };
+        assert!(longhand_decision(Some(&unset), inherited_id).should_inherit);
+        let unset_reset = longhand_decision(Some(&unset), reset_id);
+        assert!(!unset_reset.should_inherit);
+        assert!(unset_reset.use_initial_without_inherit);
+
+        // currentcolor in the color property inherits.
+        let currentcolor = StyleValueData::Keyword {
+            keyword: keyword::CURRENTCOLOR,
+        };
+        assert!(
+            longhand_decision(Some(&currentcolor), crate::css::property_metadata::property_id::COLOR).should_inherit
+        );
+        assert!(!longhand_decision(Some(&currentcolor), reset_id).should_inherit);
+    }
+
+    #[test]
+    fn container_relative_units_are_unhandled() {
+        assert!(!absolutize_length(1.0, unit_code("cqw"), &test_context()).handled);
+    }
+}

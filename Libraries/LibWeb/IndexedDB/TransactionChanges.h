@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, Ladybird contributors
+ * Copyright (c) 2026-present, the Ladybird developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -8,14 +8,14 @@
 
 #include <AK/JsonValue.h>
 #include <AK/Optional.h>
-#include <AK/String.h>
+#include <AK/Utf16String.h>
 #include <AK/Vector.h>
 
 namespace Web::IndexedDB {
 
 struct TransactionChange {
-    String database_name;
-    String object_store_name;
+    Utf16String database_name;
+    Utf16String object_store_name;
     Optional<JsonValue> key {};
 };
 

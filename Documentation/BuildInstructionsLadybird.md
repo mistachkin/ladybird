@@ -2,7 +2,10 @@
 
 ## Build Prerequisites
 
-Qt6 development packages, nasm, additional build tools, and a C++23 capable compiler are required.
+Qt6.9+ development packages, nasm, additional build tools, and a C++23 capable compiler are required.
+
+> [!NOTE]
+> Some distributions still package a Qt6 older than 6.9; for example, Debian 13 (trixie) ships Qt 6.8 — so configuring against it fails. If your Qt6 is older than 6.9, install a newer one from a newer distribution release, or directly from the [Qt online installer](https://www.qt.io/download-open-source), and then point the build to it using `CMAKE_PREFIX_PATH`.
 
 A Rust toolchain is also required. You can install it via [rustup](https://rustup.rs/).
 
@@ -25,7 +28,7 @@ sudo apt install autoconf autoconf-archive automake build-essential ccache cmake
 - Recommendation: Install `CMake 3.30` or newer from [Kitware's apt repository](https://apt.kitware.com/):
 
 > [!NOTE]
-> This repository is Ubuntu-only
+> Kitware’s apt repository is Ubuntu-only.
 
 ```bash
 # Add Kitware GPG signing key
@@ -255,7 +258,6 @@ If you want to run other applications, such as the JS REPL or the WebAssembly RE
 Ladybird will be built with one of the following browser frontends, depending on the platform:
 * [AppKit](https://developer.apple.com/documentation/appkit?language=objc) - The native UI on macOS.
 * [Qt](https://doc.qt.io/qt-6/) - The UI used on all other platforms.
-* [GTK 4](https://docs.gtk.org/gtk4/) - An alternative UI on Linux (experimental).
 * [Android UI](https://developer.android.com/develop/ui) - The native UI on Android.
 
 You can pick the UI using the `LADYBIRD_GUI_FRAMEWORK` option, or the `--gui` argument to ladybird.py.
@@ -266,26 +268,6 @@ For example, to force building with the Qt UI:
 cmake --preset Release -DLADYBIRD_GUI_FRAMEWORK=Qt
 # Or
 ./Meta/ladybird.py run --gui=Qt
-```
-
-#### Additional prerequisites for the GTK UI
-
-Building with `LADYBIRD_GUI_FRAMEWORK=Gtk` requires additional system packages, as some vcpkg
-dependencies (e.g. gettext) need to be rebuilt from source:
-
-**Debian/Ubuntu:**
-```bash
-sudo apt install bison libxkbcommon-dev
-```
-
-**Arch Linux/Manjaro:**
-```bash
-sudo pacman -S bison
-```
-
-**Fedora:**
-```bash
-sudo dnf install bison
 ```
 
 ### Build error messages you may encounter
@@ -393,14 +375,9 @@ Now breakpoints, stepping and variable inspection will work.
 
 If all you want to do is use Instruments, then an Xcode project is not required.
 
-Simply run the `ladybird.py` script as normal, and then make sure to codesign the Ladybird binary with the proper entitlements to allow Instruments to attach to it.
-
-```
-./Meta/ladybird.py build
- ninja -C Build/release apply-debug-entitlements
- # or
- codesign -s - -v -f --entitlements Meta/debug.plist Build/release/bin/Ladybird.app
-```
+Simply run the `ladybird.py` script as normal with a debug-style build. The build automatically signs the app bundle
+with the entitlements from `Meta/DebugEntitlements.plist`, which includes `get-task-allow` for debugger and Instruments
+attachment.
 
 Now you can open the Instruments app and point it to the Ladybird app bundle.
 

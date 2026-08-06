@@ -7,6 +7,8 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/ByteBuffer.h>
+#include <AK/Checked.h>
 #include <GLES3/gl3.h>
 extern "C" {
 #include <GLES2/gl2ext.h>
@@ -59,7 +61,12 @@ void WebGL2RenderingContextImpl::get_buffer_sub_data(WebIDL::UnsignedLong target
     if (length == 0) {
         // If dstBuffer is a DataView, let copyLength be dstBuffer.byteLength - dstOffset; the typed elements in the
         // text below are bytes. Otherwise, let copyLength be dstBuffer.length - dstOffset.
-        copy_length = dst_buffer.byte_length() / element_size - dst_offset;
+        auto destination_element_count = dst_buffer.byte_length() / element_size;
+        if (dst_offset > destination_element_count) {
+            set_error(GL_INVALID_VALUE);
+            return;
+        }
+        copy_length = destination_element_count - dst_offset;
     }
 
     // Otherwise, let copyLength be length.
@@ -73,26 +80,44 @@ void WebGL2RenderingContextImpl::get_buffer_sub_data(WebIDL::UnsignedLong target
 
     // If dstOffset is greater than dstBuffer.length (or dstBuffer.byteLength in the case of DataView), generates an
     // INVALID_VALUE error.
-    size_t dst_offset_in_bytes = dst_offset * element_size;
-    if (dst_offset_in_bytes > dst_buffer.byte_length()) {
+    Checked<size_t> dst_offset_in_bytes_checked = dst_offset;
+    dst_offset_in_bytes_checked *= element_size;
+    if (dst_offset_in_bytes_checked.has_overflow() || dst_offset_in_bytes_checked.value() > dst_buffer.byte_length()) {
         set_error(GL_INVALID_VALUE);
         return;
     }
+    auto dst_offset_in_bytes = dst_offset_in_bytes_checked.value();
 
     // If dstOffset + copyLength is greater than dstBuffer.length (or dstBuffer.byteLength in the case of DataView),
     // generates an INVALID_VALUE error.
-    size_t copy_bytes = copy_length * element_size;
-    if (dst_offset_in_bytes + copy_bytes > dst_buffer.byte_length()) {
+    Checked<size_t> copy_bytes_checked = copy_length;
+    copy_bytes_checked *= element_size;
+    if (copy_bytes_checked.has_overflow()) {
         set_error(GL_INVALID_VALUE);
         return;
     }
+    Checked<size_t> end_offset_checked = dst_offset_in_bytes;
+    end_offset_checked += copy_bytes_checked.value();
+    if (end_offset_checked.has_overflow() || end_offset_checked.value() > dst_buffer.byte_length()) {
+        set_error(GL_INVALID_VALUE);
+        return;
+    }
+    auto copy_bytes = copy_bytes_checked.value();
 
     // If copyLength is greater than zero, copy copyLength typed elements (each of size elementSize) from buf into
     // dstBuffer, reading buf starting at byte index srcByteOffset and writing into dstBuffer starting at element
-    // index dstOffset. The destination span is bounds-checked above, so the readback can
-    // land directly in the JS-owned buffer without staging.
-    auto dst_span = dst_buffer.viewed_array_buffer()->span().slice(dst_buffer.byte_offset() + dst_offset_in_bytes, copy_bytes);
-    m_context->read_buffer_sub_data(target, src_byte_offset, dst_span);
+    // index dstOffset.
+    auto temporary_buffer = ByteBuffer::create_uninitialized(copy_bytes);
+    if (temporary_buffer.is_error()) {
+        set_error(GL_OUT_OF_MEMORY);
+        return;
+    }
+
+    auto bytes = temporary_buffer.release_value();
+    if (!m_context->read_buffer_sub_data(target, src_byte_offset, bytes))
+        return;
+    if (dst_buffer.write_checked(bytes, dst_offset_in_bytes).is_error()) [[unlikely]]
+        set_error(GL_INVALID_VALUE);
 }
 
 void WebGL2RenderingContextImpl::blit_framebuffer(WebIDL::Long src_x0, WebIDL::Long src_y0, WebIDL::Long src_x1, WebIDL::Long src_y1, WebIDL::Long dst_x0, WebIDL::Long dst_y0, WebIDL::Long dst_x1, WebIDL::Long dst_y1, WebIDL::UnsignedLong mask, WebIDL::UnsignedLong filter)
@@ -187,33 +212,69 @@ void WebGL2RenderingContextImpl::tex_image3d(WebIDL::UnsignedLong target, WebIDL
 {
     m_context->make_current();
 
-    ReadonlyBytes src_data_span;
-    if (!src_data.has<Empty>()) {
-        src_data_span = SET_ERROR_VALUE_IF_ERROR(get_offset_span<u8 const>(src_data.downcast<WebIDL::ArrayBufferViewVariant>(), /* src_offset= */ 0), GL_INVALID_OPERATION);
+    if (src_data.has<Empty>()) {
+        m_context->tex_image3d_robust_angle(target, level, internalformat, width, height, depth, border, format, type, 0, nullptr);
+        return;
     }
 
-    m_context->tex_image3d_robust_angle(target, level, internalformat, width, height, depth, border, format, type, src_data_span.size(), src_data_span.data());
+    SET_ERROR_VALUE_IF_ERROR(with_buffer_source_bytes(WebIDL::BufferSource { src_data.downcast<WebIDL::ArrayBufferViewVariant>() }, /* src_offset= */ 0, /* src_length_override= */ 0, [&](ReadonlyBytes src_data_bytes) {
+        m_context->tex_image3d_robust_angle(target, level, internalformat, width, height, depth, border, format, type, src_data_bytes.size(), src_data_bytes.data());
+    }),
+        GL_INVALID_OPERATION);
+}
+
+void WebGL2RenderingContextImpl::tex_image3d(WebIDL::UnsignedLong target, WebIDL::Long level, WebIDL::Long internalformat, WebIDL::Long width, WebIDL::Long height, WebIDL::Long depth, WebIDL::Long border, WebIDL::UnsignedLong format, WebIDL::UnsignedLong type, TexImageSource source)
+{
+    m_context->make_current();
+
+    // https://registry.khronos.org/OpenGL-Refpages/es3.0/html/glTexImage3D.xhtml
+    // border: This value must be 0.
+    if (border != 0) {
+        set_error(GL_INVALID_VALUE);
+        return;
+    }
+
+    auto maybe_source_frame = read_texture_image_source(source, format, type);
+    if (!maybe_source_frame.has_value())
+        return;
+    auto source_frame = maybe_source_frame.release_value();
+    m_context->tex_image3d_from_bitmap(target, level, internalformat, depth, format, type, move(source_frame.frame), Gfx::IntSize { width, height }, source_frame.flip_y, source_frame.premultiply_alpha);
 }
 
 void WebGL2RenderingContextImpl::tex_image3d(WebIDL::UnsignedLong target, WebIDL::Long level, WebIDL::Long internalformat, WebIDL::Long width, WebIDL::Long height, WebIDL::Long depth, WebIDL::Long border, WebIDL::UnsignedLong format, WebIDL::UnsignedLong type, WebIDL::ArrayBufferView src_data, WebIDL::UnsignedLongLong src_offset)
 {
     m_context->make_current();
 
-    auto src_data_span = SET_ERROR_VALUE_IF_ERROR(get_offset_span<u8 const>(src_data, src_offset), GL_INVALID_OPERATION);
+    SET_ERROR_VALUE_IF_ERROR(with_buffer_source_bytes(WebIDL::BufferSource { src_data }, src_offset, /* src_length_override= */ 0, [&](ReadonlyBytes src_data_bytes) {
+        m_context->tex_image3d_robust_angle(target, level, internalformat, width, height, depth, border, format, type, src_data_bytes.size(), src_data_bytes.data());
+    }),
+        GL_INVALID_OPERATION);
+}
 
-    m_context->tex_image3d_robust_angle(target, level, internalformat, width, height, depth, border, format, type, src_data_span.size(), src_data_span.data());
+void WebGL2RenderingContextImpl::tex_sub_image3d(WebIDL::UnsignedLong target, WebIDL::Long level, WebIDL::Long xoffset, WebIDL::Long yoffset, WebIDL::Long zoffset, WebIDL::Long width, WebIDL::Long height, WebIDL::Long depth, WebIDL::UnsignedLong format, WebIDL::UnsignedLong type, TexImageSource source)
+{
+    m_context->make_current();
+
+    auto maybe_source_frame = read_texture_image_source(source, format, type);
+    if (!maybe_source_frame.has_value())
+        return;
+    auto source_frame = maybe_source_frame.release_value();
+    m_context->tex_sub_image3d_from_bitmap(target, level, xoffset, yoffset, zoffset, depth, format, type, move(source_frame.frame), Gfx::IntSize { width, height }, source_frame.flip_y, source_frame.premultiply_alpha);
 }
 
 void WebGL2RenderingContextImpl::tex_sub_image3d(WebIDL::UnsignedLong target, WebIDL::Long level, WebIDL::Long xoffset, WebIDL::Long yoffset, WebIDL::Long zoffset, WebIDL::Long width, WebIDL::Long height, WebIDL::Long depth, WebIDL::UnsignedLong format, WebIDL::UnsignedLong type, WebIDL::NullableArrayBufferViewVariant src_data, WebIDL::UnsignedLongLong src_offset)
 {
     m_context->make_current();
 
-    ReadonlyBytes src_data_span;
-    if (!src_data.has<Empty>()) {
-        src_data_span = SET_ERROR_VALUE_IF_ERROR(get_offset_span<u8 const>(src_data.downcast<WebIDL::ArrayBufferViewVariant>(), src_offset), GL_INVALID_OPERATION);
+    if (src_data.has<Empty>()) {
+        m_context->tex_sub_image3d_robust_angle(target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, 0, nullptr);
+        return;
     }
 
-    m_context->tex_sub_image3d_robust_angle(target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, src_data_span.size(), src_data_span.data());
+    SET_ERROR_VALUE_IF_ERROR(with_buffer_source_bytes(WebIDL::BufferSource { src_data.downcast<WebIDL::ArrayBufferViewVariant>() }, src_offset, /* src_length_override= */ 0, [&](ReadonlyBytes src_data_bytes) {
+        m_context->tex_sub_image3d_robust_angle(target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, src_data_bytes.size(), src_data_bytes.data());
+    }),
+        GL_INVALID_OPERATION);
 }
 
 void WebGL2RenderingContextImpl::uniform1ui(GC::Ptr<WebGLUniformLocation> location, WebIDL::UnsignedLong v0)
@@ -977,7 +1038,7 @@ void WebGL2RenderingContextImpl::end_transform_feedback()
     m_context->end_transform_feedback();
 }
 
-void WebGL2RenderingContextImpl::transform_feedback_varyings(GC::Ref<WebGLProgram> program, Vector<String> const& varyings, WebIDL::UnsignedLong buffer_mode)
+void WebGL2RenderingContextImpl::transform_feedback_varyings(GC::Ref<WebGLProgram> program, Vector<Utf16String> const& varyings, WebIDL::UnsignedLong buffer_mode)
 {
     m_context->make_current();
 
@@ -991,7 +1052,7 @@ void WebGL2RenderingContextImpl::transform_feedback_varyings(GC::Ref<WebGLProgra
     Vector<Vector<GLchar>> varying_strings;
     varying_strings.ensure_capacity(varyings.size());
     for (auto const& varying : varyings) {
-        varying_strings.unchecked_append(null_terminated_string(varying));
+        varying_strings.unchecked_append(null_terminated_utf8_string(varying.utf16_view()));
     }
 
     Vector<GLchar const*> varying_strings_characters;
@@ -1057,7 +1118,7 @@ void WebGL2RenderingContextImpl::bind_buffer_range(WebIDL::UnsignedLong target, 
     m_context->bind_buffer_range(target, index, buffer_handle, offset, size);
 }
 
-Optional<Vector<WebIDL::UnsignedLong>> WebGL2RenderingContextImpl::get_uniform_indices(GC::Ref<WebGLProgram> program, Vector<String> const& uniform_names)
+Optional<Vector<WebIDL::UnsignedLong>> WebGL2RenderingContextImpl::get_uniform_indices(GC::Ref<WebGLProgram> program, Vector<Utf16String> const& uniform_names)
 {
     m_context->make_current();
 
@@ -1072,7 +1133,7 @@ Optional<Vector<WebIDL::UnsignedLong>> WebGL2RenderingContextImpl::get_uniform_i
     Vector<Vector<GLchar>> uniform_names_strings;
     uniform_names_strings.ensure_capacity(uniform_names.size());
     for (auto const& uniform_name : uniform_names) {
-        uniform_names_strings.unchecked_append(null_terminated_string(uniform_name));
+        uniform_names_strings.unchecked_append(null_terminated_utf8_string(uniform_name.utf16_view()));
     }
 
     Vector<GLchar const*> uniform_names_characters;
@@ -1131,7 +1192,7 @@ JS::Value WebGL2RenderingContextImpl::get_active_uniforms(GC::Ref<WebGLProgram> 
     return JS::Array::create_from(realm(), params_as_values);
 }
 
-WebIDL::UnsignedLong WebGL2RenderingContextImpl::get_uniform_block_index(GC::Ref<WebGLProgram> program, String uniform_block_name)
+WebIDL::UnsignedLong WebGL2RenderingContextImpl::get_uniform_block_index(GC::Ref<WebGLProgram> program, Utf16String uniform_block_name)
 {
     m_context->make_current();
 
@@ -1142,7 +1203,7 @@ WebIDL::UnsignedLong WebGL2RenderingContextImpl::get_uniform_block_index(GC::Ref
     }
     auto program_handle = handle_or_error.release_value();
 
-    auto uniform_block_name_null_terminated = null_terminated_string(uniform_block_name);
+    auto uniform_block_name_null_terminated = null_terminated_utf8_string(uniform_block_name.utf16_view());
     return m_context->get_uniform_block_index(program_handle, uniform_block_name_null_terminated.data());
 }
 
@@ -1187,7 +1248,7 @@ JS::Value WebGL2RenderingContextImpl::get_active_uniform_block_parameter(GC::Ref
     }
 }
 
-Optional<String> WebGL2RenderingContextImpl::get_active_uniform_block_name(GC::Ref<WebGLProgram> program, WebIDL::UnsignedLong uniform_block_index)
+Optional<Utf16String> WebGL2RenderingContextImpl::get_active_uniform_block_name(GC::Ref<WebGLProgram> program, WebIDL::UnsignedLong uniform_block_index)
 {
     m_context->make_current();
 
@@ -1203,9 +1264,9 @@ Optional<String> WebGL2RenderingContextImpl::get_active_uniform_block_name(GC::R
     Vector<GLchar> uniform_block_name;
     uniform_block_name.resize(uniform_block_name_length);
     if (!uniform_block_name_length)
-        return String {};
+        return Utf16String {};
     m_context->get_active_uniform_block_name(program_handle, uniform_block_index, uniform_block_name_length, nullptr, uniform_block_name.data());
-    return String::from_utf8_without_validation(ReadonlyBytes { uniform_block_name.data(), static_cast<size_t>(uniform_block_name_length - 1) });
+    return utf16_string_from_gl_string(uniform_block_name.data(), static_cast<size_t>(uniform_block_name_length - 1));
 }
 
 void WebGL2RenderingContextImpl::uniform_block_binding(GC::Ref<WebGLProgram> program, WebIDL::UnsignedLong uniform_block_index, WebIDL::UnsignedLong uniform_block_binding)
@@ -1297,8 +1358,10 @@ void WebGL2RenderingContextImpl::compressed_tex_image3d(WebIDL::UnsignedLong tar
         return;
     }
 
-    auto pixels = SET_ERROR_VALUE_IF_ERROR(get_offset_span<u8 const>(src_data, src_offset, src_length_override), GL_INVALID_VALUE);
-    m_context->compressed_tex_image3d_robust_angle(target, level, internalformat, width, height, depth, border, pixels.size(), pixels.size(), pixels.data());
+    SET_ERROR_VALUE_IF_ERROR(with_buffer_source_bytes(WebIDL::BufferSource { src_data }, src_offset, src_length_override, [&](ReadonlyBytes pixels_bytes) {
+        m_context->compressed_tex_image3d_robust_angle(target, level, internalformat, width, height, depth, border, pixels_bytes.size(), pixels_bytes.size(), pixels_bytes.data());
+    }),
+        GL_INVALID_VALUE);
 }
 
 void WebGL2RenderingContextImpl::compressed_tex_sub_image3d(WebIDL::UnsignedLong target, WebIDL::Long level, WebIDL::Long xoffset, WebIDL::Long yoffset, WebIDL::Long zoffset, WebIDL::Long width, WebIDL::Long height, WebIDL::Long depth, WebIDL::UnsignedLong format, WebIDL::ArrayBufferView src_data, WebIDL::UnsignedLongLong src_offset, WebIDL::UnsignedLong src_length_override)
@@ -1310,8 +1373,10 @@ void WebGL2RenderingContextImpl::compressed_tex_sub_image3d(WebIDL::UnsignedLong
         return;
     }
 
-    auto pixels = SET_ERROR_VALUE_IF_ERROR(get_offset_span<u8 const>(src_data, src_offset, src_length_override), GL_INVALID_VALUE);
-    m_context->compressed_tex_sub_image3d_robust_angle(target, level, xoffset, yoffset, zoffset, width, height, depth, format, pixels.size(), pixels.size(), pixels.data());
+    SET_ERROR_VALUE_IF_ERROR(with_buffer_source_bytes(WebIDL::BufferSource { src_data }, src_offset, src_length_override, [&](ReadonlyBytes pixels_bytes) {
+        m_context->compressed_tex_sub_image3d_robust_angle(target, level, xoffset, yoffset, zoffset, width, height, depth, format, pixels_bytes.size(), pixels_bytes.size(), pixels_bytes.data());
+    }),
+        GL_INVALID_VALUE);
 }
 
 }

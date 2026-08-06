@@ -10,6 +10,8 @@
 #include <LibWeb/WebAudio/AudioBufferSourceNode.h>
 #include <LibWeb/WebAudio/AudioParam.h>
 #include <LibWeb/WebAudio/AudioScheduledSourceNode.h>
+#include <LibWeb/WebAudio/BaseAudioContext.h>
+#include <LibWeb/WebAudio/Rendering/RenderNodes.h>
 
 namespace Web::WebAudio {
 
@@ -18,8 +20,8 @@ GC_DEFINE_ALLOCATOR(AudioBufferSourceNode);
 AudioBufferSourceNode::AudioBufferSourceNode(JS::Realm& realm, GC::Ref<BaseAudioContext> context, Bindings::AudioBufferSourceOptions const& options)
     : AudioScheduledSourceNode(realm, context)
     , m_buffer(options.buffer.value_or(nullptr))
-    , m_playback_rate(AudioParam::create(realm, context, options.playback_rate, NumericLimits<float>::lowest(), NumericLimits<float>::max(), Bindings::AutomationRate::KRate, AudioParam::FixedAutomationRate::Yes))
-    , m_detune(AudioParam::create(realm, context, options.detune, NumericLimits<float>::lowest(), NumericLimits<float>::max(), Bindings::AutomationRate::KRate, AudioParam::FixedAutomationRate::Yes))
+    , m_playback_rate(AudioParam::create(realm, context, this, options.playback_rate, NumericLimits<float>::lowest(), NumericLimits<float>::max(), Bindings::AutomationRate::KRate, AudioParam::FixedAutomationRate::Yes))
+    , m_detune(AudioParam::create(realm, context, this, options.detune, NumericLimits<float>::lowest(), NumericLimits<float>::max(), Bindings::AutomationRate::KRate, AudioParam::FixedAutomationRate::Yes))
     , m_loop(options.loop)
     , m_loop_start(options.loop_start)
     , m_loop_end(options.loop_end)
@@ -27,6 +29,18 @@ AudioBufferSourceNode::AudioBufferSourceNode(JS::Realm& realm, GC::Ref<BaseAudio
 }
 
 AudioBufferSourceNode::~AudioBufferSourceNode() = default;
+
+void AudioBufferSourceNode::queue_parameters_update(RefPtr<Rendering::AudioBufferContents> buffer, bool update_buffer)
+{
+    context()->queue_control_message(NodeMessage { SetBufferSourceParameters {
+        .node_id = node_id(),
+        .loop = m_loop,
+        .loop_start = m_loop_start,
+        .loop_end = m_loop_end,
+        .buffer = move(buffer),
+        .update_buffer = update_buffer,
+    } });
+}
 
 // https://webaudio.github.io/web-audio-api/#dom-audiobuffersourcenode-buffer
 WebIDL::ExceptionOr<void> AudioBufferSourceNode::set_buffer(GC::Ptr<AudioBuffer> buffer)
@@ -45,7 +59,9 @@ WebIDL::ExceptionOr<void> AudioBufferSourceNode::set_buffer(GC::Ptr<AudioBuffer>
     // 4. Assign new buffer to the buffer attribute.
     m_buffer = new_buffer;
 
-    // FIXME: 5. If start() has previously been called on this node, perform the operation acquire the content on buffer.
+    // 5. If start() has previously been called on this node, perform the operation acquire the content on buffer.
+    if (source_started())
+        queue_parameters_update(m_buffer ? m_buffer->acquire_contents() : nullptr, true);
 
     return {};
 }
@@ -72,6 +88,7 @@ GC::Ref<AudioParam> AudioBufferSourceNode::detune() const
 WebIDL::ExceptionOr<void> AudioBufferSourceNode::set_loop(bool loop)
 {
     m_loop = loop;
+    queue_parameters_update();
     return {};
 }
 
@@ -85,6 +102,7 @@ bool AudioBufferSourceNode::loop() const
 WebIDL::ExceptionOr<void> AudioBufferSourceNode::set_loop_start(double loop_start)
 {
     m_loop_start = loop_start;
+    queue_parameters_update();
     return {};
 }
 
@@ -98,6 +116,7 @@ double AudioBufferSourceNode::loop_start() const
 WebIDL::ExceptionOr<void> AudioBufferSourceNode::set_loop_end(double loop_end)
 {
     m_loop_end = loop_end;
+    queue_parameters_update();
     return {};
 }
 
@@ -117,24 +136,35 @@ WebIDL::ExceptionOr<void> AudioBufferSourceNode::start(Optional<double> when, Op
     // 2. Check for any errors that must be thrown due to parameter constraints described below. If any exception is thrown during this step, abort those steps.
     // A RangeError exception MUST be thrown if when is negative.
     if (when.has_value() && when.value() < 0)
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::RangeError, "when must not be negative"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::RangeError, "when must not be negative"_utf16 };
 
     // A RangeError exception MUST be thrown if offset is negative
     if (offset.has_value() && offset.value() < 0)
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::RangeError, "offset must not be negative"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::RangeError, "offset must not be negative"_utf16 };
 
     // A RangeError exception MUST be thrown if duration is negative.
     if (duration.has_value() && duration.value() < 0)
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::RangeError, "duration must not be negative"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::RangeError, "duration must not be negative"_utf16 };
 
     // 3. Set the internal slot [[source started]] on this AudioBufferSourceNode to true.
     set_source_started(true);
 
-    // FIXME: 4. Queue a control message to start the AudioBufferSourceNode, including the parameter values in the message.
-    // FIXME: 5. Acquire the contents of the buffer if the buffer has been set.
+    // 4. Queue a control message to start the AudioBufferSourceNode, including the parameter values in the message.
+    // 5. Acquire the contents of the buffer if the buffer has been set.
+    RefPtr<Rendering::AudioBufferContents> contents;
+    if (m_buffer)
+        contents = m_buffer->acquire_contents();
+    context()->queue_control_message(NodeMessage { StartBufferSource {
+        .node_id = node_id(),
+        .when = when.value_or(0),
+        .offset = offset.value_or(0),
+        .duration = duration,
+        .buffer = move(contents),
+    } });
+    context()->add_playing_source(*this);
+
     // FIXME: 6. Send a control message to the associated AudioContext to start running its rendering thread only when all the following conditions are met:
 
-    dbgln("FIXME: Implement AudioBufferSourceNode::start(when, offset, duration)");
     return {};
 }
 
@@ -160,6 +190,9 @@ WebIDL::ExceptionOr<GC::Ref<AudioBufferSourceNode>> AudioBufferSourceNode::const
     // FIXME: Set tail-time to no
 
     TRY(node->initialize_audio_node_options(Bindings::AudioNodeOptions {}, default_options));
+
+    node->queue_render_node_creation(make<Rendering::AudioBufferSourceRenderNode>(node->node_id(), BaseAudioContext::render_quantum_size(), node->m_playback_rate->render_param(), node->m_detune->render_param()));
+    node->queue_parameters_update();
 
     return node;
 }

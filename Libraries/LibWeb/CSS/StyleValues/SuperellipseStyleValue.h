@@ -23,23 +23,31 @@ public:
     // NOTE: This function can only be called after absolutization
     double parameter() const
     {
-        return number_from_style_value(*m_parameter, {});
+        return number_from_style_value(parameter_style_value(), {});
     }
 
-    virtual void serialize(StringBuilder&, SerializationMode) const override;
+    void serialize(StringBuilder&, SerializationMode) const;
 
-    virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const override;
+    ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const;
 
-    bool properties_equal(SuperellipseStyleValue const& other) const { return m_parameter == other.m_parameter; }
-
-    virtual bool is_computationally_independent() const override { return m_parameter->is_computationally_independent(); }
+    bool properties_equal(SuperellipseStyleValue const& other) const { return parameter_style_value() == other.parameter_style_value(); }
 
 private:
+    friend class StyleValue;
+
+    explicit SuperellipseStyleValue(StyleValueFFI::StyleValueData const* data)
+        : StyleValueWithDefaultOperators(Type::Superellipse, data)
+        , m_parameter(StyleValue::adopt_rust_style_value_data(StyleValueFFI::rust_style_value_retain(static_cast<StyleValueFFI::StyleValueData const*>(data->superellipse.parameter.pointer))))
+    {
+    }
+
     explicit SuperellipseStyleValue(ValueComparingNonnullRefPtr<StyleValue const> const& parameter)
-        : StyleValueWithDefaultOperators(Type::Superellipse)
+        : StyleValueWithDefaultOperators(Type::Superellipse, StyleValueFFI::rust_style_value_create_superellipse(StyleValueFFI::rust_style_value_retain(parameter->rust_style_value_data())))
         , m_parameter(parameter)
     {
     }
+
+    ValueComparingNonnullRefPtr<StyleValue const> parameter_style_value() const { return m_parameter; }
 
     ValueComparingNonnullRefPtr<StyleValue const> m_parameter;
 };

@@ -6,7 +6,7 @@
 
 #pragma once
 
-#include <LibWeb/SVG/SVGAnimatedLength.h>
+#include <LibWeb/CSS/StyleValues/NumberStyleValue.h>
 #include <LibWeb/SVG/SVGGeometryElement.h>
 
 namespace Web::SVG {
@@ -18,14 +18,20 @@ class SVGCircleElement final : public SVGGeometryElement {
 public:
     virtual ~SVGCircleElement() override = default;
 
-    virtual bool is_presentational_hint(FlyString const&) const override;
-    virtual void apply_presentational_hints(Vector<CSS::StyleProperty>&) const override;
-
     virtual Gfx::Path get_path(CSSPixelSize viewport_size) override;
 
-    GC::Ref<SVGAnimatedLength> cx() const;
-    GC::Ref<SVGAnimatedLength> cy() const;
-    GC::Ref<SVGAnimatedLength> r() const;
+    // AD-HOC: The spec states that the cx, cy and r IDL attributes reflect the respective computed values and their
+    //         corresponding presentation attributes but other browsers reflect the attribute values instead - see
+    //         https://github.com/w3c/svgwg/issues/1153
+
+    // https://w3c.github.io/svgwg/svg2-draft/shapes.html#__svg__SVGCircleElement__cx
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(cx, Horizontal, CSS::NumberStyleValue::create(0));
+
+    // https://w3c.github.io/svgwg/svg2-draft/shapes.html#__svg__SVGCircleElement__cy
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(cy, Vertical, CSS::NumberStyleValue::create(0));
+
+    // https://w3c.github.io/svgwg/svg2-draft/shapes.html#__svg__SVGCircleElement__r
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(r, Unspecified, CSS::NumberStyleValue::create(0));
 
 private:
     SVGCircleElement(DOM::Document&, DOM::QualifiedName);

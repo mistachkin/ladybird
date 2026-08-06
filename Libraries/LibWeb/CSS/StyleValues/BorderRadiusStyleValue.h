@@ -28,30 +28,40 @@ public:
     }
     virtual ~BorderRadiusStyleValue() override = default;
 
-    ValueComparingNonnullRefPtr<StyleValue const> const& horizontal_radius() const { return m_properties.horizontal_radius; }
-    ValueComparingNonnullRefPtr<StyleValue const> const& vertical_radius() const { return m_properties.vertical_radius; }
-    bool is_elliptical() const { return m_properties.is_elliptical; }
+    ValueComparingNonnullRefPtr<StyleValue const> horizontal_radius() const { return m_horizontal_radius; }
+    ValueComparingNonnullRefPtr<StyleValue const> vertical_radius() const { return m_vertical_radius; }
+    bool is_elliptical() const { return m_value->border_radius.is_elliptical; }
 
-    virtual void serialize(StringBuilder&, SerializationMode) const override;
+    void serialize(StringBuilder&, SerializationMode) const;
 
-    bool properties_equal(BorderRadiusStyleValue const& other) const { return m_properties == other.m_properties; }
-
-    virtual bool is_computationally_independent() const override { return m_properties.horizontal_radius->is_computationally_independent() && m_properties.vertical_radius->is_computationally_independent(); }
+    bool properties_equal(BorderRadiusStyleValue const& other) const
+    {
+        return is_elliptical() == other.is_elliptical()
+            && horizontal_radius() == other.horizontal_radius()
+            && vertical_radius() == other.vertical_radius();
+    }
 
 private:
-    BorderRadiusStyleValue(ValueComparingNonnullRefPtr<StyleValue const> const& horizontal_radius, ValueComparingNonnullRefPtr<StyleValue const> const& vertical_radius)
-        : StyleValueWithDefaultOperators(Type::BorderRadius)
-        , m_properties { .is_elliptical = horizontal_radius != vertical_radius, .horizontal_radius = horizontal_radius, .vertical_radius = vertical_radius }
+    explicit BorderRadiusStyleValue(StyleValueFFI::StyleValueData const* data)
+        : StyleValueWithDefaultOperators(Type::BorderRadius, data)
+        , m_horizontal_radius(StyleValue::adopt_rust_style_value_data(StyleValueFFI::rust_style_value_retain(static_cast<StyleValueFFI::StyleValueData const*>(data->border_radius.horizontal_radius.pointer))))
+        , m_vertical_radius(StyleValue::adopt_rust_style_value_data(StyleValueFFI::rust_style_value_retain(static_cast<StyleValueFFI::StyleValueData const*>(data->border_radius.vertical_radius.pointer))))
     {
     }
 
-    virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const override;
-    struct Properties {
-        bool is_elliptical;
-        ValueComparingNonnullRefPtr<StyleValue const> horizontal_radius;
-        ValueComparingNonnullRefPtr<StyleValue const> vertical_radius;
-        bool operator==(Properties const&) const = default;
-    } m_properties;
+    BorderRadiusStyleValue(ValueComparingNonnullRefPtr<StyleValue const> const& horizontal_radius, ValueComparingNonnullRefPtr<StyleValue const> const& vertical_radius)
+        : StyleValueWithDefaultOperators(Type::BorderRadius, StyleValueFFI::rust_style_value_create_border_radius(horizontal_radius != vertical_radius, StyleValueFFI::rust_style_value_retain(horizontal_radius->rust_style_value_data()), StyleValueFFI::rust_style_value_retain(vertical_radius->rust_style_value_data())))
+        , m_horizontal_radius(horizontal_radius)
+        , m_vertical_radius(vertical_radius)
+    {
+    }
+
+    // NB: StyleValue dispatches operations by type tag, so it may call private impls.
+    friend class StyleValue;
+    ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const;
+
+    ValueComparingNonnullRefPtr<StyleValue const> m_horizontal_radius;
+    ValueComparingNonnullRefPtr<StyleValue const> m_vertical_radius;
 };
 
 }

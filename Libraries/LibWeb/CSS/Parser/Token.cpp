@@ -36,7 +36,7 @@ Token Token::create(Type type, String original_source_text)
     return token;
 }
 
-Token Token::create_ident(FlyString ident, String original_source_text)
+Token Token::create_ident(Utf16FlyString ident, String original_source_text)
 {
     Token token;
     token.m_type = Type::Ident;
@@ -45,7 +45,7 @@ Token Token::create_ident(FlyString ident, String original_source_text)
     return token;
 }
 
-Token Token::create_function(FlyString name, String original_source_text)
+Token Token::create_function(Utf16FlyString name, String original_source_text)
 {
     Token token;
     token.m_type = Type::Function;
@@ -54,7 +54,7 @@ Token Token::create_function(FlyString name, String original_source_text)
     return token;
 }
 
-Token Token::create_at_keyword(FlyString name, String original_source_text)
+Token Token::create_at_keyword(Utf16FlyString name, String original_source_text)
 {
     Token token;
     token.m_type = Type::AtKeyword;
@@ -63,7 +63,7 @@ Token Token::create_at_keyword(FlyString name, String original_source_text)
     return token;
 }
 
-Token Token::create_hash(FlyString value, HashType hash_type, String original_source_text)
+Token Token::create_hash(Utf16FlyString value, HashType hash_type, String original_source_text)
 {
     Token token;
     token.m_type = Type::Hash;
@@ -72,7 +72,7 @@ Token Token::create_hash(FlyString value, HashType hash_type, String original_so
     return token;
 }
 
-Token Token::create_string(FlyString value, String original_source_text)
+Token Token::create_string(Utf16FlyString value, String original_source_text)
 {
     Token token;
     token.m_type = Type::String;
@@ -81,7 +81,7 @@ Token Token::create_string(FlyString value, String original_source_text)
     return token;
 }
 
-Token Token::create_url(FlyString url, String original_source_text)
+Token Token::create_url(Utf16FlyString url, String original_source_text)
 {
     Token token;
     token.m_type = Type::Url;
@@ -117,7 +117,7 @@ Token Token::create_percentage(Number value, String original_source_text)
     return token;
 }
 
-Token Token::create_dimension(Number value, FlyString unit, String original_source_text)
+Token Token::create_dimension(Number value, Utf16FlyString unit, String original_source_text)
 {
     Token token;
     token.m_type = Type::Dimension;
@@ -134,72 +134,107 @@ Token Token::create_whitespace(String original_source_text)
     return token;
 }
 
-String Token::to_string() const
+void Token::serialize_to(Utf16StringBuilder& builder) const
 {
-    StringBuilder builder;
-
     switch (m_type) {
     case Type::EndOfFile:
-        return String {};
+        return;
     case Type::Ident:
-        return serialize_an_identifier(ident());
-    case Type::Function:
-        return MUST(String::formatted("{}(", serialize_an_identifier(function())));
+        serialize_an_identifier(builder, ident());
+        return;
+    case Type::Function: {
+        serialize_an_identifier(builder, function());
+        builder.append_ascii('(');
+        return;
+    }
     case Type::AtKeyword:
-        return MUST(String::formatted("@{}", serialize_an_identifier(at_keyword())));
-    case Type::Hash: {
+        builder.append_ascii('@');
+        serialize_an_identifier(builder, at_keyword());
+        return;
+    case Type::Hash:
+        builder.append_ascii('#');
         switch (hash_type()) {
         case HashType::Id:
-            return MUST(String::formatted("#{}", serialize_an_identifier(hash_value())));
+            serialize_an_identifier(builder, hash_value());
+            return;
         case HashType::Unrestricted:
-            return MUST(String::formatted("#{}", hash_value()));
+            builder.append(hash_value());
+            return;
         }
         VERIFY_NOT_REACHED();
-    }
     case Type::String:
-        return serialize_a_string(string());
+        serialize_a_string(builder, string());
+        return;
     case Type::BadString:
-        return String {};
+        return;
     case Type::Url:
-        return serialize_a_url(url());
+        builder.append_ascii("url("sv);
+        serialize_a_string(builder, url());
+        builder.append_ascii(')');
+        return;
     case Type::BadUrl:
-        return "url()"_string;
+        builder.append_ascii("url()"sv);
+        return;
     case Type::Delim:
-        return String::from_code_point(delim());
+        builder.append_code_point(delim());
+        return;
     case Type::Number:
-        return String::number(m_value.get<Number>().value());
+        builder.appendff("{}", m_value.get<Number>().value());
+        return;
     case Type::Percentage:
-        return MUST(String::formatted("{}%", m_value.get<Number>().value()));
+        builder.appendff("{}%", m_value.get<Number>().value());
+        return;
     case Type::Dimension:
-        return MUST(String::formatted("{}{}", m_value.get<DimensionValue>().number.value(), dimension_unit()));
+        builder.appendff("{}", m_value.get<DimensionValue>().number.value());
+        builder.append(dimension_unit());
+        return;
     case Type::Whitespace:
-        return " "_string;
+        builder.append_ascii(' ');
+        return;
     case Type::CDO:
-        return "<!--"_string;
+        builder.append_ascii("<!--"sv);
+        return;
     case Type::CDC:
-        return "-->"_string;
+        builder.append_ascii("-->"sv);
+        return;
     case Type::Colon:
-        return ":"_string;
+        builder.append_ascii(':');
+        return;
     case Type::Semicolon:
-        return ";"_string;
+        builder.append_ascii(';');
+        return;
     case Type::Comma:
-        return ","_string;
+        builder.append_ascii(',');
+        return;
     case Type::OpenSquare:
-        return "["_string;
+        builder.append_ascii('[');
+        return;
     case Type::CloseSquare:
-        return "]"_string;
+        builder.append_ascii(']');
+        return;
     case Type::OpenParen:
-        return "("_string;
+        builder.append_ascii('(');
+        return;
     case Type::CloseParen:
-        return ")"_string;
+        builder.append_ascii(')');
+        return;
     case Type::OpenCurly:
-        return "{"_string;
+        builder.append_ascii('{');
+        return;
     case Type::CloseCurly:
-        return "}"_string;
+        builder.append_ascii('}');
+        return;
     case Type::Invalid:
     default:
         VERIFY_NOT_REACHED();
     }
+}
+
+Utf16String Token::to_string() const
+{
+    Utf16StringBuilder builder;
+    serialize_to(builder);
+    return builder.to_string();
 }
 
 String Token::to_debug_string() const
@@ -243,28 +278,28 @@ String Token::to_debug_string() const
         break;
     case Type::Ident:
         builder.append("Ident(value="sv);
-        append_quoted_string(builder, ident().bytes_as_string_view());
+        append_quoted_string(builder, MUST(ident().view().to_utf8()));
         has_type_specific_fields = true;
         break;
     case Type::Function:
         builder.append("Function(value="sv);
-        append_quoted_string(builder, function().bytes_as_string_view());
+        append_quoted_string(builder, MUST(function().view().to_utf8()));
         has_type_specific_fields = true;
         break;
     case Type::AtKeyword:
         builder.append("AtKeyword(value="sv);
-        append_quoted_string(builder, at_keyword().bytes_as_string_view());
+        append_quoted_string(builder, MUST(at_keyword().view().to_utf8()));
         has_type_specific_fields = true;
         break;
     case Type::Hash:
         builder.append("Hash(value="sv);
-        append_quoted_string(builder, hash_value().bytes_as_string_view());
+        append_quoted_string(builder, MUST(hash_value().view().to_utf8()));
         builder.appendff(", hash_type={}", hash_type_name(hash_type()));
         has_type_specific_fields = true;
         break;
     case Type::String:
         builder.append("String(value="sv);
-        append_quoted_string(builder, string().bytes_as_string_view());
+        append_quoted_string(builder, MUST(string().view().to_utf8()));
         has_type_specific_fields = true;
         break;
     case Type::BadString:
@@ -272,7 +307,7 @@ String Token::to_debug_string() const
         break;
     case Type::Url:
         builder.append("Url(value="sv);
-        append_quoted_string(builder, url().bytes_as_string_view());
+        append_quoted_string(builder, MUST(url().view().to_utf8()));
         has_type_specific_fields = true;
         break;
     case Type::BadUrl:
@@ -294,7 +329,7 @@ String Token::to_debug_string() const
         break;
     case Type::Dimension:
         builder.appendff("Dimension(value={}, number_type={}, unit=", dimension_value(), number_type_name(m_value.get<DimensionValue>().number.type()));
-        append_quoted_string(builder, dimension_unit().bytes_as_string_view());
+        append_quoted_string(builder, MUST(dimension_unit().view().to_utf8()));
         has_type_specific_fields = true;
         break;
     case Type::Whitespace:
@@ -422,9 +457,9 @@ void Token::set_position_range(Badge<Tokenizer, RustTokenizer>, SourcePosition s
     m_end_position = end;
 }
 
-FlyString const& Token::string_value() const
+Utf16FlyString const& Token::string_value() const
 {
-    return m_value.get<FlyString>();
+    return m_value.get<Utf16FlyString>();
 }
 
 Number const& Token::number_value_for_type() const

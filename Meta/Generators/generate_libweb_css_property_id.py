@@ -178,6 +178,7 @@ def write_header_file(out: TextIO, properties: dict, logical_property_groups: di
 #include <AK/NonnullRefPtr.h>
 #include <AK/Traits.h>
 #include <AK/Utf16FlyString.h>
+#include <AK/Utf16View.h>
 #include <AK/Variant.h>
 #include <LibJS/Forward.h>
 #include <LibWeb/CSS/NumericRange.h>
@@ -238,15 +239,17 @@ enum class AnimationType {{
     Custom,
     None,
 }};
-AnimationType animation_type_from_longhand_property(PropertyID);
+WEB_API AnimationType animation_type_from_longhand_property(PropertyID);
 bool is_animatable_property(PropertyID);
 
 Optional<PropertyID> property_id_from_camel_case_string(StringView);
+Optional<PropertyID> property_id_from_camel_case_string(Utf16View);
 WEB_API Optional<PropertyID> property_id_from_string(StringView);
+WEB_API Optional<PropertyID> property_id_from_string(Utf16View);
 [[nodiscard]] WEB_API Utf16FlyString const& string_from_property_id(PropertyID);
 [[nodiscard]] Utf16FlyString const& camel_case_string_from_property_id(PropertyID);
 WEB_API bool is_inherited_property(PropertyID);
-NonnullRefPtr<StyleValue const> property_initial_value(PropertyID);
+WEB_API NonnullRefPtr<StyleValue const> property_initial_value(PropertyID);
 
 enum class PropertyMultiplicity {{
     Single,
@@ -258,11 +261,11 @@ bool property_is_single_valued(PropertyID);
 bool property_is_list_valued(PropertyID);
 
 bool property_accepts_type(PropertyID, ValueType);
-NumericRangesByValueType property_accepted_ranges_by_value_type(PropertyID);
+WEB_API NumericRangesByValueType property_accepted_ranges_by_value_type(PropertyID);
 bool property_accepts_keyword(PropertyID, Keyword);
 Optional<Keyword> resolve_legacy_value_alias(PropertyID, Keyword);
 Optional<ValueType> property_resolves_percentages_relative_to(PropertyID);
-Vector<StringView> property_custom_ident_blacklist(PropertyID);
+Vector<Utf16View> property_custom_ident_blacklist(PropertyID);
 
 // These perform range-checking, but are also safe to call with properties that don't accept that type. (They'll just return false.)
 bool property_accepts_angle(PropertyID, Angle const&);
@@ -275,23 +278,24 @@ bool property_accepts_percentage(PropertyID, Percentage const&);
 bool property_accepts_resolution(PropertyID, Resolution const&);
 bool property_accepts_time(PropertyID, Time const&);
 
-bool property_is_shorthand(PropertyID);
-Vector<PropertyID> const& longhands_for_shorthand(PropertyID);
+WEB_API bool property_is_shorthand(PropertyID);
+WEB_API Vector<PropertyID> const& longhands_for_shorthand(PropertyID);
 Vector<PropertyID> const& expanded_longhands_for_shorthand(PropertyID);
 bool property_maps_to_shorthand(PropertyID);
 Vector<PropertyID> const& shorthands_for_longhand(PropertyID);
-Vector<PropertyID> const& property_computation_order();
+WEB_API Vector<PropertyID> const& property_computation_order();
 bool property_is_positional_value_list_shorthand(PropertyID);
 
-bool property_requires_computation_with_inherited_value(PropertyID);
-bool property_requires_computation_with_initial_value(PropertyID);
-bool property_requires_computation_with_cascaded_value(PropertyID);
+WEB_API bool property_requires_computation_with_inherited_value(PropertyID);
+WEB_API bool property_requires_computation_with_initial_value(PropertyID);
+WEB_API bool property_requires_computation_with_cascaded_value(PropertyID);
 
 size_t property_maximum_value_count(PropertyID);
 
 bool property_affects_layout(PropertyID);
 bool property_affects_stacking_context(PropertyID);
 bool property_affects_accumulated_visual_contexts(PropertyID);
+bool property_affects_scrollable_overflow(PropertyID);
 bool property_needs_layout_for_getcomputedstyle(PropertyID);
 bool property_needs_layout_node_for_resolved_value(PropertyID);
 
@@ -316,9 +320,9 @@ struct LogicalAliasMappingContext {{
     Direction direction;
     // TODO: text-orientation
 }};
-bool property_is_logical_alias(PropertyID);
-PropertyID map_logical_alias_to_physical_property(PropertyID logical_property_id, LogicalAliasMappingContext const&);
-PropertyID map_physical_property_to_logical_alias(PropertyID physical_property_id, LogicalAliasMappingContext const&);
+WEB_API bool property_is_logical_alias(PropertyID);
+WEB_API PropertyID map_logical_alias_to_physical_property(PropertyID logical_property_id, LogicalAliasMappingContext const&);
+WEB_API PropertyID map_physical_property_to_logical_alias(PropertyID physical_property_id, LogicalAliasMappingContext const&);
 
 enum class LogicalPropertyGroup : {logical_property_group_underlying_type} {{
 """)
@@ -386,6 +390,15 @@ Optional<PropertyID> property_id_from_camel_case_string(StringView string)
     return camel_case_properties_table.get(string);
 }
 
+Optional<PropertyID> property_id_from_camel_case_string(Utf16View string)
+{
+    for (auto const& entry : camel_case_properties_table) {
+        if (string.equals_ignoring_ascii_case(entry.key))
+            return entry.value;
+    }
+    return {};
+}
+
 static auto generate_properties_table()
 {
     HashMap<StringView, PropertyID, CaseInsensitiveASCIIStringViewTraits> table;
@@ -410,6 +423,21 @@ Optional<PropertyID> property_id_from_string(StringView string)
         return PropertyID::Custom;
 
     return properties_table.get(string);
+}
+
+Optional<PropertyID> property_id_from_string(Utf16View string)
+{
+    if (is_a_custom_property_name_string(string))
+        return PropertyID::Custom;
+
+    if (string.has_ascii_storage())
+        return properties_table.get(StringView { string.bytes() });
+
+    for (auto const& entry : properties_table) {
+        if (string.equals_ignoring_ascii_case(entry.key))
+            return entry.value;
+    }
+    return {};
 }
 
 Utf16FlyString const& string_from_property_id(PropertyID property_id) {
@@ -559,6 +587,23 @@ bool property_affects_accumulated_visual_contexts(PropertyID property_id)
         if is_legacy_alias(value):
             continue
         if value.get("affects-accumulated-visual-contexts", False):
+            out.write(f"    case PropertyID::{title_casify(name)}:\n")
+    out.write("""
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool property_affects_scrollable_overflow(PropertyID property_id)
+{
+    switch (property_id) {
+""")
+
+    for name, value in properties.items():
+        if is_legacy_alias(value):
+            continue
+        if value.get("affects-scrollable-overflow", False):
             out.write(f"    case PropertyID::{title_casify(name)}:\n")
     out.write("""
         return true;
@@ -917,7 +962,7 @@ Optional<ValueType> property_resolves_percentages_relative_to(PropertyID propert
     }
 }
 
-Vector<StringView> property_custom_ident_blacklist(PropertyID property_id)
+Vector<Utf16View> property_custom_ident_blacklist(PropertyID property_id)
 {
     switch (property_id) {
 """)
@@ -941,7 +986,7 @@ Vector<StringView> property_custom_ident_blacklist(PropertyID property_id)
 
             out.write(f"""
     case PropertyID::{title_casify(name)}:
-        return Vector {{ """)
+        return Vector<Utf16View> {{ """)
             for keyword in blacklisted_keywords:
                 out.write(f'"{keyword}"sv, ')
             out.write("};\n")

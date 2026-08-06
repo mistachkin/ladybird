@@ -95,6 +95,7 @@ animation-timing-function: ease
 appearance: none
 aspect-ratio: auto
 backdrop-filter: none
+backface-visibility: visible
 background-attachment: scroll
 background-blend-mode: normal
 background-clip: border-box
@@ -105,7 +106,7 @@ background-position-x: 0%
 background-position-y: 0%
 background-repeat: repeat
 background-size: auto
-block-size: 1605px
+block-size: 1404px
 border-block-end-color: rgb(0, 0, 0)
 border-block-end-style: none
 border-block-end-width: 0px
@@ -172,6 +173,7 @@ counter-reset: none
 counter-set: none
 cx: 0px
 cy: 0px
+d: none
 display: block
 filter: none
 flex-basis: auto
@@ -192,7 +194,7 @@ grid-row-start: auto
 grid-template-areas: none
 grid-template-columns: none
 grid-template-rows: none
-height: 2910px
+height: 2548px
 inline-size: 784px
 inset-block-end: auto
 inset-block-start: auto
@@ -282,14 +284,14 @@ scroll-margin-inline-start: 0px
 scroll-margin-left: 0px
 scroll-margin-right: 0px
 scroll-margin-top: 0px
-scroll-padding-block-end: 0px
-scroll-padding-block-start: 0px
-scroll-padding-bottom: 0px
-scroll-padding-inline-end: 0px
-scroll-padding-inline-start: 0px
-scroll-padding-left: 0px
-scroll-padding-right: 0px
-scroll-padding-top: 0px
+scroll-padding-block-end: auto
+scroll-padding-block-start: auto
+scroll-padding-bottom: auto
+scroll-padding-inline-end: auto
+scroll-padding-inline-start: auto
+scroll-padding-left: auto
+scroll-padding-right: auto
+scroll-padding-top: auto
 scroll-timeline-axis: block
 scroll-timeline-name: none
 scrollbar-gutter: auto
@@ -319,6 +321,7 @@ transition-timing-function: ease
 translate: none
 unicode-bidi: normal
 user-select: auto
+vector-effect: none
 vertical-align: baseline
 view-timeline-axis: block
 view-timeline-inset: auto

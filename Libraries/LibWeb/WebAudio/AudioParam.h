@@ -6,9 +6,13 @@
 
 #pragma once
 
+#include <AK/NonnullRefPtr.h>
 #include <LibJS/Forward.h>
 #include <LibWeb/Bindings/AudioParam.h>
 #include <LibWeb/Bindings/PlatformObject.h>
+#include <LibWeb/Forward.h>
+#include <LibWeb/WebAudio/AudioParamTimeline.h>
+#include <LibWeb/WebAudio/Rendering/RenderNode.h>
 
 namespace Web::WebAudio {
 
@@ -22,21 +26,33 @@ public:
         No,
         Yes,
     };
-    static GC::Ref<AudioParam> create(JS::Realm&, GC::Ref<BaseAudioContext>, float default_value, float min_value, float max_value, Bindings::AutomationRate, FixedAutomationRate = FixedAutomationRate::No);
+    // The owner is the AudioNode this parameter belongs to, or null for the AudioListener's parameters.
+    static GC::Ref<AudioParam> create(JS::Realm&, GC::Ref<BaseAudioContext>, GC::Ptr<AudioNode> owner, float default_value, float min_value, float max_value, Bindings::AutomationRate, FixedAutomationRate = FixedAutomationRate::No);
 
     virtual ~AudioParam() override;
 
     GC::Ref<BaseAudioContext> context() const { return m_context; }
 
     float value() const;
-    void set_value(float);
+    WebIDL::ExceptionOr<void> set_value(float);
+
+    // https://webaudio.github.io/web-audio-api/#computedvalue
+    float intrinsic_value_at_time(double time) const { return m_timeline->value_at_time(time); }
 
     Bindings::AutomationRate automation_rate() const;
     WebIDL::ExceptionOr<void> set_automation_rate(Bindings::AutomationRate);
 
-    float default_value() const;
-    float min_value() const;
-    float max_value() const;
+    // https://webaudio.github.io/web-audio-api/#dom-audioparam-defaultvalue
+    float default_value() const { return m_default_value; }
+
+    // https://webaudio.github.io/web-audio-api/#dom-audioparam-minvalue
+    float min_value() const { return m_min_value; }
+
+    // https://webaudio.github.io/web-audio-api/#dom-audioparam-maxvalue
+    float max_value() const { return m_max_value; }
+
+    NonnullRefPtr<AudioParamTimeline> timeline() const { return m_timeline; }
+    NonnullRefPtr<Rendering::RenderAudioParam> render_param() const { return m_render_param; }
 
     WebIDL::ExceptionOr<GC::Ref<AudioParam>> set_value_at_time(float value, double start_time);
     WebIDL::ExceptionOr<GC::Ref<AudioParam>> linear_ramp_to_value_at_time(float value, double end_time);
@@ -47,9 +63,18 @@ public:
     WebIDL::ExceptionOr<GC::Ref<AudioParam>> cancel_and_hold_at_time(double cancel_time);
 
 private:
-    AudioParam(JS::Realm&, GC::Ref<BaseAudioContext>, float default_value, float min_value, float max_value, Bindings::AutomationRate, FixedAutomationRate = FixedAutomationRate::No);
+    AudioParam(JS::Realm&, GC::Ref<BaseAudioContext>, GC::Ptr<AudioNode> owner, float default_value, float min_value, float max_value, Bindings::AutomationRate, FixedAutomationRate = FixedAutomationRate::No);
+
+    WebIDL::ExceptionOr<void> map_insert_result(AudioParamTimeline::InsertResult);
 
     GC::Ref<BaseAudioContext> m_context;
+
+    // An AudioParam is a facet of the AudioNode that exposes it, so holding on to the parameter keeps that node, and
+    // with it the node's render node and automation, alive.
+    GC::Ptr<AudioNode> m_owner;
+
+    NonnullRefPtr<AudioParamTimeline> m_timeline;
+    NonnullRefPtr<Rendering::RenderAudioParam> m_render_param;
 
     // https://webaudio.github.io/web-audio-api/#dom-audioparam-current-value-slot
     float m_current_value {}; //  [[current value]]

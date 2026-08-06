@@ -19,40 +19,42 @@ public:
 
     virtual ~BorderImageSliceStyleValue() override = default;
 
-    ValueComparingNonnullRefPtr<StyleValue const> top() const { return m_properties.top; }
-    ValueComparingNonnullRefPtr<StyleValue const> left() const { return m_properties.left; }
-    ValueComparingNonnullRefPtr<StyleValue const> bottom() const { return m_properties.bottom; }
-    ValueComparingNonnullRefPtr<StyleValue const> right() const { return m_properties.right; }
+    ValueComparingNonnullRefPtr<StyleValue const> top() const { return m_top; }
+    ValueComparingNonnullRefPtr<StyleValue const> left() const { return m_left; }
+    ValueComparingNonnullRefPtr<StyleValue const> bottom() const { return m_bottom; }
+    ValueComparingNonnullRefPtr<StyleValue const> right() const { return m_right; }
 
-    bool fill() const { return m_properties.fill; }
+    bool fill() const { return m_value->border_image_slice.fill; }
 
-    virtual void serialize(StringBuilder&, SerializationMode) const override;
+    void serialize(StringBuilder&, SerializationMode) const;
 
-    bool properties_equal(BorderImageSliceStyleValue const& other) const { return m_properties == other.m_properties; }
-
-    virtual bool is_computationally_independent() const override
-    {
-        return m_properties.top->is_computationally_independent()
-            && m_properties.right->is_computationally_independent()
-            && m_properties.bottom->is_computationally_independent()
-            && m_properties.left->is_computationally_independent();
-    }
+    bool properties_equal(BorderImageSliceStyleValue const& other) const { return top() == other.top() && right() == other.right() && bottom() == other.bottom() && left() == other.left() && fill() == other.fill(); }
 
 private:
-    BorderImageSliceStyleValue(ValueComparingNonnullRefPtr<StyleValue const> top, ValueComparingNonnullRefPtr<StyleValue const> right, ValueComparingNonnullRefPtr<StyleValue const> bottom, ValueComparingNonnullRefPtr<StyleValue const> left, bool fill)
-        : StyleValueWithDefaultOperators(Type::BorderImageSlice)
-        , m_properties { .top = move(top), .right = move(right), .bottom = move(bottom), .left = move(left), .fill = fill }
+    friend class StyleValue;
+
+    explicit BorderImageSliceStyleValue(StyleValueFFI::StyleValueData const* data)
+        : StyleValueWithDefaultOperators(Type::BorderImageSlice, data)
+        , m_top(StyleValue::adopt_rust_style_value_data(StyleValueFFI::rust_style_value_retain(static_cast<StyleValueFFI::StyleValueData const*>(data->border_image_slice.top.pointer))))
+        , m_right(StyleValue::adopt_rust_style_value_data(StyleValueFFI::rust_style_value_retain(static_cast<StyleValueFFI::StyleValueData const*>(data->border_image_slice.right.pointer))))
+        , m_bottom(StyleValue::adopt_rust_style_value_data(StyleValueFFI::rust_style_value_retain(static_cast<StyleValueFFI::StyleValueData const*>(data->border_image_slice.bottom.pointer))))
+        , m_left(StyleValue::adopt_rust_style_value_data(StyleValueFFI::rust_style_value_retain(static_cast<StyleValueFFI::StyleValueData const*>(data->border_image_slice.left.pointer))))
     {
     }
 
-    struct Properties {
-        ValueComparingNonnullRefPtr<StyleValue const> top;
-        ValueComparingNonnullRefPtr<StyleValue const> right;
-        ValueComparingNonnullRefPtr<StyleValue const> bottom;
-        ValueComparingNonnullRefPtr<StyleValue const> left;
-        bool fill;
-        bool operator==(Properties const&) const = default;
-    } m_properties;
+    BorderImageSliceStyleValue(ValueComparingNonnullRefPtr<StyleValue const> top, ValueComparingNonnullRefPtr<StyleValue const> right, ValueComparingNonnullRefPtr<StyleValue const> bottom, ValueComparingNonnullRefPtr<StyleValue const> left, bool fill)
+        : StyleValueWithDefaultOperators(Type::BorderImageSlice, StyleValueFFI::rust_style_value_create_border_image_slice(StyleValueFFI::rust_style_value_retain(top->rust_style_value_data()), StyleValueFFI::rust_style_value_retain(right->rust_style_value_data()), StyleValueFFI::rust_style_value_retain(bottom->rust_style_value_data()), StyleValueFFI::rust_style_value_retain(left->rust_style_value_data()), fill))
+        , m_top(move(top))
+        , m_right(move(right))
+        , m_bottom(move(bottom))
+        , m_left(move(left))
+    {
+    }
+
+    ValueComparingNonnullRefPtr<StyleValue const> m_top;
+    ValueComparingNonnullRefPtr<StyleValue const> m_right;
+    ValueComparingNonnullRefPtr<StyleValue const> m_bottom;
+    ValueComparingNonnullRefPtr<StyleValue const> m_left;
 };
 
 }

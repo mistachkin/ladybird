@@ -5,10 +5,17 @@
  */
 
 #include <AK/ByteBuffer.h>
+#include <AK/Vector.h>
 #include <LibCore/AnonymousBuffer.h>
 #include <LibCore/System.h>
 #include <LibTest/TestCase.h>
 #include <string.h>
+
+#ifdef AK_OS_WINDOWS
+#    include <AK/Windows.h>
+#else
+#    include <fcntl.h>
+#endif
 
 TEST_CASE(create_with_size)
 {
@@ -18,6 +25,20 @@ TEST_CASE(create_with_size)
     EXPECT_EQ(buffer.size(), 1024u);
     EXPECT_NE(buffer.data<void>(), nullptr);
     EXPECT_EQ(buffer.bytes().size(), 1024u);
+}
+
+TEST_CASE(create_with_size_produces_independent_buffers)
+{
+    Vector<Core::AnonymousBuffer> buffers;
+    for (u8 i = 0; i < 64; ++i) {
+        auto buffer = MUST(Core::AnonymousBuffer::create_with_size(64));
+        EXPECT(buffer.is_valid());
+        *buffer.data<u8>() = i;
+        buffers.append(move(buffer));
+    }
+
+    for (u8 i = 0; i < 64; ++i)
+        EXPECT_EQ(*buffers[i].data<u8>(), i);
 }
 
 TEST_CASE(default_constructed_is_invalid)
@@ -72,3 +93,31 @@ TEST_CASE(reconstruct_from_anon_fd_shares_memory)
     StringView mirrored { mirror.data<char const>(), payload.length() };
     EXPECT_EQ(mirrored, payload);
 }
+
+#ifndef AK_OS_WINDOWS
+TEST_CASE(failed_creation_from_an_fd_closes_the_fd)
+{
+    auto pipe_fds = MUST(Core::System::pipe2(0));
+    MUST(Core::System::close(pipe_fds[1]));
+
+    // Pipes cannot be mapped, so creation fails and must close the fd it took ownership of.
+    auto result = Core::AnonymousBuffer::create_from_anon_fd(pipe_fds[0], 0x1000);
+    EXPECT(result.is_error());
+    EXPECT_EQ(fcntl(pipe_fds[0], F_GETFD), -1);
+    EXPECT_EQ(errno, EBADF);
+}
+#else
+TEST_CASE(failed_creation_from_a_handle_closes_the_handle)
+{
+    HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    EXPECT(event != nullptr);
+
+    // An event handle cannot back a file mapping, so creation fails and must close the handle it took ownership of.
+    auto result = Core::AnonymousBuffer::create_from_anon_fd(to_fd(event), 0x1000);
+    EXPECT(result.is_error());
+
+    DWORD handle_flags = 0;
+    EXPECT_EQ(GetHandleInformation(event, &handle_flags), 0);
+    EXPECT_EQ(GetLastError(), static_cast<DWORD>(ERROR_INVALID_HANDLE));
+}
+#endif

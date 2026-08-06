@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, The Ladybird developers
+ * Copyright (c) 2026-present, the Ladybird developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -8,7 +8,7 @@
 
 #include <AK/Atomic.h>
 #include <AK/Optional.h>
-#include <AK/String.h>
+#include <AK/Utf16String.h>
 #include <LibWeb/Bindings/MediaStreamConstraints.h>
 #include <LibWeb/Bindings/MediaStreamTrack.h>
 #include <LibWeb/Bindings/PlatformObject.h>
@@ -18,19 +18,24 @@
 
 namespace Web::MediaCapture {
 
+enum class MediaStreamTrackKind : u8 {
+    Audio,
+    Video,
+};
+
 // Spec: https://w3c.github.io/mediacapture-main/#mediastreamtrack
 class MediaStreamTrack final : public DOM::EventTarget {
     WEB_PLATFORM_OBJECT(MediaStreamTrack, DOM::EventTarget);
     GC_DECLARE_ALLOCATOR(MediaStreamTrack);
 
 public:
-    static GC::Ref<MediaStreamTrack> create(JS::Realm&, Bindings::MediaStreamTrackKind, Optional<String> label = {}, bool muted = false);
+    static GC::Ref<MediaStreamTrack> create(JS::Realm&, MediaStreamTrackKind, Optional<Utf16String> label = {}, bool muted = false);
 
     virtual ~MediaStreamTrack() override = default;
 
-    Bindings::MediaStreamTrackKind kind() const { return m_kind; }
-    String id() const { return m_id; }
-    String label() const { return m_label; }
+    Utf16String kind() const;
+    Utf16String const& id() const { return m_id; }
+    Utf16String const& label() const { return m_label; }
 
     bool enabled() const { return m_enabled; }
     void set_enabled(bool enabled) { m_enabled = enabled; }
@@ -51,7 +56,7 @@ public:
     GC::Ref<WebIDL::Promise> apply_constraints(Optional<Bindings::MediaTrackConstraints> const& constraints);
     void set_settings(Bindings::MediaTrackSettings settings);
 
-    Optional<String> device_id() const;
+    Optional<Utf16String> device_id() const;
     u32 sample_rate_hz() const;
     u32 channel_count() const;
 
@@ -64,9 +69,9 @@ private:
 
     static Atomic<u64> s_next_provider_id;
 
-    Bindings::MediaStreamTrackKind m_kind { static_cast<Bindings::MediaStreamTrackKind>(0) };
-    String m_id;
-    String m_label;
+    MediaStreamTrackKind m_kind { MediaStreamTrackKind::Audio };
+    Utf16String m_id;
+    Utf16String m_label;
     bool m_enabled { true };
     bool m_muted { false };
     Bindings::MediaStreamTrackState m_state { static_cast<Bindings::MediaStreamTrackState>(0) };

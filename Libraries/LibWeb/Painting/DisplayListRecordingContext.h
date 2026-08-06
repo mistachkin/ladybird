@@ -7,6 +7,8 @@
 
 #pragma once
 
+#include <AK/HashMap.h>
+#include <AK/Vector.h>
 #include <LibGfx/AffineTransform.h>
 #include <LibGfx/Forward.h>
 #include <LibGfx/Palette.h>
@@ -15,12 +17,23 @@
 #include <LibWeb/Forward.h>
 #include <LibWeb/Painting/ChromeMetrics.h>
 #include <LibWeb/Painting/DevicePixelConverter.h>
+#include <LibWeb/Painting/VisualContextIndex.h>
 #include <LibWeb/PixelUnits.h>
 
 namespace Web::Painting {
 
+class AccumulatedVisualContextTree;
+class DisplayList;
 class HitTestDisplayList;
+class Paintable;
 class ScrollState;
+
+using NestedMaskNodeAssignments = HashMap<Paintable const*, Vector<VisualContextIndex>>;
+
+enum class PaintCommandCacheMode : u8 {
+    ReadOnly,
+    ReadWrite,
+};
 
 }
 
@@ -39,6 +52,15 @@ public:
 
     bool should_paint_overlay() const { return m_should_paint_overlay; }
     void set_should_paint_overlay(bool should_paint_overlay) { m_should_paint_overlay = should_paint_overlay; }
+
+    Painting::PaintCommandCacheMode paint_command_cache_mode() const { return m_paint_command_cache_mode; }
+    void set_paint_command_cache_mode(Painting::PaintCommandCacheMode mode) { m_paint_command_cache_mode = mode; }
+
+    Painting::DisplayList const* paint_command_cache_source_display_list() const { return m_paint_command_cache_source_display_list; }
+    void set_paint_command_cache_source_display_list(Painting::DisplayList const* display_list) { m_paint_command_cache_source_display_list = display_list; }
+
+    Painting::HitTestDisplayList const* hit_test_item_cache_source() const { return m_hit_test_item_cache_source; }
+    void set_hit_test_item_cache_source(Painting::HitTestDisplayList const* hit_test_display_list) { m_hit_test_item_cache_source = hit_test_display_list; }
 
     DevicePixelRect device_viewport_rect() const { return m_device_viewport_rect; }
     void set_device_viewport_rect(DevicePixelRect const& rect) { m_device_viewport_rect = rect; }
@@ -63,6 +85,9 @@ public:
         m_draw_svg_geometry_for_clip_path = draw_svg_geometry_for_clip_path;
     }
 
+    Optional<Painting::NestedMaskNodeAssignments> const& nested_mask_node_assignments() const { return m_nested_mask_node_assignments; }
+    void set_nested_mask_node_assignments(Painting::NestedMaskNodeAssignments assignments) { m_nested_mask_node_assignments = move(assignments); }
+
     DevicePixels enclosing_device_pixels(CSSPixels css_pixels) const;
     DevicePixels floored_device_pixels(CSSPixels css_pixels) const;
     DevicePixels rounded_device_pixels(CSSPixels css_pixels) const;
@@ -73,9 +98,9 @@ public:
     DevicePixelSize enclosing_device_size(CSSPixelSize) const;
     DevicePixelSize rounded_device_size(CSSPixelSize) const;
 
-    DisplayListRecordingContext clone(Painting::DisplayListRecorder& painter) const
+    DisplayListRecordingContext clone(Painting::DisplayListRecorder& painter, Painting::HitTestDisplayList* hit_test_display_list = nullptr) const
     {
-        auto clone = DisplayListRecordingContext(painter, m_palette, m_device_pixel_converter.device_pixels_per_css_pixel(), m_chrome_metrics);
+        auto clone = DisplayListRecordingContext(painter, m_palette, m_device_pixel_converter.device_pixels_per_css_pixel(), m_chrome_metrics, hit_test_display_list);
         clone.m_device_viewport_rect = m_device_viewport_rect;
         clone.m_should_show_line_box_borders = m_should_show_line_box_borders;
         clone.m_should_paint_overlay = m_should_paint_overlay;
@@ -89,11 +114,13 @@ public:
 
     void set_async_scrolling_metadata_context(
         UniqueNodeID document_id,
+        Painting::AccumulatedVisualContextTree const& visual_context_tree,
         Painting::ScrollState const& scroll_state,
         bool has_blocking_wheel_event_listeners,
         bool has_blocking_wheel_event_region_covering_viewport)
     {
         m_async_scrolling_document_id = document_id;
+        m_async_scrolling_visual_context_tree = &visual_context_tree;
         m_async_scrolling_scroll_state = &scroll_state;
         m_has_blocking_wheel_event_listeners = has_blocking_wheel_event_listeners;
         m_has_blocking_wheel_event_region_covering_viewport = has_blocking_wheel_event_region_covering_viewport;
@@ -101,6 +128,7 @@ public:
 
     bool is_recording_async_scrolling_metadata() const { return m_async_scrolling_scroll_state != nullptr; }
     UniqueNodeID async_scrolling_document_id() const { return m_async_scrolling_document_id; }
+    Painting::AccumulatedVisualContextTree const& async_scrolling_visual_context_tree() const { return *m_async_scrolling_visual_context_tree; }
     Painting::ScrollState const& async_scrolling_scroll_state() const { return *m_async_scrolling_scroll_state; }
     bool has_blocking_wheel_event_listeners() const { return m_has_blocking_wheel_event_listeners; }
     void set_has_blocking_wheel_event_listeners(bool value) { m_has_blocking_wheel_event_listeners = value; }
@@ -113,12 +141,17 @@ private:
     Painting::DevicePixelConverter m_device_pixel_converter;
     ChromeMetrics m_chrome_metrics;
     DevicePixelRect m_device_viewport_rect;
+    Painting::PaintCommandCacheMode m_paint_command_cache_mode { Painting::PaintCommandCacheMode::ReadOnly };
+    Painting::DisplayList const* m_paint_command_cache_source_display_list { nullptr };
+    Painting::HitTestDisplayList const* m_hit_test_item_cache_source { nullptr };
     bool m_should_show_line_box_borders { false };
     bool m_should_paint_overlay { true };
     bool m_draw_svg_geometry_for_clip_path { false };
     Gfx::AffineTransform m_svg_transform;
+    Optional<Painting::NestedMaskNodeAssignments> m_nested_mask_node_assignments;
     u64 m_paint_generation_id { 0 };
     UniqueNodeID m_async_scrolling_document_id {};
+    Painting::AccumulatedVisualContextTree const* m_async_scrolling_visual_context_tree { nullptr };
     Painting::ScrollState const* m_async_scrolling_scroll_state { nullptr };
     bool m_has_blocking_wheel_event_listeners { false };
     bool m_has_blocking_wheel_event_region_covering_viewport { false };

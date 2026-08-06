@@ -1,11 +1,10 @@
 // https://html.spec.whatwg.org/multipage/dom.html#htmlorsvgelement
 interface mixin HTMLOrSVGOrMathMLElement {
     [SameObject] readonly attribute DOMStringMap dataset;
-    attribute DOMString nonce; // intentionally no [CEReactions]
+    attribute Utf16DOMString nonce; // intentionally no [CEReactions]
 
     [CEReactions, Reflect] attribute boolean autofocus;
     [CEReactions] attribute long tabIndex;
-    // FIXME: Support the optional FocusOptions parameter.
-    undefined focus();
+    undefined focus(optional FocusOptions options = {});
     undefined blur();
 };

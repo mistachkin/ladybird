@@ -17,8 +17,10 @@
 #include <AK/Time.h>
 #include <AK/Try.h>
 #include <AK/TypeList.h>
+#include <AK/Utf16FlyString.h>
 #include <AK/Variant.h>
 #include <LibCore/Forward.h>
+#include <LibCore/SharedCircularQueue.h>
 #include <LibIPC/Attachment.h>
 #include <LibIPC/Concepts.h>
 #include <LibIPC/File.h>
@@ -95,6 +97,9 @@ ErrorOr<String> decode(Decoder&);
 
 template<>
 ErrorOr<Utf16String> decode(Decoder&);
+
+template<>
+ErrorOr<Utf16FlyString> decode(Decoder&);
 
 template<>
 ErrorOr<ByteString> decode(Decoder&);
@@ -204,6 +209,13 @@ ErrorOr<T> decode(Decoder& decoder)
     }
 
     return hashmap;
+}
+
+template<Concepts::SharedSingleProducerCircularQueue T>
+ErrorOr<T> decode(Decoder& decoder)
+{
+    auto anon_file = TRY(decoder.decode<IPC::File>());
+    return T::create(anon_file.take_fd());
 }
 
 template<Concepts::Optional T>

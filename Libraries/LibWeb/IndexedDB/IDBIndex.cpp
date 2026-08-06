@@ -48,7 +48,7 @@ void IDBIndex::visit_edges(Visitor& visitor)
 }
 
 // https://w3c.github.io/IndexedDB/#dom-idbindex-name
-WebIDL::ExceptionOr<void> IDBIndex::set_name(String const& value)
+WebIDL::ExceptionOr<void> IDBIndex::set_name(Utf16String const& value)
 {
     auto& realm = this->realm();
 
@@ -101,12 +101,12 @@ WebIDL::ExceptionOr<void> IDBIndex::set_name(String const& value)
 JS::Value IDBIndex::key_path() const
 {
     return m_index->key_path().visit(
-        [&](String const& value) -> JS::Value {
-            return JS::PrimitiveString::create(realm().vm(), Utf16String::from_utf8(value));
+        [&](Utf16String const& value) -> JS::Value {
+            return JS::PrimitiveString::create(realm().vm(), value);
         },
-        [&](Vector<String> const& value) -> JS::Value {
-            return JS::Array::create_from<String>(realm(), value.span(), [&](auto const& entry) -> JS::Value {
-                return JS::PrimitiveString::create(realm().vm(), Utf16String::from_utf8(entry));
+        [&](Vector<Utf16String> const& value) -> JS::Value {
+            return JS::Array::create_from<Utf16String>(realm(), value.span(), [&](auto const& entry) -> JS::Value {
+                return JS::PrimitiveString::create(realm().vm(), entry);
             });
         });
 }
@@ -138,7 +138,7 @@ WebIDL::ExceptionOr<GC::Ref<IDBRequest>> IDBIndex::open_cursor(Optional<JS::Valu
 
     // 7. Let operation be an algorithm to run iterate a cursor with the current Realm record and cursor.
     auto operation = GC::Function<WebIDL::ExceptionOr<JS::Value>()>::create(realm.heap(), [&realm, cursor] -> WebIDL::ExceptionOr<JS::Value> {
-        return WebIDL::ExceptionOr<JS::Value>(iterate_a_cursor(realm, cursor));
+        return TRY(iterate_a_cursor(realm, cursor));
     });
 
     // 8. Let request be the result of running asynchronously execute a request with this and operation.
@@ -293,7 +293,7 @@ WebIDL::ExceptionOr<GC::Ref<IDBRequest>> IDBIndex::open_key_cursor(Optional<JS::
 
     // 7. Let operation be an algorithm to run iterate a cursor with the current Realm record and cursor.
     auto operation = GC::Function<WebIDL::ExceptionOr<JS::Value>()>::create(realm.heap(), [&realm, cursor] -> WebIDL::ExceptionOr<JS::Value> {
-        return WebIDL::ExceptionOr<JS::Value>(iterate_a_cursor(realm, cursor));
+        return TRY(iterate_a_cursor(realm, cursor));
     });
 
     // 8. Let request be the result of running asynchronously execute a request with this and operation.

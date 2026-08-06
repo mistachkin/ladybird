@@ -14,9 +14,9 @@ interface Node : EventTarget {
     const unsigned short DOCUMENT_FRAGMENT_NODE = 11;
     const unsigned short NOTATION_NODE = 12; // legacy
     readonly attribute unsigned short nodeType;
-    readonly attribute DOMString nodeName;
+    readonly attribute Utf16DOMString nodeName;
 
-    readonly attribute USVString baseURI;
+    readonly attribute Utf16USVString baseURI;
 
     readonly attribute boolean isConnected;
     readonly attribute Document? ownerDocument;
@@ -30,7 +30,7 @@ interface Node : EventTarget {
     readonly attribute Node? previousSibling;
     readonly attribute Node? nextSibling;
 
-    [CEReactions] attribute DOMString? nodeValue;
+    [CEReactions] attribute Utf16DOMString? nodeValue;
     [CEReactions] attribute Utf16DOMString? textContent;
     [CEReactions] undefined normalize();
 
@@ -47,9 +47,9 @@ interface Node : EventTarget {
     unsigned short compareDocumentPosition(Node? otherNode);
     boolean contains(Node? other);
 
-    DOMString? lookupPrefix(DOMString? namespace);
-    DOMString? lookupNamespaceURI(DOMString? prefix);
-    boolean isDefaultNamespace(DOMString? namespace);
+    Utf16DOMString? lookupPrefix(Utf16DOMString? namespace);
+    Utf16DOMString? lookupNamespaceURI(Utf16DOMString? prefix);
+    boolean isDefaultNamespace(Utf16DOMString? namespace);
 
     [ImplementedAs=pre_insert, CEReactions] Node insertBefore(Node node, Node? child);
     [CEReactions] Node appendChild(Node node);

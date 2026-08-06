@@ -671,7 +671,10 @@ static int eval_js_command(Th8_Interp* interp, void* ctx, int argc, char const**
             "to enable"sv);
     }
 
-    auto js_source = StringView { argv[1], argl[1] };
+    // ClassicScript::create takes UTF-16 source text; decode the UTF-8
+    // interpreter argument (lenient, BOM-aware) to match how script sources
+    // are decoded elsewhere in LibWeb.
+    auto js_source = Utf16String::from_utf8_with_replacement_character(StringView { argv[1], argl[1] });
 
     // Evaluate JavaScript using the same ClassicScript path that
     // <script> tags use.  This ensures proper execution context

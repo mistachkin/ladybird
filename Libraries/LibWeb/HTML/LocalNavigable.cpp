@@ -7,10 +7,15 @@
  */
 
 #include <AK/NeverDestroyed.h>
+#include <AK/Utf16String.h>
+#include <AK/Utf16StringBuilder.h>
+#include <AK/Variant.h>
 #include <LibCore/Timer.h>
 #include <LibGfx/PaintingSurface.h>
 #include <LibWeb/CSS/ComputedProperties.h>
+#include <LibWeb/CSS/PropertyID.h>
 #include <LibWeb/CSS/PseudoElement.h>
+#include <LibWeb/CSS/SerializationMode.h>
 #include <LibWeb/CSS/SystemColor.h>
 #include <LibWeb/CSS/VisualViewport.h>
 #include <LibWeb/Compositor/CompositorHost.h>
@@ -20,12 +25,17 @@
 #include <LibWeb/ContentSecurityPolicy/Violation.h>
 #include <LibWeb/Crypto/Crypto.h>
 #include <LibWeb/DOM/Document.h>
+#include <LibWeb/DOM/DocumentFragment.h>
 #include <LibWeb/DOM/DocumentLoading.h>
 #include <LibWeb/DOM/Element.h>
+#include <LibWeb/DOM/ElementFactory.h>
 #include <LibWeb/DOM/Event.h>
 #include <LibWeb/DOM/Position.h>
 #include <LibWeb/DOM/Range.h>
 #include <LibWeb/DOM/Text.h>
+#include <LibWeb/Editing/ClipboardSerializer.h>
+#include <LibWeb/Editing/EditingHistory.h>
+#include <LibWeb/Editing/Internal/Algorithms.h>
 #include <LibWeb/Fetch/Fetching/Fetching.h>
 #include <LibWeb/Fetch/Infrastructure/FetchAlgorithms.h>
 #include <LibWeb/Fetch/Infrastructure/FetchController.h>
@@ -36,8 +46,10 @@
 #include <LibWeb/HTML/BrowsingContextGroup.h>
 #include <LibWeb/HTML/DocumentState.h>
 #include <LibWeb/HTML/EventLoop/EventLoop.h>
+#include <LibWeb/HTML/HTMLBRElement.h>
 #include <LibWeb/HTML/HTMLIFrameElement.h>
 #include <LibWeb/HTML/HTMLInputElement.h>
+#include <LibWeb/HTML/HTMLParagraphElement.h>
 #include <LibWeb/HTML/History.h>
 #include <LibWeb/HTML/HistoryHandlingBehavior.h>
 #include <LibWeb/HTML/LocalNavigable.h>
@@ -56,13 +68,16 @@
 #include <LibWeb/HTML/StructuredSerialize.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/HTML/WindowProxy.h>
+#include <LibWeb/HTML/XMLSerializer.h>
 #include <LibWeb/Infra/Strings.h>
 #include <LibWeb/Layout/Node.h>
 #include <LibWeb/Layout/Viewport.h>
+#include <LibWeb/Loader/DownloadFilename.h>
 #include <LibWeb/Loader/GeneratedPagesLoader.h>
 #include <LibWeb/Page/Page.h>
+#include <LibWeb/Painting/DisplayListDamage.h>
+#include <LibWeb/Painting/DisplayListRecordingContext.h>
 #include <LibWeb/Painting/Paintable.h>
-#include <LibWeb/Painting/PaintableBox.h>
 #include <LibWeb/Painting/ViewportPaintable.h>
 #include <LibWeb/Platform/EventLoopPlugin.h>
 #include <LibWeb/Selection/Selection.h>
@@ -92,9 +107,9 @@ struct NavigationParamsFetchStateHolder : public JS::Cell {
         Fetch::Infrastructure::Request::ReferrerType request_referrer,
         ReferrerPolicy::ReferrerPolicy request_referrer_policy,
         Optional<URL::Origin> origin,
-        Variant<Empty, String, POSTResource> resource,
+        DocumentResource resource,
         bool ever_populated,
-        String navigable_target_name)
+        Utf16String navigable_target_name)
         : coop_enforcement_result(move(coop_enforcement_result))
         , current_url(move(current_url))
         , request(request)
@@ -126,7 +141,7 @@ struct NavigationParamsFetchStateHolder : public JS::Cell {
     GC::Ptr<LocalNavigable> navigable;
     ContentSecurityPolicy::Directives::Directive::NavigationType csp_navigation_type;
     TargetSnapshotParams target_snapshot_params;
-    Optional<String> navigation_id;
+    Optional<Utf16String> navigation_id;
 
     // Fields extracted from entry's document_state
     Optional<URL::Origin> initiator_origin;
@@ -138,13 +153,13 @@ struct NavigationParamsFetchStateHolder : public JS::Cell {
     Fetch::Infrastructure::Request::ReferrerType request_referrer { Fetch::Infrastructure::Request::Referrer::Client };
     ReferrerPolicy::ReferrerPolicy request_referrer_policy { ReferrerPolicy::DEFAULT_REFERRER_POLICY };
     Optional<URL::Origin> origin;
-    Variant<Empty, String, POSTResource> resource;
+    DocumentResource resource;
     bool ever_populated = false;
-    String navigable_target_name;
+    Utf16String navigable_target_name;
 
     // Accumulated redirect output
     Optional<URL::URL> redirected_url;
-    Optional<SerializationRecord> redirect_classic_history_api_state;
+    Optional<StorageSerializationRecord> redirect_classic_history_api_state;
     RefPtr<DocumentState> replacement_document_state;
     bool resource_cleared = false;
 
@@ -182,7 +197,7 @@ public:
 
     // Redirect mutations (only set by fetch path)
     Optional<URL::URL> redirected_url;
-    Optional<SerializationRecord> classic_history_api_state;
+    Optional<StorageSerializationRecord> classic_history_api_state;
     RefPtr<DocumentState> replacement_document_state;
     bool resource_cleared = false;
 
@@ -315,35 +330,108 @@ static ContentDispositionInfo parse_content_disposition(HTTP::HeaderList const& 
     return info;
 }
 
-static ByteString sanitize_suggested_download_filename(ByteString filename)
+// https://html.spec.whatwg.org/multipage/links.html#getting-the-suggested-filename
+static ByteString suggested_download_filename(URL::URL const& url, HTTP::HeaderList const& headers, Optional<ByteString> const& proposed_filename, Optional<URL::Origin> const& interface_origin)
 {
-    filename = LexicalPath::basename(move(filename));
+    // 1. Let filename be the undefined value.
+    Optional<ByteString> filename;
 
-    StringBuilder builder;
-    for (auto byte : filename.bytes()) {
-        if (byte == '\0' || byte == '/' || byte == '\\')
-            builder.append('_');
-        else
-            builder.append(static_cast<char>(byte));
+    // 2. If response has a `Content-Disposition` header, that header specifies the attachment disposition type,
+    //    and the header includes filename information, then let filename have the value specified by the header,
+    //    and jump to the step labeled sanitize below.
+    auto content_disposition = parse_content_disposition(headers);
+    if (content_disposition.is_attachment && content_disposition.filename.has_value()) {
+        filename = content_disposition.filename.value();
+        goto sanitize;
     }
 
-    auto sanitized = builder.to_byte_string();
-    if (sanitized.is_empty() || sanitized == "."sv || sanitized == ".."sv)
-        return "download";
-    return sanitized;
-}
+    // NB: Steps 3 to 10 are enclosed in a scope, so the jumps below may bypass the variables declared here.
+    {
+        // 3. Let interface origin be the origin of the Document in which the download or navigate action resulting
+        //    in the download was initiated, if any.
+        // NB: The interface origin is provided by the caller.
 
-static ByteString suggested_download_filename(URL::URL const& url, HTTP::HeaderList const& headers)
-{
-    // https://html.spec.whatwg.org/multipage/links.html#getting-the-suggested-filename
-    // FIXME: This is a partial implementation. We do not yet model the
-    //        hyperlink download attribute, trusted operation, or extension
-    //        adjustment steps.
-    auto content_disposition = parse_content_disposition(headers);
-    if (content_disposition.is_attachment && content_disposition.filename.has_value())
-        return sanitize_suggested_download_filename(content_disposition.filename.release_value());
+        // 4. Let response origin be the origin of the URL of response, unless that URL's scheme component is data,
+        //    in which case let response origin be the same as the interface origin, if any.
+        Optional<URL::Origin> response_origin = url.scheme() == "data"sv ? interface_origin : url.origin();
 
-    return sanitize_suggested_download_filename(url.basename());
+        // 5. If there is no interface origin, then let trusted operation be true. Otherwise, let trusted operation
+        //    be true if response origin is the same origin as interface origin, and false otherwise.
+        auto trusted_operation = !interface_origin.has_value() || response_origin->is_same_origin(*interface_origin);
+
+        // 6. If trusted operation is true and response has a `Content-Disposition` header and that header includes
+        //    filename information, then let filename have the value specified by the header, and jump to the step
+        //    labeled sanitize below.
+        if (trusted_operation && content_disposition.filename.has_value()) {
+            filename = content_disposition.filename.value();
+            goto sanitize;
+        }
+
+        // 7. If the download was not initiated from a hyperlink created by an a or area element, or if the element
+        //    of the hyperlink from which it was initiated did not have a download attribute when the download was
+        //    initiated, or if there was such an attribute but its value when the download was initiated was the
+        //    empty string, then jump to the step labeled no proposed filename.
+        if (!proposed_filename.has_value() || proposed_filename->is_empty())
+            goto no_proposed_filename;
+
+        // 8. Let proposed filename have the value of the download attribute of the element of the hyperlink that
+        //    initiated the download at the time the download was initiated.
+        // NB: The proposed filename is provided by the caller.
+
+        // 9. If trusted operation is true, let filename have the value of proposed filename, and jump to the step
+        //    labeled sanitize below.
+        if (trusted_operation) {
+            filename = proposed_filename.value();
+            goto sanitize;
+        }
+
+        // 10. If response has a `Content-Disposition` header and that header specifies the attachment disposition
+        //     type, let filename have the value of proposed filename, and jump to the step labeled sanitize below.
+        if (content_disposition.is_attachment) {
+            filename = proposed_filename.value();
+            goto sanitize;
+        }
+    }
+
+    // 11. No proposed filename: If trusted operation is true, or if the user indicated a preference for having the
+    //     response in question downloaded, let filename have a value derived from the URL of response in an
+    //     implementation-defined manner, and jump to the step labeled sanitize below.
+no_proposed_filename:
+    // 12. Let filename be set to the user's preferred filename or to a filename selected by the user agent, and
+    //     jump to the step labeled sanitize below.
+    // NB: In both cases the filename is derived from the URL of the response. URLs with an opaque path, such as
+    //     data: URLs, do not contain a usable filename, so the default filename is used instead.
+    if (!url.has_an_opaque_path())
+        filename = url.basename();
+
+    // 13. Sanitize: Optionally, allow the user to influence filename. For example, a user agent could prompt the
+    //     user for a filename, potentially providing the value of filename as determined above as a default value.
+sanitize:
+
+    // 14. Adjust filename to be suitable for the local file system.
+    filename = sanitize_suggested_download_filename(filename.value_or({}));
+
+    // FIXME: 15. If the platform conventions do not in any way use extensions to determine the types of file on
+    //        the file system, then return filename as the filename.
+
+    // FIXME: 16. Let claimed type be the type given by response's Content-Type metadata, if any is known. Let
+    //        named type be the type given by filename's extension, if any is known. For the purposes of this step, a
+    //        type is a mapping of a MIME type to an extension.
+
+    // FIXME: 17. If named type is consistent with the user's preferences (e.g., because the value of filename was
+    //        determined by prompting the user), then return filename as the filename.
+
+    // FIXME: 18. If claimed type and named type are the same type (i.e., the type given by response's Content-Type
+    //        metadata is consistent with the type given by filename's extension), then return filename as the filename.
+
+    // FIXME: 19. If the claimed type is known, then alter filename to add an extension corresponding to claimed
+    //        type. Otherwise, if named type is known to be potentially dangerous (e.g. it will be treated by the
+    //        platform conventions as a native executable, shell script, HTML application, or
+    //        executable-macro-capable document), then optionally alter filename to add a known-safe extension
+    //        (e.g. ".txt").
+
+    // 20. Return filename as the filename.
+    return filename.release_value();
 }
 
 static Optional<u64> response_content_length(HTTP::HeaderList const& headers)
@@ -354,8 +442,65 @@ static Optional<u64> response_content_length(HTTP::HeaderList const& headers)
     return {};
 }
 
+void LocalNavigable::start_download_for_response(GC::Ref<Fetch::Infrastructure::Response> response, URL::URL const& download_url, ByteString suggested_filename, GC::Ptr<Fetch::Infrastructure::FetchController> fetch_controller)
+{
+    auto active_window = this->active_window();
+    if (!active_window) {
+        response->release_request_for_transfer();
+        return;
+    }
+    auto& realm = active_window->realm();
+
+    auto download_id = page().client().page_did_start_download(download_url, suggested_filename, response_content_length(*response->header_list()));
+    if (!download_id.has_value()) {
+        if (fetch_controller)
+            fetch_controller->stop_fetch();
+        return;
+    }
+
+    if (fetch_controller)
+        page().client().page_did_register_download_controller(*download_id, *fetch_controller);
+
+    auto process_body_chunk = GC::create_function(realm.heap(), [navigable = GC::Ref { *this }, download_id = *download_id](ByteBuffer data) {
+        if (navigable->page().client().page_is_download_canceled(download_id))
+            return;
+
+        navigable->page().client().page_did_receive_download_data(download_id, move(data));
+    });
+
+    auto process_end_of_body = GC::create_function(realm.heap(), [navigable = GC::Ref { *this }, download_id = *download_id]() {
+        if (navigable->page().client().page_is_download_canceled(download_id))
+            return;
+
+        navigable->page().client().page_did_finish_download(download_id);
+    });
+
+    auto process_body_error = GC::create_function(realm.heap(), [navigable = GC::Ref { *this }, download_id = *download_id](JS::Value) {
+        if (navigable->page().client().page_is_download_canceled(download_id))
+            return;
+
+        navigable->page().client().page_did_fail_download(download_id, "Unable to read downloaded file"_string);
+    });
+
+    // https://fetch.spec.whatwg.org/#body-incrementally-read
+    auto reader = response->body()->incrementally_read(process_body_chunk, process_end_of_body, process_body_error, GC::Ref { realm.global_object() });
+    page().client().page_did_register_download_reader(*download_id, reader);
+    response->resume_body_delivery();
+}
+
 // https://html.spec.whatwg.org/multipage/links.html#handle-as-a-download
-static bool handle_navigation_response_as_download(JS::Realm& realm, GC::Ref<NavigationParams> navigation_params, GC::Ref<SourceSnapshotParams> source_snapshot_params, Optional<ReadonlyBytes> initial_data = {})
+void LocalNavigable::handle_as_a_download(GC::Ref<Fetch::Infrastructure::Response> response, URL::URL const& fallback_url, GC::Ptr<Fetch::Infrastructure::FetchController> fetch_controller, Optional<ByteString> proposed_filename, Optional<URL::Origin> interface_origin)
+{
+    if (!response->body())
+        return;
+
+    auto download_url = response->url().value_or(fallback_url);
+    auto suggested_filename = suggested_download_filename(download_url, *response->header_list(), proposed_filename, interface_origin);
+
+    start_download_for_response(response, download_url, move(suggested_filename), fetch_controller);
+}
+
+static bool handle_navigation_response_as_download(GC::Ref<NavigationParams> navigation_params, GC::Ref<SourceSnapshotParams> source_snapshot_params, Optional<ReadonlyBytes> initial_data = {})
 {
     auto response = navigation_params->response;
     if (!response || !response->body())
@@ -381,8 +526,8 @@ static bool handle_navigation_response_as_download(JS::Realm& realm, GC::Ref<Nav
     }
 
     auto download_url = response->url().value_or(navigation_params->request ? navigation_params->request->current_url() : URL::about_blank());
-    auto suggested_filename = suggested_download_filename(download_url, *response->header_list());
     if (auto const& request_server_request = response->request_server_request(); request_server_request.has_value()) {
+        auto suggested_filename = suggested_download_filename(download_url, *response->header_list(), {}, source_snapshot_params->fetch_client->origin());
         auto response_body_will_be_transferred_in_full = request_server_request->request && request_server_request->request->has_file_backed_response_body();
         ByteBuffer initial_data_buffer;
         if (initial_data.has_value() && !initial_data->is_empty() && !response_body_will_be_transferred_in_full)
@@ -401,42 +546,7 @@ static bool handle_navigation_response_as_download(JS::Realm& realm, GC::Ref<Nav
         return true;
     }
 
-    auto download_id = navigation_params->navigable->page().client().page_did_start_download(download_url, suggested_filename, response_content_length(*response->header_list()));
-    if (!download_id.has_value()) {
-        if (navigation_params->fetch_controller)
-            navigation_params->fetch_controller->stop_fetch();
-        return true;
-    }
-
-    if (navigation_params->fetch_controller)
-        navigation_params->navigable->page().client().page_did_register_download_controller(*download_id, *navigation_params->fetch_controller);
-
-    auto process_body_chunk = GC::create_function(realm.heap(), [navigable = navigation_params->navigable, download_id = *download_id](ByteBuffer data) {
-        if (navigable->page().client().page_is_download_canceled(download_id))
-            return;
-
-        navigable->page().client().page_did_receive_download_data(download_id, move(data));
-    });
-
-    auto process_end_of_body = GC::create_function(realm.heap(), [navigable = navigation_params->navigable, download_id = *download_id]() {
-        if (navigable->page().client().page_is_download_canceled(download_id))
-            return;
-
-        navigable->page().client().page_did_finish_download(download_id);
-    });
-
-    auto process_body_error = GC::create_function(realm.heap(), [navigable = navigation_params->navigable, download_id = *download_id](JS::Value) {
-        if (navigable->page().client().page_is_download_canceled(download_id))
-            return;
-
-        navigable->page().client().page_did_fail_download(download_id, "Unable to read downloaded file"_string);
-    });
-
-    // https://fetch.spec.whatwg.org/#body-incrementally-read
-    auto reader = response->body()->incrementally_read(process_body_chunk, process_end_of_body, process_body_error, GC::Ref { realm.global_object() });
-    navigation_params->navigable->page().client().page_did_register_download_reader(*download_id, reader);
-    response->resume_body_delivery();
-
+    navigation_params->navigable->handle_as_a_download(*response, download_url, navigation_params->fetch_controller, {}, source_snapshot_params->fetch_client->origin());
     return true;
 }
 
@@ -564,6 +674,15 @@ Vector<NonnullRefPtr<SessionHistoryEntry>>* append_nested_history_for_child_navi
         .entries { history_entry },
     };
     parent_doc_state->nested_histories().append(move(nested_history));
+
+    if (auto traversable = parent_navigable.traversable_navigable()) {
+        SessionHistoryNestedHistoryDescriptor nested_history_descriptor {
+            .id = child_navigable.id(),
+            .entries { create_session_history_entry_descriptor(history_entry) },
+        };
+        traversable->page().client().page_did_append_nested_history(parent_navigable.id(), nested_history_descriptor);
+    }
+
     return &parent_doc_state->nested_histories().last().entries;
 }
 
@@ -628,6 +747,7 @@ void LocalNavigable::set_has_been_destroyed()
     destroy_compositor_context();
     m_has_been_destroyed = true;
     resolve_all_pending_async_scroll_operations();
+    cancel_user_scroll_settlement();
 }
 
 void LocalNavigable::remove_from_all_local_navigables()
@@ -635,6 +755,7 @@ void LocalNavigable::remove_from_all_local_navigables()
     cancel_hover_update_after_async_scroll();
     destroy_compositor_context();
     resolve_all_pending_async_scroll_operations();
+    cancel_user_scroll_settlement();
 
     if (m_active_document)
         m_active_document->set_navigable(nullptr);
@@ -644,6 +765,7 @@ void LocalNavigable::remove_from_all_local_navigables()
 void LocalNavigable::finalize()
 {
     cancel_hover_update_after_async_scroll();
+    cancel_user_scroll_settlement();
     destroy_compositor_context();
     all_local_navigables().remove(*this);
     Base::finalize();
@@ -664,6 +786,10 @@ void LocalNavigable::visit_edges(Cell::Visitor& visitor)
 
     for (auto& async_scroll_operation : m_pending_async_scroll_operations)
         visitor.visit(async_scroll_operation.promise);
+    for (auto& smooth_scroll : m_main_thread_smooth_scrolls)
+        visitor.visit(smooth_scroll.promise);
+    for (auto& target : m_pending_user_scrollend_targets)
+        visitor.visit(target);
 }
 
 void LocalNavigable::NavigateParams::visit_edges(Cell::Visitor& visitor)
@@ -736,8 +862,7 @@ void LocalNavigable::set_current_session_history_entry(RefPtr<SessionHistoryEntr
 // https://html.spec.whatwg.org/multipage/document-sequences.html#initialize-the-navigable
 void LocalNavigable::initialize_navigable(NonnullRefPtr<DocumentState> document_state, GC::Ptr<LocalNavigable> parent, GC::Ref<DOM::Document> document)
 {
-    static int next_id = 0;
-    set_id(String::number(next_id++));
+    set_id(page().client().allocate_navigable_id());
 
     // 1. Assert: documentState's document is non-null.
     // NOTE: DocumentState no longer owns the document; it is passed separately and owned by the LocalNavigable.
@@ -835,8 +960,9 @@ void LocalNavigable::activate_history_entry(RefPtr<SessionHistoryEntry> entry, G
     // 4. Set navigable's active session history entry to entry.
     m_active_session_history_entry = entry;
     if (m_active_document && m_active_document != new_document) {
-        // The pending post-scroll hover refresh belongs to the outgoing document; drop it.
+        // The pending post-scroll hover refresh and scrollend settlement belong to the outgoing document; drop them.
         cancel_hover_update_after_async_scroll();
+        cancel_user_scroll_settlement();
         m_active_document->set_navigable(nullptr);
     }
     m_active_document = new_document;
@@ -884,6 +1010,11 @@ void LocalNavigable::save_persisted_state_to_active_session_history_entry()
     auto scroll_position_data = entry->scroll_position_data();
     scroll_position_data.viewport_scroll_position = viewport_scroll_offset();
     entry->set_scroll_position_data(move(scroll_position_data));
+
+    if (auto traversable = traversable_navigable()) {
+        traversable->page().client().page_did_update_session_history_entry_scroll_position_data(
+            id(), entry->navigation_api_key(), entry->scroll_position_data());
+    }
 
     // FIXME: 2. Optionally, update entry's persisted user state.
 }
@@ -938,6 +1069,17 @@ Optional<URL::Origin> LocalNavigable::active_document_origin() const
     return m_active_document->origin();
 }
 
+ReplicatedNavigableState LocalNavigable::replicated_state() const
+{
+    VERIFY(m_active_document);
+    return {
+        .target_name = target_name(),
+        .active_document_url = m_active_document->url(),
+        .active_document_origin = m_active_document->origin(),
+        .active_document_is_fully_active = m_active_document->is_fully_active(),
+    };
+}
+
 Optional<UniqueNodeID> LocalNavigable::active_document_id() const
 {
     if (!m_active_document)
@@ -948,8 +1090,9 @@ Optional<UniqueNodeID> LocalNavigable::active_document_id() const
 void LocalNavigable::set_active_document(GC::Ptr<DOM::Document> document)
 {
     if (m_active_document && m_active_document != document) {
-        // The pending post-scroll hover refresh belongs to the outgoing document; drop it.
+        // The pending post-scroll hover refresh and scrollend settlement belong to the outgoing document; drop them.
         cancel_hover_update_after_async_scroll();
+        cancel_user_scroll_settlement();
         m_active_document->set_navigable(nullptr);
     }
     m_active_document = document;
@@ -993,7 +1136,7 @@ GC::Ptr<HTML::Window> LocalNavigable::active_window()
 }
 
 // https://html.spec.whatwg.org/multipage/document-sequences.html#nav-target
-String LocalNavigable::target_name() const
+Utf16String const& LocalNavigable::target_name() const
 {
     // A navigable's target name is its active session history entry's document state's navigable target name.
     return active_session_history_entry()->document_state()->navigable_target_name();
@@ -1034,7 +1177,7 @@ GC::Ptr<LocalTraversableNavigable> LocalNavigable::traversable_navigable() const
 }
 
 // https://html.spec.whatwg.org/multipage/browsing-the-web.html#set-the-ongoing-navigation
-void LocalNavigable::set_ongoing_navigation(Variant<Empty, Traversal, String> ongoing_navigation, NavigationAPIAbortBehavior navigation_api_abort_behavior)
+void LocalNavigable::set_ongoing_navigation(Variant<Empty, Traversal, Utf16String> ongoing_navigation, NavigationAPIAbortBehavior navigation_api_abort_behavior)
 {
     // 1. If navigable's ongoing navigation is equal to newValue, then return.
     if (m_ongoing_navigation == ongoing_navigation)
@@ -1076,7 +1219,7 @@ void LocalNavigable::process_pending_navigations()
 }
 
 // https://html.spec.whatwg.org/multipage/document-sequences.html#the-rules-for-choosing-a-navigable
-LocalNavigable::ChosenNavigable LocalNavigable::choose_a_navigable(StringView name, TokenizedFeature::NoOpener no_opener, ActivateTab activate_tab, Optional<TokenizedFeature::Map const&> window_features)
+LocalNavigable::ChosenNavigable LocalNavigable::choose_a_navigable(Utf16View name, TokenizedFeature::NoOpener no_opener, ActivateTab activate_tab, Optional<TokenizedFeature::Map const&> window_features)
 {
     // 1. Let chosen be null.
     GC::Ptr<LocalNavigable> chosen = nullptr;
@@ -1088,13 +1231,13 @@ LocalNavigable::ChosenNavigable LocalNavigable::choose_a_navigable(StringView na
     auto sandboxing_flag_set = active_document()->active_sandboxing_flag_set();
 
     // 4. If name is the empty string or an ASCII case-insensitive match for "_self", then set chosen to currentNavigable.
-    if (name.is_empty() || name.equals_ignoring_ascii_case("_self"sv)) {
+    if (name.is_empty() || name.equals_ignoring_ascii_case(u"_self"sv)) {
         chosen = this;
     }
 
     // 5. Otherwise, if name is an ASCII case-insensitive match for "_parent",
     //    set chosen to currentNavigable's parent, if any, and currentNavigable otherwise.
-    else if (name.equals_ignoring_ascii_case("_parent"sv)) {
+    else if (name.equals_ignoring_ascii_case(u"_parent"sv)) {
         if (auto parent = this->parent())
             chosen = as<LocalNavigable>(*parent);
         else
@@ -1103,13 +1246,13 @@ LocalNavigable::ChosenNavigable LocalNavigable::choose_a_navigable(StringView na
 
     // 6. Otherwise, if name is an ASCII case-insensitive match for "_top",
     //    set chosen to currentNavigable's traversable navigable.
-    else if (name.equals_ignoring_ascii_case("_top"sv)) {
+    else if (name.equals_ignoring_ascii_case(u"_top"sv)) {
         chosen = traversable_navigable();
     }
 
     // 7. Otherwise, if name is not an ASCII case-insensitive match for "_blank" and noopener is false, then set chosen
     //    to the result of finding a navigable by target name given name and currentNavigable.
-    else if (!name.equals_ignoring_ascii_case("_blank"sv) && no_opener == TokenizedFeature::NoOpener::No) {
+    else if (!name.equals_ignoring_ascii_case(u"_blank"sv) && no_opener == TokenizedFeature::NoOpener::No) {
         chosen = find_a_navigable_by_target_name(name);
     }
 
@@ -1150,7 +1293,7 @@ LocalNavigable::ChosenNavigable LocalNavigable::choose_a_navigable(StringView na
                 no_opener = TokenizedFeature::NoOpener::Yes;
 
                 // 2. Set name to "_blank".
-                name = "_blank"sv;
+                name = u"_blank"sv;
 
                 // 3. Set windowType to "new with no opener".
                 window_type = WindowType::NewWithNoOpener;
@@ -1159,18 +1302,19 @@ LocalNavigable::ChosenNavigable LocalNavigable::choose_a_navigable(StringView na
             //       nested documents that are cross-origin with their top-level browsing context's active document always set noopener to true.
 
             // 5. Let targetName be the empty string.
-            String target_name;
+            Utf16String target_name;
 
             // 6. If name is not an ASCII case-insensitive match for "_blank", then set targetName to name.
-            if (!name.equals_ignoring_ascii_case("_blank"sv))
-                target_name = MUST(String::from_utf8(name));
+            if (!name.equals_ignoring_ascii_case(u"_blank"sv))
+                target_name = Utf16String::from_utf16(name);
 
             auto create_new_traversable_closure = [this, no_opener, target_name, activate_tab, window_features](GC::Ptr<BrowsingContext> opener) -> GC::Ref<LocalNavigable> {
-                auto hints = WebViewHints::from_tokenised_features(window_features.value_or({}), traversable_navigable()->page());
+                TokenizedFeature::Map empty_window_features;
+                auto hints = WebViewHints::from_tokenised_features(window_features.has_value() ? *window_features : empty_window_features, traversable_navigable()->page());
                 auto [page, window_handle] = traversable_navigable()->page().client().page_did_request_new_web_view(activate_tab, hints, no_opener);
                 auto traversable = LocalTraversableNavigable::create_a_new_top_level_traversable(*page, opener, target_name);
                 page->set_top_level_traversable(traversable);
-                traversable->set_window_handle(window_handle);
+                traversable->set_window_handle(Utf16String::from_ascii_without_validation(window_handle.bytes()));
                 return traversable;
             };
             auto create_new_traversable = GC::create_function(heap(), move(create_new_traversable_closure));
@@ -1218,7 +1362,7 @@ LocalNavigable::ChosenNavigable LocalNavigable::choose_a_navigable(StringView na
 }
 
 // https://html.spec.whatwg.org/multipage/document-sequences.html#find-a-navigable-by-target-name
-GC::Ptr<LocalNavigable> LocalNavigable::find_a_navigable_by_target_name(StringView name)
+GC::Ptr<LocalNavigable> LocalNavigable::find_a_navigable_by_target_name(Utf16View name)
 {
     // 1. Let currentDocument be currentNavigable's active document.
     auto& current_document = *active_document();
@@ -1244,7 +1388,8 @@ GC::Ptr<LocalNavigable> LocalNavigable::find_a_navigable_by_target_name(StringVi
                 continue;
 
             // 2. If navigable's target name is name, then return navigable.
-            if (navigable->target_name() == name)
+            auto const& target_name = navigable->target_name();
+            if (target_name.utf16_view() == name)
                 return *navigable;
         }
     }
@@ -1275,7 +1420,8 @@ GC::Ptr<LocalNavigable> LocalNavigable::find_a_navigable_by_target_name(StringVi
                 continue;
 
             // 3. If navigable's target name is name, then return navigable.
-            if (navigable->target_name() == name)
+            auto const& target_name = navigable->target_name();
+            if (target_name.utf16_view() == name)
                 return *navigable;
         }
     }
@@ -1399,21 +1545,21 @@ static GC::Ptr<DOM::Document> attempt_to_create_a_non_fetch_scheme_document(NonF
 
 // https://html.spec.whatwg.org/multipage/browsing-the-web.html#create-navigation-params-from-a-srcdoc-resource
 static GC::Ref<NavigationParams> create_navigation_params_from_a_srcdoc_resource(
-    Variant<Empty, String, POSTResource> const& document_resource,
+    DocumentResource const& document_resource,
     Optional<URL::Origin> const& origin,
     Variant<SerializedPolicyContainer, DocumentState::Client> const& history_policy_container_variant,
     Optional<URL::URL> const& about_base_url,
     GC::Ptr<LocalNavigable> navigable,
     TargetSnapshotParams const& target_snapshot_params,
     UserNavigationInvolvement user_involvement,
-    Optional<String> navigation_id)
+    Optional<Utf16String> navigation_id)
 {
     auto& vm = navigable->vm();
     VERIFY(navigable->active_window());
     auto& realm = navigable->active_window()->realm();
 
     // 1. Let documentResource be entry's document state's resource.
-    VERIFY(document_resource.has<String>());
+    VERIFY(document_resource.has<Utf16String>());
 
     // 2. Let response be a new response with
     //    URL: about:srcdoc
@@ -1422,7 +1568,8 @@ static GC::Ref<NavigationParams> create_navigation_params_from_a_srcdoc_resource
     auto response = Fetch::Infrastructure::Response::create(vm);
     response->url_list().append(URL::about_srcdoc());
     response->header_list()->append({ "Content-Type"sv, "text/html"sv });
-    response->set_body(Fetch::Infrastructure::byte_sequence_as_body(realm, document_resource.get<String>().bytes()));
+    auto document_resource_utf8 = MUST(document_resource.get<Utf16String>().utf16_view().to_utf8());
+    response->set_body(Fetch::Infrastructure::byte_sequence_as_body(realm, document_resource_utf8.bytes()));
 
     // 3. Let responseOrigin be the result of determining the origin given response's URL, targetSnapshotParams's sandboxing flags, and entry's document state's origin.
     auto response_origin = determine_the_origin(response->url(), target_snapshot_params.sandboxing_flags, origin);
@@ -1548,7 +1695,7 @@ static void perform_navigation_params_fetch(JS::Realm& realm, GC::Ref<Navigation
         //    and top-level origin is topLevelOrigin.
         // FIXME: Make this a proper unique opaque string.
         static int next_id = 1;
-        auto id_string = MUST(String::formatted("create-by-fetching-{}", next_id++));
+        auto id_string = Utf16String::formatted("create-by-fetching-{}", next_id++);
         state_holder->request->set_reserved_client(realm.create<Environment>(id_string, state_holder->current_url, top_level_creation_url, top_level_origin, state_holder->navigable->active_browsing_context()));
     }
 
@@ -1679,7 +1826,7 @@ static void perform_navigation_params_fetch(JS::Realm& realm, GC::Ref<Navigation
         // resource: oldDocState's resource
         // ever populated: oldDocState's ever populated
         // navigable target name: oldDocState's navigable target name
-        auto new_doc_state = DocumentState::create();
+        auto new_doc_state = DocumentState::create(state_holder->navigable->page().client().allocate_cross_process_id());
         new_doc_state->set_history_policy_container(state_holder->history_policy_container);
         new_doc_state->set_request_referrer(state_holder->request_referrer);
         new_doc_state->set_request_referrer_policy(state_holder->request_referrer_policy);
@@ -1714,14 +1861,15 @@ static void perform_navigation_params_fetch(JS::Realm& realm, GC::Ref<Navigation
 // https://html.spec.whatwg.org/multipage/browsing-the-web.html#create-navigation-params-by-fetching
 static void create_navigation_params_by_fetching(
     URL::URL url,
-    Variant<Empty, String, POSTResource> document_resource,
+    DocumentResource document_resource,
     Fetch::Infrastructure::Request::ReferrerType request_referrer,
     ReferrerPolicy::ReferrerPolicy request_referrer_policy,
     Optional<URL::Origin> initiator_origin,
+    Optional<URL::Origin> cross_process_initiator_origin,
     Variant<SerializedPolicyContainer, DocumentState::Client> history_policy_container,
     Optional<URL::URL> about_base_url,
     Optional<URL::Origin> origin,
-    String navigable_target_name,
+    Utf16String navigable_target_name,
     bool reload_pending,
     bool ever_populated,
     GC::Ptr<LocalNavigable> navigable,
@@ -1729,7 +1877,7 @@ static void create_navigation_params_by_fetching(
     TargetSnapshotParams const& target_snapshot_params,
     ContentSecurityPolicy::Directives::Directive::NavigationType csp_navigation_type,
     UserNavigationInvolvement user_involvement,
-    Optional<String> navigation_id,
+    Optional<Utf16String> navigation_id,
     GC::Ref<GC::Function<void(GC::Ref<InternalNavigationResult>)>> completion_steps)
 {
     auto& vm = navigable->vm();
@@ -1771,6 +1919,13 @@ static void create_navigation_params_by_fetching(
     //    document state's initiator origin.
     if (navigable->is_top_level_traversable())
         request->set_top_level_navigation_initiator_origin(initiator_origin);
+
+    // AD-HOC: The request's origin would normally be resolved from its client (sourceSnapshotParams's fetch client),
+    //         which is the source document's environment settings object. For a navigation handed off from another
+    //         WebContent process, that client is this process's initial about:blank document, whose origin is opaque.
+    //         Use the origin snapshotted from the real source document instead, so the Origin header is correct.
+    if (cross_process_initiator_origin.has_value())
+        request->set_origin(*cross_process_initiator_origin);
 
     // 5. If request's client is null:
     if (request->client() == nullptr) {
@@ -1823,8 +1978,17 @@ static void create_navigation_params_by_fetching(
     }
 
     // 7. If entry's document state's reload pending is true, then set request's reload-navigation flag.
-    if (reload_pending)
+    if (reload_pending) {
         request->set_reload_navigation(true);
+
+        // AD-HOC: The specs don't define HTTP cache behavior for reloads. But every major engine forces at least re-
+        //         validation of the reloaded document rather than serving it straight from cache. Use the "no-cache"
+        //         cache mode, which per Fetch "creates a conditional request if there is a response in the HTTP cache
+        //         and a normal request otherwise. It then updates the HTTP cache with the response." This matches
+        //         Chromium (FetchCacheMode::kValidateCache) and Firefox (nsIRequest::VALIDATE_ALWAYS); WebKit goes
+        //         further, and bypasses the cache entirely (ReloadIgnoringCacheData).
+        request->set_cache_mode(HTTP::CacheMode::NoCache);
+    }
 
     // 8. Otherwise, if entry's document state's ever populated is true, then set request's history-navigation flag.
     else if (ever_populated)
@@ -1927,7 +2091,9 @@ static void create_navigation_params_by_fetching(
         //     then return null.
         if (state_holder->response->is_network_error()) {
             // AD-HOC: We pass the error message if we have one in NullWithError
-            result->navigation_params = state_holder->response->network_error_message();
+            result->navigation_params = state_holder->response->network_error_message().map([](auto const& error_message) {
+                return Utf16String::from_utf8(error_message);
+            });
             completion_steps->function()(*result);
             return;
         }
@@ -1997,20 +2163,21 @@ static void create_navigation_params_by_fetching(
 // https://html.spec.whatwg.org/multipage/browsing-the-web.html#populating-a-session-history-entry
 void LocalNavigable::populate_session_history_entry_document(
     URL::URL url,
-    Variant<Empty, String, POSTResource> document_resource,
+    DocumentResource document_resource,
     Fetch::Infrastructure::Request::ReferrerType request_referrer,
     ReferrerPolicy::ReferrerPolicy request_referrer_policy,
     Optional<URL::Origin> initiator_origin,
+    Optional<URL::Origin> cross_process_initiator_origin,
     Optional<URL::Origin> origin,
     Variant<SerializedPolicyContainer, DocumentState::Client> history_policy_container,
     Optional<URL::URL> about_base_url,
-    String navigable_target_name,
+    Utf16String navigable_target_name,
     bool reload_pending,
     bool ever_populated,
     GC::Ref<SourceSnapshotParams> source_snapshot_params,
     TargetSnapshotParams const& target_snapshot_params,
     UserNavigationInvolvement user_involvement,
-    Optional<String> navigation_id,
+    Optional<Utf16String> navigation_id,
     NavigationParamsVariant navigation_params,
     ContentSecurityPolicy::Directives::Directive::NavigationType csp_navigation_type,
     bool allow_POST,
@@ -2089,13 +2256,14 @@ void LocalNavigable::populate_session_history_entry_document(
                          },
                          [](GC::Ref<NonFetchSchemeNavigationParams>) { return false; })) {
                 // 1. Set entry's document state's document to the result of creating a document for inline content that doesn't have a DOM, given navigable, null, navTimingType, and userInvolvement. The inline content should indicate to the user the sort of error that occurred.
-                auto error_message = navigation_params.has<NullOrError>() ? navigation_params.get<NullOrError>().value_or("Unknown error"_string) : "The request was denied."_string;
+                auto error_message = navigation_params.has<NullOrError>() ? navigation_params.get<NullOrError>().value_or("Unknown error"_utf16) : "The request was denied."_utf16;
+                auto error_message_utf8 = error_message.to_utf8();
 
                 auto error_url = result->redirected_url.value_or(url);
-                auto error_html = load_error_page(error_url, error_message).release_value_but_fixme_should_propagate_errors();
+                auto error_html = load_error_page(error_url, error_message_utf8).release_value_but_fixme_should_propagate_errors();
                 output->document = create_document_for_inline_content(this, navigation_id, user_involvement, [this, error_html](auto& document) {
                     auto scripting_mode = document.is_scripting_enabled() ? HTML::ParserScriptingMode::Normal : HTML::ParserScriptingMode::Disabled;
-                    auto parser = HTMLParser::create(document, error_html, scripting_mode, "utf-8"sv);
+                    auto parser = HTMLParser::create_from_byte_string(document, error_html, scripting_mode, "utf-8"sv);
                     document.set_url(URL::about_error());
                     parser->run();
 
@@ -2103,14 +2271,14 @@ void LocalNavigable::populate_session_history_entry_document(
                     // FIXME: Directly calling parser->the_end results in a deadlock, because it waits for the warning image to load.
                     //        However the response is never processed when parser->the_end is called.
                     //        Queuing a global task is a workaround for now.
-                    queue_a_task(Task::Source::Unspecified, HTML::main_thread_event_loop(), document, GC::create_function(heap(), [&document]() {
-                        HTMLParser::the_end(document);
+                    queue_a_task(Task::Source::Unspecified, HTML::main_thread_event_loop(), document, GC::create_function(heap(), [&document, parser] {
+                        HTMLParser::the_end(document, parser);
                     }));
                 });
 
                 // 2. Make document unsalvageable given entry's document state's document and "navigation-failure".
                 if (output->document)
-                    output->document->make_unsalvageable("navigation-failure"_string);
+                    output->document->make_unsalvageable("navigation-failure"_utf16);
 
                 // 3. Set saveExtraDocumentState to false.
                 output->save_extra_document_state = false;
@@ -2136,7 +2304,7 @@ void LocalNavigable::populate_session_history_entry_document(
             //    disposition type, then:
             else if (auto nav_params = navigation_params.get<GC::Ref<NavigationParams>>();
                 parse_content_disposition(*nav_params->response->header_list()).is_attachment) {
-                output->download_handled = handle_navigation_response_as_download(active_window()->realm(), nav_params, source_snapshot_params);
+                output->download_handled = handle_navigation_response_as_download(nav_params, source_snapshot_params);
                 output->save_extra_document_state = false;
             }
 
@@ -2159,7 +2327,7 @@ void LocalNavigable::populate_session_history_entry_document(
                             if (nav_params->navigable->active_browsing_context()) {
                                 output->document = load_document(nav_params, sniff_bytes);
                                 if (!output->document) {
-                                    output->download_handled = handle_navigation_response_as_download(nav_params->navigable->active_window()->realm(), nav_params, source_snapshot_params, sniff_bytes);
+                                    output->download_handled = handle_navigation_response_as_download(nav_params, source_snapshot_params, sniff_bytes);
                                     output->save_extra_document_state = false;
                                 } else {
                                     nav_params->response->resume_body_delivery();
@@ -2177,7 +2345,7 @@ void LocalNavigable::populate_session_history_entry_document(
                 // Sync path: bytes available immediately
                 output->document = load_document(nav_params, sniff_bytes.value());
                 if (!output->document) {
-                    output->download_handled = handle_navigation_response_as_download(active_window()->realm(), nav_params, source_snapshot_params, sniff_bytes.value());
+                    output->download_handled = handle_navigation_response_as_download(nav_params, source_snapshot_params, sniff_bytes.value());
                     output->save_extra_document_state = false;
                 } else {
                     nav_params->response->resume_body_delivery();
@@ -2205,7 +2373,7 @@ void LocalNavigable::populate_session_history_entry_document(
         // 1. If documentResource is a string, then set navigationParams to the result of creating navigation params
         //    from a srcdoc resource given entry, navigable, targetSnapshotParams, userInvolvement, navigationId, and
         //    navTimingType.
-        if (document_resource.has<String>()) {
+        if (document_resource.has<Utf16String>()) {
             wrap_navigation_params(create_navigation_params_from_a_srcdoc_resource(
                 document_resource,
                 origin,
@@ -2227,6 +2395,7 @@ void LocalNavigable::populate_session_history_entry_document(
                 request_referrer,
                 request_referrer_policy,
                 initiator_origin,
+                cross_process_initiator_origin,
                 history_policy_container,
                 about_base_url,
                 origin,
@@ -2417,11 +2586,30 @@ void LocalNavigable::begin_navigation(NavigateParams params)
         initiator_base_url_snapshot = source_document->base_url();
     }
 
+    // AD-HOC: If this navigation was handed off from another WebContent process, sourceDocument is merely this
+    //         process's initial about:blank document. Substitute the state that the navigate algorithm snapshotted
+    //         from the real source document in the process where the navigation started. The fetch client cannot
+    //         cross the process boundary, so the local document's environment continues to stand in for it as the
+    //         request client.
+    if (params.cross_process_source_snapshot.has_value()) {
+        auto const& snapshot = *params.cross_process_source_snapshot;
+        source_snapshot_params = heap().allocate<SourceSnapshotParams>(
+            snapshot.has_transient_activation,
+            snapshot.sandboxing_flags,
+            snapshot.allows_downloading,
+            source_snapshot_params->fetch_client,
+            create_a_policy_container_from_serialized_policy_container(heap(), snapshot.source_policy_container));
+        initiator_origin_snapshot = snapshot.initiator_origin_snapshot;
+        initiator_base_url_snapshot = snapshot.initiator_base_url_snapshot;
+        referrer_policy = snapshot.referrer_policy;
+    }
+
     // 5. If sourceDocument's node navigable is not allowed by sandboxing to navigate navigable given sourceSnapshotParams, then:
     // NOTE: This step is handled in LocalNavigable::navigate()
 
     // 7. Let navigationId be the result of generating a random UUID.
-    auto navigation_id = Crypto::generate_random_uuid();
+    auto uuid = Crypto::generate_random_uuid();
+    auto navigation_id = Utf16String::from_ascii_without_validation(uuid.bytes());
 
     // FIXME: 8. If the surrounding agent is equal to navigable's active document's relevant agent, then continue these steps.
     //           Otherwise, queue a global task on the navigation and traversal task source given navigable's active window to continue these steps.
@@ -2451,6 +2639,14 @@ void LocalNavigable::begin_navigation(NavigateParams params)
     // 12-13. Determine historyHandling for this navigation.
     history_handling = determine_history_handling_for_navigation(history_handling, url, active_document, initiator_origin_snapshot);
 
+    // FIXME: Revisit the following once the dust settles on our Navigation rewrites — specifically, whether the "the UI
+    //        process seeds the new process's active session-history entry with the target URL *before* its document has
+    //        loaded" behavior is actually a mistake that the following is just working around (papering over).
+    // AD-HOC: In addition to the spec requirements here, we also require the active document's URL (ignoring fragments)
+    //         to match. That's because: After a cross-site process swap, the UI process seeds the new process's active
+    //         session-history entry with the target URL *before* its document has loaded. So, doing just the session-
+    //         history-entry check alone would misclassify a fresh cross-document navigation as a same-document fragment
+    //         navigation — and completely skip loading the document. See issue #10312.
     // 14. If all of the following are true:
     //     - documentResource is null;
     //     - response is null;
@@ -2460,6 +2656,7 @@ void LocalNavigable::begin_navigation(NavigateParams params)
     if (document_resource.has<Empty>()
         && !response
         && url.equals(active_session_history_entry()->url(), URL::ExcludeFragment::Yes)
+        && url.equals(active_document.url(), URL::ExcludeFragment::Yes)
         && url.fragment().has_value()) {
         // 1. Navigate to a fragment given navigable, url, historyHandling, userInvolvement, sourceElement, navigationAPIState, and navigationId.
         navigate_to_a_fragment(url, to_history_handling_behavior(history_handling), user_involvement, source_element, navigation_api_state, navigation_id);
@@ -2548,8 +2745,19 @@ void LocalNavigable::begin_navigation(NavigateParams params)
         auto continue_ = navigation->fire_a_push_replace_reload_navigate_event(navigation_type, url, false, user_involvement, source_element, entry_list_for_firing, navigation_api_state_for_firing);
 
         // 5. If continue is false, then return.
-        if (!continue_)
+        if (!continue_) {
+            // AD-HOC: This navigation is over: the navigate event either canceled it, or intercepted it and already
+            //         committed it as a same-document navigation. In the spec, an intercepted navigation's queued
+            //         same-document finalize sets the navigable's ongoing navigation to null moments later; our
+            //         synchronous same-document commit replaces that queued step but deliberately preserves foreign
+            //         navigation IDs, so clear our own ID here. Leaving it stamped makes later same-document
+            //         traversals treat themselves as superseded and lets WebDriver wait forever for this navigation
+            //         to finish. Preserve the Navigation API state: an intercepted navigate event stays ongoing
+            //         until its handlers settle.
+            if (ongoing_navigation() == navigation_id)
+                set_ongoing_navigation(Empty {}, NavigationAPIAbortBehavior::Preserve);
             return;
+        }
     }
 
     // FIXME: 22. If sourceDocument is navigable's container document, then reserve deferred fetch quota for navigable's container given url's origin.
@@ -2565,11 +2773,17 @@ void LocalNavigable::begin_navigation(NavigateParams params)
         // 1. Let unloadPromptCanceled be the result of checking if unloading is user-canceled for navigable's active document's inclusive descendant navigables.
         traversable_navigable()->check_if_unloading_is_canceled(this->active_document()->inclusive_descendant_navigables(),
             GC::create_function(heap(), [this, source_snapshot_params, target_snapshot_params, csp_navigation_type, document_resource, url, navigation_id, referrer_policy, initiator_origin_snapshot, response, history_handling, initiator_base_url_snapshot, user_involvement, params = move(params)](LocalTraversableNavigable::CheckIfUnloadingIsCanceledResult unload_prompt_canceled) mutable {
+                // AD-HOC: Not in the spec but we should not navigate a navigable that has been destroyed.
+                if (has_been_destroyed()) {
+                    set_delaying_load_events(false);
+                    return;
+                }
+
                 // 2. If unloadPromptCanceled is not "continue", or navigable's ongoing navigation is no longer navigationId:
                 if (unload_prompt_canceled != LocalTraversableNavigable::CheckIfUnloadingIsCanceledResult::Continue) {
                     // FIXME: 1. Invoke WebDriver BiDi navigation failed with navigable and a new WebDriver BiDi navigation status whose id is navigationId, status is "canceled", and url is url.
                     if (is_top_level_traversable())
-                        active_browsing_context()->page().client().page_did_cancel_loading(url);
+                        active_browsing_context()->page().client().page_did_cancel_loading(navigation_id, url);
 
                     // 2. Abort these steps.
                     set_delaying_load_events(false);
@@ -2599,21 +2813,39 @@ void LocalNavigable::begin_navigation(NavigateParams params)
                     return;
                 }
 
-                // AD-HOC: If we are not able to continue in this process, request a new process from the UI.
+                // AD-HOC: If we are not able to continue in this process, request a new process from the UI. The new
+                //         process cannot snapshot the source document (it only exists in this process), so hand over
+                //         the state that the navigate algorithm snapshotted from it. Browser-UI navigations hand over
+                //         nothing: per spec their sourceDocument is null and their source snapshot params and
+                //         initiator origin have fixed values, which the new process provides on its own.
                 auto& page_client = active_browsing_context()->page().client();
                 auto is_top_level_navigation = is_top_level_traversable();
                 auto target = is_top_level_navigation ? NavigationTarget::TopLevel : NavigationTarget::IFrame;
-                auto frame_id = is_top_level_navigation ? Optional<String> {} : Optional<String> { id() };
+                auto frame_id = is_top_level_navigation ? Optional<CrossProcessId> {} : Optional<CrossProcessId> { id() };
                 auto process_decision = page_client.decide_navigation_process(this->active_document()->url(), url, target, move(frame_id));
-                if (process_decision == NavigationProcessDecision::Remote && is_top_level_navigation) {
-                    page_client.request_new_process_for_navigation(url, document_resource, history_handling);
-                    set_delaying_load_events(false);
-                    return;
-                }
                 if (process_decision == NavigationProcessDecision::Remote) {
-                    if (has_compositor_context())
-                        compositor_context().set_parent_context({});
-                    page_client.request_new_process_for_child_frame_navigation(id(), url, document_resource, history_handling);
+                    Optional<NavigationSourceSnapshot> source_snapshot;
+                    if (user_involvement != UserNavigationInvolvement::BrowserUI) {
+                        source_snapshot = NavigationSourceSnapshot {
+                            .has_transient_activation = source_snapshot_params->has_transient_activation,
+                            .sandboxing_flags = source_snapshot_params->sandboxing_flags,
+                            .allows_downloading = source_snapshot_params->allows_downloading,
+                            .source_policy_container = source_snapshot_params->source_policy_container->serialize(),
+                            .initiator_origin_snapshot = initiator_origin_snapshot,
+                            .initiator_base_url_snapshot = initiator_base_url_snapshot,
+                            .referrer = params.cross_process_source_snapshot.has_value()
+                                ? params.cross_process_source_snapshot->referrer
+                                : params.source_document->url(),
+                            .referrer_policy = referrer_policy,
+                        };
+                    }
+                    if (is_top_level_navigation) {
+                        page_client.request_new_process_for_navigation(url, document_resource, history_handling, source_snapshot);
+                    } else {
+                        if (has_compositor_context())
+                            compositor_context().set_parent_context({});
+                        page_client.request_new_process_for_child_frame_navigation(id(), url, document_resource, history_handling, source_snapshot);
+                    }
                     set_delaying_load_events(false);
                     return;
                 }
@@ -2627,7 +2859,7 @@ void LocalNavigable::begin_navigation(NavigateParams params)
 
                 // AD-HOC: Tell the UI that we started loading.
                 if (is_top_level_traversable()) {
-                    active_browsing_context()->page().client().page_did_start_loading(url, document_resource, false, history_handling);
+                    active_browsing_context()->page().client().page_did_start_loading(navigation_id, url, document_resource, false, history_handling);
                 }
 
                 // AD-HOC: Subsequent steps will fail if the navigable doesn't have an active window.
@@ -2646,19 +2878,25 @@ void LocalNavigable::begin_navigation(NavigateParams params)
                 //    initiator origin: initiatorOriginSnapshot
                 //    resource: documentResource
                 //    navigable target name: navigable's target name
-                auto document_state = DocumentState::create();
+                auto document_state = DocumentState::create(page().client().allocate_cross_process_id());
                 document_state->set_request_referrer_policy(referrer_policy);
                 document_state->set_initiator_origin(initiator_origin_snapshot);
                 document_state->set_resource(document_resource);
                 document_state->set_navigable_target_name(target_name());
 
+                // AD-HOC: The request referrer normally stays "client" and is resolved from the fetch client, but for
+                //         a navigation handed off from another process, that client belongs to the source document in
+                //         the process where the navigation started. Use the referrer snapshotted there instead.
+                if (params.cross_process_source_snapshot.has_value())
+                    document_state->set_request_referrer(params.cross_process_source_snapshot->referrer);
+
                 // 5. If url matches about:blank or is about:srcdoc, then:
                 // FIXME: Is calling url_matches_about_srcdoc() correct? https://github.com/whatwg/html/issues/10900
                 if (url_matches_about_blank(url) || url_matches_about_srcdoc(url)) {
                     // AD-HOC: document_resource cannot have an Empty if the url is about:srcdoc since we rely on document_resource
-                    //         having a String to call create_navigation_params_from_a_srcdoc_resource
+                    //         having a Utf16String to call create_navigation_params_from_a_srcdoc_resource
                     if (url_matches_about_srcdoc(url) && document_resource.has<Empty>()) {
-                        document_state->set_resource({ String {} });
+                        document_state->set_resource({ Utf16String {} });
                     }
                     // 1. Set documentState's origin to initiatorOriginSnapshot.
                     document_state->set_origin(document_state->initiator_origin());
@@ -2763,6 +3001,7 @@ void LocalNavigable::begin_navigation(NavigateParams params)
                     history_entry->document_state()->request_referrer(),
                     history_entry->document_state()->request_referrer_policy(),
                     history_entry->document_state()->initiator_origin(),
+                    params.cross_process_source_snapshot.has_value() ? Optional<URL::Origin> { params.cross_process_source_snapshot->initiator_origin_snapshot } : Optional<URL::Origin> {},
                     history_entry->document_state()->origin(),
                     history_entry->document_state()->history_policy_container(),
                     history_entry->document_state()->about_base_url(),
@@ -2772,7 +3011,7 @@ void LocalNavigable::begin_navigation(NavigateParams params)
                     source_snapshot_params, target_snapshot_params, user_involvement, navigation_id, navigation_params, csp_navigation_type, true, GC::create_function(heap(), [this, history_entry, history_handling, navigation_id, user_involvement](GC::Ptr<PopulateSessionHistoryEntryDocumentOutput> output) {
                         if (output && output->download_handled) {
                             if (is_top_level_traversable())
-                                active_browsing_context()->page().client().page_did_cancel_loading(history_entry->url());
+                                active_browsing_context()->page().client().page_did_cancel_loading(navigation_id, history_entry->url());
                             set_ongoing_navigation({});
                             set_delaying_load_events(false);
                             return;
@@ -2805,7 +3044,7 @@ void LocalNavigable::begin_navigation(NavigateParams params)
 }
 
 // https://html.spec.whatwg.org/multipage/browsing-the-web.html#navigate-fragid
-void LocalNavigable::navigate_to_a_fragment(URL::URL const& url, HistoryHandlingBehavior history_handling, UserNavigationInvolvement user_involvement, GC::Ptr<DOM::Element> source_element, Optional<SerializationRecord> navigation_api_state, String navigation_id)
+void LocalNavigable::navigate_to_a_fragment(URL::URL const& url, HistoryHandlingBehavior history_handling, UserNavigationInvolvement user_involvement, GC::Ptr<DOM::Element> source_element, Optional<StorageSerializationRecord> navigation_api_state, Utf16String navigation_id)
 {
     // 1. Let navigation be navigable's active window's navigation API.
     VERIFY(active_window());
@@ -2903,7 +3142,7 @@ void LocalNavigable::navigate_to_a_fragment(URL::URL const& url, HistoryHandling
 }
 
 // https://html.spec.whatwg.org/multipage/browsing-the-web.html#evaluate-a-javascript:-url
-GC::Ptr<DOM::Document> LocalNavigable::evaluate_javascript_url(URL::URL const& url, URL::Origin const& new_document_origin, UserNavigationInvolvement user_involvement, String navigation_id)
+GC::Ptr<DOM::Document> LocalNavigable::evaluate_javascript_url(URL::URL const& url, URL::Origin const& new_document_origin, UserNavigationInvolvement user_involvement, Utf16String navigation_id)
 {
     auto& vm = this->vm();
     VERIFY(active_window());
@@ -2924,7 +3163,8 @@ GC::Ptr<DOM::Document> LocalNavigable::evaluate_javascript_url(URL::URL const& u
     auto encoded_script_source = url_string.bytes_as_string_view().substring_view(11);
 
     // 3. Let scriptSource be the UTF-8 decoding of the percent-decoding of encodedScriptSource.
-    auto script_source = URL::percent_decode(encoded_script_source);
+    auto percent_decoded_script_source = URL::percent_decode(encoded_script_source);
+    auto script_source = Utf16String::from_utf8(percent_decoded_script_source.view());
 
     // 4. Let settings be targetNavigable's active document's relevant settings object.
     auto& settings = active_document()->relevant_settings_object();
@@ -2939,11 +3179,11 @@ GC::Ptr<DOM::Document> LocalNavigable::evaluate_javascript_url(URL::URL const& u
     auto evaluation_status = script->run();
 
     // 8. Let result be null.
-    String result;
+    Optional<Utf16View> result;
 
     // 9. If evaluationStatus is a normal completion, and evaluationStatus.[[Value]] is a String, then set result to evaluationStatus.[[Value]].
     if (evaluation_status.type() == JS::Completion::Type::Normal && evaluation_status.value().is_string()) {
-        result = evaluation_status.value().as_string().utf16_string_view().to_utf8_but_should_be_ported_to_utf16();
+        result = evaluation_status.value().as_string().utf16_string_view();
     } else {
         // 10. Otherwise, return null.
         return nullptr;
@@ -2953,10 +3193,11 @@ GC::Ptr<DOM::Document> LocalNavigable::evaluate_javascript_url(URL::URL const& u
     //     URL: targetNavigable's active document's URL
     //     header list: «(`Content-Type`, `text/html;charset=utf-8`)»
     //     body: the UTF-8 encoding of result, as a body
+    auto result_utf8 = MUST(result->to_utf8());
     auto response = Fetch::Infrastructure::Response::create(vm);
     response->url_list().append(active_document()->url());
     response->header_list()->append({ "Content-Type"sv, "text/html"sv });
-    response->set_body(Fetch::Infrastructure::byte_sequence_as_body(realm, result.bytes()));
+    response->set_body(Fetch::Infrastructure::byte_sequence_as_body(realm, result_utf8.bytes()));
 
     // 12. Let policyContainer be targetNavigable's active document's policy container.
     auto const& policy_container = active_document()->policy_container();
@@ -3016,11 +3257,11 @@ GC::Ptr<DOM::Document> LocalNavigable::evaluate_javascript_url(URL::URL const& u
 
     // 17. Return the result of loading an HTML document given navigationParams.
     // NB: The response body is a known byte sequence, so we can pass it directly for sniffing.
-    return load_document(navigation_params, result.bytes());
+    return load_document(navigation_params, result_utf8.bytes());
 }
 
 // https://html.spec.whatwg.org/multipage/browsing-the-web.html#navigate-to-a-javascript:-url
-void LocalNavigable::navigate_to_a_javascript_url(URL::URL const& url, HistoryHandlingBehavior history_handling, GC::Ref<SourceSnapshotParams> source_snapshot_params, URL::Origin const& initiator_origin, UserNavigationInvolvement user_involvement, ContentSecurityPolicy::Directives::Directive::NavigationType csp_navigation_type, InitialInsertion initial_insertion, String navigation_id)
+void LocalNavigable::navigate_to_a_javascript_url(URL::URL const& url, HistoryHandlingBehavior history_handling, GC::Ref<SourceSnapshotParams> source_snapshot_params, URL::Origin const& initiator_origin, UserNavigationInvolvement user_involvement, ContentSecurityPolicy::Directives::Directive::NavigationType csp_navigation_type, InitialInsertion initial_insertion, Utf16String navigation_id)
 {
     auto& vm = this->vm();
 
@@ -3092,7 +3333,7 @@ void LocalNavigable::navigate_to_a_javascript_url(URL::URL const& url, HistoryHa
     //     resource: null
     //     ever populated: true
     //     navigable target name: oldDocState's navigable target name
-    auto document_state = DocumentState::create();
+    auto document_state = DocumentState::create(page().client().allocate_cross_process_id());
     document_state->set_history_policy_container(old_doc_state->history_policy_container());
     document_state->set_request_referrer(old_doc_state->request_referrer());
     document_state->set_request_referrer_policy(old_doc_state->request_referrer_policy());
@@ -3119,7 +3360,7 @@ void LocalNavigable::navigate_to_a_javascript_url(URL::URL const& url, HistoryHa
 }
 
 // https://html.spec.whatwg.org/multipage/browsing-the-web.html#reload
-void LocalNavigable::reload(Optional<SerializationRecord> navigation_api_state, UserNavigationInvolvement user_involvement)
+void LocalNavigable::reload(Optional<StorageSerializationRecord> navigation_api_state, UserNavigationInvolvement user_involvement)
 {
     // 1. If userInvolvement is not "browser UI", then:
     if (user_involvement != UserNavigationInvolvement::BrowserUI) {
@@ -3157,12 +3398,8 @@ void LocalNavigable::reload(Optional<SerializationRecord> navigation_api_state, 
     // 3. Let traversable be navigable's traversable navigable.
     auto traversable = traversable_navigable();
 
-    // AD-HOC: Report the reload-pending document state to the UI process before the reload history step finishes,
-    //         so the UI-owned session history mirror remains synchronized during an in-flight reload.
-    if (traversable->page().client().should_report_session_history_updates()) {
-        auto session_history_snapshot = traversable->create_session_history_snapshot();
-        traversable->page().client().page_did_update_session_history(session_history_snapshot.top_level_session_history_entries, session_history_snapshot.used_session_history_steps, session_history_snapshot.current_used_step_index);
-    }
+    traversable->page().client().page_did_set_session_history_entry_document_state_reload_pending(
+        id(), active_session_history_entry()->navigation_api_key(), true);
 
     // 4. Append the following session history traversal steps to traversable:
     traversable->append_session_history_traversal_steps(GC::create_function(heap(), [traversable, user_involvement](NonnullRefPtr<Core::Promise<Empty>> signal) {
@@ -3255,8 +3492,20 @@ TargetSnapshotParams LocalNavigable::snapshot_target_snapshot_params()
     };
 }
 
+static void report_finalized_cross_document_navigation_to_ui_process(LocalTraversableNavigable& traversable, LocalNavigable const& navigable, SessionHistoryEntry const& history_entry, RefPtr<SessionHistoryEntry> const& entry_to_replace)
+{
+    Optional<Utf16String> entry_to_replace_navigation_api_key;
+    if (entry_to_replace)
+        entry_to_replace_navigation_api_key = entry_to_replace->navigation_api_key();
+
+    traversable.page().client().page_did_finalize_cross_document_navigation(
+        navigable.id(),
+        create_session_history_entry_descriptor(history_entry),
+        entry_to_replace_navigation_api_key);
+}
+
 // https://html.spec.whatwg.org/multipage/browsing-the-web.html#finalize-a-cross-document-navigation
-void finalize_a_cross_document_navigation(GC::Ref<LocalNavigable> navigable, HistoryHandlingBehavior history_handling, UserNavigationInvolvement user_involvement, NonnullRefPtr<SessionHistoryEntry> history_entry, GC::Ptr<DOM::Document> pending_document, Optional<String> expected_ongoing_navigation_id, GC::Ref<OnApplyHistoryStepComplete> on_complete)
+void finalize_a_cross_document_navigation(GC::Ref<LocalNavigable> navigable, HistoryHandlingBehavior history_handling, UserNavigationInvolvement user_involvement, NonnullRefPtr<SessionHistoryEntry> history_entry, GC::Ptr<DOM::Document> pending_document, Optional<Utf16String> expected_ongoing_navigation_id, GC::Ref<OnApplyHistoryStepComplete> on_complete)
 {
     // NOTE: This is not in the spec but we should not navigate destroyed navigable.
     if (navigable->has_been_destroyed()) {
@@ -3280,6 +3529,17 @@ void finalize_a_cross_document_navigation(GC::Ref<LocalNavigable> navigable, His
     // NOTE: pending_document corresponds to historyEntry's document — it is the document produced by
     //       populate_session_history_entry_document, threaded here explicitly instead of being stored on the entry.
     if (!pending_document) {
+        // AD-HOC: Notify the UI that this navigation will never produce a document (e.g. an unhandled non-fetch
+        //         scheme like mailto:), so that it does not consider the page to be loading forever.
+        if (navigable->is_top_level_traversable())
+            navigable->active_browsing_context()->page().client().page_did_cancel_loading(expected_ongoing_navigation_id, history_entry->url());
+
+        // AD-HOC: Clear the ongoing navigation, like the "navigation must be a replace" and download cases do.
+        //         No history step will be applied for this navigation, so nothing else clears it, and a stale
+        //         ongoing navigation ID makes later same-document traversals consider themselves superseded.
+        if (expected_ongoing_navigation_id.has_value() && navigable->ongoing_navigation() == expected_ongoing_navigation_id)
+            navigable->set_ongoing_navigation({});
+
         on_complete->function()(HistoryStepResult::Applied);
         return;
     }
@@ -3292,7 +3552,7 @@ void finalize_a_cross_document_navigation(GC::Ref<LocalNavigable> navigable, His
     if (navigable->parent() == nullptr
         && !(pending_document->browsing_context()->is_auxiliary() && pending_document->browsing_context()->opener_browsing_context() != nullptr)
         && pending_document->origin() != navigable->active_document()->origin()) {
-        history_entry->document_state()->set_navigable_target_name(String {});
+        history_entry->document_state()->set_navigable_target_name(Utf16String {});
     }
 
     // 5. Let entryToReplace be navigable's active session history entry if historyHandling is "replace", otherwise null.
@@ -3342,6 +3602,7 @@ void finalize_a_cross_document_navigation(GC::Ref<LocalNavigable> navigable, His
 
         // 4. Append historyEntry to targetEntries.
         target_entries.append(history_entry);
+        report_finalized_cross_document_navigation_to_ui_process(*traversable, navigable, history_entry, nullptr);
     } else {
         // 1. Replace entryToReplace with historyEntry in targetEntries.
         auto entry_to_replace_iterator = target_entries.find(*entry_to_replace);
@@ -3392,6 +3653,7 @@ void finalize_a_cross_document_navigation(GC::Ref<LocalNavigable> navigable, His
 
         // 4. Set targetStep to traversable's current session history step.
         target_step = traversable->current_session_history_step();
+        report_finalized_cross_document_navigation_to_ui_process(*traversable, navigable, history_entry, entry_to_replace);
     }
 
     // 10. Apply the push/replace history step targetStep to traversable given historyHandling and userInvolvement.
@@ -3405,7 +3667,7 @@ void finalize_a_cross_document_navigation(GC::Ref<LocalNavigable> navigable, His
 }
 
 // https://html.spec.whatwg.org/multipage/browsing-the-web.html#url-and-history-update-steps
-void perform_url_and_history_update_steps(DOM::Document& document, URL::URL new_url, Optional<SerializationRecord> serialized_data, HistoryHandlingBehavior history_handling)
+void perform_url_and_history_update_steps(DOM::Document& document, URL::URL new_url, Optional<StorageSerializationRecord> serialized_data, HistoryHandlingBehavior history_handling)
 {
     // 1. Let navigable be document's node navigable.
     auto navigable = document.navigable();
@@ -3497,11 +3759,8 @@ void LocalNavigable::scroll_offset_did_change()
     //    newInlineTarget.
 
     // 3. If (doc, "scroll") is already in doc’s pending scroll events, abort these steps.
-    if (doc->pending_scroll_events().contains_slow(DOM::Document::PendingScrollEvent { *doc, EventNames::scroll }))
-        return;
-
     // 4. Append (doc, "scroll") to doc’s pending scroll events.
-    doc->pending_scroll_events().append({ *doc, EventNames::scroll });
+    doc->append_pending_scroll_event({ *doc, EventNames::scroll });
 }
 
 CSSPixelRect LocalNavigable::to_top_level_rect(CSSPixelRect const& a_rect)
@@ -3523,13 +3782,9 @@ CSSPixelPoint LocalNavigable::to_top_level_position(CSSPixelPoint a_position)
         if (!paintable)
             return {};
 
-        if (auto const* paintable_box = as_if<Painting::PaintableBox>(*paintable)) {
-            auto point = paintable_box->absolute_position();
-            point.translate_by(position);
-            position = paintable_box->transform_rect_to_viewport({ point, { 0, 0 } }).location();
-        } else {
-            position.translate_by(paintable->box_type_agnostic_position());
-        }
+        auto point = paintable->absolute_position();
+        point.translate_by(position);
+        position = paintable->transform_rect_to_viewport({ point, { 0, 0 } }).location();
 
         auto parent = ancestor->parent();
         ancestor = parent ? &as<LocalNavigable>(*parent) : nullptr;
@@ -3636,39 +3891,38 @@ static DOM::Element* element_for_async_scroll_node_stable_id(DOM::Document& docu
     return element;
 }
 
-static bool adopt_async_element_scroll_delta(DOM::Document& document, Compositor::AsyncScrollNodeStableID const& stable_id, CSSPixelPoint scroll_delta)
+static GC::Ptr<DOM::Element> adopt_async_element_scroll_delta(DOM::Document& document, Compositor::AsyncScrollNodeStableID const& stable_id, CSSPixelPoint scroll_delta)
 {
     auto* element = element_for_async_scroll_node_stable_id(document, stable_id);
     if (!element)
-        return false;
+        return {};
 
     Optional<CSS::PseudoElement> pseudo_element;
     switch (stable_id.kind) {
     case Compositor::AsyncScrollNodeKind::Viewport:
-        return false;
+        return {};
     case Compositor::AsyncScrollNodeKind::Element:
         break;
     case Compositor::AsyncScrollNodeKind::PseudoElement:
         pseudo_element = pseudo_element_from_async_scroll_node_stable_id(stable_id);
         if (!pseudo_element.has_value())
-            return false;
+            return {};
         if (!element->get_pseudo_element(*pseudo_element).has_value())
-            return false;
+            return {};
         break;
     }
 
     auto scroll_offset = element->scroll_offset(pseudo_element);
     scroll_offset.translate_by(scroll_delta);
     if (element->scroll_offset(pseudo_element) == scroll_offset)
-        return false;
+        return {};
 
     element->set_scroll_offset(pseudo_element, scroll_offset);
 
     document.set_needs_to_refresh_scroll_state(true);
-    if (!document.pending_scroll_events().contains_slow(DOM::Document::PendingScrollEvent { *element, EventNames::scroll }))
-        document.pending_scroll_events().append({ *element, EventNames::scroll });
+    document.append_pending_scroll_event({ *element, EventNames::scroll });
     element->set_needs_repaint(InvalidateDisplayList::No);
-    return true;
+    return element;
 }
 
 static void queue_async_scroll_operation_promise_resolution(GC::Ref<WebIDL::Promise> promise)
@@ -3691,7 +3945,12 @@ void LocalNavigable::wait_for_async_scroll_operation(Compositor::AsyncScrollOper
         return;
     }
 
-    m_pending_async_scroll_operations.append({ operation_id, promise });
+    m_pending_async_scroll_operations.append({
+        .operation_id = operation_id,
+        .promise = promise,
+        .stable_node_id = {},
+        .initial_scroll_offset = {},
+    });
 }
 
 void LocalNavigable::resolve_async_scroll_operation(Compositor::AsyncScrollOperationID operation_id)
@@ -3700,6 +3959,11 @@ void LocalNavigable::resolve_async_scroll_operation(Compositor::AsyncScrollOpera
         if (pending.operation_id != operation_id)
             return false;
 
+        if (pending.stable_node_id.has_value() && pending.initial_scroll_offset.has_value()) {
+            auto final_scroll_offset = scroll_offset_for(*pending.stable_node_id);
+            if (final_scroll_offset.has_value() && *final_scroll_offset != *pending.initial_scroll_offset)
+                queue_scrollend_event_for_finished_scroll(*pending.stable_node_id, pending.trigger);
+        }
         queue_async_scroll_operation_promise_resolution(pending.promise);
         return true;
     });
@@ -3709,8 +3973,288 @@ void LocalNavigable::resolve_all_pending_async_scroll_operations()
 {
     while (!m_pending_async_scroll_operations.is_empty()) {
         auto pending = m_pending_async_scroll_operations.take_last();
+        if (pending.stable_node_id.has_value() && pending.initial_scroll_offset.has_value()) {
+            auto final_scroll_offset = scroll_offset_for(*pending.stable_node_id);
+            if (final_scroll_offset.has_value() && *final_scroll_offset != *pending.initial_scroll_offset)
+                queue_scrollend_event_for_finished_scroll(*pending.stable_node_id, pending.trigger);
+        }
         queue_async_scroll_operation_promise_resolution(pending.promise);
     }
+
+    while (!m_main_thread_smooth_scrolls.is_empty()) {
+        auto smooth_scroll = m_main_thread_smooth_scrolls.take_last();
+        auto final_scroll_offset = scroll_offset_for(smooth_scroll.stable_node_id);
+        if (final_scroll_offset.has_value() && *final_scroll_offset != smooth_scroll.initial_scroll_offset)
+            queue_scrollend_event_for_finished_scroll(smooth_scroll.stable_node_id, smooth_scroll.trigger);
+        queue_async_scroll_operation_promise_resolution(smooth_scroll.promise);
+    }
+}
+
+Optional<CSSPixelPoint> LocalNavigable::scroll_offset_for(Compositor::AsyncScrollNodeStableID stable_node_id) const
+{
+    auto document = active_document();
+    if (!document)
+        return {};
+
+    if (stable_node_id.kind == Compositor::AsyncScrollNodeKind::Viewport) {
+        if (stable_node_id.node_id != document->unique_id())
+            return {};
+        return m_viewport_scroll_offset;
+    }
+
+    auto* element = element_for_async_scroll_node_stable_id(*document, stable_node_id);
+    if (!element)
+        return {};
+    return element->scroll_offset(pseudo_element_from_async_scroll_node_stable_id(stable_node_id));
+}
+
+bool LocalNavigable::set_scroll_offset_for(Compositor::AsyncScrollNodeStableID stable_node_id, CSSPixelPoint scroll_offset)
+{
+    auto document = active_document();
+    if (!document)
+        return false;
+
+    if (stable_node_id.kind == Compositor::AsyncScrollNodeKind::Viewport) {
+        if (stable_node_id.node_id != document->unique_id())
+            return false;
+        auto old_scroll_offset = m_viewport_scroll_offset;
+        perform_scroll_of_viewport_scrolling_box(scroll_offset);
+        return old_scroll_offset != m_viewport_scroll_offset;
+    }
+
+    auto* element = element_for_async_scroll_node_stable_id(*document, stable_node_id);
+    if (!element)
+        return false;
+    document->update_layout(DOM::UpdateLayoutReason::ElementScroll);
+    Optional<CSS::PseudoElement> pseudo_element = pseudo_element_from_async_scroll_node_stable_id(stable_node_id);
+    RefPtr<Painting::Paintable> paintable;
+    if (pseudo_element.has_value()) {
+        auto synthetic_pseudo_element = element->get_synthetic_pseudo_element(*pseudo_element);
+        if (!synthetic_pseudo_element.has_value() || !synthetic_pseudo_element->layout_node())
+            return false;
+        paintable = synthetic_pseudo_element->layout_node()->paintable();
+    } else {
+        paintable = element->paintable_box();
+    }
+    if (!paintable)
+        return false;
+    return paintable->set_scroll_offset(scroll_offset) == Painting::Paintable::ScrollHandled::Yes;
+}
+
+static GC::Ptr<DOM::EventTarget> scroll_event_target_for_async_scroll_node(DOM::Document& document, Compositor::AsyncScrollNodeStableID stable_node_id)
+{
+    if (stable_node_id.kind == Compositor::AsyncScrollNodeKind::Viewport) {
+        if (stable_node_id.node_id != document.unique_id())
+            return {};
+        return document;
+    }
+    return element_for_async_scroll_node_stable_id(document, stable_node_id);
+}
+
+void LocalNavigable::queue_scrollend_event(Compositor::AsyncScrollNodeStableID stable_node_id, ScrollTrigger trigger)
+{
+    auto document = active_document();
+    if (!document)
+        return;
+
+    auto target = scroll_event_target_for_async_scroll_node(*document, stable_node_id);
+    if (!target)
+        return;
+
+    queue_scrollend_event(*document, *target, trigger);
+}
+
+void LocalNavigable::queue_scrollend_event(DOM::Document& document, GC::Ref<DOM::EventTarget> target, ScrollTrigger trigger)
+{
+    if (trigger == ScrollTrigger::UserInput)
+        queue_scrollend_event_after_user_scroll(target);
+    else
+        document.append_pending_scroll_event({ target, EventNames::scrollend });
+}
+
+void LocalNavigable::queue_scrollend_event_for_finished_scroll(Compositor::AsyncScrollNodeStableID stable_node_id, ScrollTrigger trigger)
+{
+    // Position updates for the scrolling box are finished, so once no held input remains, both completion conditions
+    // for the scroll are met and its scrollend event is queued immediately.
+    if (trigger == ScrollTrigger::UserInput && m_user_scroll_gesture_hold_count == 0) {
+        auto document = active_document();
+        if (!document)
+            return;
+        auto target = scroll_event_target_for_async_scroll_node(*document, stable_node_id);
+        if (!target)
+            return;
+        m_pending_user_scrollend_targets.remove_first_matching([&](auto const& pending_target) { return pending_target.ptr() == target.ptr(); });
+        if (m_pending_user_scrollend_targets.is_empty()) {
+            if (m_user_scroll_settle_timer)
+                m_user_scroll_settle_timer->stop();
+        } else if (m_user_scroll_settle_timer && !m_user_scroll_settle_timer->is_active()) {
+            m_user_scroll_settle_timer->restart();
+        }
+        document->append_pending_scroll_event({ *target, EventNames::scrollend });
+        return;
+    }
+    queue_scrollend_event(stable_node_id, trigger);
+}
+
+void LocalNavigable::queue_scrollend_event_after_user_scroll(GC::Ref<DOM::EventTarget> target)
+{
+    // AD-HOC: Wheel events carry no gesture phase information, so a scroll gesture is considered finished once no
+    //         user scrolling has moved this navigable's scrolling boxes for 500 milliseconds.
+    static constexpr int user_scroll_settle_delay_ms = 500;
+
+    if (!m_pending_user_scrollend_targets.contains_slow(target))
+        m_pending_user_scrollend_targets.append(target);
+
+    if (!m_user_scroll_settle_timer) {
+        m_user_scroll_settle_timer = Core::Timer::create_single_shot(user_scroll_settle_delay_ms, [this] {
+            user_scroll_did_settle();
+        });
+    }
+    m_user_scroll_settle_timer->restart();
+}
+
+void LocalNavigable::defer_user_scroll_settlement()
+{
+    // User input activity postpones settlement of already latched targets, but never latches new ones, so scrolling
+    // boxes that do not move still receive no scrollend event.
+    if (m_pending_user_scrollend_targets.is_empty())
+        return;
+    m_user_scroll_settle_timer->restart();
+}
+
+void LocalNavigable::cancel_user_scroll_settlement()
+{
+    if (m_user_scroll_settle_timer)
+        m_user_scroll_settle_timer->stop();
+    m_pending_user_scrollend_targets.clear();
+}
+
+void LocalNavigable::begin_user_scroll_gesture_hold(Badge<UserScrollGestureHold>)
+{
+    ++m_user_scroll_gesture_hold_count;
+}
+
+void LocalNavigable::end_user_scroll_gesture_hold(Badge<UserScrollGestureHold>)
+{
+    VERIFY(m_user_scroll_gesture_hold_count > 0);
+    if (--m_user_scroll_gesture_hold_count > 0)
+        return;
+    if (m_pending_user_scrollend_targets.is_empty())
+        return;
+
+    if (has_in_flight_user_scroll_operation())
+        return;
+
+    // The release of the last held input completes the scroll gesture.
+    m_user_scroll_settle_timer->stop();
+    user_scroll_did_settle();
+}
+
+bool LocalNavigable::has_in_flight_user_scroll_operation() const
+{
+    for (auto const& pending : m_pending_async_scroll_operations) {
+        if (pending.trigger == ScrollTrigger::UserInput)
+            return true;
+    }
+    for (auto const& smooth_scroll : m_main_thread_smooth_scrolls) {
+        if (smooth_scroll.trigger == ScrollTrigger::UserInput)
+            return true;
+    }
+    return false;
+}
+
+void LocalNavigable::user_scroll_did_settle()
+{
+    if (has_been_destroyed())
+        return;
+
+    // A held input keeps the scroll gesture in progress; its release completes the settlement instead.
+    if (m_user_scroll_gesture_hold_count > 0)
+        return;
+
+    auto targets = move(m_pending_user_scrollend_targets);
+    auto document = active_document();
+    if (!document)
+        return;
+
+    bool queued_any_scrollend_event = false;
+    for (auto const& target : targets) {
+        if (auto* element = as_if<DOM::Element>(*target)) {
+            if (&element->document() != document.ptr() || !element->is_connected())
+                continue;
+        } else if (target.ptr() != document.ptr() && target.ptr() != document->visual_viewport().ptr()) {
+            continue;
+        }
+
+        if (document->append_pending_scroll_event({ target, EventNames::scrollend }))
+            queued_any_scrollend_event = true;
+    }
+
+    if (queued_any_scrollend_event)
+        main_thread_event_loop().queue_task_to_update_the_rendering();
+}
+
+void LocalNavigable::resolve_pending_smooth_scrolls(Compositor::AsyncScrollNodeStableID stable_node_id)
+{
+    for (size_t index = 0; index < m_pending_async_scroll_operations.size();) {
+        auto const& pending = m_pending_async_scroll_operations[index];
+        if (pending.stable_node_id != stable_node_id) {
+            ++index;
+            continue;
+        }
+        if (pending.initial_scroll_offset.has_value()) {
+            auto final_scroll_offset = scroll_offset_for(stable_node_id);
+            if (final_scroll_offset.has_value() && *final_scroll_offset != *pending.initial_scroll_offset)
+                queue_scrollend_event_for_finished_scroll(stable_node_id, pending.trigger);
+        }
+        queue_async_scroll_operation_promise_resolution(pending.promise);
+        m_pending_async_scroll_operations.remove(index);
+    }
+
+    for (size_t index = 0; index < m_main_thread_smooth_scrolls.size();) {
+        auto const& smooth_scroll = m_main_thread_smooth_scrolls[index];
+        if (smooth_scroll.stable_node_id != stable_node_id) {
+            ++index;
+            continue;
+        }
+        auto final_scroll_offset = scroll_offset_for(stable_node_id);
+        if (final_scroll_offset.has_value() && *final_scroll_offset != smooth_scroll.initial_scroll_offset)
+            queue_scrollend_event_for_finished_scroll(stable_node_id, smooth_scroll.trigger);
+        queue_async_scroll_operation_promise_resolution(smooth_scroll.promise);
+        m_main_thread_smooth_scrolls.remove(index);
+    }
+}
+
+void LocalNavigable::process_main_thread_smooth_scrolls()
+{
+    auto now = MonotonicTime::now();
+    for (size_t index = 0; index < m_main_thread_smooth_scrolls.size();) {
+        auto& smooth_scroll = m_main_thread_smooth_scrolls[index];
+        if (!scroll_offset_for(smooth_scroll.stable_node_id).has_value()) {
+            queue_async_scroll_operation_promise_resolution(smooth_scroll.promise);
+            m_main_thread_smooth_scrolls.remove(index);
+            continue;
+        }
+
+        auto elapsed_since_last_tick = now - smooth_scroll.last_tick;
+        auto minimum_tick_duration = AK::Duration::from_milliseconds(1);
+        smooth_scroll.elapsed += max(elapsed_since_last_tick, minimum_tick_duration);
+        smooth_scroll.last_tick = now;
+        auto sample = smooth_scroll.animation.sample(smooth_scroll.elapsed);
+        set_scroll_offset_for(smooth_scroll.stable_node_id, sample.offset.to_type<CSSPixels>());
+        if (sample.complete) {
+            auto final_scroll_offset = scroll_offset_for(smooth_scroll.stable_node_id);
+            if (final_scroll_offset.has_value() && *final_scroll_offset != smooth_scroll.initial_scroll_offset)
+                queue_scrollend_event_for_finished_scroll(smooth_scroll.stable_node_id, smooth_scroll.trigger);
+            queue_async_scroll_operation_promise_resolution(smooth_scroll.promise);
+            m_main_thread_smooth_scrolls.remove(index);
+        } else {
+            ++index;
+        }
+    }
+
+    if (!m_main_thread_smooth_scrolls.is_empty())
+        main_thread_event_loop().queue_task_to_update_the_rendering();
 }
 
 static bool adopt_async_viewport_scroll_delta(LocalNavigable& navigable, CSSPixelPoint scroll_delta)
@@ -3748,28 +4292,50 @@ void LocalNavigable::adopt_pending_async_scroll_offsets()
     }
 
     auto device_pixels_per_css_pixel = page().client().device_pixels_per_css_pixel();
-    bool adopted_any_scroll_delta = false;
+    bool adopted_any_scroll_offset = false;
     for (auto const& async_scroll_offset : async_scroll_updates.scroll_offsets) {
         auto css_scroll_delta = async_scroll_offset_to_css_pixels(async_scroll_offset.unadopted_scroll_delta, device_pixels_per_css_pixel);
+        bool is_programmatic_smooth_scroll = false;
+        for (auto const& pending_operation : m_pending_async_scroll_operations) {
+            if (pending_operation.stable_node_id == async_scroll_offset.stable_node_id) {
+                is_programmatic_smooth_scroll = true;
+                break;
+            }
+        }
+
+        // NB: A programmatic smooth scroll has an absolute destination. Adopt the
+        //     compositor's absolute position so that replacing scroll snapshots
+        //     during the animation cannot cause overlapping deltas to accumulate.
+        if (is_programmatic_smooth_scroll) {
+            auto css_scroll_offset = async_scroll_offset_to_css_pixels(async_scroll_offset.compositor_scroll_offset, device_pixels_per_css_pixel);
+            if (set_scroll_offset_for(async_scroll_offset.stable_node_id, css_scroll_offset)) {
+                adopted_any_scroll_offset = true;
+                dbgln_if(COMPOSITOR_DEBUG, "[Compositor] Main thread adopting async programmatic scroll offset {},{}",
+                    async_scroll_offset.compositor_scroll_offset.x(), async_scroll_offset.compositor_scroll_offset.y());
+            }
+            continue;
+        }
+
         if (async_scroll_offset.stable_node_id.kind == Compositor::AsyncScrollNodeKind::Viewport) {
             if (async_scroll_offset.stable_node_id.node_id != document->unique_id())
                 continue;
             if (adopt_async_viewport_scroll_delta(*this, css_scroll_delta)) {
-                adopted_any_scroll_delta = true;
+                adopted_any_scroll_offset = true;
                 dbgln_if(COMPOSITOR_DEBUG, "[Compositor] Main thread adopting async viewport delta {},{}",
                     async_scroll_offset.unadopted_scroll_delta.x(), async_scroll_offset.unadopted_scroll_delta.y());
             }
             continue;
         }
 
-        if (adopt_async_element_scroll_delta(*document, async_scroll_offset.stable_node_id, css_scroll_delta)) {
-            adopted_any_scroll_delta = true;
+        if (auto element = adopt_async_element_scroll_delta(*document, async_scroll_offset.stable_node_id, css_scroll_delta)) {
+            adopted_any_scroll_offset = true;
+            queue_scrollend_event_after_user_scroll(*element);
             dbgln_if(COMPOSITOR_DEBUG, "[Compositor] Main thread adopting async element delta {},{}",
                 async_scroll_offset.unadopted_scroll_delta.x(), async_scroll_offset.unadopted_scroll_delta.y());
         }
     }
 
-    if (adopted_any_scroll_delta)
+    if (adopted_any_scroll_offset)
         schedule_hover_update_after_async_scroll();
 
     for (auto operation_id : async_scroll_updates.completed_operation_ids)
@@ -3865,66 +4431,53 @@ bool LocalNavigable::is_focused() const
 {
     if (!m_page->client().has_focus())
         return false;
+
+    // A top-level traversable retains system focus while the focus chain descends into a child navigable.
+    if (is_traversable())
+        return true;
     return &m_page->focused_navigable() == this;
 }
 
-static String visible_text_in_range(DOM::Range const& range)
-{
-    // NOTE: This is an adaption of Range stringification — but we skip over DOM nodes that don't have a corresponding
-    //       layout node, and over nodes whose used value of user-select is 'none'. The latter implements
-    //       https://drafts.csswg.org/css-ui/#valdef-user-select-none — applied at the clipboard-extraction boundary.
-    StringBuilder builder;
-
-    auto is_user_select_none = [](DOM::Node const& node) {
-        auto const* layout = node.layout_node();
-        return layout && layout->user_select_used_value() == CSS::UserSelect::None;
-    };
-
-    if (range.start_container() == range.end_container() && is<DOM::Text>(*range.start_container())) {
-        if (!range.start_container()->layout_node() || is_user_select_none(*range.start_container()))
-            return String {};
-        return static_cast<DOM::Text const&>(*range.start_container()).data().substring_view(range.start_offset(), range.end_offset() - range.start_offset()).to_utf8_but_should_be_ported_to_utf16();
-    }
-
-    if (is<DOM::Text>(*range.start_container()) && range.start_container()->layout_node() && !is_user_select_none(*range.start_container()))
-        builder.append(static_cast<DOM::Text const&>(*range.start_container()).data().substring_view(range.start_offset()));
-
-    range.for_each_contained([&](GC::Ref<DOM::Node> node) {
-        if (is<DOM::Text>(*node) && node->layout_node() && !is_user_select_none(*node))
-            builder.append(static_cast<DOM::Text const&>(*node).data());
-        return IterationDecision::Continue;
-    });
-
-    if (is<DOM::Text>(*range.end_container()) && range.end_container()->layout_node() && !is_user_select_none(*range.end_container()))
-        builder.append(static_cast<DOM::Text const&>(*range.end_container()).data().substring_view(0, range.end_offset()));
-
-    return MUST(builder.to_string());
-}
-
-String LocalNavigable::selected_text() const
+Utf16String LocalNavigable::selected_text() const
 {
     auto document = active_document();
     if (!document)
-        return String {};
+        return Utf16String {};
 
     document->update_layout(DOM::UpdateLayoutReason::NavigableSelectedText);
 
     auto const* input_element = as_if<HTML::HTMLInputElement>(document->active_element());
     if (input_element && input_element->type_state() == HTML::HTMLInputElement::TypeAttributeState::Password) {
         // Apparently nobody wants bullet characters. We leave the clipboard alone here like other browsers.
-        return String {};
+        return Utf16String {};
     }
     auto selection = document->get_selection();
     if (auto form_text = selection->try_form_control_selected_text_for_stringifier(); form_text.has_value())
-        return form_text->to_utf8();
+        return form_text.release_value();
 
     auto range = selection->range();
     if (!range)
-        return String {};
-    return visible_text_in_range(*range);
+        return Utf16String {};
+    return Editing::serialize_range_as_plain_text_for_clipboard(*range);
 }
 
-String LocalNavigable::cut_selected_text() const
+Utf16String LocalNavigable::selected_html_for_clipboard() const
+{
+    auto document = active_document();
+    if (!document)
+        return {};
+
+    auto selection = document->get_selection();
+    if (selection->try_form_control_selected_text_for_stringifier().has_value())
+        return {};
+
+    auto range = selection->range();
+    if (!range)
+        return {};
+    return Editing::serialize_range_as_html_for_clipboard(*range);
+}
+
+Utf16String LocalNavigable::cut_selected_text() const
 {
     auto document = active_document();
     if (!document)
@@ -3959,16 +4512,34 @@ void LocalNavigable::select_all()
     }
 }
 
-void LocalNavigable::paste(Utf16String const& text)
+void LocalNavigable::paste(Utf16View text)
 {
     auto document = active_document();
     if (!document)
         return;
 
-    m_event_handler.handle_paste(text);
+    m_event_handler.handle_paste(text, {});
 }
 
-void LocalNavigable::set_marked_text_from_input_method(Utf16String const& text)
+void LocalNavigable::undo()
+{
+    auto document = active_document();
+    if (!document)
+        return;
+
+    (void)Editing::perform_history_action(*document, Editing::HistoryAction::Undo);
+}
+
+void LocalNavigable::redo()
+{
+    auto document = active_document();
+    if (!document)
+        return;
+
+    (void)Editing::perform_history_action(*document, Editing::HistoryAction::Redo);
+}
+
+void LocalNavigable::set_marked_text_from_input_method(Utf16View text)
 {
     // Platform input methods call this on each composition update, with the current marked/preedit text. LibWeb owns
     // the marked-text range – so each update replaces the previously-marked text. The UI doesn't track the preedit
@@ -3983,8 +4554,13 @@ void LocalNavigable::set_marked_text_from_input_method(Utf16String const& text)
     replace_input_method_marked_text(text);
 }
 
-void LocalNavigable::commit_text_from_input_method(Utf16String const& text)
+void LocalNavigable::commit_text_from_input_method(Utf16View text, i32 replacement_start, i32 replacement_length)
 {
+    if ((replacement_start != 0 || replacement_length != 0) && apply_input_method_commit_replacement(text, replacement_start, replacement_length)) {
+        m_input_method_composition_node = nullptr;
+        return;
+    }
+
     // The input method has committed text and finished the composition. Replace the marked text with the committed
     // text, then end the composition — so the text becomes ordinary editable content.
     replace_input_method_marked_text(text);
@@ -3998,7 +4574,7 @@ void LocalNavigable::unmark_text_from_input_method()
     m_input_method_composition_node = nullptr;
 }
 
-void LocalNavigable::replace_input_method_marked_text(Utf16String const& text)
+void LocalNavigable::replace_input_method_marked_text(Utf16View text)
 {
     // Insert text from a platform input method into the currently-focused editable, via the same input-events target
     // that keyboard typing uses — so observers see the correct InputEvent.inputType.
@@ -4013,15 +4589,19 @@ void LocalNavigable::replace_input_method_marked_text(Utf16String const& text)
         return;
     }
 
-    // Drop a stale composition start (for example, if the editable content was replaced out from under us).
-    if (m_input_method_composition_node && !m_input_method_composition_node->is_connected())
+    // Drop a stale composition start (for example, if the editable content was replaced out from under us, or focus moved
+    // to a different editable).
+    if (m_input_method_composition_node && (!m_input_method_composition_node->is_connected() || document->active_input_events_target(m_input_method_composition_node) != target))
         m_input_method_composition_node = nullptr;
 
     // The caret is the end of the marked text. Read it while the selection is still collapsed. Forming the marked-text
     // selection below would otherwise make cursor_position() return null for form controls.
     auto caret = document->cursor_position();
-    if (!caret)
+    if (!caret) {
+        if (!m_input_method_composition_node)
+            target->handle_insert(UIEvents::InputTypes::insertText, text);
         return;
+    }
 
     if (m_input_method_composition_node) {
         // A composition is already in progress. Select the existing marked text [composition start, caret] — so that
@@ -4035,6 +4615,62 @@ void LocalNavigable::replace_input_method_marked_text(Utf16String const& text)
     }
 
     target->handle_insert(UIEvents::InputTypes::insertText, text);
+}
+
+bool LocalNavigable::apply_input_method_commit_replacement(Utf16View text, i32 replacement_start, i32 replacement_length)
+{
+    if (replacement_length < 0)
+        return false;
+
+    auto document = active_document();
+    if (!document || !document->is_fully_active()) {
+        m_input_method_composition_node = nullptr;
+        return true;
+    }
+    auto* target = document->active_input_events_target();
+    if (!target) {
+        m_input_method_composition_node = nullptr;
+        return true;
+    }
+
+    if (m_input_method_composition_node && (!m_input_method_composition_node->is_connected() || document->active_input_events_target(m_input_method_composition_node) != target))
+        m_input_method_composition_node = nullptr;
+
+    auto caret = document->cursor_position();
+    if (!caret) {
+        if (!m_input_method_composition_node) {
+            target->handle_insert(UIEvents::InputTypes::insertText, text);
+            return true;
+        }
+        return false;
+    }
+
+    auto preedit_start_node = m_input_method_composition_node ? m_input_method_composition_node : caret->node();
+    auto preedit_start_offset = m_input_method_composition_node ? m_input_method_composition_offset : caret->offset();
+    if (!preedit_start_node || preedit_start_node != caret->node())
+        return false;
+
+    size_t replacement_start_offset = preedit_start_offset;
+    if (replacement_start < 0) {
+        auto offset_delta = static_cast<size_t>(-static_cast<i64>(replacement_start));
+        if (offset_delta > preedit_start_offset)
+            return false;
+        replacement_start_offset -= offset_delta;
+    } else {
+        auto offset_delta = static_cast<size_t>(replacement_start);
+        if (offset_delta > NumericLimits<size_t>::max() - replacement_start_offset)
+            return false;
+        replacement_start_offset += offset_delta;
+    }
+
+    auto replacement_length_as_size = static_cast<size_t>(replacement_length);
+    if (replacement_start_offset > preedit_start_node->length() || replacement_length_as_size > preedit_start_node->length() - replacement_start_offset)
+        return false;
+
+    target->set_selection_anchor(*preedit_start_node, replacement_start_offset);
+    target->set_selection_focus(*preedit_start_node, replacement_start_offset + replacement_length_as_size);
+    target->handle_insert(UIEvents::InputTypes::insertText, text);
+    return true;
 }
 
 // https://drafts.csswg.org/css-view-transitions-1/#snapshot-containing-block
@@ -4063,14 +4699,19 @@ void LocalNavigable::unregister_navigation_observer(Badge<NavigationObserver>, N
     m_navigation_observers.remove(navigation_observer);
 }
 
-// https://html.spec.whatwg.org/multipage/document-lifecycle.html#nav-stop
+// https://html.spec.whatwg.org/multipage/document-lifecycle.html#stop-document-loading
 void LocalNavigable::stop_loading()
 {
     // 1. Let document be navigable's active document.
     auto document = active_document();
 
+    // AD-HOC: The HTML Standard does not cancel planned navigations here, but Chromium, WebKit, and Gecko do so when
+    //         handling window.stop(). Prevent navigations deferred behind an ongoing traversal from starting once it
+    //         completes. See https://github.com/whatwg/html/issues/12609.
+    clear_pending_navigations();
+
     // 2. If document's unload counter is 0, and navigable's ongoing navigation is a navigation ID, then set the ongoing navigation for navigable to null.
-    if (document->unload_counter() == 0 && ongoing_navigation().has<String>())
+    if (document->unload_counter() == 0 && ongoing_navigation().has<Utf16String>())
         set_ongoing_navigation(Empty {});
 
     // 3. Abort a document and its descendants given document.
@@ -4112,6 +4753,9 @@ void LocalNavigable::repaint_after_compositor_process_reconnect()
         m_needs_repaint = true;
         m_needs_to_record_display_list = true;
         m_compositor_display_list_paint_config.clear();
+        m_compositor_display_list.clear();
+        m_compositor_visual_context_tree.clear();
+        m_compositor_scroll_state_snapshot.clear();
         m_compositor_display_list_resources = {};
     }
 
@@ -4143,12 +4787,11 @@ void LocalNavigable::set_should_show_caret_hit_test_debug_overlay(bool value)
         child_navigable->set_should_show_caret_hit_test_debug_overlay(value);
 }
 
-bool LocalNavigable::record_display_list_and_scroll_state(PaintConfig paint_config)
+bool LocalNavigable::record_display_list_and_scroll_state(PaintConfig paint_config, Gfx::IntRect* damage_rect)
 {
     if (!has_compositor_context())
         return false;
 
-    m_needs_repaint = false;
     auto document = active_document();
     if (!document)
         return false;
@@ -4165,14 +4808,20 @@ bool LocalNavigable::record_display_list_and_scroll_state(PaintConfig paint_conf
     Painting::DisplayListResourceTransaction resource_transaction;
     Optional<Painting::AccumulatedVisualContextTree> visual_context_tree;
     if (should_record_display_list) {
-        display_list = document->record_display_list(paint_config, m_display_list_resource_storage);
+        display_list = document->record_display_list(paint_config, m_display_list_resource_storage, Painting::PaintCommandCacheMode::ReadWrite);
         if (!display_list)
             return false;
         auto recorded_document_paintable = document->paintable();
         VERIFY(recorded_document_paintable);
         visual_context_tree = recorded_document_paintable->visual_context_tree();
-        display_list_resources = m_display_list_resource_storage.collect_referenced_resources(*display_list);
-        display_list_resources.include(m_display_list_resource_storage.cache_referenced_resources());
+        if (recorded_document_paintable->display_list_used_as_paint_command_cache_source() == display_list.ptr()) {
+            display_list_resources.include(recorded_document_paintable->paint_command_cache_source_referenced_resources());
+        } else {
+            // A recording downgraded to cache-read-only leaves the retained source and the cached ranges
+            // into it live, so the resources they reference must survive the pruning below.
+            display_list_resources = m_display_list_resource_storage.collect_referenced_resources(*display_list);
+            recorded_document_paintable->append_paint_command_cache_source_resources(display_list_resources);
+        }
         resource_transaction = m_display_list_resource_storage.create_transaction(
             m_compositor_display_list_resources,
             display_list_resources);
@@ -4184,7 +4833,33 @@ bool LocalNavigable::record_display_list_and_scroll_state(PaintConfig paint_conf
     document_paintable->refresh_scroll_state();
 
     Painting::ScrollStateSnapshot scroll_state_snapshot { document_paintable->scroll_state_snapshot() };
+    auto viewport_rect = page().css_to_device_rect(this->viewport_rect()).to_type<int>();
+    Gfx::IntRect surface_rect { {}, viewport_rect.size() };
+    if (damage_rect)
+        *damage_rect = surface_rect;
     if (should_record_display_list) {
+        if (damage_rect
+            && m_compositor_display_list
+            && m_compositor_visual_context_tree.has_value()
+            && m_compositor_scroll_state_snapshot.has_value()
+            && m_compositor_scroll_state_snapshot->device_offsets() == scroll_state_snapshot.device_offsets()
+            && m_compositor_display_list_paint_config == paint_config) {
+            auto computed_damage = Painting::compute_display_list_damage(
+                m_compositor_display_list->command_bytes(),
+                *m_compositor_visual_context_tree,
+                *m_compositor_scroll_state_snapshot,
+                display_list->command_bytes(),
+                *visual_context_tree,
+                scroll_state_snapshot,
+                surface_rect);
+            if (computed_damage.has_value())
+                *damage_rect = *computed_damage;
+        }
+
+        m_compositor_display_list = display_list;
+        m_compositor_visual_context_tree = *visual_context_tree;
+        m_compositor_scroll_state_snapshot = scroll_state_snapshot;
+        m_compositor_display_list_visual_context_tree_version = display_list->compatible_visual_context_tree_version();
         compositor_context().update_display_list(*display_list, visual_context_tree.release_value(), move(resource_transaction), move(scroll_state_snapshot));
         document_paintable->did_update_visual_context_tree_in_compositor();
         m_display_list_resource_storage.retain_only(display_list_resources);
@@ -4193,6 +4868,7 @@ bool LocalNavigable::record_display_list_and_scroll_state(PaintConfig paint_conf
         m_compositor_display_list_paint_config = paint_config;
     } else {
         if (visual_context_tree_needs_compositor_update) {
+            VERIFY(document_paintable->visual_context_tree().version() == m_compositor_display_list_visual_context_tree_version);
             compositor_context().update_visual_context_tree(document_paintable->visual_context_tree());
             document_paintable->did_update_visual_context_tree_in_compositor();
         }
@@ -4221,23 +4897,13 @@ void LocalNavigable::paint_next_frame()
             return;
     }
 
-    auto should_defer_main_thread_present_for_async_scroll = [&] {
-        return page().async_scrolling_enabled()
-            && compositor_context().should_defer_main_thread_present_for_async_scroll();
-    };
-    if (should_defer_main_thread_present_for_async_scroll())
-        return;
+    m_needs_repaint = false;
 
-    if (!record_display_list_and_scroll_state(paint_config))
+    Gfx::IntRect damage_rect;
+    if (!record_display_list_and_scroll_state(paint_config, &damage_rect))
         return;
-
     viewport_rect = page().css_to_device_rect(this->viewport_rect()).to_type<int>();
-    if (should_defer_main_thread_present_for_async_scroll()) {
-        dbgln_if(COMPOSITOR_DEBUG, "[Compositor] Main thread deferred present while async scroll is pending");
-        return;
-    }
-
-    compositor_context().present_frame(viewport_rect);
+    compositor_context().present_frame(viewport_rect, damage_rect);
 }
 
 void LocalNavigable::render_screenshot(Gfx::PaintingSurface& painting_surface, PaintConfig paint_config, Function<void()>&& callback)
@@ -4254,16 +4920,121 @@ void LocalNavigable::render_screenshot(Gfx::PaintingSurface& painting_surface, P
     compositor_context().request_screenshot(painting_surface, move(callback));
 }
 
-GC::Ref<WebIDL::Promise> LocalNavigable::scroll_viewport_by_delta(CSSPixelPoint delta)
+GC::Ref<WebIDL::Promise> LocalNavigable::perform_a_scroll_of_a_scrolling_box(Compositor::AsyncScrollNodeStableID stable_node_id, CSSPixelPoint position, Bindings::ScrollBehavior behavior, GC::Ptr<DOM::Element> associated_element, ScrollTrigger trigger)
+{
+    auto document = active_document();
+    VERIFY(document);
+    auto initial_scroll_offset = scroll_offset_for(stable_node_id);
+    if (!initial_scroll_offset.has_value())
+        return WebIDL::create_resolved_promise(document->realm(), JS::js_undefined());
+
+    auto should_scroll_smoothly = behavior == Bindings::ScrollBehavior::Smooth;
+    if (behavior == Bindings::ScrollBehavior::Auto && associated_element) {
+        if (auto computed_values = associated_element->computed_values())
+            should_scroll_smoothly = computed_values->scroll_behavior() == CSS::ScrollBehavior::Smooth;
+    }
+
+    // https://drafts.csswg.org/cssom-view-1/#perform-a-scroll
+    // 1. Abort any ongoing smooth scroll for box.
+    if (has_compositor_context())
+        compositor_context().cancel_smooth_scroll(stable_node_id);
+    // 2. Resolve all pending scroll promises for box.
+    resolve_pending_smooth_scrolls(stable_node_id);
+
+    // 3. Let scrollPromise be a new promise and return it while the remaining
+    //    steps run in parallel.
+    auto scroll_promise = WebIDL::create_promise(document->realm());
+
+    // 4. If the user agent honors the scroll-behavior property and either the
+    //    requested behavior or the associated element's computed behavior is
+    //    smooth, perform a smooth scroll. Otherwise, perform an instant scroll.
+    if (!should_scroll_smoothly) {
+        auto did_scroll = set_scroll_offset_for(stable_node_id, position);
+        if (did_scroll)
+            queue_scrollend_event(stable_node_id, trigger);
+        WebIDL::resolve_promise(document->realm(), scroll_promise);
+        return scroll_promise;
+    }
+
+    if (has_compositor_context()) {
+        // NB: Do not adopt compositor progress while replacing one smooth scroll
+        //     with another. All listeners in the current JavaScript task must
+        //     observe the same main-thread scroll offset. The compositor starts
+        //     the replacement from its own current visual offset.
+        auto device_pixels_per_css_pixel = page().client().device_pixels_per_css_pixel();
+        auto target_offset = Gfx::FloatPoint {
+            static_cast<float>(position.x().to_double() * device_pixels_per_css_pixel),
+            static_cast<float>(position.y().to_double() * device_pixels_per_css_pixel),
+        };
+        auto viewport_rect = page().css_to_device_rect(this->viewport_rect()).to_type<int>();
+        auto enqueue_result = compositor_context().smooth_scroll_to(stable_node_id, target_offset, viewport_rect, device_pixels_per_css_pixel);
+        if (enqueue_result.accepted) {
+            VERIFY(enqueue_result.operation_id.has_value());
+            m_pending_async_scroll_operations.append({
+                .operation_id = *enqueue_result.operation_id,
+                .promise = scroll_promise,
+                .stable_node_id = stable_node_id,
+                .initial_scroll_offset = *initial_scroll_offset,
+                .trigger = trigger,
+            });
+            return scroll_promise;
+        }
+    }
+
+    // NB: A page can lack compositor scroll state before its first paint, or
+    //     asynchronous scrolling can be disabled. Keep the same algorithm on
+    //     the main thread in those cases.
+    if (has_compositor_context()) {
+        // NB: The compositor rejected the replacement, so consume its last
+        //     offset before falling back to a main-thread animation.
+        adopt_pending_async_scroll_offsets();
+        initial_scroll_offset = scroll_offset_for(stable_node_id);
+        if (!initial_scroll_offset.has_value()) {
+            WebIDL::resolve_promise(document->realm(), scroll_promise);
+            return scroll_promise;
+        }
+    }
+    if (position == *initial_scroll_offset) {
+        WebIDL::resolve_promise(document->realm(), scroll_promise);
+        return scroll_promise;
+    }
+    m_main_thread_smooth_scrolls.append({
+        .stable_node_id = stable_node_id,
+        .animation = Compositor::SmoothScrollAnimation { initial_scroll_offset->to_type<float>(), position.to_type<float>(), 1.0 },
+        .last_tick = MonotonicTime::now(),
+        .elapsed = AK::Duration::zero(),
+        .initial_scroll_offset = *initial_scroll_offset,
+        .promise = scroll_promise,
+        .trigger = trigger,
+    });
+    main_thread_event_loop().queue_task_to_update_the_rendering();
+    return scroll_promise;
+}
+
+GC::Ref<WebIDL::Promise> LocalNavigable::perform_a_scroll_of_an_element(DOM::Element& element, CSSPixelPoint position, Bindings::ScrollBehavior behavior)
+{
+    return perform_a_scroll_of_a_scrolling_box({
+                                                   .node_id = element.unique_id(),
+                                                   .kind = Compositor::AsyncScrollNodeKind::Element,
+                                               },
+        position, behavior, element, ScrollTrigger::Programmatic);
+}
+
+GC::Ref<WebIDL::Promise> LocalNavigable::scroll_viewport_by_delta(CSSPixelPoint delta, Bindings::ScrollBehavior behavior)
 {
     auto vv = active_document()->visual_viewport();
     CSSPixelPoint page_position { CSSPixels(vv->page_left()), CSSPixels(vv->page_top()) };
-    return perform_a_scroll_of_the_viewport(page_position + delta);
+    return perform_a_scroll_of_the_viewport(page_position + delta, behavior, ScrollTrigger::UserInput);
 }
 
 // https://drafts.csswg.org/cssom-view/#viewport-perform-a-scroll
-GC::Ref<WebIDL::Promise> LocalNavigable::perform_a_scroll_of_the_viewport(CSSPixelPoint position)
+GC::Ref<WebIDL::Promise> LocalNavigable::perform_a_scroll_of_the_viewport(CSSPixelPoint position, Bindings::ScrollBehavior behavior, ScrollTrigger trigger)
 {
+    // AD-HOC: User input keeps the scroll gesture in progress even when this scroll does not move the viewport, such
+    //         as when a held scroll key repeats at the scroll extent.
+    if (trigger == ScrollTrigger::UserInput)
+        defer_user_scroll_settlement();
+
     // 1. Let doc be the viewport’s associated Document.
     auto doc = active_document();
 
@@ -4309,12 +5080,21 @@ GC::Ref<WebIDL::Promise> LocalNavigable::perform_a_scroll_of_the_viewport(CSSPix
     //     Promise returned from this step.
     TemporaryExecutionContext temporary_execution_context { doc->realm() };
 
+    // 15. Perform a scroll of vv’s scrolling box to its current scroll position + (visual dx, visual dy) with element
+    //     as the associated element, and behavior as the scroll behavior. Let scrollPromise2 be the Promise returned
+    //     from this step.
+    // FIXME: Get a Promise from this.
+    // AD-HOC: Step 15 is performed before step 14 so that the visual viewport's scroll and scrollend events are
+    //         dispatched before the window's.
+    CSSPixelPoint visual_delta { visual_dx, visual_dy };
+    vv->scroll_by(visual_delta);
+    if (visual_delta.is_zero())
+        doc->set_needs_repaint(Badge<HTML::LocalNavigable> {}, InvalidateDisplayList::No);
+    else
+        queue_scrollend_event(*doc, *vv, trigger);
+
     // NB: Must update layout before accessing paintables.
     doc->update_layout(DOM::UpdateLayoutReason::NavigableViewportScroll);
-
-    // AD-HOC: Skip scrolling unscrollable boxes, unless this scroll can pan the visual viewport.
-    if (!doc->paintable_box()->could_be_scrolled_by_wheel_event() && visual_dx == 0.0 && visual_dy == 0.0)
-        return WebIDL::create_resolved_promise(doc->realm(), JS::js_undefined());
 
     auto scrolling_area = doc->paintable_box()->scrollable_overflow_rect()->to_type<float>();
     auto new_viewport_scroll_offset = m_viewport_scroll_offset.to_type<double>() + Gfx::Point(layout_dx, layout_dy);
@@ -4322,29 +5102,15 @@ GC::Ref<WebIDL::Promise> LocalNavigable::perform_a_scroll_of_the_viewport(CSSPix
     new_viewport_scroll_offset.set_x(max(0.0, min(new_viewport_scroll_offset.x(), scrolling_area.width() - viewport_size().width().to_double())));
     new_viewport_scroll_offset.set_y(max(0.0, min(new_viewport_scroll_offset.y(), scrolling_area.height() - viewport_size().height().to_double())));
 
-    // AD-HOC: If the scroll position would not change, return early to avoid unnecessary display invalidation
-    //         and event loop scheduling (e.g. during momentum scrolling against a boundary).
-    if (new_viewport_scroll_offset.to_type<CSSPixels>() == m_viewport_scroll_offset && visual_dx == 0.0 && visual_dy == 0.0)
-        return WebIDL::create_resolved_promise(doc->realm(), JS::js_undefined());
-
-    // FIXME: Get a Promise from this.
-    perform_scroll_of_viewport_scrolling_box(new_viewport_scroll_offset.to_type<CSSPixels>());
-
-    // 15. Perform a scroll of vv’s scrolling box to its current scroll position + (visual dx, visual dy) with element
-    //     as the associated element, and behavior as the scroll behavior. Let scrollPromise2 be the Promise returned
-    //     from this step.
-    // FIXME: Get a Promise from this.
-    vv->scroll_by({ visual_dx, visual_dy });
-    if (visual_dx == 0.0 && visual_dy == 0.0)
-        doc->set_needs_repaint(Badge<HTML::LocalNavigable> {}, InvalidateDisplayList::No);
-
-    // 16. Let scrollPromise be a new Promise.
-    auto scroll_promise = WebIDL::create_promise(doc->realm());
+    auto scroll_promise = perform_a_scroll_of_a_scrolling_box({
+                                                                  .node_id = doc->unique_id(),
+                                                                  .kind = Compositor::AsyncScrollNodeKind::Viewport,
+                                                              },
+        new_viewport_scroll_offset.to_type<CSSPixels>(), behavior, doc->document_element(), trigger);
 
     // 17. Return scrollPromise, and run the remaining steps in parallel.
     // 18. Resolve scrollPromise when both scrollPromise1 and scrollPromise2 have settled.
-    // FIXME: Actually wait for scroll to occur. For now, all our scrolls are instant.
-    WebIDL::resolve_promise(doc->realm(), scroll_promise);
+    // FIXME: Actually wait for visual viewport scrolling to settle as well.
     return scroll_promise;
 }
 
@@ -4359,8 +5125,8 @@ void LocalNavigable::reset_zoom()
 bool LocalNavigable::has_inclusive_ancestor_with_visibility_hidden() const
 {
     if (auto container = this->container()) {
-        if (auto container_computed_properties = container->computed_properties()) {
-            if (container_computed_properties->visibility() == CSS::Visibility::Hidden)
+        if (auto container_computed_values = container->computed_values()) {
+            if (container_computed_values->visibility() == CSS::Visibility::Hidden)
                 return true;
         }
         if (auto ancestor_navigable = container->document().navigable()) {
@@ -4369,6 +5135,18 @@ bool LocalNavigable::has_inclusive_ancestor_with_visibility_hidden() const
         }
     }
     return false;
+}
+
+UserScrollGestureHold::UserScrollGestureHold(LocalNavigable& navigable)
+    : m_navigable(navigable)
+{
+    m_navigable->begin_user_scroll_gesture_hold({});
+}
+
+UserScrollGestureHold::~UserScrollGestureHold()
+{
+    if (m_navigable)
+        m_navigable->end_user_scroll_gesture_hold({});
 }
 
 }

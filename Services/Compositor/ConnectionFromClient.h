@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, the Ladybird developers.
+ * Copyright (c) 2026-present, the Ladybird developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -32,8 +32,8 @@ private:
 
     virtual void die() override;
 
-    virtual void did_allocate_backing_stores(Web::Compositor::CompositorContextId, i32 front_bitmap_id, Gfx::SharedImage&& front_backing_store, i32 back_bitmap_id, Gfx::SharedImage&& back_backing_store) override;
-    virtual void did_present_frame(Web::Compositor::CompositorContextId, Gfx::IntRect content_rect, i32 bitmap_id) override;
+    virtual void did_allocate_backing_stores(Web::Compositor::CompositorContextId, Vector<i32> bitmap_ids, Vector<Gfx::SharedImage>&& backing_stores) override;
+    virtual void did_present_frame(Web::Compositor::CompositorContextId, Gfx::IntRect content_rect, Gfx::IntRect damage_rect, i32 bitmap_id) override;
 
     virtual Messages::CompositorControlServer::InitTransportResponse init_transport(int peer_pid) override;
     virtual Messages::CompositorControlServer::ConnectWebContentResponse connect_web_content() override;
@@ -45,6 +45,7 @@ private:
     virtual Messages::CompositorControlServer::HandlePinchEventResponse handle_pinch_event(Web::Compositor::CompositorContextId, Web::PinchEvent) override;
     virtual Messages::CompositorControlServer::AsyncScrollByResponse async_scroll_by(Web::Compositor::CompositorContextId, Gfx::FloatPoint position, Gfx::FloatPoint delta_in_device_pixels) override;
     virtual void presented_bitmap_ready_to_paint(Web::Compositor::CompositorContextId, i32 bitmap_id) override;
+    virtual void set_client_gpu_presentation_capability(bool supported, u64 adapter_luid) override;
     virtual void crash() override;
 
     ConnectionFromWebContent* web_content_connection(i32 web_content_connection_id);

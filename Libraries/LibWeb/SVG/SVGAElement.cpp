@@ -39,7 +39,7 @@ void SVGAElement::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_target);
 }
 
-void SVGAElement::attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
+void SVGAElement::attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_)
 {
     Base::attribute_changed(name, old_value, value, namespace_);
 
@@ -47,7 +47,7 @@ void SVGAElement::attribute_changed(FlyString const& name, Optional<String> cons
         CSS::Invalidation::invalidate_style_after_hyperlink_state_change(*this);
     if (name == HTML::AttributeNames::rel) {
         if (m_rel_list)
-            m_rel_list->associated_attribute_changed(value.value_or(String {}));
+            m_rel_list->associated_attribute_changed(value.has_value() ? value->utf16_view() : u""sv);
     }
 }
 
@@ -75,7 +75,7 @@ GC::Ref<DOM::DOMTokenList> SVGAElement::rel_list()
     return *m_rel_list;
 }
 
-RefPtr<Layout::Node> SVGAElement::create_layout_node(CSS::ComputedProperties const& style)
+RefPtr<Layout::Node> SVGAElement::create_layout_node(NonnullRefPtr<CSS::ComputedValues const> style)
 {
     return make_ref_counted<Layout::SVGGraphicsBox>(document(), *this, style);
 }
@@ -98,7 +98,7 @@ void SVGAElement::activation_behavior(DOM::Event const& event)
     }
 
     // 2. Let hyperlinkSuffix be null.
-    Optional<String> hyperlink_suffix {};
+    Optional<Utf16String> hyperlink_suffix {};
 
     // FIXME: 3. If element is an a element, and event's target is an img with an ismap attribute specified, then:
 
@@ -107,9 +107,13 @@ void SVGAElement::activation_behavior(DOM::Event const& event)
 
     // FIXME: 5. If the user has expressed a preference to download the hyperlink, then set userInvolvement to "browser UI".
 
-    // FIXME: 6. If element has a download attribute, or if the user has expressed a preference to download the
-    //     hyperlink, then download the hyperlink created by element with hyperlinkSuffix set to hyperlinkSuffix and
-    //     userInvolvement set to userInvolvement.
+    // 6. If element has a download attribute, or if the user has expressed a preference to download the
+    //    hyperlink, then download the hyperlink created by element with hyperlinkSuffix set to hyperlinkSuffix and
+    //    userInvolvement set to userInvolvement.
+    if (has_attribute(HTML::AttributeNames::download)) {
+        download_the_hyperlink(hyperlink_suffix, user_involvement);
+        return;
+    }
 
     // 7. Otherwise, follow the hyperlink created by element with hyperlinkSuffix set to hyperlinkSuffix and userInvolvement set to userInvolvement.
     follow_the_hyperlink(hyperlink_suffix, user_involvement);

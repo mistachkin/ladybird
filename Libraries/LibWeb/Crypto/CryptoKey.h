@@ -20,14 +20,24 @@
 
 namespace Web::Crypto {
 
-class CryptoKey final
+// The raw key octets of an Ed25519, Ed448, X25519, or X448 ("OKP") key.
+struct OKPPublicKey {
+    ByteBuffer bytes;
+};
+
+struct OKPPrivateKey {
+    ByteBuffer bytes;
+};
+
+class WEB_API CryptoKey final
     : public Bindings::PlatformObject
     , public Bindings::Serializable {
     WEB_PLATFORM_OBJECT(CryptoKey, Bindings::PlatformObject);
     GC_DECLARE_ALLOCATOR(CryptoKey);
 
 public:
-    using InternalKeyData = Variant<ByteBuffer, JsonWebKey, ::Crypto::PK::RSAPublicKey, ::Crypto::PK::RSAPrivateKey, ::Crypto::PK::ECPublicKey, ::Crypto::PK::ECPrivateKey, ::Crypto::PK::MLDSAPublicKey, ::Crypto::PK::MLDSAPrivateKey, ::Crypto::PK::MLKEMPublicKey, ::Crypto::PK::MLKEMPrivateKey>;
+    using ImportKeyData = Variant<ByteBuffer, JsonWebKey>;
+    using InternalKeyData = Variant<ByteBuffer, ::Crypto::PK::RSAPublicKey, ::Crypto::PK::RSAPrivateKey, ::Crypto::PK::ECPublicKey, ::Crypto::PK::ECPrivateKey, ::Crypto::PK::MLDSAPublicKey, ::Crypto::PK::MLDSAPrivateKey, ::Crypto::PK::MLKEMPublicKey, ::Crypto::PK::MLKEMPrivateKey, OKPPublicKey, OKPPrivateKey>;
 
     static constexpr bool OVERRIDES_FINALIZE = true;
 
@@ -47,10 +57,10 @@ public:
     void set_usages(Vector<Bindings::KeyUsage>);
 
     InternalKeyData const& handle() const { return m_key_data; }
-    String const& algorithm_name() const;
+    Utf16String const& algorithm_name() const;
 
-    virtual WebIDL::ExceptionOr<void> serialization_steps(HTML::TransferDataEncoder&, bool for_storage, HTML::SerializationMemory&) override;
-    virtual WebIDL::ExceptionOr<void> deserialization_steps(HTML::TransferDataDecoder&, HTML::DeserializationMemory&) override;
+    virtual WebIDL::ExceptionOr<void> serialization_steps(HTML::StructuredSerializeWriter&, bool for_storage, HTML::SerializationMemory&) override;
+    virtual WebIDL::ExceptionOr<void> deserialization_steps(HTML::StructuredSerializeReader&, HTML::DeserializationMemory&) override;
 
 private:
     CryptoKey(JS::Realm&, InternalKeyData);
@@ -67,7 +77,7 @@ private:
 
     Vector<Bindings::KeyUsage> m_usages;
     InternalKeyData m_key_data; // [[handle]]
-    mutable String m_algorithm_name;
+    mutable Utf16String m_algorithm_name;
 };
 
 // https://w3c.github.io/webcrypto/#ref-for-dfn-CryptoKeyPair-2

@@ -13,7 +13,9 @@
 
 #include <AK/Assertions.h>
 #include <AK/Diagnostics.h>
+#include <AK/Error.h>
 #include <AK/Platform.h>
+#include <AK/Vector.h>
 
 #ifdef AK_OS_WINDOWS
 #    define timeval dummy_timeval
@@ -84,6 +86,34 @@ inline struct SystemApi {
 #    include <io.h>
 #    include <stdlib.h>
 
+// Converts UTF-8 text to a null-terminated UTF-16 string for use with wide-char Win32 APIs.
+inline ErrorOr<Vector<wchar_t>> to_wide_string(StringView utf8)
+{
+    int length = 0;
+    if (!utf8.is_empty()) {
+        length = MultiByteToWideChar(CP_UTF8, 0, utf8.characters_without_null_termination(), static_cast<int>(utf8.length()), nullptr, 0);
+        if (length == 0)
+            return Error::from_windows_error();
+    }
+
+    Vector<wchar_t> result;
+    TRY(result.try_resize(length + 1));
+    if (length > 0)
+        MultiByteToWideChar(CP_UTF8, 0, utf8.characters_without_null_termination(), static_cast<int>(utf8.length()), result.data(), length);
+    return result;
+}
+
+// Cached SYSTEM_INFO::dwAllocationGranularity — the required alignment for MapViewOfFile offsets.
+inline size_t system_allocation_granularity()
+{
+    static size_t granularity = [] {
+        SYSTEM_INFO system_info {};
+        GetSystemInfo(&system_info);
+        return static_cast<size_t>(system_info.dwAllocationGranularity);
+    }();
+    return granularity;
+}
+
 inline void initiate_wsa()
 {
     WSADATA wsa;
@@ -108,14 +138,35 @@ inline void override_crt_invalid_parameter_handler()
     _set_invalid_parameter_handler(invalid_parameter_handler);
 }
 
+inline UINT& saved_console_output_code_page()
+{
+    static UINT code_page = 0;
+    return code_page;
+}
+
+inline void use_utf8_console_output()
+{
+    // All Ladybird output is UTF-8; make consoles interpret it as such. The code page is a property of the console
+    // itself and outlives this process, so the original one is restored in windows_shutdown(). Save it only once:
+    // this runs both from AK/Format.cpp's static initializer and from windows_init(), and a later run would
+    // overwrite the saved value with the already-switched CP_UTF8.
+    if (saved_console_output_code_page() == 0)
+        saved_console_output_code_page() = GetConsoleOutputCP();
+    if (saved_console_output_code_page() != 0)
+        SetConsoleOutputCP(CP_UTF8);
+}
+
 inline void windows_init()
 {
     initiate_wsa();
     override_crt_invalid_parameter_handler();
+    use_utf8_console_output();
 }
 
 inline void windows_shutdown()
 {
+    if (saved_console_output_code_page() != 0 && saved_console_output_code_page() != CP_UTF8)
+        SetConsoleOutputCP(saved_console_output_code_page());
     terminate_wsa();
 }
 #endif

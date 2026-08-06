@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <AK/Utf16String.h>
 #include <LibWeb/Bindings/TransitionEvent.h>
 #include <LibWeb/DOM/Event.h>
 
@@ -16,23 +17,27 @@ class TransitionEvent final : public DOM::Event {
     GC_DECLARE_ALLOCATOR(TransitionEvent);
 
 public:
-    [[nodiscard]] static GC::Ref<TransitionEvent> create(JS::Realm&, FlyString const& event_name, Bindings::TransitionEventInit const& = {});
-    [[nodiscard]] static GC::Ref<TransitionEvent> construct_impl(JS::Realm&, FlyString const& event_name, Bindings::TransitionEventInit const& = {});
+    [[nodiscard]] static GC::Ref<TransitionEvent> create(JS::Realm&, Utf16FlyString const& event_name, Bindings::TransitionEventInit const& = {});
+    [[nodiscard]] static GC::Ref<TransitionEvent> construct_impl(JS::Realm&, Utf16FlyString const& event_name, Bindings::TransitionEventInit const& = {});
 
     virtual ~TransitionEvent() override;
 
-    String const& property_name() const { return m_property_name; }
+    Utf16String const& property_name() const { return m_property_name; }
     double elapsed_time() const { return m_elapsed_time; }
-    String const& pseudo_element() const { return m_pseudo_element; }
+    Utf16String const& pseudo_element() const { return m_pseudo_element; }
+    GC::Ptr<CSSTransition> animation() const { return m_animation; }
+
+    virtual void visit_edges(Cell::Visitor&) override;
 
 private:
-    TransitionEvent(JS::Realm&, FlyString const& event_name, Bindings::TransitionEventInit const& event_init);
+    TransitionEvent(JS::Realm&, Utf16FlyString const& event_name, Bindings::TransitionEventInit const& event_init);
 
     virtual void initialize(JS::Realm&) override;
 
-    String m_property_name {};
+    Utf16String m_property_name {};
     double m_elapsed_time {};
-    String m_pseudo_element {};
+    Utf16String m_pseudo_element {};
+    GC::Ptr<CSSTransition> m_animation;
 };
 
 }

@@ -45,7 +45,7 @@ void SVGSymbolElement::adjust_computed_style(CSS::ComputedProperties::Builder& c
     }
 }
 
-void SVGSymbolElement::attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
+void SVGSymbolElement::attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_)
 {
     Base::attribute_changed(name, old_value, value, namespace_);
     SVGFitToViewBox::attribute_changed(*this, name, value);
@@ -62,7 +62,7 @@ bool SVGSymbolElement::is_direct_child_of_use_shadow_tree() const
     return is<SVGUseElement>(host);
 }
 
-RefPtr<Layout::Node> SVGSymbolElement::create_layout_node(CSS::ComputedProperties const& style)
+RefPtr<Layout::Node> SVGSymbolElement::create_layout_node(NonnullRefPtr<CSS::ComputedValues const> style)
 {
     // https://svgwg.org/svg2-draft/render.html#TermNeverRenderedElement
     // [..] it also includes a ‘symbol’ element that is not the instance root of a use-element shadow tree.

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Utf16View.h>
 #include <LibWeb/Compositor/AsyncScrollTree.h>
 #include <LibWeb/Compositor/AsyncScrollingState.h>
 #include <LibWeb/Painting/DisplayList.h>
@@ -11,9 +12,9 @@
 
 namespace Web::Compositor {
 
-static AsyncScrollNodeID scroll_node_id_for(UniqueNodeID document_id, Painting::ScrollFrameIndex scroll_frame_index)
+static AsyncScrollNodeID scroll_node_id_for(UniqueNodeID document_id, Painting::VisualContextIndex scroll_node_index)
 {
-    return { .document_id = document_id, .scroll_frame_index = scroll_frame_index };
+    return { .document_id = document_id, .scroll_node_index = scroll_node_index };
 }
 
 static AsyncScrollNodeKind async_scroll_node_kind_for(Painting::CompositorScrollNodeKind kind)
@@ -41,8 +42,8 @@ static AsyncScrollNodeStableID stable_scroll_node_id_for(UniqueNodeID scrollable
 AsyncScrollingState async_scrolling_state_from_display_list(Painting::DisplayList const& display_list)
 {
     AsyncScrollingState async_scrolling_state;
-    Vector<Painting::ScrollFrameIndex> parent_scroll_frame_indices;
-    Vector<Painting::ScrollFrameIndex> wheel_hit_test_target_scroll_frame_indices;
+    Vector<Painting::VisualContextIndex> parent_scroll_node_indices;
+    Vector<Painting::VisualContextIndex> wheel_hit_test_target_scroll_node_indices;
     Vector<UniqueNodeID> wheel_hit_test_target_document_ids;
 
     if (auto const& metadata = display_list.async_scrolling_metadata(); metadata.has_value()) {
@@ -60,7 +61,7 @@ AsyncScrollingState async_scrolling_state_from_display_list(Painting::DisplayLis
                 .corner_radii = corner_radii,
                 .target_node_id = {},
             });
-            wheel_hit_test_target_scroll_frame_indices.append(command.target_scroll_frame_index);
+            wheel_hit_test_target_scroll_node_indices.append(command.target_scroll_node_index);
             wheel_hit_test_target_document_ids.append(command.document_id);
         };
 
@@ -78,8 +79,8 @@ AsyncScrollingState async_scrolling_state_from_display_list(Painting::DisplayLis
             auto command = Painting::read_display_list_command_payload<Painting::CompositorStickyArea>(payload);
             async_scrolling_state.sticky_areas.append({
                 .document_id = command.document_id,
-                .scroll_frame_index = command.scroll_frame_index,
-                .parent_scroll_frame_index = command.parent_scroll_frame_index,
+                .scroll_node_index = command.scroll_node_index,
+                .parent_scroll_node_index = command.parent_scroll_node_index,
                 .nearest_scrolling_ancestor_index = command.nearest_scrolling_ancestor_index,
                 .position_relative_to_scroll_ancestor = command.position_relative_to_scroll_ancestor,
                 .border_box_size = command.border_box_size,
@@ -96,17 +97,16 @@ AsyncScrollingState async_scrolling_state_from_display_list(Painting::DisplayLis
         case Painting::DisplayListCommandType::CompositorScrollNode: {
             auto command = Painting::read_display_list_command_payload<Painting::CompositorScrollNode>(payload);
             async_scrolling_state.scroll_nodes.append({
-                .node_id = scroll_node_id_for(command.document_id, command.scroll_frame_index),
+                .node_id = scroll_node_id_for(command.document_id, command.scroll_node_index),
                 .stable_node_id = stable_scroll_node_id_for(command.scrollable_node_id, command.scroll_node_kind, command.pseudo_element_type),
                 .parent_node_id = {},
-                .hit_test_visual_context_index = header.context_index,
                 .scrollport_rect = command.scrollport_rect,
                 .max_scroll_offset = command.max_scroll_offset,
                 .is_viewport = command.is_viewport,
                 .can_be_wheel_scrolled_horizontally = command.can_be_wheel_scrolled_horizontally,
                 .can_be_wheel_scrolled_vertically = command.can_be_wheel_scrolled_vertically,
             });
-            parent_scroll_frame_indices.append(command.parent_scroll_frame_index);
+            parent_scroll_node_indices.append(command.parent_scroll_node_index);
             break;
         }
         case Painting::DisplayListCommandType::CompositorWheelHitTestTarget: {
@@ -130,8 +130,8 @@ AsyncScrollingState async_scrolling_state_from_display_list(Painting::DisplayLis
         case Painting::DisplayListCommandType::CompositorViewportScrollbar: {
             auto command = Painting::read_display_list_command_payload<Painting::CompositorViewportScrollbar>(payload);
             async_scrolling_state.viewport_scrollbars.append({
-                .scroll_node_id = scroll_node_id_for(command.document_id, command.scroll_frame_index),
-                .scroll_frame_index = command.scroll_frame_index,
+                .scroll_node_id = scroll_node_id_for(command.document_id, command.scroll_node_index),
+                .scroll_node_index = command.scroll_node_index,
                 .gutter_rect = command.gutter_rect,
                 .thumb_rect = command.thumb_rect,
                 .expanded_gutter_rect = command.expanded_gutter_rect,
@@ -150,19 +150,19 @@ AsyncScrollingState async_scrolling_state_from_display_list(Painting::DisplayLis
         }
     });
 
-    VERIFY(parent_scroll_frame_indices.size() == async_scrolling_state.scroll_nodes.size());
+    VERIFY(parent_scroll_node_indices.size() == async_scrolling_state.scroll_nodes.size());
     for (size_t i = 0; i < async_scrolling_state.scroll_nodes.size(); ++i) {
-        auto parent_scroll_frame_index = parent_scroll_frame_indices[i];
-        if (parent_scroll_frame_index.value())
-            async_scrolling_state.scroll_nodes[i].parent_node_id = scroll_node_id_for(async_scrolling_state.scroll_nodes[i].node_id.document_id, parent_scroll_frame_index);
+        auto parent_scroll_node_index = parent_scroll_node_indices[i];
+        if (parent_scroll_node_index.value())
+            async_scrolling_state.scroll_nodes[i].parent_node_id = scroll_node_id_for(async_scrolling_state.scroll_nodes[i].node_id.document_id, parent_scroll_node_index);
     }
 
-    VERIFY(wheel_hit_test_target_scroll_frame_indices.size() == async_scrolling_state.wheel_hit_test_targets.size());
+    VERIFY(wheel_hit_test_target_scroll_node_indices.size() == async_scrolling_state.wheel_hit_test_targets.size());
     VERIFY(wheel_hit_test_target_document_ids.size() == async_scrolling_state.wheel_hit_test_targets.size());
     for (size_t i = 0; i < async_scrolling_state.wheel_hit_test_targets.size(); ++i) {
-        auto target_scroll_frame_index = wheel_hit_test_target_scroll_frame_indices[i];
-        if (target_scroll_frame_index.value())
-            async_scrolling_state.wheel_hit_test_targets[i].target_node_id = scroll_node_id_for(wheel_hit_test_target_document_ids[i], target_scroll_frame_index);
+        auto target_scroll_node_index = wheel_hit_test_target_scroll_node_indices[i];
+        if (target_scroll_node_index.value())
+            async_scrolling_state.wheel_hit_test_targets[i].target_node_id = scroll_node_id_for(wheel_hit_test_target_document_ids[i], target_scroll_node_index);
     }
     return async_scrolling_state;
 }
@@ -177,19 +177,19 @@ WheelRoutingAdmission wheel_routing_admission_for(AsyncScrollingState const& sta
     return WheelRoutingAdmission::Accepted;
 }
 
-StringView wheel_routing_admission_to_string(WheelRoutingAdmission admission)
+Utf16View wheel_routing_admission_to_utf16_view(WheelRoutingAdmission admission)
 {
     switch (admission) {
     case WheelRoutingAdmission::Accepted:
-        return "accepted"sv;
+        return u"accepted"sv;
     case WheelRoutingAdmission::NoAsyncScrollingState:
-        return "no async scrolling state"sv;
+        return u"no async scrolling state"sv;
     case WheelRoutingAdmission::BlockingWheelEventListeners:
-        return "blocking wheel event listeners"sv;
+        return u"blocking wheel event listeners"sv;
     case WheelRoutingAdmission::NoScrollNode:
-        return "no scroll node"sv;
+        return u"no scroll node"sv;
     case WheelRoutingAdmission::StaleWheelEventListeners:
-        return "stale wheel event listeners"sv;
+        return u"stale wheel event listeners"sv;
     }
     VERIFY_NOT_REACHED();
 }

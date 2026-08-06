@@ -16,7 +16,7 @@ NonnullRefPtr<CanvasPaintable> CanvasPaintable::create(Layout::CanvasBox const& 
 }
 
 CanvasPaintable::CanvasPaintable(Layout::CanvasBox const& layout_box)
-    : PaintableBox(layout_box)
+    : Paintable(layout_box)
 {
 }
 
@@ -25,7 +25,7 @@ void CanvasPaintable::paint(DisplayListRecordingContext& context, PaintPhase pha
     if (!is_visible())
         return;
 
-    PaintableBox::paint(context, phase);
+    Paintable::paint(context, phase);
 
     if (phase == PaintPhase::Foreground) {
         auto canvas_rect = context.rounded_device_rect(absolute_rect());
@@ -39,7 +39,7 @@ void CanvasPaintable::paint(DisplayListRecordingContext& context, PaintPhase pha
             auto scaling_mode = to_gfx_scaling_mode(computed_values().image_rendering(),
                 *content_size, canvas_int_rect.size());
             context.display_list_recorder().draw_canvas(canvas_int_rect,
-                *canvas_id, scaling_mode);
+                *canvas_id, canvas_element.content_generation(), scaling_mode);
         }
     }
 }

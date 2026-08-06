@@ -31,6 +31,7 @@
 #include <LibWeb/HTML/Parser/HTMLParser.h>
 #include <LibWeb/HTML/PotentialCORSRequest.h>
 #include <LibWeb/HTML/SharedResourceRequest.h>
+#include <LibWeb/Infra/SerializedURL.h>
 #include <LibWeb/Layout/ImageBox.h>
 #include <LibWeb/Layout/NavigableContainerViewport.h>
 #include <LibWeb/Loader/ResourceLoader.h>
@@ -94,7 +95,7 @@ void HTMLObjectElement::adopted_from(DOM::Document& old_document)
         delayer = DOM::DocumentLoadEventDelayer { document() };
 }
 
-void HTMLObjectElement::form_associated_element_attribute_changed(FlyString const& name, Optional<String> const&, Optional<String> const&, Optional<FlyString> const&)
+void HTMLObjectElement::form_associated_element_attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const&, Optional<Utf16String> const&, Optional<Utf16FlyString> const&)
 {
     // https://html.spec.whatwg.org/multipage/iframe-embed-object.html#the-object-element
     // Whenever one of the following conditions occur:
@@ -116,7 +117,7 @@ void HTMLObjectElement::form_associated_element_was_removed(DOM::Node*)
     destroy_the_child_navigable();
 }
 
-bool HTMLObjectElement::is_presentational_hint(FlyString const& name) const
+bool HTMLObjectElement::is_presentational_hint(Utf16FlyString const& name) const
 {
     if (Base::is_presentational_hint(name))
         return true;
@@ -133,7 +134,7 @@ bool HTMLObjectElement::is_presentational_hint(FlyString const& name) const
 void HTMLObjectElement::apply_presentational_hints(Vector<CSS::StyleProperty>& properties) const
 {
     Base::apply_presentational_hints(properties);
-    for_each_attribute([&](auto& name, auto& value) {
+    for_each_attribute([&](Utf16FlyString const& name, Utf16View value) {
         if (name == HTML::AttributeNames::align) {
             // https://html.spec.whatwg.org/multipage/rendering.html#attributes-for-embedded-content-and-images
             // When an embed, iframe, img, or object element, or an input element whose type attribute is in the Image Button state,
@@ -142,7 +143,7 @@ void HTMLObjectElement::apply_presentational_hints(Vector<CSS::StyleProperty>& p
             // vertical middle of the element with the parent element's baseline.
             // FIXME: This should use legacy baseline-middle alignment instead of CSS vertical-align: middle,
             //        as Firefox and Chrome do with engine-specific legacy values.
-            if (value.equals_ignoring_ascii_case("center"sv) || value.equals_ignoring_ascii_case("middle"sv))
+            if (value.equals_ignoring_ascii_case(u"center"sv) || value.equals_ignoring_ascii_case(u"middle"sv))
                 properties.append({ .property_id = CSS::PropertyID::VerticalAlign, .value = CSS::KeywordStyleValue::create(CSS::Keyword::Middle) });
         } else if (name == HTML::AttributeNames::border) {
             if (auto parsed_value = parse_non_negative_integer(value); parsed_value.has_value()) {
@@ -185,7 +186,7 @@ void HTMLObjectElement::apply_presentational_hints(Vector<CSS::StyleProperty>& p
 }
 
 // https://html.spec.whatwg.org/multipage/iframe-embed-object.html#attr-object-data
-String HTMLObjectElement::data() const
+Utf16String HTMLObjectElement::data() const
 {
     auto data = get_attribute(HTML::AttributeNames::data);
     if (!data.has_value())
@@ -195,15 +196,15 @@ String HTMLObjectElement::data() const
     if (!maybe_url.has_value())
         return {};
 
-    return maybe_url->to_string();
+    return utf16_string_from_url_ascii(maybe_url->to_string());
 }
 
-void HTMLObjectElement::set_data(String const& data)
+void HTMLObjectElement::set_data(Utf16View data)
 {
     set_attribute_value(HTML::AttributeNames::data, data);
 }
 
-RefPtr<Layout::Node> HTMLObjectElement::create_layout_node(CSS::ComputedProperties const& style)
+RefPtr<Layout::Node> HTMLObjectElement::create_layout_node(NonnullRefPtr<CSS::ComputedValues const> style)
 {
     switch (m_representation) {
     case Representation::Children:
@@ -414,7 +415,7 @@ void HTMLObjectElement::resource_did_load(Fetch::Infrastructure::Response const&
         else if (auto type = this->type(); !type.is_empty() && (type != "application/octet-stream"sv)) {
             // 1. If the attribute's value is a type that starts with "image/" that is not also an XML MIME type, then
             //    let the resource type be the type specified in that type attribute.
-            if (type.starts_with_bytes("image/"sv)) {
+            if (type.starts_with(u"image/"sv)) {
                 auto parsed_type = MimeSniff::MimeType::parse(type);
 
                 if (parsed_type.has_value() && !parsed_type->is_xml())
@@ -468,7 +469,7 @@ void HTMLObjectElement::run_object_representation_handler_steps(Fetch::Infrastru
         // If response's URL does not match about:blank, then navigate the element's content navigable to response's URL
         // using the element's node document, with historyHandling set to "replace".
         if (response.url().has_value() && !url_matches_about_blank(*response.url())) {
-            MUST(m_content_navigable->navigate({
+            MUST(as<HTML::LocalNavigable>(*m_content_navigable).navigate({
                 .url = *response.url(),
                 .source_document = document(),
                 .history_handling = Bindings::NavigationHistoryBehavior::Replace,
@@ -536,7 +537,7 @@ void HTMLObjectElement::run_object_representation_fallback_steps()
 void HTMLObjectElement::load_image()
 {
     // FIXME: This currently reloads the image instead of reusing the resource we've already downloaded.
-    auto data = get_attribute_value(HTML::AttributeNames::data);
+    auto data = get_attribute_value_view(HTML::AttributeNames::data).value_or({});
     auto url = document().encoding_parse_url(data);
 
     if (!url.has_value()) {

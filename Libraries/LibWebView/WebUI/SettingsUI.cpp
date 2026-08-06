@@ -6,6 +6,8 @@
 
 #include <AK/JsonArray.h>
 #include <AK/Platform.h>
+#include <AK/Utf16String.h>
+#include <LibCore/GeolocationProvider.h>
 #include <LibURL/Parser.h>
 #include <LibWeb/HTML/AutoplayPolicy.h>
 #include <LibWebView/Application.h>
@@ -34,15 +36,10 @@ static StringView config_variable_type_to_string(JsonValue::Type type)
     VERIFY_NOT_REACHED();
 }
 
-static bool should_show_config_variable([[maybe_unused]] ConfigVariableID id)
+static bool should_show_config_variable(ConfigVariableID id)
 {
-#if !defined(AK_OS_MACOS)
-    if (id == ConfigVariableID::UseRoundedWindowCorners)
-        return false;
-#endif
-    if (id == ConfigVariableID::UseServerSideWindowDecorations)
-        return Application::the().supports_server_side_window_decorations();
-
+    if (id == ConfigVariableID::UseClientSideWindowDecorations)
+        return Application::the().supports_client_side_window_decorations();
     return true;
 }
 
@@ -122,6 +119,10 @@ void SettingsUI::register_interfaces()
     register_interface("setDNSSettings"sv, [this](auto const& data) {
         set_dns_settings(data);
     });
+
+    register_interface("setGeolocationEnabled"sv, [this](auto const& data) {
+        set_geolocation_enabled(data);
+    });
 }
 
 void SettingsUI::load_features()
@@ -131,6 +132,7 @@ void SettingsUI::load_features()
     JsonObject features;
     features.set("primaryPaste"_string, application.supports_clipboard_type(Application::ClipboardType::Selection));
     features.set("verticalTabs"_string, application.supports_vertical_tabs());
+    features.set("geolocation"_string, Core::GeolocationProvider::is_available());
 
     async_send_message("loadFeatures"sv, move(features));
 }
@@ -329,7 +331,8 @@ void SettingsUI::set_site_setting_policy(JsonValue const& site_setting)
 
     switch (*setting) {
     case SiteSettingType::Autoplay:
-        if (auto parsed = Web::HTML::autoplay_policy_from_string(*policy); parsed.has_value())
+        auto policy_utf16 = Utf16String::from_utf8_without_validation(*policy);
+        if (auto parsed = Web::HTML::autoplay_policy_from_string(policy_utf16.utf16_view()); parsed.has_value())
             WebView::Application::settings().set_autoplay_policy(*parsed);
         break;
     }
@@ -396,6 +399,7 @@ void SettingsUI::estimate_browsing_data_sizes(JsonValue const& options)
         return;
 
     auto& application = Application::the();
+    auto weak_this = static_cast<Core::EventReceiver&>(*this).make_weak_ptr();
 
     auto since = [&]() {
         if (auto since = options.as_object().get_integer<i64>("since"sv); since.has_value())
@@ -404,7 +408,14 @@ void SettingsUI::estimate_browsing_data_sizes(JsonValue const& options)
     }();
 
     application.estimate_browsing_data_size_accessed_since(since)
-        ->when_resolved([this](Application::BrowsingDataSizes sizes) {
+        ->when_resolved([weak_this](Application::BrowsingDataSizes const& sizes) {
+            if (!weak_this)
+                return;
+
+            auto& settings_ui = static_cast<SettingsUI&>(*weak_this.ptr());
+            if (!settings_ui.is_open())
+                return;
+
             JsonObject result;
 
             result.set("cacheSizeSinceRequestedTime"sv, sizes.cache_size_since_requested_time);
@@ -413,7 +424,7 @@ void SettingsUI::estimate_browsing_data_sizes(JsonValue const& options)
             result.set("siteDataSizeSinceRequestedTime"sv, sizes.site_data_size_since_requested_time);
             result.set("totalSiteDataSize"sv, sizes.total_site_data_size);
 
-            async_send_message("estimatedBrowsingDataSizes"sv, move(result));
+            settings_ui.async_send_message("estimatedBrowsingDataSizes"sv, move(result));
         })
         .when_rejected([](Error const& error) {
             dbgln("Failed to estimate browsing data sizes: {}", error);
@@ -463,6 +474,14 @@ void SettingsUI::set_dns_settings(JsonValue const& dns_settings)
 {
     Application::settings().set_dns_settings(Settings::parse_dns_settings(dns_settings));
     load_current_settings();
+}
+
+void SettingsUI::set_geolocation_enabled(JsonValue const& enabled)
+{
+    if (!enabled.is_bool())
+        return;
+
+    Application::settings().set_geolocation_enabled(enabled.as_bool());
 }
 
 }

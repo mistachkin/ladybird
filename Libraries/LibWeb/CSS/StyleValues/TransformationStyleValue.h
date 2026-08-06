@@ -25,37 +25,67 @@ public:
 
     static ValueComparingNonnullRefPtr<TransformationStyleValue const> identity_transformation(TransformFunction);
 
-    TransformFunction transform_function() const { return m_properties.transform_function; }
-    StyleValueVector const& values() const { return m_properties.values; }
+    TransformFunction transform_function() const { return static_cast<TransformFunction>(m_value->transformation.transform_function); }
+    StyleValueVector values() const
+    {
+        return m_values;
+    }
 
     bool can_be_converted_to_matrix_without_reference_box() const;
-    FloatMatrix4x4 to_matrix(Optional<Painting::PaintableBox const&>) const;
+    FloatMatrix4x4 to_matrix(Optional<Painting::Paintable const&>) const;
 
-    virtual void serialize(StringBuilder&, SerializationMode) const override;
+    void serialize(StringBuilder&, SerializationMode) const;
     GC::Ptr<CSSTransformComponent> reify_a_transform_function(JS::Realm&) const;
 
-    virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const override;
+    ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const;
 
-    bool properties_equal(TransformationStyleValue const& other) const { return m_properties == other.m_properties; }
-
-    virtual bool is_computationally_independent() const override
+    bool properties_equal(TransformationStyleValue const& other) const
     {
-        return all_of(m_properties.values, [](auto& value) { return value->is_computationally_independent(); });
+        if (property() != other.property() || transform_function() != other.transform_function() || size() != other.size())
+            return false;
+        for (size_t i = 0; i < size(); ++i) {
+            if (value_at(i) != other.value_at(i))
+                return false;
+        }
+        return true;
     }
 
 private:
+    friend class StyleValue;
+
+    explicit TransformationStyleValue(StyleValueFFI::StyleValueData const* data)
+        : StyleValueWithDefaultOperators(Type::Transformation, data)
+    {
+        auto const& values = data->transformation.values;
+        m_values.ensure_capacity(values.length);
+        for (size_t i = 0; i < values.length; ++i) {
+            auto* child_data = static_cast<StyleValueFFI::StyleValueData const*>(values.pointer[i].pointer);
+            m_values.unchecked_append(StyleValue::adopt_rust_style_value_data(StyleValueFFI::rust_style_value_retain(child_data)));
+        }
+    }
+
     TransformationStyleValue(PropertyID property, TransformFunction transform_function, StyleValueVector&& values)
-        : StyleValueWithDefaultOperators(Type::Transformation)
-        , m_properties { .property = property, .transform_function = transform_function, .values = move(values) }
+        : StyleValueWithDefaultOperators(Type::Transformation, make_transformation_data(property, transform_function, values))
+        , m_values(move(values))
     {
     }
 
-    struct Properties {
-        PropertyID property;
-        TransformFunction transform_function;
-        StyleValueVector values;
-        bool operator==(Properties const& other) const;
-    } m_properties;
+    static StyleValueFFI::StyleValueData const* make_transformation_data(PropertyID property, TransformFunction transform_function, StyleValueVector const& values)
+    {
+        Vector<StyleValueFFI::StyleValueData const*> pointers;
+        pointers.ensure_capacity(values.size());
+        for (auto const& value : values)
+            pointers.unchecked_append(StyleValueFFI::rust_style_value_retain(value->rust_style_value_data()));
+        return StyleValueFFI::rust_style_value_create_transformation(to_underlying(property), static_cast<u8>(to_underlying(transform_function)), pointers.data(), pointers.size());
+    }
+
+    size_t size() const { return m_values.size(); }
+
+    ValueComparingNonnullRefPtr<StyleValue const> value_at(size_t i) const { return m_values[i]; }
+
+    PropertyID property() const { return static_cast<PropertyID>(m_value->transformation.property); }
+
+    StyleValueVector m_values;
 };
 
 }

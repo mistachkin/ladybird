@@ -6,7 +6,7 @@
 
 #pragma once
 
-#include <AK/String.h>
+#include <AK/Utf16String.h>
 #include <LibIPC/Forward.h>
 #include <LibURL/Origin.h>
 #include <LibURL/URL.h>
@@ -31,12 +31,18 @@ struct SerializedWindow {
 
 struct SerializedWorkerGlobalScope {
     bool relevant_settings_object_is_secure_context { false };
+
+    // https://html.spec.whatwg.org/multipage/imagebitmap-and-animations.html#concept-AnimationFrameProvider-supported
+    // Whether the serialized global is a DedicatedWorkerGlobalScope that is a supported
+    // AnimationFrameProvider. Recorded at serialization time so that a nested dedicated
+    // worker can compute its own supported-ness without reaching across processes.
+    bool is_supported_animation_frame_provider { false };
 };
 
 using SerializedGlobal = Variant<SerializedWindow, SerializedWorkerGlobalScope>;
 
 struct SerializedEnvironmentSettingsObject {
-    String id;
+    Utf16String id;
     URL::URL creation_url;
     Optional<URL::URL> top_level_creation_url;
     Optional<URL::Origin> top_level_origin;

@@ -375,7 +375,7 @@ NonnullOwnPtr<Request> Request::fetch(
     NonnullRefPtr<HTTP::HeaderList> request_headers,
     ByteBuffer request_body,
     HTTP::Cookie::IncludeCredentials include_credentials,
-    ByteString alt_svc_cache_path,
+    Optional<ByteString> alt_svc_cache_path,
     Core::ProxyData proxy_data,
     bool keep_alive_for_transfer)
 {
@@ -410,7 +410,7 @@ NonnullOwnPtr<Request> Request::revalidate(
     NonnullRefPtr<HTTP::HeaderList> request_headers,
     ByteBuffer request_body,
     HTTP::Cookie::IncludeCredentials include_credentials,
-    ByteString alt_svc_cache_path,
+    Optional<ByteString> alt_svc_cache_path,
     Core::ProxyData proxy_data)
 {
     auto request = adopt_own(*new Request { request_id, RequestType::BackgroundRevalidation, disk_cache, HTTP::CacheMode::Default, client, curl_multi, resolver, move(url), move(method), move(request_headers), move(request_body), include_credentials, move(alt_svc_cache_path), proxy_data });
@@ -432,7 +432,7 @@ Request::Request(
     NonnullRefPtr<HTTP::HeaderList> request_headers,
     ByteBuffer request_body,
     HTTP::Cookie::IncludeCredentials include_credentials,
-    ByteString alt_svc_cache_path,
+    Optional<ByteString> alt_svc_cache_path,
     Core::ProxyData proxy_data,
     bool keep_alive_for_transfer)
     : m_request_id(request_id)
@@ -534,7 +534,7 @@ void Request::notify_fetch_complete(Badge<ConnectionFromClient>, int result_code
     }
 
     if (is_revalidation_request()) {
-        if (acquire_status_code() == 304) {
+        if (result_code == CURLE_OK && acquire_status_code() == 304) {
             if (m_type == RequestType::BackgroundRevalidation && m_disk_cache->mode() == HTTP::DiskCache::Mode::Testing)
                 m_response_headers->set({ HTTP::TEST_CACHE_REVALIDATION_STATUS_HEADER, "fresh"sv });
 
@@ -546,7 +546,12 @@ void Request::notify_fetch_complete(Badge<ConnectionFromClient>, int result_code
         if (revalidation_failed().is_error())
             return;
 
-        transfer_headers_to_client_if_needed();
+        // Only forward the response to the client if the network request actually produced one. If the request failed
+        // at the transport level (e.g. connection refused), there's no response; fall through so the request completes
+        // with a network error — exactly like a non-revalidation request whose connection failed. Otherwise, the client
+        // would receive an empty response with HTTP status 0 — and then wait forever for a body that will never arrive.
+        if (result_code == CURLE_OK)
+            transfer_headers_to_client_if_needed();
     }
 
     m_curl_result_code = result_code;
@@ -854,7 +859,7 @@ void Request::handle_retrieve_cookie_state()
 
     if (auto connection = ConnectionFromClient::primary_connection(); connection.has_value()) {
         mark_lifecycle_event(this, &WireStats::cookie_started_at);
-        connection->async_retrieve_http_cookie(m_client->client_id(), m_request_id, m_type, m_url);
+        connection->async_retrieve_http_cookie(m_client->client_id(), m_request_id, m_type, m_url, m_client->is_private());
     } else {
         m_network_error = Requests::NetworkError::RequestServerDied;
         transition_to_state(State::Error);
@@ -933,8 +938,9 @@ void Request::handle_fetch_state()
     set_option(CURLOPT_URL, m_url.to_byte_string().characters());
     set_option(CURLOPT_PORT, m_url.port_or_default());
     set_option(CURLOPT_CONNECTTIMEOUT, s_connect_timeout_seconds);
-    set_option(CURLOPT_PIPEWAIT, 1L);
-    set_option(CURLOPT_ALTSVC, m_alt_svc_cache_path.characters());
+
+    if (m_alt_svc_cache_path.has_value())
+        set_option(CURLOPT_ALTSVC, m_alt_svc_cache_path->characters());
 
     set_option(CURLOPT_CUSTOMREQUEST, m_method.characters());
     set_option(CURLOPT_FOLLOWLOCATION, 0);
@@ -1314,7 +1320,10 @@ void Request::transfer_headers_to_client_if_needed()
 
 void Request::send_headers_to_client(Optional<IPC::File> javascript_bytecode, u64 javascript_bytecode_size, Optional<u64> javascript_bytecode_cache_vary_key)
 {
-    m_client->async_headers_became_available(m_request_id, m_response_headers->headers(), m_status_code, m_reason_phrase, move(javascript_bytecode), javascript_bytecode_size, javascript_bytecode_cache_vary_key);
+    auto came_from_cache = m_cache_status == CacheStatus::ReadFromCache
+        ? Requests::CameFromCache::Yes
+        : Requests::CameFromCache::No;
+    m_client->async_headers_became_available(m_request_id, m_response_headers->headers(), m_status_code, m_reason_phrase, move(javascript_bytecode), javascript_bytecode_size, javascript_bytecode_cache_vary_key, came_from_cache);
 }
 
 ErrorOr<void> Request::write_queued_bytes_without_blocking()

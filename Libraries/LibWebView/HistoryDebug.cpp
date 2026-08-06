@@ -19,9 +19,9 @@ bool history_debug_enabled()
 
 static void append_history_log_entry(StringBuilder& builder, Web::HTML::SessionHistoryEntryDescriptor const& entry);
 
-static StringView document_state_resource_type(Variant<Empty, String, Web::HTML::POSTResource> const& resource)
+static StringView document_state_resource_type(Web::HTML::DocumentResource const& resource)
 {
-    if (resource.has<String>())
+    if (resource.has<Utf16String>())
         return "string"sv;
     if (resource.has<Web::HTML::POSTResource>())
         return "post"sv;
@@ -53,8 +53,7 @@ static void append_history_log_entry(StringBuilder& builder, Web::HTML::SessionH
 {
     builder.appendff("{}:{}", entry.step, entry.url);
     auto resource_type = document_state_resource_type(entry.document_state.resource);
-    if (entry.document_state.id != 0
-        || entry.document_state.reload_pending
+    if (entry.document_state.reload_pending
         || !entry.document_state.navigable_target_name.is_empty()
         || resource_type != "none"sv) {
         builder.appendff(" document_state={{id={}", entry.document_state.id);
@@ -108,7 +107,7 @@ static JsonArray history_json_nested_histories(Vector<Web::HTML::SessionHistoryN
             serialized_entries.must_append(history_json_entry(entry));
 
         JsonObject serialized_nested_history;
-        serialized_nested_history.set("id"sv, nested_history.id);
+        serialized_nested_history.set("id"sv, MUST(String::formatted("{}", nested_history.id)));
         serialized_nested_history.set("entries"sv, move(serialized_entries));
         serialized_nested_histories.must_append(move(serialized_nested_history));
     }
@@ -120,10 +119,10 @@ JsonObject history_json_entry(Web::HTML::SessionHistoryEntryDescriptor const& en
     JsonObject serialized;
     serialized.set("step"sv, entry.step);
     serialized.set("url"sv, entry.url.serialize());
-    serialized.set("documentStateId"sv, entry.document_state.id);
+    serialized.set("documentStateId"sv, MUST(String::formatted("{}", entry.document_state.id)));
     serialized.set("resource"sv, document_state_resource_type(entry.document_state.resource));
     serialized.set("reloadPending"sv, entry.document_state.reload_pending);
-    serialized.set("targetName"sv, entry.document_state.navigable_target_name);
+    serialized.set("targetName"sv, entry.document_state.navigable_target_name.to_utf8());
     serialized.set("scrollRestoration"sv, scroll_restoration_mode_to_string(entry.scroll_restoration_mode));
     serialized.set("scrollPosition"sv, history_json_scroll_position_data(entry.scroll_position_data));
     serialized.set("nestedHistories"sv, history_json_nested_histories(entry.document_state.nested_histories));

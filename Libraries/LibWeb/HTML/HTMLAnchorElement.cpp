@@ -40,7 +40,7 @@ void HTMLAnchorElement::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_rel_list);
 }
 
-void HTMLAnchorElement::attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
+void HTMLAnchorElement::attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_)
 {
     Base::attribute_changed(name, old_value, value, namespace_);
 
@@ -48,7 +48,7 @@ void HTMLAnchorElement::attribute_changed(FlyString const& name, Optional<String
         set_the_url();
     } else if (name == HTML::AttributeNames::rel) {
         if (m_rel_list)
-            m_rel_list->associated_attribute_changed(value.value_or(String {}));
+            m_rel_list->associated_attribute_changed(value.has_value() ? value->utf16_view() : u""sv);
     }
 }
 
@@ -75,7 +75,7 @@ void HTMLAnchorElement::activation_behavior(Web::DOM::Event const& event)
     }
 
     // 2. Let hyperlinkSuffix be null.
-    Optional<String> hyperlink_suffix {};
+    Optional<Utf16String> hyperlink_suffix {};
 
     // 3. If element is an a element, and event's target is an img with an ismap attribute specified, then:
     if (event.target() && is<HTMLImageElement>(*event.target()) && static_cast<HTMLImageElement const&>(*event.target()).has_attribute(AttributeNames::ismap)) {
@@ -99,28 +99,27 @@ void HTMLAnchorElement::activation_behavior(Web::DOM::Event const& event)
 
         // 5. Set hyperlinkSuffix to the concatenation of U+003F (?), the value of x expressed as a base-ten integer using ASCII digits,
         //    U+002C (,), and the value of y expressed as a base-ten integer using ASCII digits.
-        hyperlink_suffix = MUST(String::formatted("?{},{}", x.to_int(), y.to_int()));
+        hyperlink_suffix = Utf16String::formatted("?{},{}", x.to_int(), y.to_int());
     }
 
     // 4. Let userInvolvement be event's user navigation involvement.
     auto user_involvement = user_navigation_involvement(event);
 
-    // 5. If the user has expressed a preference to download the hyperlink, then set userInvolvement to "browser UI".
+    // FIXME: 5. If the user has expressed a preference to download the hyperlink, then set userInvolvement to "browser UI".
     // NOTE: That is, if the user has expressed a specific preference for downloading, this no longer counts as merely "activation".
-    if (has_download_preference())
-        user_involvement = UserNavigationInvolvement::BrowserUI;
+    // NB: There is currently no way for the user to express a preference to download a hyperlink at activation
+    //     time.
 
-    // FIXME: 6. If element has a download attribute, or if the user has expressed a preference to download the
-    //     hyperlink, then download the hyperlink created by element with hyperlinkSuffix set to hyperlinkSuffix and
-    //     userInvolvement set to userInvolvement.
+    // 6. If element has a download attribute, or if the user has expressed a preference to download the
+    //    hyperlink, then download the hyperlink created by element with hyperlinkSuffix set to hyperlinkSuffix and
+    //    userInvolvement set to userInvolvement.
+    if (has_attribute(HTML::AttributeNames::download)) {
+        download_the_hyperlink(hyperlink_suffix, user_involvement);
+        return;
+    }
 
     // 7. Otherwise, follow the hyperlink created by element with hyperlinkSuffix set to hyperlinkSuffix and userInvolvement set to userInvolvement.
     follow_the_hyperlink(hyperlink_suffix, user_involvement);
-}
-
-bool HTMLAnchorElement::has_download_preference() const
-{
-    return has_attribute(HTML::AttributeNames::download);
 }
 
 // https://html.spec.whatwg.org/multipage/interaction.html#dom-tabindex
@@ -156,7 +155,7 @@ Utf16String HTMLAnchorElement::text() const
 }
 
 // https://html.spec.whatwg.org/multipage/text-level-semantics.html#dom-a-text
-void HTMLAnchorElement::set_text(Utf16String const& text)
+void HTMLAnchorElement::set_text(Utf16View text)
 {
     // The text attribute's setter must string replace all with the given value within this element.
     string_replace_all(text);

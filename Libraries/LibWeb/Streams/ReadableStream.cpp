@@ -27,6 +27,7 @@
 #include <LibWeb/Streams/WritableStream.h>
 #include <LibWeb/Streams/WritableStreamOperations.h>
 #include <LibWeb/WebIDL/Buffers.h>
+#include <LibWeb/WebIDL/DOMException.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
 
 namespace Web::Streams {
@@ -52,7 +53,7 @@ WebIDL::ExceptionOr<GC::Ref<ReadableStream>> ReadableStream::construct_impl(JS::
     if (underlying_source_dict.type.has_value() && underlying_source_dict.type.value() == Bindings::ReadableStreamType::Bytes) {
         // 1. If strategy["size"] exists, throw a RangeError exception.
         if (strategy.size)
-            return WebIDL::SimpleException { WebIDL::SimpleExceptionType::RangeError, "Size strategy not allowed for byte stream"sv };
+            return WebIDL::SimpleException { WebIDL::SimpleExceptionType::RangeError, "Size strategy not allowed for byte stream"_utf16 };
 
         // 2. Let highWaterMark be ? ExtractHighWaterMark(strategy, 0).
         auto high_water_mark = TRY(extract_high_water_mark(strategy, 0));
@@ -149,11 +150,11 @@ WebIDL::ExceptionOr<GC::Ref<ReadableStream>> ReadableStream::pipe_through(Bindin
 {
     // 1. If ! IsReadableStreamLocked(this) is true, throw a TypeError exception.
     if (is_readable_stream_locked(*this))
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Failed to execute 'pipeThrough' on 'ReadableStream': Cannot pipe a locked stream"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Failed to execute 'pipeThrough' on 'ReadableStream': Cannot pipe a locked stream"_utf16 };
 
     // 2. If ! IsWritableStreamLocked(transform["writable"]) is true, throw a TypeError exception.
     if (is_writable_stream_locked(*transform.writable))
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Failed to execute 'pipeThrough' on 'ReadableStream': parameter 1's 'writable' is locked"sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Failed to execute 'pipeThrough' on 'ReadableStream': parameter 1's 'writable' is locked"_utf16 };
 
     // 3. Let signal be options["signal"] if it exists, or undefined otherwise.
     GC::Ptr<DOM::AbortSignal> signal = options.signal;
@@ -309,7 +310,8 @@ WebIDL::ExceptionOr<void> ReadableStream::pull_from_bytes(ByteBuffer bytes)
     // 8. If stream’s current BYOB request view is non-null, then:
     if (auto byob_view = current_byob_request_view(); byob_view.has_value()) {
         // 1. Write pulled into stream’s current BYOB request view.
-        byob_view->write(pulled);
+        if (byob_view->write_checked(pulled).is_error())
+            return WebIDL::InvalidStateError::create(realm, "BYOB request view is detached or out-of-bounds"_utf16);
 
         // 2. Perform ? ReadableByteStreamControllerRespond(stream.[[controller]], pullSize).
         TRY(readable_byte_stream_controller_respond(controller, pull_size));

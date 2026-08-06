@@ -51,6 +51,19 @@ Page::Page(GC::Ref<PageClient> client)
 
 Page::~Page() = default;
 
+void Page::acquire_screen_wake_lock()
+{
+    if (m_active_screen_wake_lock_count++ == 0)
+        client().page_did_change_screen_wake_lock_state(ScreenWakeLockState::Acquired);
+}
+
+void Page::release_screen_wake_lock()
+{
+    VERIFY(m_active_screen_wake_lock_count > 0);
+    if (--m_active_screen_wake_lock_count == 0)
+        client().page_did_change_screen_wake_lock_state(ScreenWakeLockState::Released);
+}
+
 bool Page::has_compositor_host() const
 {
     return m_client->compositor_host();
@@ -86,6 +99,8 @@ void Page::visit_edges(JS::Cell::Visitor& visitor)
     visitor.visit(m_window_rect_observer);
     visitor.visit(m_on_pending_dialog_closed);
     visitor.visit(m_pending_clipboard_requests);
+    for (auto const& request : m_pending_geolocation_requests)
+        visitor.visit(request.value.callback);
     m_pending_fullscreen_operations.for_each([&](auto const& operation) {
         operation.visit([&](PendingFullscreenEnter const& enter_operation) {
                 visitor.visit(enter_operation.element);
@@ -105,7 +120,7 @@ HTML::LocalNavigable& Page::focused_navigable()
     return top_level_traversable();
 }
 
-void Page::set_focused_navigable(Badge<EventHandler>, HTML::LocalNavigable& navigable)
+void Page::set_focused_navigable(HTML::LocalNavigable& navigable)
 {
     m_focused_navigable = navigable;
 }
@@ -114,6 +129,8 @@ void Page::navigable_document_destroyed(Badge<DOM::Document>, HTML::LocalNavigab
 {
     if (&navigable == m_focused_navigable.ptr())
         m_focused_navigable = nullptr;
+    if (&navigable == m_mouse_event_tracking_navigable.ptr())
+        m_mouse_event_tracking_navigable = nullptr;
 }
 
 void Page::load(URL::URL const& url, Bindings::NavigationHistoryBehavior history_handling)
@@ -121,8 +138,8 @@ void Page::load(URL::URL const& url, Bindings::NavigationHistoryBehavior history
     (void)top_level_traversable()->navigate({ .url = url, .source_document = *top_level_traversable()->active_document(), .history_handling = history_handling, .user_involvement = HTML::UserNavigationInvolvement::BrowserUI });
 }
 
-void Page::load(URL::URL const& url, Variant<Empty, String, HTML::POSTResource> document_resource,
-    Bindings::NavigationHistoryBehavior history_handling)
+void Page::load(URL::URL const& url, HTML::DocumentResource document_resource,
+    Bindings::NavigationHistoryBehavior history_handling, Optional<HTML::NavigationSourceSnapshot> source_snapshot)
 {
     (void)top_level_traversable()->navigate({
         .url = url,
@@ -130,6 +147,7 @@ void Page::load(URL::URL const& url, Variant<Empty, String, HTML::POSTResource> 
         .document_resource = move(document_resource),
         .history_handling = history_handling,
         .user_involvement = HTML::UserNavigationInvolvement::BrowserUI,
+        .cross_process_source_snapshot = move(source_snapshot),
     });
 }
 
@@ -140,7 +158,7 @@ void Page::load_html(StringView html)
 
     (void)top_level_traversable()->navigate({ .url = URL::about_srcdoc(),
         .source_document = *top_level_traversable()->active_document(),
-        .document_resource = String::from_utf8(html).release_value_but_fixme_should_propagate_errors(),
+        .document_resource = Utf16String::from_utf8(html),
         .user_involvement = HTML::UserNavigationInvolvement::BrowserUI });
 }
 
@@ -164,7 +182,7 @@ void Page::load_html(StringView html, URL::URL const& url)
         .user_involvement = HTML::UserNavigationInvolvement::BrowserUI };
 
     if (url == URL::about_srcdoc())
-        params.document_resource = move(html_string);
+        params.document_resource = Utf16String::from_utf8(html);
 
     (void)top_level_traversable()->navigate(move(params));
 }
@@ -176,15 +194,7 @@ void Page::reload()
 
 void Page::traverse_the_history_by_delta(int delta)
 {
-    if (m_client->page_did_request_traverse_the_history_by_delta(delta, HistoryTraversalPrecheck::Needed))
-        return;
-
-    traverse_the_history_by_delta_from_ui_process(delta);
-}
-
-void Page::traverse_the_history_by_delta_from_ui_process(int delta)
-{
-    top_level_traversable()->traverse_the_history_by_delta(delta);
+    m_client->page_did_request_traverse_the_history_by_delta(delta, HistoryTraversalPrecheck::Needed);
 }
 
 Gfx::Palette Page::palette() const
@@ -329,12 +339,30 @@ ChromeMetrics Page::chrome_metrics() const
 
 EventResult Page::handle_mouseup(DevicePixelPoint position, DevicePixelPoint screen_position, unsigned button, unsigned buttons, unsigned modifiers)
 {
+    // INTEROP: Releasing outside an iframe still ends selection and drag tracking in the child document where the
+    //          interaction began, while the mouseup event itself remains targeted at the document under the pointer.
+    ScopeGuard reset_mouse_input_tracking = [&] {
+        if (auto navigable = m_mouse_event_tracking_navigable) {
+            m_mouse_event_tracking_navigable = nullptr;
+            navigable->event_handler().reset_mouse_input_tracking({});
+        }
+    };
     return top_level_traversable()->event_handler().handle_mouseup(device_to_css_point(position), device_to_css_point(screen_position), button, buttons, modifiers);
 }
 
 EventResult Page::handle_mousedown(DevicePixelPoint position, DevicePixelPoint screen_position, unsigned button, unsigned buttons, unsigned modifiers, int click_count)
 {
+    if (button == UIEvents::MouseButton::Primary) {
+        if (auto navigable = m_mouse_event_tracking_navigable)
+            navigable->event_handler().reset_mouse_input_tracking({});
+        m_mouse_event_tracking_navigable = nullptr;
+    }
     return top_level_traversable()->event_handler().handle_mousedown(device_to_css_point(position), device_to_css_point(screen_position), button, buttons, modifiers, click_count);
+}
+
+void Page::set_mouse_event_tracking_navigable(Badge<EventHandler>, HTML::LocalNavigable& navigable)
+{
+    m_mouse_event_tracking_navigable = navigable;
 }
 
 EventResult Page::handle_mousemove(DevicePixelPoint position, DevicePixelPoint screen_position, unsigned buttons, unsigned modifiers)
@@ -346,6 +374,13 @@ EventResult Page::handle_mouseleave()
 {
     return top_level_traversable()->event_handler().handle_mouseleave();
 }
+
+#if defined(AK_OS_MACOS)
+bool Page::select_word_for_dictionary_lookup(DevicePixelPoint position)
+{
+    return top_level_traversable()->event_handler().select_word_for_dictionary_lookup(device_to_css_point(position));
+}
+#endif
 
 UniqueNodeID Page::node_id_at_position(DevicePixelPoint position)
 {
@@ -477,7 +512,7 @@ static ResponseType spin_event_loop_until_dialog_closed(PageClient& client, Opti
     return response.release_value();
 }
 
-void Page::did_request_alert(String const& message)
+void Page::did_request_alert(Utf16String const& message)
 {
     m_pending_dialog = PendingDialog::Alert;
     m_client->page_did_request_alert(message);
@@ -496,7 +531,7 @@ void Page::alert_closed()
     }
 }
 
-bool Page::did_request_confirm(String const& message)
+bool Page::did_request_confirm(Utf16String const& message)
 {
     m_pending_dialog = PendingDialog::Confirm;
     m_client->page_did_request_confirm(message);
@@ -515,7 +550,7 @@ void Page::confirm_closed(bool accepted)
     }
 }
 
-Optional<String> Page::did_request_prompt(String const& message, String const& default_)
+Optional<Utf16String> Page::did_request_prompt(Utf16String const& message, Utf16String const& default_)
 {
     m_pending_dialog = PendingDialog::Prompt;
     m_client->page_did_request_prompt(message, default_);
@@ -526,7 +561,7 @@ Optional<String> Page::did_request_prompt(String const& message, String const& d
     return spin_event_loop_until_dialog_closed(*m_client, m_pending_prompt_response);
 }
 
-void Page::prompt_closed(Optional<String> response)
+void Page::prompt_closed(Optional<Utf16String> response)
 {
     if (m_pending_dialog == PendingDialog::Prompt) {
         m_pending_prompt_response = move(response);
@@ -662,6 +697,86 @@ void Page::retrieved_clipboard_entries(u64 request_id, Vector<Clipboard::SystemC
         (*request)->function()(move(items));
 }
 
+u64 Page::request_geolocation_position(GeolocationPositionCallback callback, GeolocationRequestType type)
+{
+    // This is the browser-process bridge for the Geolocation spec's "try to acquire position data from the underlying system" step.
+    auto request_id = m_next_geolocation_request_id++;
+    m_pending_geolocation_requests.set(request_id, { callback, type });
+
+    if (type == GeolocationRequestType::Watch) {
+        client().page_did_start_geolocation_position_watch(request_id);
+        return request_id;
+    }
+
+    if (!m_active_geolocation_request_id.has_value()) {
+        m_active_geolocation_request_id = request_id;
+        client().page_did_request_geolocation_position(request_id);
+    }
+
+    return request_id;
+}
+
+void Page::cancel_geolocation_position_request(u64 request_id)
+{
+    auto request = m_pending_geolocation_requests.take(request_id);
+    if (!request.has_value())
+        return;
+
+    if (request->type == GeolocationRequestType::Watch) {
+        client().page_did_stop_geolocation_position_watch(request_id);
+        return;
+    }
+
+    if (m_active_geolocation_request_id != request_id)
+        return;
+
+    client().page_did_cancel_geolocation_position_request(request_id);
+    m_active_geolocation_request_id = {};
+    for (auto const& entry : m_pending_geolocation_requests) {
+        if (entry.value.type == GeolocationRequestType::OneShot) {
+            m_active_geolocation_request_id = entry.key;
+            client().page_did_request_geolocation_position(entry.key);
+            return;
+        }
+    }
+}
+
+void Page::receive_geolocation_position(u64 request_id, GeolocationPositionResult result)
+{
+    auto request = m_pending_geolocation_requests.get(request_id);
+    if (!request.has_value())
+        return;
+
+    if (request->type == GeolocationRequestType::Watch) {
+        auto callback = request->callback;
+        if (result.has<Geolocation::GeolocationPositionError::ErrorCode>()
+            && result.get<Geolocation::GeolocationPositionError::ErrorCode>() == Geolocation::GeolocationPositionError::ErrorCode::PermissionDenied)
+            m_pending_geolocation_requests.remove(request_id);
+        callback->function()(result);
+        return;
+    }
+
+    if (m_active_geolocation_request_id != request_id)
+        return;
+
+    m_active_geolocation_request_id = {};
+
+    Vector<GeolocationPositionCallback> callbacks;
+    Vector<u64> completed_request_ids;
+    for (auto const& entry : m_pending_geolocation_requests) {
+        if (entry.value.type != GeolocationRequestType::OneShot)
+            continue;
+        callbacks.append(entry.value.callback);
+        completed_request_ids.append(entry.key);
+    }
+
+    for (auto completed_request_id : completed_request_ids)
+        m_pending_geolocation_requests.remove(completed_request_id);
+
+    for (auto const& callback : callbacks)
+        callback->function()(result);
+}
+
 void Page::register_media_element(Badge<HTML::HTMLMediaElement>, UniqueNodeID media_id)
 {
     m_media_elements.append(media_id);
@@ -683,16 +798,18 @@ void Page::for_each_media_element(Callback&& callback)
     }
 }
 
-void Page::update_all_media_element_video_sinks()
+void Page::restore_all_media_element_video_sinks()
 {
-    bool should_request_another_frame = false;
     for_each_media_element([&](auto& media_element) {
-        media_element.update_video_frame_and_timeline();
-        should_request_another_frame = true;
+        media_element.add_current_video_sink();
     });
+}
 
-    if (should_request_another_frame)
-        client().request_frame();
+void Page::detach_all_media_element_video_sinks_after_compositor_lost()
+{
+    for_each_media_element([&](auto& media_element) {
+        media_element.detach_video_sink_after_compositor_lost();
+    });
 }
 
 void Page::register_canvas_element(Badge<HTML::HTMLCanvasElement>, UniqueNodeID canvas_id)
@@ -721,6 +838,12 @@ void Page::prepare_canvas_contexts_for_compositing()
     for_each_canvas_element([](auto& canvas_element) {
         canvas_element.prepare_for_compositing();
     });
+
+    // Preparing only records commands and present markers into the shared
+    // canvas command stream; flush it here so canvases reach the Compositor
+    // even when nothing else repaints this rendering update.
+    if (has_compositor_host())
+        compositor_host().flush_canvas_2d_stream();
 }
 
 void Page::notify_all_canvas_elements_of_lost_backing_storage()
@@ -782,7 +905,7 @@ void Page::toggle_media_loop_state()
     if (media_element->has_attribute(HTML::AttributeNames::loop))
         media_element->remove_attribute(HTML::AttributeNames::loop);
     else
-        media_element->set_attribute_value(HTML::AttributeNames::loop, String {});
+        media_element->set_attribute_value(HTML::AttributeNames::loop, Utf16String {});
 }
 
 void Page::toggle_media_fullscreen_state()
@@ -806,12 +929,15 @@ void Page::toggle_media_controls_state()
     if (media_element->has_attribute(HTML::AttributeNames::controls))
         media_element->remove_attribute(HTML::AttributeNames::controls);
     else
-        media_element->set_attribute_value(HTML::AttributeNames::controls, String {});
+        media_element->set_attribute_value(HTML::AttributeNames::controls, Utf16String {});
 }
 
-void Page::toggle_page_mute_state()
+void Page::set_page_mute_state(HTML::MuteState mute_state)
 {
-    m_mute_state = HTML::invert_mute_state(m_mute_state);
+    if (m_mute_state == mute_state)
+        return;
+
+    m_mute_state = mute_state;
 
     for_each_media_element([&](auto& media_element) {
         media_element.page_mute_state_changed({});
@@ -833,9 +959,9 @@ GC::Ptr<HTML::HTMLMediaElement> Page::media_context_menu_element()
     return static_cast<HTML::HTMLMediaElement*>(dom_node);
 }
 
-void Page::set_user_style(String source)
+void Page::set_user_style(Utf16String source)
 {
-    m_user_style_sheet_source = source;
+    m_user_style_sheet_source = move(source);
     invalidate_user_style();
 }
 

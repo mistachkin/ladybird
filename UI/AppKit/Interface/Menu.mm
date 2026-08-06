@@ -40,6 +40,12 @@
 
     if (![[[NSApp keyWindow] firstResponder] isKindOfClass:[LadybirdWebView class]]) {
         switch (action->id()) {
+        case WebView::ActionID::Undo:
+            [NSApp sendAction:@selector(undo:) to:nil from:sender];
+            return;
+        case WebView::ActionID::Redo:
+            [NSApp sendAction:@selector(redo:) to:nil from:sender];
+            return;
         case WebView::ActionID::CopySelection:
             [NSApp sendAction:@selector(copy:) to:nil from:sender];
             return;
@@ -60,6 +66,44 @@
     if (action->is_checkable())
         action->set_checked(!action->checked());
     action->activate();
+}
+
+- (BOOL)validateMenuItem:(NSMenuItem*)item
+{
+    auto action = m_action.strong_ref();
+    if (!action)
+        return NO;
+
+    // Undo and Redo dispatch to the native responder chain when focus is in the browser chrome, so their enablement
+    // must come from that same responder rather than from the web view's editing history. Ask the native target to
+    // validate a stand-in item carrying the native selector.
+    if (![[[NSApp keyWindow] firstResponder] isKindOfClass:[LadybirdWebView class]]) {
+        SEL native_action = nil;
+        switch (action->id()) {
+        case WebView::ActionID::Undo:
+            native_action = @selector(undo:);
+            break;
+        case WebView::ActionID::Redo:
+            native_action = @selector(redo:);
+            break;
+        default:
+            break;
+        }
+
+        if (native_action != nil) {
+            id target = [NSApp targetForAction:native_action to:nil from:item];
+            if (target == nil)
+                return NO;
+            if (![target respondsToSelector:@selector(validateUserInterfaceItem:)])
+                return YES;
+            auto* native_item = [[NSMenuItem alloc] initWithTitle:[item title]
+                                                           action:native_action
+                                                    keyEquivalent:@""];
+            return [(id<NSUserInterfaceValidations>)target validateUserInterfaceItem:native_item];
+        }
+    }
+
+    return action->enabled();
 }
 
 @end
@@ -225,8 +269,13 @@ static void initialize_native_icon(WebView::Action& action, id control)
         set_control_image(control, @"arrow.clockwise");
         [control setKeyEquivalent:@"r"];
         break;
+    case WebView::ActionID::ViewDownloads:
+        set_control_image(control, @"arrow.down.circle");
+        [control setKeyEquivalent:@"j"];
+        break;
     case WebView::ActionID::ViewHistory:
         set_control_image(control, @"clock");
+        [control setKeyEquivalent:@"y"];
         break;
     case WebView::ActionID::ClearBrowsingData:
         set_control_image(control, @"trash");
@@ -234,6 +283,15 @@ static void initialize_native_icon(WebView::Action& action, id control)
         [control setKeyEquivalentModifierMask:NSEventModifierFlagCommand | NSEventModifierFlagShift];
         break;
 
+    case WebView::ActionID::Undo:
+        set_control_image(control, @"arrow.uturn.backward");
+        [control setKeyEquivalent:@"z"];
+        break;
+    case WebView::ActionID::Redo:
+        set_control_image(control, @"arrow.uturn.forward");
+        [control setKeyEquivalent:@"z"];
+        [control setKeyEquivalentModifierMask:NSEventModifierFlagCommand | NSEventModifierFlagShift];
+        break;
     case WebView::ActionID::CopySelection:
         set_control_image(control, @"document.on.document");
         [control setKeyEquivalent:@"c"];
@@ -251,6 +309,7 @@ static void initialize_native_icon(WebView::Action& action, id control)
         [control setKeyEquivalent:@"a"];
         break;
 
+    case WebView::ActionID::LookUpSelectedText:
     case WebView::ActionID::SearchSelectedText:
         set_control_image(control, @"magnifyingglass");
         break;
@@ -260,6 +319,10 @@ static void initialize_native_icon(WebView::Action& action, id control)
         break;
     case WebView::ActionID::ToggleBookmark:
         [control setKeyEquivalent:@"d"];
+        break;
+    case WebView::ActionID::AddBookmarkAllTabs:
+        set_control_image(control, @"square.badge.plus");
+        [control setKeyEquivalent:@"D"];
         break;
     case WebView::ActionID::ToggleBookmarksBar:
         set_control_image(control, @"line.horizontal.star.fill.line.horizontal");
@@ -302,6 +365,9 @@ static void initialize_native_icon(WebView::Action& action, id control)
         break;
     case WebView::ActionID::OpenInNewWindow:
         set_control_image(control, @"macwindow.badge.plus");
+        break;
+    case WebView::ActionID::OpenInNewPrivateWindow:
+        set_control_image(control, @"eyeglasses");
         break;
     case WebView::ActionID::CopyURL:
         set_control_image(control, @"document.on.document");
@@ -475,7 +541,12 @@ NSMenuItem* create_application_menu_item(WebView::Menu& menu)
 
 NSButton* create_application_button(WebView::Action& action)
 {
-    auto* button = [[NSButton alloc] init];
+    return create_application_button(action, [NSButton class]);
+}
+
+NSButton* create_application_button(WebView::Action& action, Class button_class)
+{
+    NSButton* button = [[button_class alloc] init];
     initialize_native_control(action, button);
     set_properties(button, action);
     return button;

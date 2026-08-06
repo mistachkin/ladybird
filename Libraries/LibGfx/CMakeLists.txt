@@ -60,11 +60,11 @@ if (APPLE)
 endif()
 
 if (HAS_DIRECTX)
-    list(APPEND SOURCES Direct3DContext.cpp)
+    list(APPEND SOURCES D3DSharedTexture.cpp Direct3DContext.cpp)
 endif()
 
 if (HAS_VULKAN)
-    list(APPEND SOURCES VulkanContext.cpp VulkanImage.cpp)
+    list(APPEND SOURCES SkiaVulkanMemoryAllocator.cpp VulkanContext.cpp VulkanImage.cpp)
 endif()
 
 if (HAS_FONTCONFIG)
@@ -77,7 +77,7 @@ target_link_libraries(LibGfx PRIVATE LibCompress LibCore LibCrypto LibFileSystem
 
 target_link_libraries(LibGfx PRIVATE PkgConfig::WOFF2 JPEG::JPEG PNG::PNG skia harfbuzz)
 
-import_rust_crate(MANIFEST_PATH Rust/Cargo.toml CRATE_NAME libgfx_rust FFI_HEADER RustFFI.h)
+import_rust_crate(MANIFEST_PATH Rust/Cargo.toml CRATE_NAME libgfx_rust FEATURES allocator FFI_HEADER RustFFI.h)
 target_link_libraries(LibGfx PRIVATE libgfx_rust)
 
 if (HAS_FONTCONFIG)
@@ -105,6 +105,7 @@ endif()
 
 if (HAS_VULKAN)
     target_link_libraries(LibCore PUBLIC Vulkan::Vulkan Vulkan::Headers)
+    target_link_libraries(LibGfx PRIVATE GPUOpen::VulkanMemoryAllocator)
 
     if (USE_VULKAN_DMABUF_IMAGES)
         pkg_check_modules(LibDRM REQUIRED libdrm)

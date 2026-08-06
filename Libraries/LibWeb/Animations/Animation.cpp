@@ -58,7 +58,7 @@ GC::Ref<Animation> Animation::construct_impl(JS::Realm& realm, GC::Ptr<Animation
 }
 
 // https://www.w3.org/TR/web-animations-1/#animation-set-the-associated-effect-of-an-animation
-void Animation::set_effect(GC::Ptr<AnimationEffect> new_effect)
+void Animation::set_effect(GC::Ptr<AnimationEffect> new_effect, ShouldInvalidate should_invalidate)
 {
     // Setting this attribute updates the object’s associated effect using the procedure to set the associated effect of
     // an animation.
@@ -106,7 +106,13 @@ void Animation::set_effect(GC::Ptr<AnimationEffect> new_effect)
 
     // 7. Run the procedure to update an animation’s finished state for animation with the did seek flag set to false,
     //    and the synchronously notify flag set to false.
-    update_finished_state(DidSeek::No, SynchronouslyNotify::No);
+    update_finished_state(DidSeek::No, SynchronouslyNotify::No, should_invalidate);
+}
+
+GC::Ptr<AnimationTimeline> Animation::timeline_for_bindings() const
+{
+    update_style_if_needed();
+    return m_timeline;
 }
 
 // https://www.w3.org/TR/web-animations-1/#animation-set-the-timeline-of-an-animation
@@ -232,7 +238,7 @@ WebIDL::ExceptionOr<Optional<TimeValue>> Animation::validate_a_css_numberish_tim
         // return false;
         return WebIDL::SimpleException {
             WebIDL::SimpleExceptionType::TypeError,
-            "CSSNumberish must be a percentage for progress-based animations"sv
+            "CSSNumberish must be a percentage for progress-based animations"_utf16
         };
     }
 
@@ -254,7 +260,7 @@ WebIDL::ExceptionOr<Optional<TimeValue>> Animation::validate_a_css_numberish_tim
         // return false.
         return WebIDL::SimpleException {
             WebIDL::SimpleExceptionType::TypeError,
-            "CSSNumericValue must be a time for non-progress based animations"sv
+            "CSSNumericValue must be a time for non-progress based animations"_utf16
         };
     }
 
@@ -277,6 +283,12 @@ WebIDL::ExceptionOr<Optional<TimeValue>> Animation::validate_a_css_numberish_tim
     return TimeValue::from_css_numberish(time.downcast<double, GC::Ref<CSS::CSSNumericValue>>(), computation_context);
 
     VERIFY_NOT_REACHED();
+}
+
+NullableCSSNumberish Animation::start_time_for_bindings() const
+{
+    update_style_if_needed();
+    return NullableCSSNumberish::from_optional_css_numberish_time(realm(), start_time());
 }
 
 // https://www.w3.org/TR/web-animations-1/#dom-animation-starttime
@@ -411,6 +423,12 @@ Optional<TimeValue> Animation::current_time() const
     return (m_timeline->current_time().value() - m_start_time.value()) * playback_rate();
 }
 
+NullableCSSNumberish Animation::current_time_for_bindings() const
+{
+    update_style_if_needed();
+    return NullableCSSNumberish::from_optional_css_numberish_time(realm(), current_time());
+}
+
 // https://www.w3.org/TR/web-animations-1/#animation-set-the-current-time
 WebIDL::ExceptionOr<void> Animation::set_current_time_for_bindings(NullableCSSNumberish const& raw_seek_time)
 {
@@ -484,13 +502,35 @@ WebIDL::ExceptionOr<void> Animation::set_playback_rate(double new_playback_rate)
     return {};
 }
 
+void Animation::update_style_if_needed() const
+{
+    if (m_owning_element.has_value())
+        m_owning_element->document().update_style_if_needed_for_element(*m_owning_element);
+}
+
 // https://www.w3.org/TR/web-animations-1/#animation-play-state
 Bindings::AnimationPlayState Animation::play_state_for_bindings() const
 {
-    if (m_owning_element.has_value())
-        m_owning_element->document().update_style();
-
+    update_style_if_needed();
     return play_state();
+}
+
+bool Animation::pending_for_bindings() const
+{
+    update_style_if_needed();
+    return pending();
+}
+
+GC::Ref<WebIDL::Promise> Animation::ready_for_bindings() const
+{
+    update_style_if_needed();
+    return ready();
+}
+
+GC::Ref<WebIDL::Promise> Animation::finished_for_bindings() const
+{
+    update_style_if_needed();
+    return finished();
 }
 
 Bindings::AnimationPlayState Animation::play_state() const
@@ -769,16 +809,16 @@ WebIDL::ExceptionOr<void> Animation::finish()
 }
 
 // https://www.w3.org/TR/web-animations-1/#dom-animation-play
-WebIDL::ExceptionOr<void> Animation::play()
+WebIDL::ExceptionOr<void> Animation::play(ShouldInvalidate should_invalidate)
 {
     // Begins or resumes playback of the animation by running the procedure to play an animation passing true as the
     // value of the auto-rewind flag.
-    return play_an_animation(AutoRewind::Yes);
+    return play_an_animation(AutoRewind::Yes, should_invalidate);
 }
 
 // https://drafts.csswg.org/web-animations-1/#playing-an-animation-section
 // https://drafts.csswg.org/web-animations-2/#play-an-animation
-WebIDL::ExceptionOr<void> Animation::play_an_animation(AutoRewind auto_rewind)
+WebIDL::ExceptionOr<void> Animation::play_an_animation(AutoRewind auto_rewind, ShouldInvalidate should_invalidate)
 {
     // 1. Let aborted pause be a boolean flag that is true if animation has a pending pause task, and false otherwise.
     auto aborted_pause = m_pending_pause_task == TaskState::Scheduled;
@@ -881,7 +921,7 @@ WebIDL::ExceptionOr<void> Animation::play_an_animation(AutoRewind auto_rewind)
 
     // 13. Run the procedure to update an animation’s finished state for animation with the did seek flag set to false,
     //     and the synchronously notify flag set to false.
-    update_finished_state(DidSeek::No, SynchronouslyNotify::No);
+    update_finished_state(DidSeek::No, SynchronouslyNotify::No, should_invalidate);
 
     return {};
 }
@@ -1199,7 +1239,7 @@ WebIDL::ExceptionOr<void> Animation::silently_set_current_time(Optional<TimeValu
         if (current_time().has_value()) {
             return WebIDL::SimpleException {
                 WebIDL::SimpleExceptionType::TypeError,
-                "Cannot change an animation's current time from a resolve value to an unresolved value"sv
+                "Cannot change an animation's current time from a resolve value to an unresolved value"_utf16
             };
         }
 
@@ -1244,7 +1284,7 @@ WebIDL::ExceptionOr<void> Animation::silently_set_current_time(Optional<TimeValu
 }
 
 // https://www.w3.org/TR/web-animations-1/#update-an-animations-finished-state
-void Animation::update_finished_state(DidSeek did_seek, SynchronouslyNotify synchronously_notify)
+void Animation::update_finished_state(DidSeek did_seek, SynchronouslyNotify synchronously_notify, ShouldInvalidate should_invalidate)
 {
     auto& realm = this->realm();
 
@@ -1402,7 +1442,8 @@ void Animation::update_finished_state(DidSeek did_seek, SynchronouslyNotify sync
         m_is_finished = false;
     }
 
-    invalidate_effect();
+    if (should_invalidate == ShouldInvalidate::Yes)
+        invalidate_effect();
 }
 
 // https://www.w3.org/TR/web-animations-1/#animation-reset-an-animations-pending-tasks

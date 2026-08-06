@@ -1,0 +1,12 @@
+Harness status: OK
+
+Found 7 tests
+
+7 Pass
+Pass	var() in attribute value substitutes locally
+Pass	var() in attribute value substitutes locally, argument
+Pass	var() in attribute value substitutes locally, typed
+Pass	attr() fallback substitutes locally
+Pass	attr() cycle through local
+Pass	attr() cycle through unused fallback in local
+Pass	attr() cycle through function

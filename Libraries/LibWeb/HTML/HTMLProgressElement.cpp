@@ -57,7 +57,7 @@ void HTMLProgressElement::set_value(double value)
     if (value < 0)
         value = 0;
 
-    set_attribute_value(HTML::AttributeNames::value, String::number(value));
+    set_attribute_value(HTML::AttributeNames::value, Utf16String::number(value));
     update_progress_value_element();
 }
 
@@ -77,7 +77,7 @@ void HTMLProgressElement::set_max(double value)
     if (value <= 0)
         return;
 
-    set_attribute_value(HTML::AttributeNames::max, String::number(value));
+    set_attribute_value(HTML::AttributeNames::max, Utf16String::number(value));
     update_progress_value_element();
 }
 
@@ -124,7 +124,7 @@ void HTMLProgressElement::create_shadow_tree_if_needed()
 void HTMLProgressElement::update_progress_value_element()
 {
     if (m_progress_value_element)
-        MUST(m_progress_value_element->style_for_bindings()->set_property(CSS::PropertyID::Width, MUST(String::formatted("{}%", position() * 100))));
+        MUST(m_progress_value_element->style_for_bindings()->set_property(CSS::PropertyID::Width, Utf16String::formatted("{}%", position() * 100)));
 }
 
 }

@@ -15,13 +15,12 @@ class RangeInputBox final : public BlockContainer {
     LAYOUT_NODE(RangeInputBox, BlockContainer);
 
 public:
-    RangeInputBox(DOM::Document&, GC::Ptr<DOM::Element>, CSS::ComputedProperties const&);
+    RangeInputBox(DOM::Document&, GC::Ptr<DOM::Element>, NonnullRefPtr<CSS::ComputedValues const>);
 
     virtual ~RangeInputBox() override = default;
 
 private:
     virtual CSS::SizeWithAspectRatio compute_auto_content_box_size() const override;
-    virtual bool has_auto_content_box_size() const override { return true; }
 };
 
 }

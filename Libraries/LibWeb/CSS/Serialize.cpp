@@ -22,48 +22,65 @@ void escape_a_character(StringBuilder& builder, u32 character)
     builder.append_code_point(character);
 }
 
+static void escape_a_character(Utf16StringBuilder& builder, u32 character)
+{
+    builder.append_ascii('\\');
+    builder.append_code_point(character);
+}
+
 // https://www.w3.org/TR/cssom-1/#escape-a-character-as-code-point
 void escape_a_character_as_code_point(StringBuilder& builder, u32 character)
 {
     builder.appendff("\\{:x} ", character);
 }
 
-// https://www.w3.org/TR/cssom-1/#serialize-an-identifier
-void serialize_an_identifier(StringBuilder& builder, StringView ident)
+static void escape_a_character_as_code_point(Utf16StringBuilder& builder, u32 character)
 {
-    Utf8View characters { ident };
-    auto first_character = characters.is_empty() ? 0 : *characters.begin();
+    builder.appendff("\\{:x} ", character);
+}
+
+// https://www.w3.org/TR/cssom-1/#serialize-an-identifier
+template<typename Builder>
+static void serialize_an_identifier_to_builder(Builder& builder, Utf16View ident)
+{
+    auto first_character = ident.is_empty() ? 0 : *ident.begin();
+    size_t character_index = 0;
 
     // To serialize an identifier means to create a string represented by the concatenation of,
     // for each character of the identifier:
-    for (auto character : characters) {
+    for (auto character : ident) {
         // If the character is NULL (U+0000), then the REPLACEMENT CHARACTER (U+FFFD).
         if (character == 0) {
             builder.append_code_point(0xFFFD);
+            ++character_index;
             continue;
         }
         // If the character is in the range [\1-\1f] (U+0001 to U+001F) or is U+007F,
         // then the character escaped as code point.
         if ((character >= 0x0001 && character <= 0x001F) || (character == 0x007F)) {
             escape_a_character_as_code_point(builder, character);
+            ++character_index;
             continue;
         }
         // If the character is the first character and is in the range [0-9] (U+0030 to U+0039),
         // then the character escaped as code point.
-        if (builder.is_empty() && character >= '0' && character <= '9') {
+        if (character_index == 0 && character >= '0' && character <= '9') {
             escape_a_character_as_code_point(builder, character);
+            ++character_index;
             continue;
         }
         // If the character is the second character and is in the range [0-9] (U+0030 to U+0039)
         // and the first character is a "-" (U+002D), then the character escaped as code point.
-        if (builder.length() == 1 && first_character == '-' && character >= '0' && character <= '9') {
+        if (character_index == 1 && first_character == '-' && character >= '0' && character <= '9') {
             escape_a_character_as_code_point(builder, character);
+            ++character_index;
             continue;
         }
         // If the character is the first character and is a "-" (U+002D), and there is no second
         // character, then the escaped character.
-        if (builder.is_empty() && character == '-' && characters.length() == 1) {
+        if (character_index == 0 && character == '-' && ident.length_in_code_points() == 1) {
             escape_a_character(builder, character);
+            ++character_index;
             continue;
         }
         // If the character is not handled by one of the above rules and is greater than or equal to U+0080, is "-" (U+002D) or "_" (U+005F), or is in one of the ranges [0-9] (U+0030 to U+0039), [A-Z] (U+0041 to U+005A), or \[a-z] (U+0061 to U+007A), then the character itself.
@@ -73,15 +90,23 @@ void serialize_an_identifier(StringBuilder& builder, StringView ident)
             || (character >= 'A' && character <= 'Z')
             || (character >= 'a' && character <= 'z')) {
             builder.append_code_point(character);
+            ++character_index;
             continue;
         }
         // Otherwise, the escaped character.
         escape_a_character(builder, character);
+        ++character_index;
     }
 }
+
 void serialize_an_identifier(StringBuilder& builder, Utf16View ident)
 {
-    serialize_an_identifier(builder, ident.to_utf8_but_should_be_ported_to_utf16());
+    serialize_an_identifier_to_builder(builder, ident);
+}
+
+void serialize_an_identifier(Utf16StringBuilder& builder, Utf16View ident)
+{
+    serialize_an_identifier_to_builder(builder, ident);
 }
 
 // https://www.w3.org/TR/cssom-1/#serialize-a-string
@@ -116,8 +141,66 @@ void serialize_a_string(StringBuilder& builder, StringView string)
     builder.append('"');
 }
 
+void serialize_a_string(StringBuilder& builder, Utf16View string)
+{
+    // To serialize a string means to create a string represented by '"' (U+0022), followed by the result
+    // of applying the rules below to each character of the given string, followed by '"' (U+0022):
+    builder.append('"');
+
+    for (auto character : string) {
+        // If the character is NULL (U+0000), then the REPLACEMENT CHARACTER (U+FFFD).
+        if (character == 0) {
+            builder.append_code_point(0xFFFD);
+            continue;
+        }
+        // If the character is in the range [\1-\1f] (U+0001 to U+001F) or is U+007F, the character escaped as code point.
+        if ((character >= 0x0001 && character <= 0x001F) || (character == 0x007F)) {
+            escape_a_character_as_code_point(builder, character);
+            continue;
+        }
+        // If the character is '"' (U+0022) or "\" (U+005C), the escaped character.
+        if (character == 0x0022 || character == 0x005C) {
+            escape_a_character(builder, character);
+            continue;
+        }
+        // Otherwise, the character itself.
+        builder.append_code_point(character);
+    }
+
+    builder.append('"');
+}
+
+void serialize_a_string(Utf16StringBuilder& builder, Utf16View string)
+{
+    // To serialize a string means to create a string represented by '"' (U+0022), followed by the result
+    // of applying the rules below to each character of the given string, followed by '"' (U+0022):
+    builder.append_ascii('"');
+
+    for (auto character : string) {
+        // If the character is NULL (U+0000), then the REPLACEMENT CHARACTER (U+FFFD).
+        if (character == 0) {
+            builder.append_code_point(0xFFFD);
+            continue;
+        }
+        // If the character is in the range [\1-\1f] (U+0001 to U+001F) or is U+007F, the character escaped as code point.
+        if ((character >= 0x0001 && character <= 0x001F) || (character == 0x007F)) {
+            escape_a_character_as_code_point(builder, character);
+            continue;
+        }
+        // If the character is '"' (U+0022) or "\" (U+005C), the escaped character.
+        if (character == 0x0022 || character == 0x005C) {
+            escape_a_character(builder, character);
+            continue;
+        }
+        // Otherwise, the character itself.
+        builder.append_code_point(character);
+    }
+
+    builder.append_ascii('"');
+}
+
 // https://www.w3.org/TR/cssom-1/#serialize-a-url
-void serialize_a_url(StringBuilder& builder, StringView url)
+void serialize_a_url(StringBuilder& builder, Utf16View url)
 {
     // To serialize a URL means to create a string represented by "url(",
     // followed by the serialization of the URL as a string, followed by ")".
@@ -126,12 +209,13 @@ void serialize_a_url(StringBuilder& builder, StringView url)
     builder.append(')');
 }
 
-// NOTE: No spec currently exists for serializing a <'unicode-range'>.
-void serialize_unicode_ranges(StringBuilder& builder, Vector<Gfx::UnicodeRange> const& unicode_ranges)
+void serialize_a_url(Utf16StringBuilder& builder, Utf16View url)
 {
-    serialize_a_comma_separated_list(builder, unicode_ranges, [](auto& builder, Gfx::UnicodeRange unicode_range) -> void {
-        return serialize_a_string(builder, unicode_range.to_string());
-    });
+    // To serialize a URL means to create a string represented by "url(",
+    // followed by the serialization of the URL as a string, followed by ")".
+    builder.append_ascii("url("sv);
+    serialize_a_string(builder, url);
+    builder.append_ascii(')');
 }
 
 // https://drafts.csswg.org/cssom/#serialize-a-css-value
@@ -171,21 +255,28 @@ void serialize_a_number(Utf16StringBuilder& builder, double value)
     builder.appendff("{:.6}", value);
 }
 
-String serialize_an_identifier(StringView ident)
+String serialize_an_identifier(Utf16View ident)
 {
     StringBuilder builder;
     serialize_an_identifier(builder, ident);
     return builder.to_string_without_validation();
 }
 
-String serialize_a_string(StringView string)
+Utf16String serialize_an_identifier_to_utf16(Utf16View ident)
+{
+    Utf16StringBuilder builder;
+    serialize_an_identifier(builder, ident);
+    return builder.to_string();
+}
+
+String serialize_a_string(Utf16View string)
 {
     StringBuilder builder;
     serialize_a_string(builder, string);
     return builder.to_string_without_validation();
 }
 
-String serialize_a_url(StringView url)
+String serialize_a_url(Utf16View url)
 {
     StringBuilder builder;
     serialize_a_url(builder, url);
@@ -200,10 +291,10 @@ String serialize_a_number(double value)
 }
 
 // https://drafts.csswg.org/cssom/#serialize-a-css-declaration
-String serialize_a_css_declaration(Utf16View property, StringView value, Important important)
+Utf16String serialize_a_css_declaration_to_utf16(Utf16View property, Utf16View value, Important important)
 {
     // 1. Let s be the empty string.
-    StringBuilder builder;
+    Utf16StringBuilder builder;
 
     // 2. Append property to s.
     // AD-HOC: There's no place currently on the spec where the property name properly escaped,
@@ -214,22 +305,55 @@ String serialize_a_css_declaration(Utf16View property, StringView value, Importa
     serialize_an_identifier(builder, property);
 
     // 3. Append ": " (U+003A U+0020) to s.
-    builder.append(": "sv);
+    builder.append_ascii(": "sv);
 
     // 4. If value contains any non-whitespace characters, append value to s.
-    if (!value.is_whitespace())
+    if (!value.is_ascii_whitespace())
         builder.append(value);
 
     // 5. If the important flag is set, append " !important" (U+0020 U+0021 U+0069 U+006D U+0070 U+006F U+0072 U+0074
     //    U+0061 U+006E U+0074) to s.
     if (important == Important::Yes)
-        builder.append(" !important"sv);
+        builder.append_ascii(" !important"sv);
 
     // 6. Append ";" (U+003B) to s.
-    builder.append(';');
+    builder.append_ascii(';');
 
     // 7. Return s.
-    return builder.to_string_without_validation();
+    return builder.to_string();
+}
+
+// https://drafts.csswg.org/cssom/#serialize-a-css-declaration
+Utf16String serialize_a_css_declaration_to_utf16(StringView property, Utf16View value, Important important)
+{
+    // 1. Let s be the empty string.
+    Utf16StringBuilder builder;
+
+    // 2. Append property to s.
+    // AD-HOC: There's no place currently on the spec where the property name properly escaped,
+    //         and this needs to be done when custom properties have special characters.
+    //         Related spec issues:
+    //          - https://github.com/w3c/csswg-drafts/issues/11729
+    //          - https://github.com/w3c/csswg-drafts/issues/12258
+    serialize_an_identifier(builder, property);
+
+    // 3. Append ": " (U+003A U+0020) to s.
+    builder.append_ascii(": "sv);
+
+    // 4. If value contains any non-whitespace characters, append value to s.
+    if (!value.is_ascii_whitespace())
+        builder.append(value);
+
+    // 5. If the important flag is set, append " !important" (U+0020 U+0021 U+0069 U+006D U+0070 U+006F U+0072 U+0074
+    //    U+0061 U+006E U+0074) to s.
+    if (important == Important::Yes)
+        builder.append_ascii(" !important"sv);
+
+    // 6. Append ";" (U+003B) to s.
+    builder.append_ascii(';');
+
+    // 7. Return s.
+    return builder.to_string();
 }
 
 // https://drafts.csswg.org/css-syntax/#serialization
@@ -323,20 +447,24 @@ static bool needs_comment_between(Parser::ComponentValue const& first, Parser::C
 }
 
 // https://drafts.csswg.org/css-syntax/#serialization
-String serialize_a_series_of_component_values(ReadonlySpan<Parser::ComponentValue> component_values)
+void serialize_a_series_of_component_values(Utf16StringBuilder& builder, ReadonlySpan<Parser::ComponentValue> component_values)
 {
     Parser::TokenStream tokens { component_values };
-    StringBuilder builder;
 
     while (tokens.has_next_token()) {
         auto const& current_token = tokens.consume_a_token();
         auto const& next_token = tokens.next_token();
-        builder.append(current_token.to_string());
+        current_token.serialize_to(builder);
         if (needs_comment_between(current_token, next_token))
-            builder.append("/**/"sv);
+            builder.append_ascii("/**/"sv);
     }
+}
 
-    return builder.to_string_without_validation();
+Utf16String serialize_a_series_of_component_values(ReadonlySpan<Parser::ComponentValue> component_values)
+{
+    Utf16StringBuilder builder;
+    serialize_a_series_of_component_values(builder, component_values);
+    return builder.to_string();
 }
 
 static bool should_preserve_original_source_text_for_custom_property(Parser::ComponentValue const& component_value)
@@ -357,7 +485,7 @@ String serialize_a_series_of_component_values_preserving_original_source_text(Re
         if (should_preserve_original_source_text_for_custom_property(current_token)) {
             auto original_source_text = current_token.original_source_text();
             if (original_source_text.is_empty())
-                return serialize_a_series_of_component_values(component_values);
+                return serialize_a_series_of_component_values(component_values).to_utf8();
             builder.append(original_source_text);
         } else {
             builder.append(current_token.to_string());
@@ -369,7 +497,7 @@ String serialize_a_series_of_component_values_preserving_original_source_text(Re
     return builder.to_string_without_validation();
 }
 
-String serialize_a_positional_value_list(StyleValueVector const& values, SerializationMode mode)
+String serialize_a_positional_value_list(ReadonlySpan<ValueComparingNonnullRefPtr<StyleValue const>> values, SerializationMode mode)
 {
     switch (values.size()) {
     case 2: {

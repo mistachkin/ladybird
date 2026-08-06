@@ -15,8 +15,10 @@
 #include <LibWeb/DOM/MutationType.h>
 #include <LibWeb/DOM/Range.h>
 #include <LibWeb/DOM/Text.h>
+#include <LibWeb/Editing/EditingHistory.h>
 #include <LibWeb/Layout/TextNode.h>
 #include <LibWeb/Layout/TextOffsetMapping.h>
+#include <LibWeb/Selection/Selection.h>
 
 namespace Web::DOM {
 
@@ -42,7 +44,7 @@ size_t CharacterData::external_memory_size() const
 }
 
 // https://dom.spec.whatwg.org/#dom-characterdata-data
-void CharacterData::set_data(Utf16String const& data)
+void CharacterData::set_data(Utf16View const& data)
 {
     // [The data] setter must replace data with node this, offset 0, count this’s length, and data new value.
     // NOTE: Since the offset is 0, it can never be above data's length, so this can never throw.
@@ -73,6 +75,10 @@ WebIDL::ExceptionOr<Utf16String> CharacterData::substring_data(size_t offset, si
 // https://dom.spec.whatwg.org/#concept-cd-replace
 WebIDL::ExceptionOr<void> CharacterData::replace_data(size_t offset, size_t count, Utf16View const& data)
 {
+    // NB: Mutations during a recorded editing command must go through the Editing proxy functions.
+    if (auto history = document().editing_history_if_exists())
+        history->notify_dom_mutation();
+
     // 1. Let length be node’s length.
     auto length = m_data.length_in_code_units();
 
@@ -100,11 +106,19 @@ WebIDL::ExceptionOr<void> CharacterData::replace_data(size_t offset, size_t coun
 
     // 4. Queue a mutation record of "characterData" for node with null, null, node’s data, « », « », null, and null.
     // NOTE: We do this later so that the mutation observer may notify UI clients of this node's new value.
-    queue_mutation_record(MutationType::characterData, {}, {}, old_data.to_utf8_but_should_be_ported_to_utf16(), {}, {}, nullptr, nullptr);
+    queue_mutation_record(MutationType::characterData, {}, {}, old_data, {}, {}, nullptr, nullptr);
+
+    GC::Ptr<Range> selection_range_to_preserve;
+    if (m_data == old_data && document().preserve_selection_offsets_during_identical_character_data_replacement()) {
+        if (auto selection = document().get_selection())
+            selection_range_to_preserve = selection->range();
+    }
 
     // 8. For each live range whose start node is node and start offset is greater than offset but less than or equal to
     //    offset plus count, set its start offset to offset.
     for (auto* range : Range::live_ranges()) {
+        if (range == selection_range_to_preserve)
+            continue;
         if (range->start_container() == this && range->start_offset() > offset && range->start_offset() <= (offset + count))
             range->set_start_offset(offset);
     }
@@ -112,6 +126,8 @@ WebIDL::ExceptionOr<void> CharacterData::replace_data(size_t offset, size_t coun
     // 9. For each live range whose end node is node and end offset is greater than offset but less than or equal to
     //    offset plus count, set its end offset to offset.
     for (auto* range : Range::live_ranges()) {
+        if (range == selection_range_to_preserve)
+            continue;
         if (range->end_container() == this && range->end_offset() > offset && range->end_offset() <= (offset + count))
             range->set_end_offset(offset);
     }
@@ -119,6 +135,8 @@ WebIDL::ExceptionOr<void> CharacterData::replace_data(size_t offset, size_t coun
     // 10. For each live range whose start node is node and start offset is greater than offset plus count, increase its
     //     start offset by data’s length and decrease it by count.
     for (auto* range : Range::live_ranges()) {
+        if (range == selection_range_to_preserve)
+            continue;
         if (range->start_container() == this && range->start_offset() > (offset + count))
             range->set_start_offset(range->start_offset() + data.length_in_code_units() - count);
     }
@@ -126,6 +144,8 @@ WebIDL::ExceptionOr<void> CharacterData::replace_data(size_t offset, size_t coun
     // 11. For each live range whose end node is node and end offset is greater than offset plus count, increase its end
     //     offset by data’s length and decrease it by count.
     for (auto* range : Range::live_ranges()) {
+        if (range == selection_range_to_preserve)
+            continue;
         if (range->end_container() == this && range->end_offset() > (offset + count))
             range->set_end_offset(range->end_offset() + data.length_in_code_units() - count);
     }

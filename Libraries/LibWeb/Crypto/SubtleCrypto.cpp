@@ -34,49 +34,34 @@ static void normalize_key_usages(Vector<Bindings::KeyUsage>& key_usages)
 
 static JsonWebKey to_internal_json_web_key(Bindings::JsonWebKey bindings_jwk)
 {
-    auto to_utf16 = [](Optional<String> value) -> Optional<Utf16String> {
-        if (!value.has_value())
-            return {};
-        return Utf16String::from_utf8(value.release_value());
-    };
-    auto to_utf16_vector = [](Optional<Vector<String>> values) -> Optional<Vector<Utf16String>> {
-        if (!values.has_value())
-            return {};
-        Vector<Utf16String> result;
-        result.ensure_capacity(values->size());
-        for (auto& value : *values)
-            result.unchecked_append(Utf16String::from_utf8(value));
-        return result;
-    };
-
     JsonWebKey jwk;
-    jwk.alg = to_utf16(move(bindings_jwk.alg));
-    jwk.crv = to_utf16(move(bindings_jwk.crv));
-    jwk.d = to_utf16(move(bindings_jwk.d));
-    jwk.dp = to_utf16(move(bindings_jwk.dp));
-    jwk.dq = to_utf16(move(bindings_jwk.dq));
-    jwk.e = to_utf16(move(bindings_jwk.e));
+    jwk.alg = move(bindings_jwk.alg);
+    jwk.crv = move(bindings_jwk.crv);
+    jwk.d = move(bindings_jwk.d);
+    jwk.dp = move(bindings_jwk.dp);
+    jwk.dq = move(bindings_jwk.dq);
+    jwk.e = move(bindings_jwk.e);
     jwk.ext = move(bindings_jwk.ext);
-    jwk.k = to_utf16(move(bindings_jwk.k));
-    jwk.key_ops = to_utf16_vector(move(bindings_jwk.key_ops));
-    jwk.kty = to_utf16(move(bindings_jwk.kty));
-    jwk.n = to_utf16(move(bindings_jwk.n));
+    jwk.k = move(bindings_jwk.k);
+    jwk.key_ops = move(bindings_jwk.key_ops);
+    jwk.kty = move(bindings_jwk.kty);
+    jwk.n = move(bindings_jwk.n);
     if (bindings_jwk.oth.has_value()) {
         Vector<RsaOtherPrimesInfo> oth;
         oth.ensure_capacity(bindings_jwk.oth->size());
         for (auto& bindings_prime : *bindings_jwk.oth) {
-            oth.append({ .r = to_utf16(move(bindings_prime.r)), .d = to_utf16(move(bindings_prime.d)), .t = to_utf16(move(bindings_prime.t)) });
+            oth.append({ .r = move(bindings_prime.r), .d = move(bindings_prime.d), .t = move(bindings_prime.t) });
         }
         jwk.oth = move(oth);
     }
-    jwk.p = to_utf16(move(bindings_jwk.p));
-    jwk.priv = to_utf16(move(bindings_jwk.priv));
-    jwk.pub = to_utf16(move(bindings_jwk.pub));
-    jwk.q = to_utf16(move(bindings_jwk.q));
-    jwk.qi = to_utf16(move(bindings_jwk.qi));
-    jwk.use = to_utf16(move(bindings_jwk.use));
-    jwk.x = to_utf16(move(bindings_jwk.x));
-    jwk.y = to_utf16(move(bindings_jwk.y));
+    jwk.p = move(bindings_jwk.p);
+    jwk.priv = move(bindings_jwk.priv);
+    jwk.pub = move(bindings_jwk.pub);
+    jwk.q = move(bindings_jwk.q);
+    jwk.qi = move(bindings_jwk.qi);
+    jwk.use = move(bindings_jwk.use);
+    jwk.x = move(bindings_jwk.x);
+    jwk.y = move(bindings_jwk.y);
     return jwk;
 }
 
@@ -84,13 +69,14 @@ struct RegisteredAlgorithm {
     NonnullOwnPtr<AlgorithmMethods> (*create_methods)(JS::Realm&) = nullptr;
     JS::ThrowCompletionOr<NonnullOwnPtr<AlgorithmParams>> (*parameter_from_value)(JS::VM&, JS::Value) = nullptr;
 };
-using SupportedAlgorithmsMap = HashMap<String, HashMap<String, RegisteredAlgorithm, AK::ASCIICaseInsensitiveStringTraits>>;
+using RegisteredAlgorithms = HashMap<Utf16String, RegisteredAlgorithm>;
+using SupportedAlgorithmsMap = HashMap<String, RegisteredAlgorithms>;
 
 static SupportedAlgorithmsMap& supported_algorithms_internal();
 static SupportedAlgorithmsMap const& supported_algorithms();
 
 template<typename Methods, typename Param = AlgorithmParams>
-static void define_an_algorithm(String op, String algorithm);
+static void define_an_algorithm(String op, StringView algorithm);
 
 GC_DEFINE_ALLOCATOR(SubtleCrypto);
 
@@ -118,11 +104,11 @@ WebIDL::ExceptionOr<NormalizedAlgorithmAndParameter> normalize_an_algorithm(JS::
     auto& vm = realm.vm();
 
     // If alg is an instance of a DOMString:
-    if (algorithm.has<String>()) {
+    if (algorithm.has<Utf16String>()) {
         // Return the result of running the normalize an algorithm algorithm,
         // with the alg set to a new Algorithm dictionary whose name attribute is alg, and with the op set to op.
         auto dictionary = JS::Object::create(realm, realm.intrinsics().object_prototype());
-        TRY(dictionary->create_data_property("name"_utf16_fly_string, JS::PrimitiveString::create(vm, Utf16String::from_utf8(algorithm.get<String>()))));
+        TRY(dictionary->create_data_property("name"_utf16_fly_string, JS::PrimitiveString::create(vm, algorithm.get<Utf16String>())));
         return normalize_an_algorithm(realm, dictionary, operation);
     }
 
@@ -145,18 +131,24 @@ WebIDL::ExceptionOr<NormalizedAlgorithmAndParameter> normalize_an_algorithm(JS::
     }
 
     // 4. Let algName be the value of the name attribute of initialAlg.
-    auto algorithm_name = TRY(initial_algorithm.to_utf16_string(vm)).to_utf8_but_should_be_ported_to_utf16();
+    auto algorithm_name = TRY(initial_algorithm.to_utf16_string(vm));
 
     RegisteredAlgorithm desired_type;
 
     // 5. If registeredAlgorithms contains a key that is a case-insensitive string match for algName:
-    if (auto it = registered_algorithms.find(algorithm_name); it != registered_algorithms.end()) {
+    for (auto const& entry : registered_algorithms) {
+        if (!entry.key.equals_ignoring_ascii_case(algorithm_name))
+            continue;
+
         // 1. Set algName to the value of the matching key.
-        algorithm_name = it->key;
+        algorithm_name = entry.key;
 
         // 2. Let desiredType be the IDL dictionary type stored at algName in registeredAlgorithms.
-        desired_type = it->value;
-    } else {
+        desired_type = entry.value;
+        break;
+    }
+
+    if (!desired_type.create_methods) {
         // Otherwise:
         // Return a new NotSupportedError and terminate this algorithm.
         return WebIDL::NotSupportedError::create(realm, Utf16String::formatted("Algorithm '{}' is not supported for operation '{}'", algorithm_name, operation));
@@ -512,7 +504,7 @@ JS::ThrowCompletionOr<GC::Ref<WebIDL::Promise>> SubtleCrypto::import_key(Binding
 
         // 10. Let result be the CryptoKey object that results from performing the import key operation
         // specified by normalizedAlgorithm using keyData, algorithm, format, extractable and usages.
-        auto maybe_result = normalized_algorithm.methods->import_key(*normalized_algorithm.parameter, format, real_key_data.downcast<CryptoKey::InternalKeyData>(), extractable, key_usages);
+        auto maybe_result = normalized_algorithm.methods->import_key(*normalized_algorithm.parameter, format, real_key_data.downcast<CryptoKey::ImportKeyData>(), extractable, key_usages);
         if (maybe_result.is_error()) {
             WebIDL::reject_promise(realm, promise, Bindings::exception_to_throw_completion(realm.vm(), maybe_result.release_error()).release_value());
             return;
@@ -870,7 +862,7 @@ GC::Ref<WebIDL::Promise> SubtleCrypto::derive_key(AlgorithmIdentifier algorithm,
         }
 
         // 15. Let result be the result of performing the import key operation specified by normalizedDerivedKeyAlgorithmImport using "raw" as format, secret as keyData, derivedKeyType as algorithm and using extractable and usages.
-        auto secret_bytes = MUST(ByteBuffer::copy(secret.release_value()->bytes()));
+        auto secret_bytes = MUST(secret.release_value()->copy_to_byte_buffer());
         auto result_or_error = normalized_derived_key_algorithm_import.methods->import_key(*normalized_derived_key_algorithm_import.parameter, Bindings::KeyFormat::Raw, move(secret_bytes), extractable, key_usages);
         if (result_or_error.is_error()) {
             WebIDL::reject_promise(realm, promise, Bindings::exception_to_throw_completion(realm.vm(), result_or_error.release_error()).release_value());
@@ -1001,7 +993,7 @@ GC::Ref<WebIDL::Promise> SubtleCrypto::wrap_key(Bindings::KeyFormat format, GC::
             || format == Bindings::KeyFormat::Pkcs8
             || format == Bindings::KeyFormat::Spki) {
             // Let bytes be exportedKey.
-            bytes = MUST(ByteBuffer::copy(as<JS::ArrayBuffer>(*exported_key).bytes()));
+            bytes = MUST(as<JS::ArrayBuffer>(*exported_key).copy_to_byte_buffer());
         } else {
             VERIFY_NOT_REACHED();
         }
@@ -1147,7 +1139,8 @@ GC::Ref<WebIDL::Promise> SubtleCrypto::unwrap_key(Bindings::KeyFormat format, We
         // 15. If format is equal to the string "jwk":
         if (format == Bindings::KeyFormat::Jwk) {
             // Let key be the result of executing the parse a JWK algorithm, with bytes as the data to be parsed.
-            auto maybe_parsed = JsonWebKey::parse(realm, bytes->bytes());
+            auto bytes_data = MUST(bytes->copy_to_byte_buffer());
+            auto maybe_parsed = JsonWebKey::parse(realm, bytes_data);
             if (maybe_parsed.is_error()) {
                 WebIDL::reject_promise(realm, promise, maybe_parsed.release_error().release_value());
                 return;
@@ -1165,14 +1158,14 @@ GC::Ref<WebIDL::Promise> SubtleCrypto::unwrap_key(Bindings::KeyFormat format, We
             || format == Bindings::KeyFormat::Pkcs8
             || format == Bindings::KeyFormat::Spki) {
             // Let key be bytes.
-            key = MUST(ByteBuffer::copy(bytes->bytes()));
+            key = MUST(bytes->copy_to_byte_buffer());
         } else {
             VERIFY_NOT_REACHED();
         }
 
         // 16. Let result be the result of performing the import key operation specified by normalizedKeyAlgorithm
         //    using unwrappedKeyAlgorithm as algorithm, format, usages and extractable and with key as keyData.
-        auto result_or_error = normalized_key_algorithm.methods->import_key(*normalized_key_algorithm.parameter, format, key.downcast<CryptoKey::InternalKeyData>(), extractable, key_usages);
+        auto result_or_error = normalized_key_algorithm.methods->import_key(*normalized_key_algorithm.parameter, format, key.downcast<CryptoKey::ImportKeyData>(), extractable, key_usages);
         if (result_or_error.is_error()) {
             WebIDL::reject_promise(realm, promise, Bindings::exception_to_throw_completion(realm.vm(), result_or_error.release_error()).release_value());
             return;
@@ -1479,7 +1472,7 @@ GC::Ref<WebIDL::Promise> SubtleCrypto::decapsulate_key(AlgorithmIdentifier decap
         auto maybe_shared_key = normalized_shared_key_algorithm.methods->import_key(
             *normalized_shared_key_algorithm.parameter,
             Bindings::KeyFormat::RawSecret,
-            MUST(ByteBuffer::copy(decapsulated_bits->bytes())),
+            MUST(decapsulated_bits->copy_to_byte_buffer()),
             extractable,
             usages);
         if (maybe_shared_key.is_error()) {
@@ -1805,7 +1798,7 @@ SupportedAlgorithmsMap const& supported_algorithms()
 
 // https://w3c.github.io/webcrypto/#concept-define-an-algorithm
 template<typename Methods, typename Param>
-void define_an_algorithm(AK::String op, AK::String algorithm)
+void define_an_algorithm(AK::String op, StringView algorithm)
 {
     auto& internal_object = supported_algorithms_internal();
 
@@ -1815,7 +1808,7 @@ void define_an_algorithm(AK::String op, AK::String algorithm)
     auto registered_algorithms = maybe_registered_algorithms.value();
 
     // 2. Set the alg key of registeredAlgorithms to the IDL dictionary type type.
-    registered_algorithms.set(algorithm, RegisteredAlgorithm { &Methods::create, &Param::from_value });
+    registered_algorithms.set(Utf16String::from_ascii_without_validation(algorithm.bytes()), RegisteredAlgorithm { &Methods::create, &Param::from_value });
     internal_object.set(op, registered_algorithms);
 }
 

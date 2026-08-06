@@ -6,8 +6,10 @@
  */
 
 #include <AK/StringBuilder.h>
+#include <AK/Utf16StringBuilder.h>
 #include <LibWeb/CSS/CSSConditionRule.h>
 #include <LibWeb/CSS/CSSContainerRule.h>
+#include <LibWeb/CSS/CSSFunctionRule.h>
 #include <LibWeb/CSS/CSSGroupingRule.h>
 #include <LibWeb/CSS/CSSImportRule.h>
 #include <LibWeb/CSS/CSSKeyframesRule.h>
@@ -84,6 +86,51 @@ void MatchingRule::visit_edges(GC::Cell::Visitor& visitor) const
     visitor.visit(scope_rule);
 }
 
+static Optional<Utf16FlyString> namespace_filter_for_qualified_name(Selector::SimpleSelector::QualifiedName const& qualified_name, CSSStyleSheet const& style_sheet)
+{
+    switch (qualified_name.namespace_type) {
+    case Selector::SimpleSelector::QualifiedName::NamespaceType::Default:
+        return style_sheet.default_namespace();
+    case Selector::SimpleSelector::QualifiedName::NamespaceType::None:
+        return Utf16FlyString {};
+    case Selector::SimpleSelector::QualifiedName::NamespaceType::Any:
+        return {};
+    case Selector::SimpleSelector::QualifiedName::NamespaceType::Named:
+        return style_sheet.namespace_uri(qualified_name.namespace_);
+    }
+    VERIFY_NOT_REACHED();
+}
+
+static Selector::CompoundSelector const& target_compound_selector_for_namespace_filter(Selector const& selector)
+{
+    auto const& compound_selectors = selector.compound_selectors();
+    VERIFY(!compound_selectors.is_empty());
+
+    if (auto compound_selector = compound_selectors.last_matching([](auto const& compound_selector) {
+            return compound_selector.combinator != Selector::Combinator::PseudoElement;
+        });
+        compound_selector.has_value())
+        return compound_selector.value();
+
+    return compound_selectors.first();
+}
+
+static Optional<Utf16FlyString> element_namespace_filter_for_rule(Selector const& selector, CSSStyleSheet const& style_sheet)
+{
+    if (selector.is_slotted() || selector.has_part_pseudo_element())
+        return {};
+
+    auto const& compound_selector = target_compound_selector_for_namespace_filter(selector);
+    for (auto const& simple_selector : compound_selector.simple_selectors) {
+        if (simple_selector.type == Selector::SimpleSelector::Type::TagName
+            || simple_selector.type == Selector::SimpleSelector::Type::Universal) {
+            return namespace_filter_for_qualified_name(simple_selector.qualified_name(), style_sheet);
+        }
+    }
+
+    return style_sheet.default_namespace();
+}
+
 void RuleCache::visit_edges(GC::Cell::Visitor& visitor)
 {
     auto visit_vector = [&](auto& vector) {
@@ -127,24 +174,93 @@ StyleScope::StyleScope(GC::Ref<DOM::Node> node)
 {
 }
 
+bool SheetSetStyleCacheRegistry::entry_is_current(Entry const& entry)
+{
+    for (size_t i = 0; i < entry.sheets.size(); ++i) {
+        if (entry.sheets[i]->shared_style_cache_generation() != entry.sheet_generations[i])
+            return false;
+    }
+    return true;
+}
+
+static u32 hash_sheet_set(Vector<GC::Ref<CSSStyleSheet>> const& sheets)
+{
+    u32 hash = u64_hash(sheets.size());
+    for (auto const& sheet : sheets)
+        hash = pair_int_hash(hash, ptr_hash(sheet.ptr()));
+    return hash;
+}
+
+NonnullRefPtr<StyleCache> SheetSetStyleCacheRegistry::ensure_style_cache_for_sheet_set(Vector<GC::Ref<CSSStyleSheet>> const& sheets)
+{
+    auto hash = hash_sheet_set(sheets);
+    if (auto entries = m_entries_by_hash.get(hash); entries.has_value()) {
+        entries->remove_all_matching([](Entry const& entry) { return !entry_is_current(entry); });
+        for (auto& entry : *entries) {
+            if (entry.sheets == sheets)
+                return entry.style_cache;
+        }
+    }
+
+    // NB: Entries are only revalidated when their bucket is consulted, so purge entries registry-wide on every
+    //     insert: stale ones, and current ones whose cache no longer has any scope using it (the registry holds
+    //     the only reference). Otherwise abandoned sheet sets would keep their sheets and built caches alive
+    //     through visit_edges for the lifetime of the document. Inserts only happen once per distinct sheet set
+    //     and generation, so this walk stays rare.
+    m_entries_by_hash.remove_all_matching([](auto&, Vector<Entry>& entries) {
+        entries.remove_all_matching([](Entry const& entry) { return !entry_is_current(entry) || entry.style_cache->ref_count() == 1; });
+        return entries.is_empty();
+    });
+
+    Entry entry {
+        .sheets = sheets,
+        .sheet_generations = {},
+        .style_cache = StyleCache::create(),
+    };
+    entry.sheet_generations.ensure_capacity(sheets.size());
+    for (auto const& sheet : sheets)
+        entry.sheet_generations.append(sheet->shared_style_cache_generation());
+
+    auto style_cache = entry.style_cache;
+    m_entries_by_hash.ensure(hash).append(move(entry));
+    return style_cache;
+}
+
+void SheetSetStyleCacheRegistry::visit_edges(GC::Cell::Visitor& visitor)
+{
+    for (auto& [hash, entries] : m_entries_by_hash) {
+        for (auto& entry : entries) {
+            visitor.visit(entry.sheets);
+            entry.style_cache->visit_edges(visitor);
+        }
+    }
+}
+
 StyleCache& StyleScope::ensure_style_cache()
 {
     if (m_style_cache)
         return *m_style_cache;
 
-    if (auto* shadow_root = as_if<DOM::ShadowRoot>(*m_node)) {
-        GC::Ptr<CSSStyleSheet> constructed_style_sheet;
-        bool saw_more_than_one_style_sheet = false;
+    if (auto* shadow_root = as_if<DOM::ShadowRoot>(*m_node); shadow_root && !document().page().user_style().has_value()) {
+        Vector<GC::Ref<CSSStyleSheet>> sheets;
+        bool all_sheets_are_constructed = true;
         shadow_root->for_each_active_css_style_sheet([&](CSSStyleSheet& style_sheet) {
-            if (constructed_style_sheet) {
-                saw_more_than_one_style_sheet = true;
-                return;
-            }
-            constructed_style_sheet = style_sheet;
+            if (!style_sheet.constructed())
+                all_sheets_are_constructed = false;
+            else
+                sheets.append(style_sheet);
         });
 
-        if (constructed_style_sheet && !saw_more_than_one_style_sheet && constructed_style_sheet->constructed() && !document().page().user_style().has_value()) {
-            m_style_cache = constructed_style_sheet->shared_single_constructed_sheet_style_cache();
+        if (all_sheets_are_constructed && !sheets.is_empty()) {
+            if (sheets.size() == 1) {
+                m_style_cache = sheets.first()->shared_single_constructed_sheet_style_cache();
+                return *m_style_cache;
+            }
+
+            // OPTIMIZATION: Scopes whose active stylesheets are the same ordered set of constructed sheets can
+            //               share one cache, for the same reason the single-constructed-sheet cache above is
+            //               shareable: the contents only depend on the sheets and document-wide state.
+            m_style_cache = document().sheet_set_style_cache_registry().ensure_style_cache_for_sheet_set(sheets);
             return *m_style_cache;
         }
     }
@@ -161,6 +277,16 @@ StyleCache& StyleScope::ensure_style_cache() const
 void StyleScope::build_rule_cache()
 {
     auto& style_cache = ensure_style_cache();
+
+    // OPTIMIZATION: If ensure_style_cache() returned the shared single-constructed-sheet cache and another
+    //               scope has already populated it, its contents are valid for this scope as well: the cache
+    //               only depends on the sheet and document-wide state, and any change to either invalidates
+    //               the shared cache itself (see CSSStyleSheet::invalidate_shared_style_cache()).
+    if (style_cache.rule_cache)
+        return;
+
+    ++document().style_invalidation_counters().scope_rule_cache_builds;
+
     style_cache.rule_cache = make<StyleRuleCache>();
     populate_rule_cache(*style_cache.rule_cache);
 }
@@ -187,8 +313,15 @@ void StyleScope::populate_rule_cache(StyleRuleCache& rule_cache)
 void StyleScope::build_style_invalidation_data()
 {
     auto& style_cache = ensure_style_cache();
+
+    // OPTIMIZATION: Same as in build_rule_cache(): a shared cache populated by another scope using the
+    //               same single constructed sheet is valid for this scope as well.
+    if (style_cache.style_invalidation_data)
+        return;
+
     style_cache.style_invalidation_data = make<StyleInvalidationData>();
     populate_style_invalidation_data(*style_cache.style_invalidation_data);
+    style_cache.style_invalidation_data->did_finish_building();
 }
 
 void StyleScope::populate_style_invalidation_data(StyleInvalidationData& style_invalidation_data)
@@ -204,6 +337,10 @@ void StyleScope::invalidate_style_cache()
 {
     invalidate_counter_style_cache();
     m_style_cache = nullptr;
+    // The registered custom properties cache is built from the document's active stylesheets, so it only needs a
+    // rebuild when the document scope's rule set changes.
+    if (m_node->is_document())
+        document().set_needs_registered_properties_cache_update();
 }
 
 void StyleScope::invalidate_user_style_sheet()
@@ -225,16 +362,16 @@ void StyleScope::build_user_style_sheet_if_needed()
     if (!user_style_source.has_value() && content_blocker_style_source.is_empty())
         return;
 
-    StringBuilder source;
+    Utf16StringBuilder source;
     if (user_style_source.has_value())
-        source.append(user_style_source.value());
+        source.append(user_style_source->utf16_view());
     if (!content_blocker_style_source.is_empty()) {
         if (!source.is_empty())
-            source.append('\n');
-        source.append(content_blocker_style_source);
+            source.append_ascii('\n');
+        source.append(content_blocker_style_source.utf16_view());
     }
 
-    m_user_style_sheet = GC::make_root(parse_css_stylesheet(CSS::Parser::ParsingParams(document()), source.to_string_without_validation()));
+    m_user_style_sheet = GC::make_root(parse_css_stylesheet(CSS::Parser::ParsingParams(document()), source.view()));
 }
 
 void StyleScope::build_rule_cache_if_needed() const
@@ -305,7 +442,7 @@ static CSSStyleSheet& svg_stylesheet()
 
 void StyleScope::for_each_user_agent_stylesheet(bool include_quirks_mode_stylesheet, Function<void(CSS::CSSStyleSheet&, StyleSheetIdentifier const&)> const& callback)
 {
-    auto callback_with_identifier = [&](CSSStyleSheet& sheet, String url) {
+    auto callback_with_identifier = [&](CSSStyleSheet& sheet, Utf16String url) {
         StyleSheetIdentifier identifier {
             .type = StyleSheetIdentifier::Type::UserAgent,
             .url = move(url),
@@ -313,11 +450,11 @@ void StyleScope::for_each_user_agent_stylesheet(bool include_quirks_mode_stylesh
         callback(sheet, identifier);
     };
 
-    callback_with_identifier(default_stylesheet(), "CSS/Default.css"_string);
+    callback_with_identifier(default_stylesheet(), "CSS/Default.css"_utf16);
     if (include_quirks_mode_stylesheet)
-        callback_with_identifier(quirks_mode_stylesheet(), "CSS/QuirksMode.css"_string);
-    callback_with_identifier(mathml_stylesheet(), "MathML/Default.css"_string);
-    callback_with_identifier(svg_stylesheet(), "SVG/Default.css"_string);
+        callback_with_identifier(quirks_mode_stylesheet(), "CSS/QuirksMode.css"_utf16);
+    callback_with_identifier(mathml_stylesheet(), "MathML/Default.css"_utf16);
+    callback_with_identifier(svg_stylesheet(), "SVG/Default.css"_utf16);
 }
 
 Optional<StyleSheetIdentifier> StyleScope::user_agent_style_sheet_identifier(CSS::CSSStyleSheet const& style_sheet)
@@ -519,7 +656,7 @@ void StyleScope::make_rule_cache_for_cascade_origin(CascadeOrigin cascade_origin
                     .sheet = current_style_sheet,
                     .container_rule = container_rule,
                     .scope_rule = scope_rule,
-                    .default_namespace = current_style_sheet.default_namespace(),
+                    .element_namespace_filter = element_namespace_filter_for_rule(selector, current_style_sheet),
                     .selector = selector,
                     .selector_index = selector_index,
                     .style_sheet_index = style_sheet_index,
@@ -572,7 +709,6 @@ void StyleScope::make_rule_cache_for_cascade_origin(CascadeOrigin cascade_origin
                 auto const& keyframe = as<CSSKeyframeRule>(*keyframe_rule);
                 Animations::KeyframeEffect::KeyFrameSet::ResolvedKeyFrame resolved_keyframe;
 
-                auto key = static_cast<u64>(keyframe.key().value() * Animations::KeyframeEffect::AnimationKeyFrameKeyScaleFactor);
                 auto const& keyframe_style = *keyframe.style();
                 for (auto const& it : keyframe_style.properties()) {
                     if (it.property_id == PropertyID::AnimationTimingFunction) {
@@ -612,15 +748,19 @@ void StyleScope::make_rule_cache_for_cascade_origin(CascadeOrigin cascade_origin
                     });
                 }
 
-                if (auto* existing_keyframe = keyframe_set->keyframes_by_key.find(key)) {
-                    for (auto& [property_id, value] : resolved_keyframe.properties)
-                        existing_keyframe->properties.set(property_id, move(value));
-                    if (resolved_keyframe.composite != Bindings::CompositeOperationOrAuto::Auto)
-                        existing_keyframe->composite = resolved_keyframe.composite;
-                    if (!resolved_keyframe.easing.has<Empty>())
-                        existing_keyframe->easing = move(resolved_keyframe.easing);
-                } else {
-                    keyframe_set->keyframes_by_key.insert(key, resolved_keyframe);
+                for (auto const& key : keyframe.keys()) {
+                    auto resolved_key = static_cast<u64>(key.value() * Animations::KeyframeEffect::AnimationKeyFrameKeyScaleFactor);
+
+                    if (auto* existing_keyframe = keyframe_set->keyframes_by_key.find(resolved_key)) {
+                        for (auto& [property_id, value] : resolved_keyframe.properties)
+                            existing_keyframe->properties.set(property_id, value);
+                        if (resolved_keyframe.composite != Bindings::CompositeOperationOrAuto::Auto)
+                            existing_keyframe->composite = resolved_keyframe.composite;
+                        if (!resolved_keyframe.easing.has<Empty>())
+                            existing_keyframe->easing = resolved_keyframe.easing;
+                    } else {
+                        keyframe_set->keyframes_by_key.insert(resolved_key, resolved_keyframe);
+                    }
                 }
             }
 
@@ -695,12 +835,25 @@ void StyleScope::collect_selector_insights(Selector const& selector, SelectorIns
 }
 
 struct LayerNode {
-    OrderedHashMap<FlyString, LayerNode> children {};
+    OrderedHashMap<Utf16FlyString, LayerNode> children {};
 };
 
-static void flatten_layer_names_tree(Vector<FlyString>& layer_names, StringView const& parent_qualified_name, FlyString const& name, LayerNode const& node)
+static Utf16FlyString make_qualified_layer_name(Utf16FlyString const& parent_qualified_name, Utf16FlyString const& name)
 {
-    FlyString qualified_name = parent_qualified_name.is_empty() ? name : MUST(String::formatted("{}.{}", parent_qualified_name, name));
+    if (parent_qualified_name.is_empty())
+        return name;
+
+    Utf16StringBuilder builder;
+    builder.append(parent_qualified_name);
+    builder.append_ascii('.');
+    builder.append(name);
+    auto qualified_name = builder.to_string();
+    return Utf16FlyString::from_utf16(qualified_name.utf16_view());
+}
+
+static void flatten_layer_names_tree(Vector<Utf16FlyString>& layer_names, Utf16FlyString const& parent_qualified_name, Utf16FlyString const& name, LayerNode const& node)
+{
+    auto qualified_name = make_qualified_layer_name(parent_qualified_name, name);
 
     for (auto const& item : node.children)
         flatten_layer_names_tree(layer_names, qualified_name, item.key, item.value);
@@ -712,12 +865,13 @@ void StyleScope::build_qualified_layer_names_cache(StyleRuleCache& rule_cache)
 {
     LayerNode root;
 
-    auto insert_layer_name = [&](FlyString const& internal_qualified_name) {
+    auto insert_layer_name = [&](Utf16FlyString const& internal_qualified_name) {
         auto* node = &root;
-        internal_qualified_name.bytes_as_string_view()
-            .for_each_split_view('.', SplitBehavior::Nothing, [&](StringView part) {
-                auto local_name = MUST(FlyString::from_utf8(part));
+        internal_qualified_name.view()
+            .for_each_split_view(u'.', SplitBehavior::Nothing, [&](Utf16View const& part) {
+                auto local_name = Utf16FlyString::from_utf16(part);
                 node = &node->children.ensure(local_name);
+                return IterationDecision::Continue;
             });
     };
 
@@ -776,7 +930,7 @@ void StyleScope::build_qualified_layer_names_cache(StyleRuleCache& rule_cache)
 
     // Now, produce a flat list of qualified names to use later
     rule_cache.qualified_layer_names_in_order.clear();
-    flatten_layer_names_tree(rule_cache.qualified_layer_names_in_order, ""sv, {}, root);
+    flatten_layer_names_tree(rule_cache.qualified_layer_names_in_order, {}, {}, root);
 }
 
 void StyleScope::invalidate_counter_style_cache()
@@ -797,7 +951,7 @@ void StyleScope::build_counter_style_cache()
 
     m_registered_counter_styles.clear_with_capacity();
 
-    HashMap<FlyString, CSS::CounterStyleDefinition> counter_style_definitions;
+    HashMap<Utf16FlyString, CSS::CounterStyleDefinition> counter_style_definitions;
 
     auto const define_complex_predefined_counter_styles = [&]() {
         // https://drafts.csswg.org/css-counter-styles-3/#complex-predefined-counters
@@ -811,13 +965,13 @@ void StyleScope::build_counter_style_cache()
         // For this system, the name is "ethiopic-numeric", the range is 1 infinite, the suffix is "/ " (U+002F SOLIDUS
         // followed by a U+0020 SPACE), and the rest of the descriptors have their initial value.
         counter_style_definitions.set(
-            "ethiopic-numeric"_fly_string,
+            "ethiopic-numeric"_utf16_fly_string,
             CSS::CounterStyleDefinition::create(
-                "ethiopic-numeric"_fly_string,
+                "ethiopic-numeric"_utf16_fly_string,
                 CSS::CounterStyleAlgorithmOrExtends { CSS::EthiopicNumericCounterStyleAlgorithm {} },
                 {},
                 {},
-                "/ "_fly_string,
+                "/ "_utf16_fly_string,
                 Vector<CSS::CounterStyleRangeEntry> { { 1, AK::NumericLimits<i32>::max() } },
                 {},
                 {}));
@@ -838,142 +992,142 @@ void StyleScope::build_counter_style_cache()
         // https://drafts.csswg.org/css-counter-styles-3/#simp-chinese-informal
         // simp-chinese-informal
         counter_style_definitions.set(
-            "simp-chinese-informal"_fly_string,
+            "simp-chinese-informal"_utf16_fly_string,
             CSS::CounterStyleDefinition::create(
-                "simp-chinese-informal"_fly_string,
+                "simp-chinese-informal"_utf16_fly_string,
                 CSS::CounterStyleAlgorithmOrExtends { CSS::ExtendedCJKCounterStyleAlgorithm { CSS::ExtendedCJKCounterStyleAlgorithm::Type::SimpChineseInformal } },
-                CSS::CounterStyleNegativeSign { "\U00008D1F"_fly_string, ""_fly_string },
+                CSS::CounterStyleNegativeSign { "\U00008D1F"_utf16_fly_string, ""_utf16_fly_string },
                 {},
-                "\U00003001"_fly_string,
+                "\U00003001"_utf16_fly_string,
                 extended_cjk_range,
-                "cjk-decimal"_fly_string,
+                "cjk-decimal"_utf16_fly_string,
                 {}));
 
         // https://drafts.csswg.org/css-counter-styles-3/#simp-chinese-formal
         // simp-chinese-formal
         counter_style_definitions.set(
-            "simp-chinese-formal"_fly_string,
+            "simp-chinese-formal"_utf16_fly_string,
             CSS::CounterStyleDefinition::create(
-                "simp-chinese-formal"_fly_string,
+                "simp-chinese-formal"_utf16_fly_string,
                 CSS::CounterStyleAlgorithmOrExtends { CSS::ExtendedCJKCounterStyleAlgorithm { CSS::ExtendedCJKCounterStyleAlgorithm::Type::SimpChineseFormal } },
-                CSS::CounterStyleNegativeSign { "\U00008D1F"_fly_string, ""_fly_string },
+                CSS::CounterStyleNegativeSign { "\U00008D1F"_utf16_fly_string, ""_utf16_fly_string },
                 {},
-                "\U00003001"_fly_string,
+                "\U00003001"_utf16_fly_string,
                 extended_cjk_range,
-                "cjk-decimal"_fly_string,
+                "cjk-decimal"_utf16_fly_string,
                 {}));
 
         // https://drafts.csswg.org/css-counter-styles-3/#trad-chinese-informal
         // trad-chinese-informal
         counter_style_definitions.set(
-            "trad-chinese-informal"_fly_string,
+            "trad-chinese-informal"_utf16_fly_string,
             CSS::CounterStyleDefinition::create(
-                "trad-chinese-informal"_fly_string,
+                "trad-chinese-informal"_utf16_fly_string,
                 CSS::CounterStyleAlgorithmOrExtends { CSS::ExtendedCJKCounterStyleAlgorithm { CSS::ExtendedCJKCounterStyleAlgorithm::Type::TradChineseInformal } },
-                CSS::CounterStyleNegativeSign { "\U00008CA0"_fly_string, ""_fly_string },
+                CSS::CounterStyleNegativeSign { "\U00008CA0"_utf16_fly_string, ""_utf16_fly_string },
                 {},
-                "\U00003001"_fly_string,
+                "\U00003001"_utf16_fly_string,
                 extended_cjk_range,
-                "cjk-decimal"_fly_string,
+                "cjk-decimal"_utf16_fly_string,
                 {}));
 
         // https://drafts.csswg.org/css-counter-styles-3/#trad-chinese-formal
         // trad-chinese-formal
         counter_style_definitions.set(
-            "trad-chinese-formal"_fly_string,
+            "trad-chinese-formal"_utf16_fly_string,
             CSS::CounterStyleDefinition::create(
-                "trad-chinese-formal"_fly_string,
+                "trad-chinese-formal"_utf16_fly_string,
                 CSS::CounterStyleAlgorithmOrExtends { CSS::ExtendedCJKCounterStyleAlgorithm { CSS::ExtendedCJKCounterStyleAlgorithm::Type::TradChineseFormal } },
-                CSS::CounterStyleNegativeSign { "\U00008CA0"_fly_string, ""_fly_string },
+                CSS::CounterStyleNegativeSign { "\U00008CA0"_utf16_fly_string, ""_utf16_fly_string },
                 {},
-                "\U00003001"_fly_string,
+                "\U00003001"_utf16_fly_string,
                 extended_cjk_range,
-                "cjk-decimal"_fly_string,
+                "cjk-decimal"_utf16_fly_string,
                 {}));
 
         // https://drafts.csswg.org/css-counter-styles-3/#cjk-ideographic
         // cjk-ideographic
         // This counter style is identical to trad-chinese-informal. (It exists for legacy reasons.)
         counter_style_definitions.set(
-            "cjk-ideographic"_fly_string,
+            "cjk-ideographic"_utf16_fly_string,
             CSS::CounterStyleDefinition::create(
-                "cjk-ideographic"_fly_string,
+                "cjk-ideographic"_utf16_fly_string,
                 CSS::CounterStyleAlgorithmOrExtends { CSS::ExtendedCJKCounterStyleAlgorithm { CSS::ExtendedCJKCounterStyleAlgorithm::Type::TradChineseInformal } },
-                CSS::CounterStyleNegativeSign { "\U00008CA0"_fly_string, ""_fly_string },
+                CSS::CounterStyleNegativeSign { "\U00008CA0"_utf16_fly_string, ""_utf16_fly_string },
                 {},
-                "\U00003001"_fly_string,
+                "\U00003001"_utf16_fly_string,
                 extended_cjk_range,
-                "cjk-decimal"_fly_string,
+                "cjk-decimal"_utf16_fly_string,
                 {}));
 
         // https://drafts.csswg.org/css-counter-styles-3/#japanese-informal
         // japanese-informal
         counter_style_definitions.set(
-            "japanese-informal"_fly_string,
+            "japanese-informal"_utf16_fly_string,
             CSS::CounterStyleDefinition::create(
-                "japanese-informal"_fly_string,
+                "japanese-informal"_utf16_fly_string,
                 CSS::CounterStyleAlgorithmOrExtends { CSS::ExtendedCJKCounterStyleAlgorithm { CSS::ExtendedCJKCounterStyleAlgorithm::Type::JapaneseInformal } },
-                CSS::CounterStyleNegativeSign { "\U000030DE\U000030A4\U000030CA\U000030B9"_fly_string, ""_fly_string },
+                CSS::CounterStyleNegativeSign { "\U000030DE\U000030A4\U000030CA\U000030B9"_utf16_fly_string, ""_utf16_fly_string },
                 {},
-                "\U00003001"_fly_string,
+                "\U00003001"_utf16_fly_string,
                 extended_cjk_range,
-                "cjk-decimal"_fly_string,
+                "cjk-decimal"_utf16_fly_string,
                 {}));
 
         // https://drafts.csswg.org/css-counter-styles-3/#japanese-formal
         // japanese-formal
         counter_style_definitions.set(
-            "japanese-formal"_fly_string,
+            "japanese-formal"_utf16_fly_string,
             CSS::CounterStyleDefinition::create(
-                "japanese-formal"_fly_string,
+                "japanese-formal"_utf16_fly_string,
                 CSS::CounterStyleAlgorithmOrExtends { CSS::ExtendedCJKCounterStyleAlgorithm { CSS::ExtendedCJKCounterStyleAlgorithm::Type::JapaneseFormal } },
-                CSS::CounterStyleNegativeSign { "\U000030DE\U000030A4\U000030CA\U000030B9"_fly_string, ""_fly_string },
+                CSS::CounterStyleNegativeSign { "\U000030DE\U000030A4\U000030CA\U000030B9"_utf16_fly_string, ""_utf16_fly_string },
                 {},
-                "\U00003001"_fly_string,
+                "\U00003001"_utf16_fly_string,
                 extended_cjk_range,
-                "cjk-decimal"_fly_string,
+                "cjk-decimal"_utf16_fly_string,
                 {}));
 
         // https://drafts.csswg.org/css-counter-styles-3/#korean-hangul-formal
         // korean-hangul-formal
         counter_style_definitions.set(
-            "korean-hangul-formal"_fly_string,
+            "korean-hangul-formal"_utf16_fly_string,
             CSS::CounterStyleDefinition::create(
-                "korean-hangul-formal"_fly_string,
+                "korean-hangul-formal"_utf16_fly_string,
                 CSS::CounterStyleAlgorithmOrExtends { CSS::ExtendedCJKCounterStyleAlgorithm { CSS::ExtendedCJKCounterStyleAlgorithm::Type::KoreanHangulFormal } },
-                CSS::CounterStyleNegativeSign { "\U0000B9C8\U0000C774\U0000B108\U0000C2A4 "_fly_string, ""_fly_string },
+                CSS::CounterStyleNegativeSign { "\U0000B9C8\U0000C774\U0000B108\U0000C2A4 "_utf16_fly_string, ""_utf16_fly_string },
                 {},
-                ", "_fly_string,
+                ", "_utf16_fly_string,
                 extended_cjk_range,
-                "cjk-decimal"_fly_string,
+                "cjk-decimal"_utf16_fly_string,
                 {}));
 
         // https://drafts.csswg.org/css-counter-styles-3/#korean-hanja-informal
         // korean-hanja-informal
         counter_style_definitions.set(
-            "korean-hanja-informal"_fly_string,
+            "korean-hanja-informal"_utf16_fly_string,
             CSS::CounterStyleDefinition::create(
-                "korean-hanja-informal"_fly_string,
+                "korean-hanja-informal"_utf16_fly_string,
                 CSS::CounterStyleAlgorithmOrExtends { CSS::ExtendedCJKCounterStyleAlgorithm { CSS::ExtendedCJKCounterStyleAlgorithm::Type::KoreanHanjaInformal } },
-                CSS::CounterStyleNegativeSign { "\U0000B9C8\U0000C774\U0000B108\U0000C2A4 "_fly_string, ""_fly_string },
+                CSS::CounterStyleNegativeSign { "\U0000B9C8\U0000C774\U0000B108\U0000C2A4 "_utf16_fly_string, ""_utf16_fly_string },
                 {},
-                ", "_fly_string,
+                ", "_utf16_fly_string,
                 extended_cjk_range,
-                "cjk-decimal"_fly_string,
+                "cjk-decimal"_utf16_fly_string,
                 {}));
 
         // https://drafts.csswg.org/css-counter-styles-3/#korean-hanja-formal
         // korean-hanja-formal
         counter_style_definitions.set(
-            "korean-hanja-formal"_fly_string,
+            "korean-hanja-formal"_utf16_fly_string,
             CSS::CounterStyleDefinition::create(
-                "korean-hanja-formal"_fly_string,
+                "korean-hanja-formal"_utf16_fly_string,
                 CSS::CounterStyleAlgorithmOrExtends { CSS::ExtendedCJKCounterStyleAlgorithm { CSS::ExtendedCJKCounterStyleAlgorithm::Type::KoreanHanjaFormal } },
-                CSS::CounterStyleNegativeSign { "\U0000B9C8\U0000C774\U0000B108\U0000C2A4 "_fly_string, ""_fly_string },
+                CSS::CounterStyleNegativeSign { "\U0000B9C8\U0000C774\U0000B108\U0000C2A4 "_utf16_fly_string, ""_utf16_fly_string },
                 {},
-                ", "_fly_string,
+                ", "_utf16_fly_string,
                 extended_cjk_range,
-                "cjk-decimal"_fly_string,
+                "cjk-decimal"_utf16_fly_string,
                 {}));
     };
 
@@ -983,6 +1137,7 @@ void StyleScope::build_counter_style_cache()
 
     Function<void(CSS::CSSStyleSheet&)> const collect_counter_style_definitions = [&](CSS::CSSStyleSheet const& style_sheet) {
         style_sheet.for_each_effective_counter_style_at_rule([&](CSS::CSSCounterStyleRule const& counter_style_rule) {
+            // FIXME: Respect CSS layers here
             if (auto const& definition = CSS::CounterStyleDefinition::from_counter_style_rule(counter_style_rule, computation_context); definition.has_value())
                 counter_style_definitions.set(definition->name(), *definition);
         });
@@ -998,10 +1153,10 @@ void StyleScope::build_counter_style_cache()
 
     for_each_stylesheet(CSS::CascadeOrigin::Author, collect_counter_style_definitions);
 
-    VERIFY(!m_node->is_document() || counter_style_definitions.contains("decimal"_fly_string));
+    VERIFY(!m_node->is_document() || counter_style_definitions.contains("decimal"_utf16_fly_string));
 
-    auto const is_part_of_extends_cycle = [&](FlyString const& counter_style_name) {
-        HashTable<FlyString> visited;
+    auto const is_part_of_extends_cycle = [&](Utf16FlyString const& counter_style_name) {
+        HashTable<Utf16FlyString> visited;
         auto current_counter_style_name = counter_style_name;
 
         while (true) {
@@ -1044,7 +1199,7 @@ void StyleScope::build_counter_style_cache()
 
         if (is_part_of_extends_cycle(name)) {
             auto copied = definition;
-            copied.set_algorithm(CSS::CounterStyleSystemStyleValue::Extends { "decimal"_fly_string });
+            copied.set_algorithm(CSS::CounterStyleSystemStyleValue::Extends { "decimal"_utf16_fly_string });
             extending_counter_styles.append(copied);
         } else {
             extending_counter_styles.append(definition);
@@ -1057,7 +1212,8 @@ void StyleScope::build_counter_style_cache()
             auto const& definition = extending_counter_styles.at(i);
             auto extends = definition.algorithm().get<CSS::CounterStyleSystemStyleValue::Extends>();
 
-            if (!m_registered_counter_styles.contains(extends.name) && counter_style_definitions.contains(extends.name))
+            auto const& extends_name = extends.name;
+            if (!m_registered_counter_styles.contains(extends_name) && counter_style_definitions.contains(extends_name))
                 continue;
 
             m_registered_counter_styles.set(definition.name(), CSS::CounterStyle::from_counter_style_definition(definition, *this));
@@ -1106,11 +1262,6 @@ bool StyleScope::may_have_user_pseudo_class_selectors(PseudoClass pseudo_class) 
     return may_have_user_pseudo_class_selectors;
 }
 
-bool StyleScope::have_has_selectors() const
-{
-    return rule_cache().selector_insights.has_has_selectors;
-}
-
 bool StyleScope::may_have_has_selectors_with_relative_selector_that_has_sibling_combinator() const
 {
     if (!has_valid_rule_cache()) {
@@ -1125,16 +1276,6 @@ bool StyleScope::may_have_has_selectors_with_relative_selector_that_has_sibling_
     }
 
     return rule_cache().selector_insights.has_has_selectors_with_relative_selector_that_has_sibling_combinator;
-}
-
-bool StyleScope::have_has_selectors_with_relative_selector_that_has_sibling_combinator() const
-{
-    return rule_cache().selector_insights.has_has_selectors_with_relative_selector_that_has_sibling_combinator;
-}
-
-bool StyleScope::have_size_container_queries() const
-{
-    return rule_cache().has_size_container_queries;
 }
 
 DOM::Document& StyleScope::document() const
@@ -1156,6 +1297,27 @@ void StyleScope::for_each_active_css_style_sheet(Function<void(CSS::CSSStyleShee
     }
 }
 
+// The document keeps a list of the scopes with pending :has() invalidations so flushes only examine those. The
+// scope must appear in that list exactly once, so only the transition from an empty pending map registers it.
+void StyleScope::did_schedule_pending_has_invalidation(size_t previous_size)
+{
+    if (previous_size == 0)
+        document().register_style_scope_with_pending_has_invalidations(m_node);
+    document().set_needs_invalidation_of_elements_affected_by_has();
+}
+
+void StyleScope::node_was_adopted_from(DOM::Document& old_document)
+{
+    // Pending :has() invalidations registered this scope with its old document. Move the registration to the new
+    // document so the next flush there picks the scope up; the scheduling paths only register a scope when its
+    // pending map goes from empty to non-empty, so they would never re-register it themselves.
+    if (m_pending_has_invalidations.is_empty())
+        return;
+    old_document.unregister_style_scope_with_pending_has_invalidations(m_node);
+    document().register_style_scope_with_pending_has_invalidations(m_node);
+    document().set_needs_invalidation_of_elements_affected_by_has();
+}
+
 void StyleScope::schedule_ancestors_style_invalidation_due_to_presence_of_has(GC::Ref<DOM::Node> node)
 {
     auto previous_size = m_pending_has_invalidations.size();
@@ -1163,7 +1325,7 @@ void StyleScope::schedule_ancestors_style_invalidation_due_to_presence_of_has(GC
     if (m_pending_has_invalidations.size() == previous_size)
         return;
     mutation_features.is_conservative = true;
-    document().set_needs_invalidation_of_elements_affected_by_has();
+    did_schedule_pending_has_invalidation(previous_size);
 }
 
 static void merge_pending_has_invalidation_mutation_features(PendingHasInvalidationMutationFeatures& target, PendingHasInvalidationMutationFeatures const& source)
@@ -1171,6 +1333,7 @@ static void merge_pending_has_invalidation_mutation_features(PendingHasInvalidat
     target.is_conservative |= source.is_conservative;
     target.may_affect_sibling_relationships |= source.may_affect_sibling_relationships;
     target.may_affect_pseudo_classes |= source.may_affect_pseudo_classes;
+    target.may_affect_interaction_pseudo_classes |= source.may_affect_interaction_pseudo_classes;
     for (auto const& tag_name : source.tag_names)
         target.tag_names.set(tag_name);
     for (auto const& id : source.ids)
@@ -1195,30 +1358,19 @@ static void collect_pending_has_invalidation_features_from_element(PendingHasInv
     for (auto const& class_name : element.class_names())
         features.class_names.set(class_name);
 
-    element.for_each_attribute([&](FlyString const& name, String const&) {
+    element.for_each_attribute([&](Utf16FlyString const& name, auto const&) {
         features.attribute_names.set(name);
         if (element.namespace_uri() != Namespace::HTML)
             features.attribute_names.set(name.to_ascii_lowercase());
     });
 }
 
-void StyleScope::record_conservative_pending_has_invalidation(GC::Ref<DOM::Node> scheduled_node, bool may_affect_sibling_relationships)
-{
-    auto previous_size = m_pending_has_invalidations.size();
-    auto& mutation_features = m_pending_has_invalidations.ensure(scheduled_node);
-    mutation_features.is_conservative = true;
-    mutation_features.may_affect_sibling_relationships |= may_affect_sibling_relationships;
-    mutation_features.may_affect_pseudo_classes = true;
-
-    if (m_pending_has_invalidations.size() != previous_size)
-        document().set_needs_invalidation_of_elements_affected_by_has();
-}
-
-static PendingHasInvalidationMutationFeatures collect_pending_has_invalidation_mutation_features(DOM::Node& mutation_root, bool includes_descendants)
+static PendingHasInvalidationMutationFeatures collect_pending_has_invalidation_mutation_features(DOM::Node& mutation_root, bool includes_descendants, HasMutationKind kind)
 {
     PendingHasInvalidationMutationFeatures features;
     features.may_affect_sibling_relationships = includes_descendants;
     features.may_affect_pseudo_classes = true;
+    features.may_affect_interaction_pseudo_classes = kind != HasMutationKind::Insertion;
     auto collect_node = [&](DOM::Node& node) {
         if (node.is_character_data())
             return;
@@ -1244,10 +1396,10 @@ static PendingHasInvalidationMutationFeatures collect_pending_has_invalidation_m
     for (auto const& property : properties) {
         switch (property.type) {
         case InvalidationSet::Property::Type::Class:
-            features.class_names.set(property.name());
+            features.class_names.set(property.class_name());
             break;
         case InvalidationSet::Property::Type::Id:
-            features.ids.set(property.name());
+            features.ids.set(property.id());
             break;
         case InvalidationSet::Property::Type::TagName:
             features.tag_names.set(property.name());
@@ -1267,9 +1419,9 @@ static PendingHasInvalidationMutationFeatures collect_pending_has_invalidation_m
     return features;
 }
 
-void StyleScope::record_pending_has_invalidation_mutation_features(GC::Ref<DOM::Node> scheduled_node, GC::Ref<DOM::Node> mutation_root, bool includes_descendants)
+void StyleScope::record_pending_has_invalidation_mutation_features(GC::Ref<DOM::Node> scheduled_node, GC::Ref<DOM::Node> mutation_root, bool includes_descendants, HasMutationKind kind)
 {
-    auto features = collect_pending_has_invalidation_mutation_features(*mutation_root, includes_descendants);
+    auto features = collect_pending_has_invalidation_mutation_features(*mutation_root, includes_descendants, kind);
     auto previous_size = m_pending_has_invalidations.size();
     auto& existing_features = m_pending_has_invalidations.ensure(scheduled_node);
     if (m_pending_has_invalidations.size() == previous_size) {
@@ -1277,7 +1429,7 @@ void StyleScope::record_pending_has_invalidation_mutation_features(GC::Ref<DOM::
         return;
     }
     existing_features = move(features);
-    document().set_needs_invalidation_of_elements_affected_by_has();
+    did_schedule_pending_has_invalidation(previous_size);
 }
 
 void StyleScope::record_pending_has_invalidation_mutation_features(GC::Ref<DOM::Node> scheduled_node, Vector<CSS::InvalidationSet::Property> const& properties)
@@ -1290,16 +1442,70 @@ void StyleScope::record_pending_has_invalidation_mutation_features(GC::Ref<DOM::
         return;
     }
     existing_features = move(features);
-    document().set_needs_invalidation_of_elements_affected_by_has();
+    did_schedule_pending_has_invalidation(previous_size);
 }
 
-RefPtr<CSS::CounterStyle const> StyleScope::get_registered_counter_style(FlyString const& name) const
+RefPtr<CSS::CounterStyle const> StyleScope::get_registered_counter_style(Utf16FlyString const& name) const
 {
     if (m_needs_counter_style_cache_update && !m_is_doing_counter_style_cache_update)
         const_cast<StyleScope*>(this)->build_counter_style_cache();
 
     return dereference_global_tree_scoped_reference<CSS::CounterStyle const*>([&](StyleScope const& scope) { return scope.m_registered_counter_styles.get(name); })
         .value_or(nullptr);
+}
+
+Optional<StyleScope::FunctionDefinitionAndScope> StyleScope::get_function_definition(Utf16FlyString const& name) const
+{
+    return dereference_global_tree_scoped_reference<FunctionDefinitionAndScope>([&](StyleScope const& scope) -> Optional<FunctionDefinitionAndScope> {
+        auto const get_function_definition_for_cascade_origin = [&](CSS::CascadeOrigin cascade_origin) {
+            CSSFunctionRule const* cascade_origin_result = nullptr;
+
+            Function<void(CSS::CSSStyleSheet&)> const get_function_definition_from_style_sheet = [&](CSS::CSSStyleSheet& style_sheet) {
+                style_sheet.for_each_effective_function_at_rule([&](CSS::CSSFunctionRule const& function_rule) {
+                    if (function_rule.name() != name)
+                        return;
+
+                    auto layer_index = scope.rule_cache().qualified_layer_names_in_order.find_first_index(function_rule.qualified_layer_name());
+
+                    if (!layer_index.has_value())
+                        return;
+
+                    if (!cascade_origin_result) {
+                        cascade_origin_result = &function_rule;
+                        return;
+                    }
+
+                    // NB: We should have a layer index if we have a result since we needed to match it in the first place
+                    auto existing_layer_index = scope.rule_cache().qualified_layer_names_in_order.find_first_index(cascade_origin_result->qualified_layer_name()).value();
+
+                    if (layer_index.value() >= existing_layer_index)
+                        cascade_origin_result = &function_rule;
+                });
+            };
+
+            scope.for_each_stylesheet(cascade_origin, get_function_definition_from_style_sheet);
+
+            return cascade_origin_result;
+        };
+
+        CSSFunctionRule const* result = nullptr;
+
+        if (scope.m_node->is_document()) {
+            if (auto const* user_agent_result = get_function_definition_for_cascade_origin(CSS::CascadeOrigin::UserAgent))
+                result = user_agent_result;
+
+            if (auto const* user_result = get_function_definition_for_cascade_origin(CSS::CascadeOrigin::User))
+                result = user_result;
+        }
+
+        if (auto const* author_result = get_function_definition_for_cascade_origin(CSS::CascadeOrigin::Author))
+            result = author_result;
+
+        if (!result)
+            return OptionalNone {};
+
+        return FunctionDefinitionAndScope { .function = *result, .scope = scope };
+    });
 }
 
 template<typename T>

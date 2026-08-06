@@ -27,18 +27,18 @@ void SVGLineElement::initialize(JS::Realm& realm)
     Base::initialize(realm);
 }
 
-void SVGLineElement::attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
+void SVGLineElement::attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_)
 {
     Base::attribute_changed(name, old_value, value, namespace_);
 
     if (name == SVG::AttributeNames::x1) {
-        m_x1 = AttributeParser::parse_number_percentage(value.value_or(String {}));
+        m_x1 = AttributeParser::parse_number_percentage(value.value_or({}));
     } else if (name == SVG::AttributeNames::y1) {
-        m_y1 = AttributeParser::parse_number_percentage(value.value_or(String {}));
+        m_y1 = AttributeParser::parse_number_percentage(value.value_or({}));
     } else if (name == SVG::AttributeNames::x2) {
-        m_x2 = AttributeParser::parse_number_percentage(value.value_or(String {}));
+        m_x2 = AttributeParser::parse_number_percentage(value.value_or({}));
     } else if (name == SVG::AttributeNames::y2) {
-        m_y2 = AttributeParser::parse_number_percentage(value.value_or(String {}));
+        m_y2 = AttributeParser::parse_number_percentage(value.value_or({}));
     }
 
     if (name.is_one_of(SVG::AttributeNames::x1, SVG::AttributeNames::y1, SVG::AttributeNames::x2, SVG::AttributeNames::y2))
@@ -63,46 +63,6 @@ Gfx::Path SVGLineElement::get_path(CSSPixelSize viewport_size)
     path.line_to({ x2, y2 });
 
     return path;
-}
-
-// https://www.w3.org/TR/SVG11/shapes.html#LineElementX1Attribute
-GC::Ref<SVGAnimatedLength> SVGLineElement::x1() const
-{
-    // FIXME: Populate the unit type when it is parsed (0 here is "unknown").
-    // FIXME: Create a proper animated value when animations are supported.
-    auto base_length = SVGLength::create(realm(), 0, m_x1.value_or({ 0, false }).value(), SVGLength::ReadOnly::No);
-    auto anim_length = SVGLength::create(realm(), 0, m_x1.value_or({ 0, false }).value(), SVGLength::ReadOnly::Yes);
-    return SVGAnimatedLength::create(realm(), base_length, anim_length);
-}
-
-// https://www.w3.org/TR/SVG11/shapes.html#LineElementY1Attribute
-GC::Ref<SVGAnimatedLength> SVGLineElement::y1() const
-{
-    // FIXME: Populate the unit type when it is parsed (0 here is "unknown").
-    // FIXME: Create a proper animated value when animations are supported.
-    auto base_length = SVGLength::create(realm(), 0, m_y1.value_or({ 0, false }).value(), SVGLength::ReadOnly::No);
-    auto anim_length = SVGLength::create(realm(), 0, m_y1.value_or({ 0, false }).value(), SVGLength::ReadOnly::Yes);
-    return SVGAnimatedLength::create(realm(), base_length, anim_length);
-}
-
-// https://www.w3.org/TR/SVG11/shapes.html#LineElementX2Attribute
-GC::Ref<SVGAnimatedLength> SVGLineElement::x2() const
-{
-    // FIXME: Populate the unit type when it is parsed (0 here is "unknown").
-    // FIXME: Create a proper animated value when animations are supported.
-    auto base_length = SVGLength::create(realm(), 0, m_x2.value_or({ 0, false }).value(), SVGLength::ReadOnly::No);
-    auto anim_length = SVGLength::create(realm(), 0, m_x2.value_or({ 0, false }).value(), SVGLength::ReadOnly::Yes);
-    return SVGAnimatedLength::create(realm(), base_length, anim_length);
-}
-
-// https://www.w3.org/TR/SVG11/shapes.html#LineElementY2Attribute
-GC::Ref<SVGAnimatedLength> SVGLineElement::y2() const
-{
-    // FIXME: Populate the unit type when it is parsed (0 here is "unknown").
-    // FIXME: Create a proper animated value when animations are supported.
-    auto base_length = SVGLength::create(realm(), 0, m_y2.value_or({ 0, false }).value(), SVGLength::ReadOnly::No);
-    auto anim_length = SVGLength::create(realm(), 0, m_y2.value_or({ 0, false }).value(), SVGLength::ReadOnly::Yes);
-    return SVGAnimatedLength::create(realm(), base_length, anim_length);
 }
 
 }

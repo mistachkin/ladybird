@@ -56,77 +56,33 @@ void SVGImageElement::adopted_from(DOM::Document& old_document)
         m_load_event_delayer.emplace(document());
 }
 
-void SVGImageElement::attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
+void SVGImageElement::attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_)
 {
     Base::attribute_changed(name, old_value, value, namespace_);
 
     if (name == SVG::AttributeNames::x) {
-        m_x = AttributeParser::parse_number_percentage(value.value_or(String {}));
+        m_x = AttributeParser::parse_number_percentage(value.value_or({}));
     } else if (name == SVG::AttributeNames::y) {
-        m_y = AttributeParser::parse_number_percentage(value.value_or(String {}));
+        m_y = AttributeParser::parse_number_percentage(value.value_or({}));
     } else if (name == SVG::AttributeNames::width) {
-        m_width = AttributeParser::parse_number_percentage(value.value_or(String {}));
+        m_width = AttributeParser::parse_number_percentage(value.value_or({}));
     } else if (name == SVG::AttributeNames::height) {
-        m_height = AttributeParser::parse_number_percentage(value.value_or(String {}));
+        m_height = AttributeParser::parse_number_percentage(value.value_or({}));
     } else if (name == SVG::AttributeNames::href) {
         // https://svgwg.org/svg2-draft/linking.html#XLinkRefAttrs
         // For backwards compatibility, elements with an ‘href’ attribute also recognize an ‘href’ attribute in the
         // XLink namespace. If the element is in the XLink namespace, it does not recognize an ‘href’ attribute in the
         // SVG namespace. When the ‘href’ attribute is present in both the XLink namespace and without a namespace, the
         // value of the attribute without a namespace shall be used. The attribute in the XLink namespace shall be ignored.
-        if (namespace_ == Namespace::XLink && has_attribute_ns({}, name))
+        if (namespace_ == Namespace::XLink && has_attribute_ns(Optional<Utf16FlyString> {}, name))
             return;
 
         auto href = value;
         if (!namespace_.has_value() && !href.has_value())
-            href = get_attribute_ns(SVG::AttributeNames::href, Namespace::XLink);
+            href = get_attribute_ns(Namespace::XLink, SVG::AttributeNames::href);
 
         process_the_url(href);
     }
-}
-
-// https://svgwg.org/svg2-draft/embedded.html#__svg__SVGImageElement__x
-GC::Ref<SVG::SVGAnimatedLength> SVGImageElement::x()
-{
-    // FIXME: Populate the unit type when it is parsed (0 here is "unknown").
-    // FIXME: Create a proper animated value when animations are supported.
-    auto value = m_x.value_or(NumberPercentage::create_number(0)).value();
-    auto base_length = SVGLength::create(realm(), 0, value, SVGLength::ReadOnly::No);
-    auto anim_length = SVGLength::create(realm(), 0, value, SVGLength::ReadOnly::Yes);
-    return SVGAnimatedLength::create(realm(), base_length, anim_length);
-}
-
-// https://svgwg.org/svg2-draft/embedded.html#__svg__SVGImageElement__y
-GC::Ref<SVG::SVGAnimatedLength> SVGImageElement::y()
-{
-    // FIXME: Populate the unit type when it is parsed (0 here is "unknown").
-    // FIXME: Create a proper animated value when animations are supported.
-    auto value = m_y.value_or(NumberPercentage::create_number(0)).value();
-    auto base_length = SVGLength::create(realm(), 0, value, SVGLength::ReadOnly::No);
-    auto anim_length = SVGLength::create(realm(), 0, value, SVGLength::ReadOnly::Yes);
-    return SVGAnimatedLength::create(realm(), base_length, anim_length);
-}
-
-// https://svgwg.org/svg2-draft/embedded.html#__svg__SVGImageElement__width
-GC::Ref<SVG::SVGAnimatedLength> SVGImageElement::width()
-{
-    // FIXME: Populate the unit type when it is parsed (0 here is "unknown").
-    // FIXME: Create a proper animated value when animations are supported.
-    auto value = m_width.has_value() ? m_width->value() : intrinsic_width().value_or(0).to_double();
-    auto base_length = SVGLength::create(realm(), 0, value, SVGLength::ReadOnly::No);
-    auto anim_length = SVGLength::create(realm(), 0, value, SVGLength::ReadOnly::Yes);
-    return SVGAnimatedLength::create(realm(), base_length, anim_length);
-}
-
-// https://svgwg.org/svg2-draft/embedded.html#__svg__SVGImageElement__height
-GC::Ref<SVG::SVGAnimatedLength> SVGImageElement::height()
-{
-    // FIXME: Populate the unit type when it is parsed (0 here is "unknown").
-    // FIXME: Create a proper animated value when animations are supported.
-    auto value = m_height.has_value() ? m_height->value() : intrinsic_height().value_or(0).to_double();
-    auto base_length = SVGLength::create(realm(), 0, value, SVGLength::ReadOnly::No);
-    auto anim_length = SVGLength::create(realm(), 0, value, SVGLength::ReadOnly::Yes);
-    return SVGAnimatedLength::create(realm(), base_length, anim_length);
 }
 
 Gfx::FloatRect SVGImageElement::bounding_box(CSSPixelSize viewport_size) const
@@ -160,7 +116,7 @@ Gfx::FloatRect SVGImageElement::bounding_box(CSSPixelSize viewport_size) const
 }
 
 // https://www.w3.org/TR/SVG2/linking.html#processingURL
-void SVGImageElement::process_the_url(Optional<String> const& href)
+void SVGImageElement::process_the_url(Optional<Utf16String> const& href)
 {
     if (!href.has_value()) {
         m_href = {};
@@ -202,7 +158,7 @@ void SVGImageElement::fetch_the_document(URL::URL const& url)
     }
 }
 
-RefPtr<Layout::Node> SVGImageElement::create_layout_node(CSS::ComputedProperties const& style)
+RefPtr<Layout::Node> SVGImageElement::create_layout_node(NonnullRefPtr<CSS::ComputedValues const> style)
 {
     return make_ref_counted<Layout::SVGImageBox>(document(), *this, style);
 }

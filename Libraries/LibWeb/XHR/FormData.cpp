@@ -19,6 +19,17 @@ namespace Web::XHR {
 
 GC_DEFINE_ALLOCATOR(FormData);
 
+static FormDataEntryValue form_data_entry_value_for_bindings(FormDataEntry::Value const& value)
+{
+    return value.visit(
+        [](GC::Ref<FileAPI::File> file) -> FormDataEntryValue {
+            return file;
+        },
+        [](Utf16String const& string) -> FormDataEntryValue {
+            return string;
+        });
+}
+
 // https://xhr.spec.whatwg.org/#dom-formdata
 WebIDL::ExceptionOr<GC::Ref<FormData>> FormData::construct_impl(JS::Realm& realm, GC::Ptr<HTML::HTMLFormElement> form, GC::Ptr<HTML::HTMLElement> submitter)
 {
@@ -30,11 +41,11 @@ WebIDL::ExceptionOr<GC::Ref<FormData>> FormData::construct_impl(JS::Realm& realm
             // 1. If submitter is not a submit button, then throw a TypeError.
             auto form_associated_element = as_if<HTML::FormAssociatedElement>(*submitter);
             if (!form_associated_element) {
-                return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Submitter is not associated with a form."sv };
+                return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Submitter is not associated with a form."_utf16 };
             }
 
             if (!form_associated_element->is_submit_button()) {
-                return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Submitter is not a valid submit button."sv };
+                return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Submitter is not a valid submit button."_utf16 };
             }
             // 2. If submitter’s form owner is not form, then throw a "NotFoundError" DOMException.
             auto* form_owner = form_associated_element->form();
@@ -97,28 +108,27 @@ void FormData::visit_edges(Cell::Visitor& visitor)
 }
 
 // https://xhr.spec.whatwg.org/#dom-formdata-append
-WebIDL::ExceptionOr<void> FormData::append(String const& name, String const& value)
+WebIDL::ExceptionOr<void> FormData::append(Utf16String const& name, Utf16String const& value)
 {
     return append_impl(name, value);
 }
 
 // https://xhr.spec.whatwg.org/#dom-formdata-append-blob
-WebIDL::ExceptionOr<void> FormData::append(String const& name, GC::Ref<FileAPI::Blob> const& blob_value, Optional<String> const& filename)
+WebIDL::ExceptionOr<void> FormData::append(Utf16String const& name, GC::Ref<FileAPI::Blob> const& blob_value, Optional<Utf16String> const& filename)
 {
-    auto inner_filename = filename.has_value() ? filename.value() : Optional<String> {};
-    return append_impl(name, blob_value, inner_filename);
+    return append_impl(name, blob_value, filename);
 }
 
 // https://xhr.spec.whatwg.org/#dom-formdata-append
 // https://xhr.spec.whatwg.org/#dom-formdata-append-blob
-WebIDL::ExceptionOr<void> FormData::append_impl(String const& name, Variant<GC::Ref<FileAPI::Blob>, String> const& value, Optional<String> const& filename)
+WebIDL::ExceptionOr<void> FormData::append_impl(Utf16String const& name, Variant<GC::Ref<FileAPI::Blob>, Utf16String> const& value, Optional<Utf16String> const& filename)
 {
     auto& realm = this->realm();
     auto& vm = realm.vm();
 
     // 1. Let value be value if given; otherwise blobValue.
     // 2. Let entry be the result of creating an entry with name, value, and filename if given.
-    auto entry = TRY(HTML::create_entry(realm, name, value, filename));
+    auto entry = TRY(HTML::create_entry(realm, name.utf16_view(), value, filename));
 
     // 3. Append entry to this’s entry list.
     TRY_OR_THROW_OOM(vm, m_entry_list.try_append(move(entry)));
@@ -126,7 +136,7 @@ WebIDL::ExceptionOr<void> FormData::append_impl(String const& name, Variant<GC::
 }
 
 // https://xhr.spec.whatwg.org/#dom-formdata-delete
-void FormData::delete_(String const& name)
+void FormData::delete_(Utf16String const& name)
 {
     // The delete(name) method steps are to remove all entries whose name is name from this’s entry list.
     m_entry_list.remove_all_matching([&name](FormDataEntry const& entry) {
@@ -135,7 +145,7 @@ void FormData::delete_(String const& name)
 }
 
 // https://xhr.spec.whatwg.org/#dom-formdata-get
-Variant<GC::Ref<FileAPI::File>, String, Empty> FormData::get(String const& name)
+Variant<GC::Ref<FileAPI::File>, Utf16String, Empty> FormData::get(Utf16String const& name)
 {
     // 1. If there is no entry whose name is name in this’s entry list, then return null.
     auto entry_iterator = m_entry_list.find_if([&name](FormDataEntry const& entry) {
@@ -144,24 +154,24 @@ Variant<GC::Ref<FileAPI::File>, String, Empty> FormData::get(String const& name)
     if (entry_iterator.is_end())
         return Empty {};
     // 2. Return the value of the first entry whose name is name from this’s entry list.
-    return entry_iterator->value;
+    return form_data_entry_value_for_bindings(entry_iterator->value);
 }
 
 // https://xhr.spec.whatwg.org/#dom-formdata-getall
-WebIDL::ExceptionOr<Vector<FormDataEntryValue>> FormData::get_all(String const& name)
+WebIDL::ExceptionOr<Vector<FormDataEntryValue>> FormData::get_all(Utf16String const& name)
 {
     // 1. If there is no entry whose name is name in this’s entry list, then return the empty list.
     // 2. Return the values of all entries whose name is name, in order, from this’s entry list.
     Vector<FormDataEntryValue> values;
     for (auto const& entry : m_entry_list) {
         if (entry.name == name)
-            TRY_OR_THROW_OOM(vm(), values.try_append(entry.value));
+            TRY_OR_THROW_OOM(vm(), values.try_append(form_data_entry_value_for_bindings(entry.value)));
     }
     return values;
 }
 
 // https://xhr.spec.whatwg.org/#dom-formdata-has
-bool FormData::has(String const& name)
+bool FormData::has(Utf16String const& name)
 {
     // The has(name) method steps are to return true if there is an entry whose name is name in this’s entry list; otherwise false.
     return !m_entry_list.find_if([&name](auto& entry) {
@@ -171,16 +181,15 @@ bool FormData::has(String const& name)
 }
 
 // https://xhr.spec.whatwg.org/#dom-formdata-set
-WebIDL::ExceptionOr<void> FormData::set(String const& name, String const& value)
+WebIDL::ExceptionOr<void> FormData::set(Utf16String const& name, Utf16String const& value)
 {
     return set_impl(name, value);
 }
 
 // https://xhr.spec.whatwg.org/#dom-formdata-set-blob
-WebIDL::ExceptionOr<void> FormData::set(String const& name, GC::Ref<FileAPI::Blob> const& blob_value, Optional<String> const& filename)
+WebIDL::ExceptionOr<void> FormData::set(Utf16String const& name, GC::Ref<FileAPI::Blob> const& blob_value, Optional<Utf16String> const& filename)
 {
-    auto inner_filename = filename.has_value() ? filename.value() : Optional<String> {};
-    return set_impl(name, blob_value, inner_filename);
+    return set_impl(name, blob_value, filename);
 }
 
 GC::ConservativeVector<FormDataEntry> FormData::entry_list() const
@@ -190,14 +199,14 @@ GC::ConservativeVector<FormDataEntry> FormData::entry_list() const
 
 // https://xhr.spec.whatwg.org/#dom-formdata-set
 // https://xhr.spec.whatwg.org/#dom-formdata-set-blob
-WebIDL::ExceptionOr<void> FormData::set_impl(String const& name, Variant<GC::Ref<FileAPI::Blob>, String> const& value, Optional<String> const& filename)
+WebIDL::ExceptionOr<void> FormData::set_impl(Utf16String const& name, Variant<GC::Ref<FileAPI::Blob>, Utf16String> const& value, Optional<Utf16String> const& filename)
 {
     auto& realm = this->realm();
     auto& vm = realm.vm();
 
     // 1. Let value be value if given; otherwise blobValue.
     // 2. Let entry be the result of creating an entry with name, value, and filename if given.
-    auto entry = TRY(HTML::create_entry(realm, name, value, filename));
+    auto entry = TRY(HTML::create_entry(realm, name.utf16_view(), value, filename));
 
     auto existing = m_entry_list.find_if([&name](auto& entry) {
         return entry.name == name;
@@ -222,7 +231,7 @@ JS::ThrowCompletionOr<void> FormData::for_each(ForEachCallback callback)
 {
     for (auto i = 0u; i < m_entry_list.size(); ++i) {
         auto& entry = m_entry_list[i];
-        TRY(callback(entry.name, entry.value));
+        TRY(callback(entry.name, form_data_entry_value_for_bindings(entry.value)));
     }
 
     return {};

@@ -1,5 +1,5 @@
 {
-  "builtin-baseline": "81de6771512413aaf89ea77add5ad1fda126b9d0",
+  "builtin-baseline": "40f3c709db80acf154ac4b17a1f83c564ebd022e",
   "dependencies": [
     {
       "name": "angle",
@@ -12,6 +12,7 @@
       "name": "angle",
       "platform": "linux | windows | android | bsd"
     },
+    "brotli",
     {
       "name": "cpptrace",
       "platform": "linux | windows | osx"
@@ -126,6 +127,51 @@
       "platform": "windows"
     },
     {
+      "name": "qtbase",
+      "platform": "freebsd",
+      "default-features": false,
+      "features": [
+        "dbus",
+        "doubleconversion",
+        "fontconfig",
+        "freetype",
+        "gui",
+        "icu",
+        "jpeg",
+        "network",
+        "opengl",
+        "pcre2",
+        "png",
+        "thread",
+        "vulkan",
+        "widgets",
+        "xcb",
+        "xcb-xlib",
+        "xlib",
+        "xrender",
+        "zstd"
+      ]
+    },
+    {
+      "name": "qtbase",
+      "platform": "windows",
+      "default-features": false,
+      "features": [
+        "doubleconversion",
+        "freetype",
+        "gui",
+        "icu",
+        "jpeg",
+        "network",
+        "opengl",
+        "pcre2",
+        "png",
+        "thread",
+        "widgets",
+        "zstd"
+      ]
+    },
+    {
       "name": "sdl3",
       "default-features": false
     },
@@ -188,89 +234,22 @@
       "name": "vulkan-headers",
       "platform": "linux | bsd | android"
     },
+    {
+      "name": "vulkan-memory-allocator",
+      "platform": "linux | bsd | android"
+    },
     "woff2",
     "wuffs",
     "zlib"
   ],
-  "features": {
-    "gtk": {
-      "description": "Build with GTK 4 GUI framework",
-      "dependencies": [
-        {
-          "name": "libadwaita",
-          "platform": "linux | osx"
-        },
-        {
-          "name": "wayland",
-          "platform": "linux",
-          "features": [
-            "force-build"
-          ]
-        },
-        {
-          "name": "wayland-protocols",
-          "platform": "linux",
-          "features": [
-            "force-build"
-          ]
-        }
-      ]
-    },
-    "qt": {
-      "description": "Build with Qt 6 GUI framework",
-      "dependencies": [
-        {
-          "name": "qtbase",
-          "platform": "freebsd",
-          "default-features": false,
-          "features": [
-            "dbus",
-            "doubleconversion",
-            "fontconfig",
-            "freetype",
-            "gui",
-            "icu",
-            "jpeg",
-            "network",
-            "opengl",
-            "pcre2",
-            "png",
-            "thread",
-            "vulkan",
-            "widgets",
-            "xcb",
-            "xcb-xlib",
-            "xlib",
-            "xrender",
-            "zstd"
-          ]
-        },
-        {
-          "name": "qtbase",
-          "platform": "windows",
-          "default-features": false,
-          "features": [
-            "doubleconversion",
-            "freetype",
-            "gui",
-            "icu",
-            "jpeg",
-            "network",
-            "opengl",
-            "pcre2",
-            "png",
-            "thread",
-            "widgets",
-            "zstd"
-          ]
-        }
-      ]
-    }
-  },
   "overrides": [
     {
       "name": "angle",
       "version": "chromium_7258#0"
+    },
+    {
+      "name": "brotli",
+      "version": "1.2.0#0"
     },
     {
       "name": "cpptrace",
@@ -278,11 +257,11 @@
     },
     {
       "name": "curl",
-      "version": "8.20.0#2"
+      "version": "8.21.0#1"
     },
     {
       "name": "dav1d",
-      "version": "1.5.1#0"
+      "version": "1.5.3#0"
     },
     {
       "name": "dbus",
@@ -294,7 +273,7 @@
     },
     {
       "name": "fast-float",
-      "version": "8.1.0#0"
+      "version": "8.2.10#1"
     },
     {
       "name": "ffmpeg",
@@ -302,11 +281,7 @@
     },
     {
       "name": "fmt",
-      "version": "12.1.0#0"
-    },
-    {
-      "name": "gtk",
-      "version": "4.22.0#0"
+      "version": "12.2.0#1"
     },
     {
       "name": "fontconfig",
@@ -329,16 +304,12 @@
       "version": "78.3#1"
     },
     {
-      "name": "libadwaita",
-      "version": "1.8.4#0"
-    },
-    {
       "name": "libavif",
-      "version": "1.3.0#1"
+      "version": "1.4.2#1"
     },
     {
       "name": "libdwarf",
-      "version": "2.3.0#0"
+      "version": "2.3.1#0"
     },
     {
       "name": "libedit",
@@ -346,15 +317,15 @@
     },
     {
       "name": "libjpeg-turbo",
-      "version": "3.1.1#0"
+      "version": "3.2.0#0"
     },
     {
       "name": "libjxl",
-      "version": "0.11.1#3"
+      "version": "0.11.2#0"
     },
     {
       "name": "libpng",
-      "version": "1.6.50#0"
+      "version": "1.6.58#0"
     },
     {
       "name": "libproxy",
@@ -374,7 +345,7 @@
     },
     {
       "name": "libxml2",
-      "version": "2.13.8#1"
+      "version": "2.15.3#0"
     },
     {
       "name": "mimalloc",
@@ -386,11 +357,11 @@
     },
     {
       "name": "nghttp2",
-      "version": "1.68.0#1"
+      "version": "1.69.0#0"
     },
     {
       "name": "openssl",
-      "version": "3.5.3#0"
+      "version": "3.6.3#0"
     },
     {
       "name": "pdfjs",
@@ -410,23 +381,23 @@
     },
     {
       "name": "simdjson",
-      "version": "4.2.4#0"
+      "version": "4.6.4#0"
     },
     {
       "name": "simdutf",
-      "version": "7.4.0#0"
+      "version": "9.0.0#0"
     },
     {
       "name": "skia",
-      "version": "144#0"
+      "version": "148#0"
     },
     {
       "name": "sqlite3",
-      "version": "3.52.0#0"
+      "version": "3.53.3#1"
     },
     {
       "name": "tiff",
-      "version": "4.7.1#0"
+      "version": "4.7.2#0"
     },
     {
       "name": "vulkan",
@@ -434,15 +405,11 @@
     },
     {
       "name": "vulkan-headers",
-      "version": "1.4.335.0#0"
+      "version": "1.4.350.1#0"
     },
     {
-      "name": "wayland",
-      "version": "1.24.0#0"
-    },
-    {
-      "name": "wayland-protocols",
-      "version": "1.44#0"
+      "name": "vulkan-memory-allocator",
+      "version": "3.4.0#0"
     },
     {
       "name": "woff2",

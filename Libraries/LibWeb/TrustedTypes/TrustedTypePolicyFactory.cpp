@@ -32,31 +32,32 @@ namespace Web::TrustedTypes {
 GC_DEFINE_ALLOCATOR(TrustedTypePolicyFactory);
 
 // https://w3c.github.io/trusted-types/dist/spec/#dom-trustedtypepolicyfactory-getattributetype
-Optional<Utf16String> TrustedTypePolicyFactory::get_attribute_type(Utf16String const& tag_name, Utf16String& attribute, Optional<Utf16String> element_ns, Optional<Utf16String> attr_ns)
+Optional<Utf16String> TrustedTypePolicyFactory::get_attribute_type(Utf16FlyString const& tag_name, Utf16FlyString const& attribute, Optional<Utf16FlyString> element_ns, Optional<Utf16FlyString> attr_ns)
 {
     // 1. Set localName to tagName in ASCII lowercase.
     auto const local_name = tag_name.to_ascii_lowercase();
 
     // 2. Set attribute to attribute in ASCII lowercase.
-    attribute = attribute.to_ascii_lowercase();
+    auto const attribute_local_name = attribute.to_ascii_lowercase();
 
     // 3. If elementNs is null or an empty string, set elementNs to HTML namespace.
     if (!element_ns.has_value() || element_ns.value().is_empty())
-        element_ns = Utf16String::from_utf8(Namespace::HTML);
+        element_ns = Namespace::HTML;
+    auto const element_namespace = element_ns.value();
 
     // 4. If attrNs is an empty string, set attrNs to null.
     if (attr_ns.has_value() && attr_ns.value().is_empty())
         attr_ns.clear();
 
     // 5. Let interface be the element interface for localName and elementNs.
-    auto const interface = element_interface(local_name, element_ns.value().to_utf8());
+    auto const interface = element_interface(local_name, element_namespace);
 
     // 6. Let expectedType be null.
     Optional<Utf16String> expected_type {};
 
     // 7. Set attributeData to the result of Get Trusted Type data for attribute algorithm,
     // with the following arguments, interface as element, attribute, attrNs
-    auto const attribute_data = get_trusted_type_data_for_attribute(interface, attribute, attr_ns);
+    auto const attribute_data = get_trusted_type_data_for_attribute(interface, attribute_local_name, attr_ns);
 
     // 8. If attributeData is not null, then set expectedType to the interface’s name of the value of the fourth member of attributeData.
     if (attribute_data.has_value()) {
@@ -68,22 +69,23 @@ Optional<Utf16String> TrustedTypePolicyFactory::get_attribute_type(Utf16String c
 }
 
 // https://w3c.github.io/trusted-types/dist/spec/#dom-trustedtypepolicyfactory-getpropertytype
-Optional<Utf16String> TrustedTypePolicyFactory::get_property_type(Utf16String const& tag_name, Utf16String const& property, Optional<Utf16String> element_ns)
+Optional<Utf16String> TrustedTypePolicyFactory::get_property_type(Utf16FlyString const& tag_name, Utf16FlyString const& property, Optional<Utf16FlyString> element_ns)
 {
     // 1. Set localName to tagName in ASCII lowercase.
     auto const local_name = tag_name.to_ascii_lowercase();
 
     // 2. If elementNs is null or an empty string, set elementNs to HTML namespace.
     if (!element_ns.has_value() || element_ns.value().is_empty())
-        element_ns = Utf16String::from_utf8(Namespace::HTML);
+        element_ns = Namespace::HTML;
+    auto const element_namespace = element_ns.value();
 
     // FIXME: We don't have a method in ElementFactory that can give us the interface name but these are all the cases
     // we care about in the table in get_trusted_type_data_for_attribute function
     // 3. Let interface be the element interface for localName and elementNs.
     Utf16String interface;
-    if (local_name == HTML::TagNames::iframe && element_ns == Namespace::HTML) {
+    if (local_name == HTML::TagNames::iframe && element_namespace == Namespace::HTML) {
         interface = "HTMLIFrameElement"_utf16;
-    } else if (local_name == HTML::TagNames::script && element_ns == Namespace::HTML) {
+    } else if (local_name == HTML::TagNames::script && element_namespace == Namespace::HTML) {
         interface = "HTMLScriptElement"_utf16;
     } else {
         interface = "Element"_utf16;
@@ -203,11 +205,11 @@ WebIDL::ExceptionOr<GC::Ref<TrustedTypePolicy>> TrustedTypePolicyFactory::create
 
     // 2. If allowedByCSP is "Blocked", throw a TypeError and abort further steps.
     if (allowed_by_csp == ContentSecurityPolicy::Directives::Directive::Result::Blocked)
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, MUST(String::formatted("Content Security Policy blocked the creation of the policy {}", policy_name)) };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, Utf16String::formatted("Content Security Policy blocked the creation of the policy {}", policy_name) };
 
     // 3. If policyName is default and the factory’s default policy value is not null, throw a TypeError and abort further steps.
     if (policy_name == "default"sv && m_default_policy)
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Policy Factory already has a default value defined"_string };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Policy Factory already has a default value defined"_utf16 };
 
     // 4. Let policy be a new TrustedTypePolicy object.
     // 5. Set policy’s name property value to policyName.
@@ -246,24 +248,24 @@ ContentSecurityPolicy::Directives::Directive::Result TrustedTypePolicyFactory::s
         auto const directive = policy->get_directive_by_name(ContentSecurityPolicy::Directives::Names::TrustedTypes);
 
         // 4. If directive’s value only contains a tt-keyword which is a match for a value 'none', set createViolation to true.
-        if (directive->value().size() == 1 && directive->value().first().equals_ignoring_ascii_case(ContentSecurityPolicy::Directives::KeywordTrustedTypes::None))
+        if (directive->value().size() == 1 && directive->value().first().equals_ignoring_ascii_case(ContentSecurityPolicy::Directives::KeywordTrustedTypes::None.view()))
             create_violation = true;
 
         // 5. If createdPolicyNames contains policyName and directive’s value does not contain a tt-keyword which is a match for a value 'allow-duplicates', set createViolation to true.
         auto created_policy_names_iterator = created_policy_names.find(policy_name);
         if (!created_policy_names_iterator.is_end()) {
             auto maybe_allow_duplicates = directive->value().find_if([](auto const& directive_value) {
-                return directive_value.equals_ignoring_ascii_case(ContentSecurityPolicy::Directives::KeywordTrustedTypes::AllowDuplicates);
+                return directive_value.equals_ignoring_ascii_case(ContentSecurityPolicy::Directives::KeywordTrustedTypes::AllowDuplicates.view());
             });
             if (maybe_allow_duplicates.is_end())
                 create_violation = true;
         }
 
         // 6. If directive’s value does not contain a tt-policy-name, which value is policyName, and directive’s value does not contain a tt-wildcard, set createViolation to true.
-        auto directive_value_iterator = directive->value().find(policy_name.to_utf8());
+        auto directive_value_iterator = directive->value().find(policy_name);
         if (directive_value_iterator.is_end()) {
             auto maybe_wild_card = directive->value().find_if([](auto const& directive_value) {
-                return directive_value.equals_ignoring_ascii_case(ContentSecurityPolicy::Directives::KeywordTrustedTypes::WildCard);
+                return directive_value.equals_ignoring_ascii_case(ContentSecurityPolicy::Directives::KeywordTrustedTypes::WildCard.view());
             });
 
             if (maybe_wild_card.is_end())
@@ -275,14 +277,14 @@ ContentSecurityPolicy::Directives::Directive::Result TrustedTypePolicyFactory::s
             continue;
 
         // 8. Let violation be the result of executing Create a violation object for global, policy, and directive on global, policy and "trusted-types"
-        auto const violation = ContentSecurityPolicy::Violation::create_a_violation_object_for_global_policy_and_directive(realm, global, policy, ContentSecurityPolicy::Directives::Names::TrustedTypes.to_string());
+        auto const violation = ContentSecurityPolicy::Violation::create_a_violation_object_for_global_policy_and_directive(realm, global, policy, ContentSecurityPolicy::Directives::Names::TrustedTypes);
 
         // 9. Set violation’s resource to "trusted-types-policy".
         violation->set_resource(ContentSecurityPolicy::Violation::Resource::TrustedTypesPolicy);
 
         // 10. Set violation’s sample to the substring of policyName, containing its first 40 characters.
         auto sample = policy_name.substring_view(0, min(policy_name.length_in_code_points(), 40));
-        violation->set_sample(Utf16String::from_utf16(sample).to_utf8());
+        violation->set_sample(Utf16String::from_utf16(sample));
 
         // 11. Execute Report a violation on violation.
         violation->report_a_violation(realm);
@@ -297,7 +299,7 @@ ContentSecurityPolicy::Directives::Directive::Result TrustedTypePolicyFactory::s
 }
 
 // https://w3c.github.io/trusted-types/dist/spec/#get-trusted-type-data-for-attribute
-Optional<TrustedTypeData> get_trusted_type_data_for_attribute(ElementInterface const& element, Utf16String const& attribute, Optional<Utf16String> const& attribute_ns)
+Optional<TrustedTypeData> get_trusted_type_data_for_attribute(ElementInterface const& element, Utf16FlyString const& attribute, Optional<Utf16FlyString> const& attribute_ns)
 {
     // 1. Let data be null.
     Optional<TrustedTypeData const&> data {};
@@ -308,10 +310,10 @@ Optional<TrustedTypeData> get_trusted_type_data_for_attribute(ElementInterface c
     if (!attribute_ns.has_value()
         && (Namespace::HTML == element_ns || Namespace::SVG == element_ns || Namespace::MathML == element_ns)) {
 #undef __ENUMERATE
-#define __ENUMERATE(attribute_name, event_name)                                                                                                       \
-    if (attribute == HTML::AttributeNames::attribute_name) {                                                                                          \
-        /* 1. Return (Element, null, attribute, TrustedScript, "Element " + attribute). */                                                            \
-        return TrustedTypeData { "Element"_utf16, {}, attribute.to_utf8(), TrustedTypeName::TrustedScript, InjectionSink::Element_##attribute_name }; \
+#define __ENUMERATE(attribute_name, event_name)                                                                                                                        \
+    if (attribute == HTML::AttributeNames::attribute_name) {                                                                                                           \
+        /* 1. Return (Element, null, attribute, TrustedScript, "Element " + attribute). */                                                                             \
+        return TrustedTypeData { "Element"_utf16, {}, HTML::AttributeNames::attribute_name, TrustedTypeName::TrustedScript, InjectionSink::Element_##attribute_name }; \
     }
         ENUMERATE_GLOBAL_EVENT_HANDLERS(__ENUMERATE)
         ENUMERATE_WINDOW_EVENT_HANDLERS(__ENUMERATE)
@@ -322,7 +324,7 @@ Optional<TrustedTypeData> get_trusted_type_data_for_attribute(ElementInterface c
         { "HTMLIFrameElement"_utf16, {}, HTML::AttributeNames::srcdoc, TrustedTypeName::TrustedHTML, InjectionSink::HTMLIFrameElement_srcdoc },
         { "HTMLScriptElement"_utf16, {}, HTML::AttributeNames::src, TrustedTypeName::TrustedScriptURL, InjectionSink::HTMLScriptElement_src },
         { "SVGScriptElement"_utf16, {}, HTML::AttributeNames::href, TrustedTypeName::TrustedScriptURL, InjectionSink::SVGScriptElement_href },
-        { "SVGScriptElement"_utf16, Utf16String::from_utf8(Namespace::XLink), HTML::AttributeNames::href, TrustedTypeName::TrustedScriptURL, InjectionSink::SVGScriptElement_href },
+        { "SVGScriptElement"_utf16, Namespace::XLink, HTML::AttributeNames::href, TrustedTypeName::TrustedScriptURL, InjectionSink::SVGScriptElement_href },
     };
 
     // 3. Find the row in the following table, where element is in the first column, attributeNs is in the second column,

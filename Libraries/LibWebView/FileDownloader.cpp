@@ -8,10 +8,11 @@
 #include <LibCore/ElapsedTimer.h>
 #include <LibCore/EventLoop.h>
 #include <LibCore/File.h>
-#include <LibCore/System.h>
+#include <LibFileSystem/FileSystem.h>
 #include <LibHTTP/HeaderList.h>
 #include <LibRequests/Request.h>
 #include <LibRequests/RequestClient.h>
+#include <LibWeb/Loader/DownloadFilename.h>
 #include <LibWeb/Loader/UserAgent.h>
 #include <LibWebView/Application.h>
 #include <LibWebView/FileDownloader.h>
@@ -40,12 +41,23 @@ struct FileDownloader::ActiveDownload {
     bool stopped { false };
 };
 
+Optional<double> FileDownloader::Download::progress() const
+{
+    if (!total_size.has_value() || *total_size == 0)
+        return {};
+
+    return static_cast<double>(min(downloaded_size, *total_size)) / static_cast<double>(*total_size);
+}
+
 FileDownloader::FileDownloader() = default;
 FileDownloader::~FileDownloader() = default;
 
 static LexicalPath temporary_destination_for(LexicalPath const& destination, u64 download_id)
 {
-    return LexicalPath { ByteString::formatted("{}.{}.{}.download", destination.string(), download_id, generate_random_uuid()) };
+    auto suffix = ByteString::formatted(".{}.{}.download", download_id, generate_random_uuid());
+    auto truncated_basename = Web::truncate_filename_to_byte_length(destination.basename(), Web::maximum_filename_byte_length - suffix.length());
+    auto temporary_filename = ByteString::formatted("{}{}", truncated_basename, suffix);
+    return LexicalPath::join(destination.dirname(), temporary_filename.view());
 }
 
 static String status_to_error_string(Optional<Requests::NetworkError> const& network_error, Optional<u32> response_code, Optional<String> const& reason_phrase)
@@ -59,9 +71,9 @@ static String status_to_error_string(Optional<Requests::NetworkError> const& net
     return MUST(String::formatted("Received error response code {} while downloading file", *response_code));
 }
 
-u64 FileDownloader::download_file(URL::URL const& url, LexicalPath destination)
+u64 FileDownloader::download_file(IsPrivate is_private, URL::URL const& url, LexicalPath destination)
 {
-    auto download_id = start_download(url, move(destination));
+    auto download_id = start_download(is_private, url, move(destination));
     auto* active = active_download(download_id);
     if (!active)
         return download_id;
@@ -71,7 +83,7 @@ u64 FileDownloader::download_file(URL::URL const& url, LexicalPath destination)
     auto request_headers = HTTP::HeaderList::create();
     request_headers->set({ "User-Agent"sv, Web::default_user_agent });
 
-    auto request = Application::request_server_client().start_request("GET"sv, url, *request_headers);
+    auto request = Application::request_server_client(is_private).start_request("GET"sv, url, *request_headers);
     if (!request) {
         fail_download(download_id, "Unable to start request to download file"_string);
         return download_id;
@@ -83,9 +95,9 @@ u64 FileDownloader::download_file(URL::URL const& url, LexicalPath destination)
     return download_id;
 }
 
-u64 FileDownloader::adopt_download(URL::URL const& url, LexicalPath destination, Optional<u64> total_size, int request_server_client_id, u64 request_server_request_id, ReadonlyBytes initial_data)
+u64 FileDownloader::adopt_download(IsPrivate is_private, URL::URL const& url, LexicalPath destination, Optional<u64> total_size, int request_server_client_id, u64 request_server_request_id, ReadonlyBytes initial_data)
 {
-    auto download_id = start_download(url, move(destination), total_size);
+    auto download_id = start_download(is_private, url, move(destination), total_size);
     auto* active = active_download(download_id);
     if (!active)
         return download_id;
@@ -116,7 +128,7 @@ void FileDownloader::attach_request_to_download(u64 download_id, NonnullRefPtr<R
     active->request = request;
 
     request->set_unbuffered_request_callbacks(
-        [this, download_id](NonnullRefPtr<HTTP::HeaderList> response_headers, Optional<u32> response_code, Optional<String> const& reason_phrase, Optional<Core::ImmutableBytes>, Optional<u64>) {
+        [this, download_id](NonnullRefPtr<HTTP::HeaderList> response_headers, Optional<u32> response_code, Optional<String> const& reason_phrase, Optional<Core::ImmutableBytes>, Optional<u64>, Requests::CameFromCache) {
             auto* download = mutable_download_or_null(download_id);
             if (!download)
                 return;
@@ -152,12 +164,13 @@ void FileDownloader::attach_request_to_download(u64 download_id, NonnullRefPtr<R
         });
 }
 
-u64 FileDownloader::start_download(URL::URL const& url, LexicalPath destination, Optional<u64> total_size)
+u64 FileDownloader::start_download(IsPrivate is_private, URL::URL const& url, LexicalPath destination, Optional<u64> total_size)
 {
     auto download_id = m_next_download_id++;
 
     m_downloads.append(Download {
         .id = download_id,
+        .is_private = is_private,
         .url = url,
         .destination = move(destination),
         .total_size = total_size,
@@ -228,7 +241,7 @@ void FileDownloader::finish_download(u64 id)
 
     active->file = nullptr;
 
-    if (auto result = Core::System::rename(active->temporary_destination.string(), download->destination.string()); result.is_error()) {
+    if (auto result = FileSystem::move_file(download->destination.string(), active->temporary_destination.string()); result.is_error()) {
         fail_download(id, MUST(String::formatted("Unable to save downloaded file: {}", result.error())));
         return;
     }
@@ -287,7 +300,7 @@ void FileDownloader::discard_active_download(u64 id)
         active->on_cancel();
 
     active->file = nullptr;
-    (void)Core::System::unlink(active->temporary_destination.string());
+    (void)FileSystem::remove(active->temporary_destination.string(), FileSystem::RecursionMode::Disallowed);
 
     Core::deferred_invoke([this, id] {
         m_active_downloads.remove(id);
@@ -304,6 +317,24 @@ void FileDownloader::cancel_active_downloads()
 
     for (auto id : active_download_ids)
         cancel_download(id);
+}
+
+void FileDownloader::cancel_private_downloads()
+{
+    for (size_t i = m_downloads.size(); i > 0; --i) {
+        auto const& download = m_downloads[i - 1];
+
+        if (download.status != DownloadStatus::InProgress)
+            continue;
+        if (download.is_private == IsPrivate::No)
+            continue;
+
+        auto id = download.id;
+        cancel_download(id);
+
+        m_downloads.remove(i - 1);
+        notify_download_removed(id);
+    }
 }
 
 void FileDownloader::cancel_download(u64 id)

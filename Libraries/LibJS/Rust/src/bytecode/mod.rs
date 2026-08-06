@@ -13,7 +13,7 @@
 //! ## Submodules
 //!
 //! - `operand` -- Register, Operand, Label, and table index types
-//! - `instruction` -- Instruction enum (generated from Bytecode.def by build.rs)
+//! - `instruction` -- Instruction enum (generated from interpreter.flap by build.rs)
 //! - `basic_block` -- BasicBlock: list of instructions with control flow metadata
 //! - `generator` -- Generator: manages registers, constants, tables, and assembly
 //! - `codegen` -- AST-walking code that emits instructions via the Generator
@@ -25,5 +25,6 @@ pub mod dump;
 pub mod ffi;
 pub mod generator;
 pub mod instruction;
+mod native_disassembler;
 pub mod operand;
 pub mod validator;

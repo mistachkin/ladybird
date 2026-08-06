@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Utf16StringBuilder.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/CustomPropertyData.h>
 #include <LibWeb/DOM/AbstractElement.h>
@@ -95,6 +96,13 @@ GC::Ptr<Element const> AbstractElement::parent_element() const
     return m_element->parent_element();
 }
 
+Element* AbstractElement::flat_tree_parent_element() const
+{
+    if (m_pseudo_element.has_value())
+        return m_element;
+    return m_element->flat_tree_parent_element();
+}
+
 Optional<AbstractElement> AbstractElement::element_to_inherit_style_from() const
 {
     if (m_inheritance_override)
@@ -130,8 +138,11 @@ Optional<AbstractElement> AbstractElement::walk_layout_tree(WalkMethod walk_meth
         if (auto* previous_element = as_if<Element>(node->dom_node()))
             return AbstractElement { *previous_element };
 
-        if (node->is_generated_for_pseudo_element())
-            return AbstractElement { *node->pseudo_element_generator(), node->generated_for_pseudo_element() };
+        if (node->is_generated_for_pseudo_element()) {
+            auto pseudo_element = node->generated_for_pseudo_element();
+            if (pseudo_element.has_value() && CSS::is_tree_abiding_pseudo_element(*pseudo_element))
+                return AbstractElement { *node->pseudo_element_generator(), pseudo_element };
+        }
     }
 }
 
@@ -143,9 +154,9 @@ bool AbstractElement::is_before(AbstractElement const& other) const
     return this_node && other_node && this_node->is_before(*other_node);
 }
 
-CSS::ComputedProperties const* AbstractElement::computed_properties() const
+CSS::ComputedValues const* AbstractElement::computed_values() const
 {
-    return m_element->computed_properties(m_pseudo_element);
+    return m_element->computed_values(m_pseudo_element);
 }
 
 GC::Ptr<CSS::CSSStyleProperties const> AbstractElement::inline_style() const
@@ -214,14 +225,14 @@ void AbstractElement::set_counters_set(OwnPtr<CSS::CountersSet>&& counters_set)
     }
 }
 
-String AbstractElement::debug_description() const
+Utf16String AbstractElement::debug_description() const
 {
     if (m_pseudo_element.has_value()) {
-        StringBuilder builder;
+        Utf16StringBuilder builder;
         builder.append(m_element->debug_description());
-        builder.append("::"sv);
-        builder.append(CSS::pseudo_element_name(*m_pseudo_element));
-        return builder.to_string_without_validation();
+        builder.append_ascii("::"sv);
+        builder.append_ascii(CSS::pseudo_element_name(*m_pseudo_element));
+        return builder.to_string();
     }
     return m_element->debug_description();
 }
@@ -231,14 +242,14 @@ CSS::StyleScope const& AbstractElement::style_scope() const
     return m_element->style_scope();
 }
 
-HashMap<FlyString, GC::Ref<CSS::CSSAnimation>>* AbstractElement::css_defined_animations() const
+Vector<GC::Ref<CSS::CSSAnimation>> const* AbstractElement::css_defined_animations() const
 {
     return m_element->css_defined_animations(m_pseudo_element);
 }
 
-void AbstractElement::set_has_css_defined_animations()
+void AbstractElement::set_css_defined_animations(Vector<GC::Ref<CSS::CSSAnimation>>&& animations)
 {
-    m_element->set_has_css_defined_animations();
+    m_element->set_css_defined_animations(m_pseudo_element, move(animations));
 }
 
 }

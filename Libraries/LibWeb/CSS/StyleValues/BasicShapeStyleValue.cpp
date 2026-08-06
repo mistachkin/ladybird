@@ -9,14 +9,97 @@
 #include <LibGfx/Path.h>
 #include <LibWeb/CSS/Serialize.h>
 #include <LibWeb/CSS/StyleValues/BorderRadiusRectStyleValue.h>
+#include <LibWeb/CSS/StyleValues/CalcNodeRef.h>
 #include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
 #include <LibWeb/CSS/StyleValues/RadialSizeStyleValue.h>
 #include <LibWeb/CSS/ValueType.h>
 #include <LibWeb/Painting/BorderRadiiData.h>
 #include <LibWeb/Painting/Paintable.h>
+#include <LibWeb/SVG/AttributeParser.h>
 #include <LibWeb/SVG/Path.h>
 
 namespace Web::CSS {
+
+StyleValueFFI::StyleValueData const* BasicShapeStyleValue::make_basic_shape_data(BasicShape const& basic_shape)
+{
+    auto retain = [](StyleValue const* value) {
+        return value ? StyleValueFFI::rust_style_value_retain(value->rust_style_value_data()) : nullptr;
+    };
+    return basic_shape.visit(
+        [&](Inset const& inset) {
+            return StyleValueFFI::rust_style_value_create_basic_shape(0, retain(inset.top.ptr()), retain(inset.right.ptr()), retain(inset.bottom.ptr()), retain(inset.left.ptr()), retain(inset.border_radius.ptr()), 0, nullptr, 0, 0);
+        },
+        [&](Xywh const& xywh) {
+            return StyleValueFFI::rust_style_value_create_basic_shape(1, retain(xywh.x.ptr()), retain(xywh.y.ptr()), retain(xywh.width.ptr()), retain(xywh.height.ptr()), retain(xywh.border_radius.ptr()), 0, nullptr, 0, 0);
+        },
+        [&](Rect const& rect) {
+            return StyleValueFFI::rust_style_value_create_basic_shape(2, retain(rect.top.ptr()), retain(rect.right.ptr()), retain(rect.bottom.ptr()), retain(rect.left.ptr()), retain(rect.border_radius.ptr()), 0, nullptr, 0, 0);
+        },
+        [&](Circle const& circle) {
+            return StyleValueFFI::rust_style_value_create_basic_shape(3, retain(circle.radius.ptr()), retain(circle.position.ptr()), nullptr, nullptr, nullptr, 0, nullptr, 0, 0);
+        },
+        [&](Ellipse const& ellipse) {
+            return StyleValueFFI::rust_style_value_create_basic_shape(4, retain(ellipse.radius.ptr()), retain(ellipse.position.ptr()), nullptr, nullptr, nullptr, 0, nullptr, 0, 0);
+        },
+        [&](Polygon const& polygon) {
+            Vector<StyleValueFFI::RetainedShapePoint> points;
+            points.ensure_capacity(polygon.points.size());
+            for (auto const& point : polygon.points)
+                points.unchecked_append({ { retain(point.x.ptr()) }, { retain(point.y.ptr()) } });
+            return StyleValueFFI::rust_style_value_create_basic_shape(5, nullptr, nullptr, nullptr, nullptr, nullptr, static_cast<u8>(to_underlying(polygon.fill_rule)), points.data(), points.size(), 0);
+        },
+        [](Path const& path) {
+            return StyleValueFFI::rust_style_value_create_basic_shape(6, nullptr, nullptr, nullptr, nullptr, nullptr, static_cast<u8>(to_underlying(path.fill_rule)), nullptr, 0, Utf16String::from_utf8(path.path_instructions.serialize()).to_raw_leaked());
+        });
+}
+
+BasicShapeStyleValue::BasicShapeStyleValue(StyleValueFFI::StyleValueData const* data)
+    : StyleValueWithDefaultOperators(Type::BasicShape, data)
+    , m_shape([&]() -> BasicShape {
+        auto adopt = [](auto const& retained) -> ValueComparingNonnullRefPtr<StyleValue const> {
+            auto const* child_data = static_cast<StyleValueFFI::StyleValueData const*>(retained.pointer);
+            return StyleValue::adopt_rust_style_value_data(StyleValueFFI::rust_style_value_retain(child_data));
+        };
+        auto adopt_optional = [](auto const& retained) -> ValueComparingRefPtr<StyleValue const> {
+            auto const* child_data = static_cast<StyleValueFFI::StyleValueData const*>(retained.pointer);
+            if (!child_data)
+                return nullptr;
+            return StyleValue::adopt_rust_style_value_data(StyleValueFFI::rust_style_value_retain(child_data));
+        };
+        auto const& shape = data->basic_shape;
+        switch (shape.kind) {
+        case 0:
+            return Inset { adopt(shape.v0), adopt(shape.v1), adopt(shape.v2), adopt(shape.v3), adopt(shape.v4) };
+        case 1:
+            return Xywh { adopt(shape.v0), adopt(shape.v1), adopt(shape.v2), adopt(shape.v3), adopt(shape.v4) };
+        case 2:
+            return Rect { adopt(shape.v0), adopt(shape.v1), adopt(shape.v2), adopt(shape.v3), adopt(shape.v4) };
+        case 3:
+            return Circle { adopt(shape.v0), adopt_optional(shape.v1) };
+        case 4:
+            return Ellipse { adopt(shape.v0), adopt_optional(shape.v1) };
+        case 5: {
+            Vector<Polygon::Point> points;
+            points.ensure_capacity(shape.points.length);
+            for (size_t i = 0; i < shape.points.length; ++i)
+                points.unchecked_append({ adopt(shape.points.pointer[i].x), adopt(shape.points.pointer[i].y) });
+            return Polygon { static_cast<Gfx::WindingRule>(shape.fill_rule), move(points) };
+        }
+        case 6: {
+            auto path_string = Utf16String::from_raw(shape.path_string.raw);
+            return Path { static_cast<Gfx::WindingRule>(shape.fill_rule), SVG::AttributeParser::parse_path_data(path_string) };
+        }
+        default:
+            VERIFY_NOT_REACHED();
+        }
+    }())
+{
+}
+
+BasicShape const& BasicShapeStyleValue::basic_shape() const
+{
+    return m_shape;
+}
 
 static Gfx::Path path_from_resolved_rect(float top, float right, float bottom, float left)
 {
@@ -127,7 +210,7 @@ Gfx::Path Inset::to_path(CSSPixelRect reference_box) const
 void Inset::serialize(StringBuilder& builder, SerializationMode mode) const
 {
     builder.append("inset("sv);
-    builder.append(serialize_a_positional_value_list({ top, right, bottom, left }, mode));
+    builder.append(serialize_a_positional_value_list(StyleValueVector { top, right, bottom, left }, mode));
 
     auto serialized_border_radius = border_radius->to_string(mode);
 
@@ -329,7 +412,7 @@ BasicShapeStyleValue::~BasicShapeStyleValue() = default;
 
 Gfx::Path BasicShapeStyleValue::to_path(CSSPixelRect reference_box) const
 {
-    return m_basic_shape.visit([&](auto const& shape) -> Gfx::Path {
+    return basic_shape().visit([&](auto const& shape) -> Gfx::Path {
         // NB: Xywh and Rect don't require to_path functions as we should have already converted them to their
         //     respective Inset equivalents during absolutization
         if constexpr (requires { shape.to_path(reference_box); }) {
@@ -342,7 +425,7 @@ Gfx::Path BasicShapeStyleValue::to_path(CSSPixelRect reference_box) const
 
 void BasicShapeStyleValue::serialize(StringBuilder& builder, SerializationMode mode) const
 {
-    m_basic_shape.visit([&](auto const& shape) {
+    basic_shape().visit([&](auto const& shape) {
         shape.serialize(builder, mode);
     });
 }
@@ -359,12 +442,13 @@ ValueComparingNonnullRefPtr<StyleValue const> BasicShapeStyleValue::absolutized(
     CalculationContext calculation_context { .percentages_resolve_as = ValueType::Length };
 
     auto const one_hundred_percent_minus = [&](Vector<NonnullRefPtr<StyleValue const>> const& values, CalculationContext const& calculation_context) {
-        Vector<NonnullRefPtr<CalculationNode const>> sum_components = { NumericCalculationNode::create(Percentage { 100 }, calculation_context) };
+        Vector<CalcNodeRef> sum_components;
+        sum_components.append(CalcNodeRef::numeric(Percentage { 100 }));
 
         for (auto const& value : values)
-            sum_components.append(NegateCalculationNode::create(CalculationNode::from_style_value(value, calculation_context)));
+            sum_components.append(CalcNodeRef::negate(CalcNodeRef::from_style_value(value)));
 
-        return CalculatedStyleValue::create(SumCalculationNode::create(sum_components), NumericType { NumericType::BaseType::Length, 1 }, calculation_context);
+        return CalculatedStyleValue::create(CalcNodeRef::sum(move(sum_components)), NumericType { NumericType::BaseType::Length, 1 }, calculation_context);
     };
 
     auto const absolutize_if_nonnull = [&](RefPtr<StyleValue const> const& value) -> ValueComparingRefPtr<StyleValue const> {
@@ -373,7 +457,7 @@ ValueComparingNonnullRefPtr<StyleValue const> BasicShapeStyleValue::absolutized(
         return value->absolutized(computation_context);
     };
 
-    auto absolutized_shape = m_basic_shape.visit(
+    auto absolutized_shape = basic_shape().visit(
         [&](Inset const& shape) -> BasicShape {
             auto absolutized_top = shape.top->absolutized(computation_context);
             auto absolutized_right = shape.right->absolutized(computation_context);
@@ -466,7 +550,7 @@ ValueComparingNonnullRefPtr<StyleValue const> BasicShapeStyleValue::absolutized(
             return shape;
         });
 
-    if (absolutized_shape == m_basic_shape)
+    if (absolutized_shape == basic_shape())
         return *this;
 
     return BasicShapeStyleValue::create(absolutized_shape);

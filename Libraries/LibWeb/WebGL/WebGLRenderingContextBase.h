@@ -6,6 +6,10 @@
 
 #pragma once
 
+#include <AK/ByteBuffer.h>
+#include <AK/Checked.h>
+#include <AK/Utf16String.h>
+#include <AK/Utf16View.h>
 #include <LibGfx/DecodedImageFrame.h>
 #include <LibJS/Runtime/DataView.h>
 #include <LibJS/Runtime/TypedArray.h>
@@ -68,10 +72,15 @@ public:
     // https://immersive-web.github.io/webxr/#dom-webglrenderingcontextbase-makexrcompatible
     GC::Ref<WebIDL::Promise> make_xr_compatible();
 
-    Optional<Vector<String>> get_supported_extensions();
-    JS::Object* get_extension(String const& name);
+    Optional<Vector<Utf16String>> get_supported_extensions();
+    JS::Object* get_extension(Utf16String const& name);
 
     void enable_compressed_texture_format(WebIDL::UnsignedLong format);
+
+    // Holds a WebGLVertexArrayObject for WebGL2 contexts, or a WebGLVertexArrayObjectOES for WebGL1 contexts with the
+    // OES_vertex_array_object extension enabled.
+    GC::Ptr<WebGLObject> current_vertex_array_binding() const { return m_current_vertex_array; }
+    void set_current_vertex_array_binding(GC::Ptr<WebGLObject> vertex_array) { m_current_vertex_array = vertex_array; }
 
 protected:
     WebGLRenderingContextBase(JS::Realm&);
@@ -102,54 +111,156 @@ protected:
         return src_span.slice(src_offset, src_length_override);
     }
 
-    template<typename T>
-    static ErrorOr<Span<T>> get_offset_span(WebIDL::BufferSource src_data, WebIDL::UnsignedLongLong src_offset, WebIDL::UnsignedLong src_length_override = 0)
+    // The callback's view may point straight into the JS heap: it must not escape the
+    // callback, run script, or allocate on the JS heap while held.
+    template<typename Callback>
+    static ErrorOr<void> with_buffer_source_bytes(WebIDL::BufferSource src_data, WebIDL::UnsignedLongLong src_offset, WebIDL::UnsignedLong src_length_override, Callback&& callback)
     {
-        auto buffer_size = src_data.byte_length();
-        if (buffer_size % sizeof(T) != 0) [[unlikely]]
+        auto array_buffer = src_data.viewed_array_buffer();
+        if (!array_buffer || array_buffer->is_detached()) [[unlikely]]
             return Error::from_errno(EINVAL);
 
-        return src_data.buffer_source().visit(
-            [&](GC::Ref<JS::ArrayBuffer> array_buffer) -> ErrorOr<Span<T>> {
-                return TRY(get_offset_span(array_buffer->span(), src_offset, src_length_override)).template reinterpret<T>();
-            },
-            [&](GC::Ref<JS::DataView> data_view) -> ErrorOr<Span<T>> {
-                return TRY(get_offset_span(data_view->viewed_array_buffer()->span(), src_offset, src_length_override)).template reinterpret<T>();
-            },
-            [&](auto const& typed_array) -> ErrorOr<Span<T>> {
-                // NOTE: src_offset is the number of elements to offset by, not the number of bytes.
-                return TRY(get_offset_span(typed_array->data(), src_offset, src_length_override)).template reinterpret<T>();
-            });
+        if (src_data.is_out_of_bounds()) {
+            if (src_offset != 0 || src_length_override != 0) [[unlikely]]
+                return Error::from_errno(EINVAL);
+            callback(ReadonlyBytes {});
+            return {};
+        }
+
+        auto element_size = src_data.element_size();
+        Checked<size_t> byte_offset_in_view = static_cast<size_t>(src_offset);
+        byte_offset_in_view *= element_size;
+        if (byte_offset_in_view.has_overflow() || byte_offset_in_view.value() > src_data.byte_length()) [[unlikely]]
+            return Error::from_errno(EINVAL);
+
+        auto byte_length = src_data.byte_length() - byte_offset_in_view.value();
+        if (src_length_override != 0) {
+            Checked<size_t> requested_byte_length = static_cast<size_t>(src_length_override);
+            requested_byte_length *= element_size;
+            if (requested_byte_length.has_overflow() || requested_byte_length.value() > byte_length) [[unlikely]]
+                return Error::from_errno(EINVAL);
+            byte_length = requested_byte_length.value();
+        }
+
+        Checked<size_t> byte_offset_in_buffer = src_data.byte_offset();
+        byte_offset_in_buffer += byte_offset_in_view.value();
+        if (byte_offset_in_buffer.has_overflow()) [[unlikely]]
+            return Error::from_errno(EINVAL);
+
+        if (byte_offset_in_buffer.value() > array_buffer->byte_length()) [[unlikely]]
+            return Error::from_errno(EINVAL);
+        if (byte_length > array_buffer->byte_length() - byte_offset_in_buffer.value()) [[unlikely]]
+            return Error::from_errno(EINVAL);
+
+        array_buffer->with_readonly_bytes(byte_offset_in_buffer.value(), byte_length, [&](ReadonlyBytes bytes) {
+            callback(bytes);
+        });
+        return {};
     }
 
-    static ErrorOr<Span<float>> span_from_float32_list(Float32List& float32_list, WebIDL::UnsignedLongLong src_offset, WebIDL::UnsignedLong src_length_override = 0)
+    template<typename T>
+    class SpanWithStorage {
+    public:
+        explicit SpanWithStorage(Span<T> span)
+            : m_span(span)
+        {
+        }
+
+        explicit SpanWithStorage(ByteBuffer storage)
+            : m_storage(move(storage))
+            , m_has_storage(true)
+            , m_span(m_storage.bytes().template reinterpret<T>())
+        {
+        }
+
+        SpanWithStorage(SpanWithStorage const&) = delete;
+        SpanWithStorage& operator=(SpanWithStorage const&) = delete;
+
+        SpanWithStorage(SpanWithStorage&& other)
+            : m_storage(move(other.m_storage))
+            , m_has_storage(exchange(other.m_has_storage, false))
+            , m_span(m_has_storage ? m_storage.bytes().template reinterpret<T>() : other.m_span)
+        {
+        }
+
+        SpanWithStorage& operator=(SpanWithStorage&& other)
+        {
+            if (this != &other) {
+                m_storage = move(other.m_storage);
+                m_has_storage = exchange(other.m_has_storage, false);
+                m_span = m_has_storage ? m_storage.bytes().template reinterpret<T>() : other.m_span;
+            }
+            return *this;
+        }
+
+        size_t size() const { return m_span.size(); }
+        T* data() { return m_span.data(); }
+        T const* data() const { return m_span.data(); }
+
+    private:
+        ByteBuffer m_storage;
+        bool m_has_storage { false };
+        Span<T> m_span;
+    };
+
+    template<typename T>
+    static ErrorOr<SpanWithStorage<T>> span_from_typed_array(JS::TypedArrayBase& typed_array, WebIDL::UnsignedLongLong src_offset, WebIDL::UnsignedLong src_length_override = 0)
+    {
+        auto record = JS::make_typed_array_with_buffer_witness_record(typed_array, JS::ArrayBuffer::Order::SeqCst);
+        if (JS::is_typed_array_out_of_bounds(record)) [[unlikely]] {
+            if (src_offset == 0 && src_length_override == 0)
+                return SpanWithStorage<T> { Span<T> {} };
+            return Error::from_errno(EINVAL);
+        }
+
+        auto length = JS::typed_array_length(record);
+        Checked<size_t> end = static_cast<size_t>(src_offset);
+        end += src_length_override;
+        if (end.has_overflow() || end.value() > length) [[unlikely]]
+            return Error::from_errno(EINVAL);
+
+        auto elements_to_copy = src_length_override == 0 ? length - static_cast<size_t>(src_offset) : static_cast<size_t>(src_length_override);
+        Checked<size_t> byte_offset = static_cast<size_t>(src_offset);
+        byte_offset *= sizeof(T);
+        byte_offset += typed_array.byte_offset();
+
+        Checked<size_t> byte_length = elements_to_copy;
+        byte_length *= sizeof(T);
+        if (byte_offset.has_overflow() || byte_length.has_overflow()) [[unlikely]]
+            return Error::from_errno(EINVAL);
+
+        auto bytes = TRY(typed_array.viewed_array_buffer()->copy_to_byte_buffer(byte_offset.value(), byte_length.value()));
+        return SpanWithStorage<T> { move(bytes) };
+    }
+
+    static ErrorOr<SpanWithStorage<float>> span_from_float32_list(Float32List& float32_list, WebIDL::UnsignedLongLong src_offset, WebIDL::UnsignedLong src_length_override = 0)
     {
         if (float32_list.has<Vector<float>>()) {
             auto& vector = float32_list.get<Vector<float>>();
-            return get_offset_span(vector.span(), src_offset, src_length_override);
+            return SpanWithStorage<float> { TRY(get_offset_span(vector.span(), src_offset, src_length_override)) };
         }
         auto& buffer = float32_list.get<GC::Ref<JS::Float32Array>>();
-        return get_offset_span(buffer->data(), src_offset, src_length_override);
+        return span_from_typed_array<float>(*buffer, src_offset, src_length_override);
     }
 
-    static ErrorOr<Span<int>> span_from_int32_list(Int32List& int32_list, WebIDL::UnsignedLongLong src_offset, WebIDL::UnsignedLong src_length_override = 0)
+    static ErrorOr<SpanWithStorage<int>> span_from_int32_list(Int32List& int32_list, WebIDL::UnsignedLongLong src_offset, WebIDL::UnsignedLong src_length_override = 0)
     {
         if (int32_list.has<Vector<int>>()) {
             auto& vector = int32_list.get<Vector<int>>();
-            return get_offset_span(vector.span(), src_offset, src_length_override);
+            return SpanWithStorage<int> { TRY(get_offset_span(vector.span(), src_offset, src_length_override)) };
         }
         auto& buffer = int32_list.get<GC::Ref<JS::Int32Array>>();
-        return get_offset_span(buffer->data(), src_offset, src_length_override);
+        return span_from_typed_array<int>(*buffer, src_offset, src_length_override);
     }
 
-    static ErrorOr<Span<u32>> span_from_uint32_list(Uint32List& uint32_list, WebIDL::UnsignedLongLong src_offset, WebIDL::UnsignedLong src_length_override = 0)
+    static ErrorOr<SpanWithStorage<u32>> span_from_uint32_list(Uint32List& uint32_list, WebIDL::UnsignedLongLong src_offset, WebIDL::UnsignedLong src_length_override = 0)
     {
         if (uint32_list.has<Vector<u32>>()) {
             auto& vector = uint32_list.get<Vector<u32>>();
-            return get_offset_span(vector.span(), src_offset, src_length_override);
+            return SpanWithStorage<u32> { TRY(get_offset_span(vector.span(), src_offset, src_length_override)) };
         }
         auto& buffer = uint32_list.get<GC::Ref<JS::Uint32Array>>();
-        return get_offset_span(buffer->data(), src_offset, src_length_override);
+        return span_from_typed_array<u32>(*buffer, src_offset, src_length_override);
     }
 
     struct TexImageSourceFrame {
@@ -167,6 +278,17 @@ protected:
             result.append(c);
         result.append('\0');
         return result;
+    }
+
+    static Vector<GLchar> null_terminated_utf8_string(Utf16View string)
+    {
+        auto utf8_string = MUST(string.to_utf8());
+        return null_terminated_string(utf8_string.bytes_as_string_view());
+    }
+
+    static Utf16String utf16_string_from_gl_string(void const* data, size_t length)
+    {
+        return Utf16String::from_utf8_without_validation({ reinterpret_cast<char const*>(data), length });
     }
 
     GLenum get_error_value();
@@ -193,6 +315,8 @@ protected:
     //      video is still converted to rec709 RGB data, but not then converted to e.g. srgb RGB data) The initial value is
     //      BROWSER_DEFAULT_WEBGL.
     GLenum m_unpack_colorspace_conversion { BROWSER_DEFAULT_WEBGL };
+
+    GC::Ptr<WebGLObject> m_current_vertex_array;
 
 private:
     GLenum m_error { 0 };

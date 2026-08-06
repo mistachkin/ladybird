@@ -5,24 +5,39 @@
  */
 
 #include <LibWeb/CSS/CalculationResolutionContext.h>
+#include <LibWeb/CSS/Serialize.h>
 #include <LibWeb/CSS/StyleValues/AnchorStyleValue.h>
+#include <LibWeb/CSS/StyleValues/CalcNodeRef.h>
 #include <LibWeb/CSS/StyleValues/CalculatedStyleValue.h>
 
 namespace Web::CSS {
 
+static StyleValueFFI::StyleValueData const* make_anchor_data(Optional<Utf16FlyString> const& anchor_name, ValueComparingNonnullRefPtr<StyleValue const> const& anchor_side, ValueComparingRefPtr<StyleValue const> const& fallback_value)
+{
+    // The Rust allocation takes ownership of one strong reference to the side data and, when
+    // present, the fallback value data.
+    auto const* fallback_data = fallback_value ? StyleValueFFI::rust_style_value_retain(fallback_value->rust_style_value_data()) : nullptr;
+    return StyleValueFFI::rust_style_value_create_anchor(
+        anchor_name.has_value(),
+        anchor_name.has_value() ? anchor_name->to_raw_leaked() : 0,
+        StyleValueFFI::rust_style_value_retain(anchor_side->rust_style_value_data()),
+        fallback_data);
+}
+
 ValueComparingNonnullRefPtr<AnchorStyleValue const> AnchorStyleValue::create(
-    Optional<FlyString> const& anchor_name,
+    Optional<Utf16FlyString> const& anchor_name,
     ValueComparingNonnullRefPtr<StyleValue const> const& anchor_side,
     ValueComparingRefPtr<StyleValue const> const& fallback_value)
 {
     return adopt_ref(*new (nothrow) AnchorStyleValue(anchor_name, anchor_side, fallback_value));
 }
 
-AnchorStyleValue::AnchorStyleValue(Optional<FlyString> const& anchor_name,
+AnchorStyleValue::AnchorStyleValue(Optional<Utf16FlyString> const& anchor_name,
     ValueComparingNonnullRefPtr<StyleValue const> const& anchor_side,
     ValueComparingRefPtr<StyleValue const> const& fallback_value)
-    : AbstractNonMathCalcFunctionStyleValue(Type::Anchor)
-    , m_properties { .anchor_name = anchor_name, .anchor_side = anchor_side, .fallback_value = fallback_value }
+    : AbstractNonMathCalcFunctionStyleValue(Type::Anchor, make_anchor_data(anchor_name, anchor_side, fallback_value))
+    , m_anchor_side(anchor_side)
+    , m_fallback_value(fallback_value)
 {
 }
 
@@ -31,7 +46,7 @@ void AnchorStyleValue::serialize(StringBuilder& builder, SerializationMode seria
     builder.append("anchor("sv);
 
     if (anchor_name().has_value())
-        builder.append(anchor_name().value());
+        builder.append(serialize_an_identifier(anchor_name().value()));
 
     if (anchor_name().has_value())
         builder.append(' ');
@@ -46,28 +61,28 @@ void AnchorStyleValue::serialize(StringBuilder& builder, SerializationMode seria
 }
 
 // https://drafts.csswg.org/css-anchor-position-1/#anchor-pos
-RefPtr<CalculationNode const> AnchorStyleValue::resolve_to_calculation_node(CalculationContext const& calculation_context, CalculationResolutionContext const& calculation_resolution_context) const
+Optional<CalcNodeRef> AnchorStyleValue::resolve_to_calculation_node(CalculationContext const& calculation_context, CalculationResolutionContext const& calculation_resolution_context) const
 {
     if (!calculation_resolution_context.anchor_resolver)
-        return nullptr;
+        return {};
 
     // An anchor() function representing a resolvable anchor function resolves at computed value time (using style &
     // layout interleaving) to the <length> that would align the edge of the positioned boxes' inset-modified containing
     // block corresponding to the property the function appears in with the specified edge of the target anchor
     // element’s anchor box.
     if (auto side_px = calculation_resolution_context.anchor_resolver->resolve(*this); side_px.has_value())
-        return NumericCalculationNode::create(Length::make_px(side_px.release_value()), calculation_context);
+        return CalcNodeRef::numeric(Length::make_px(side_px.release_value()));
 
     // If any of these conditions are false, the anchor() function computes to its specified fallback value. If no
     // fallback value is specified, it makes the declaration referencing it invalid at computed-value time.
-    auto const& fallback_value = m_properties.fallback_value;
+    auto fallback_value = this->fallback_value();
     if (!fallback_value)
-        return nullptr;
+        return {};
 
     // NB: The fallback value can itself be an anchor(), which is resolved when the substituted tree is simplified.
-    NonnullRefPtr<CalculationNode const> fallback_node = fallback_value->is_anchor()
-        ? static_cast<NonnullRefPtr<CalculationNode const>>(NonMathFunctionCalculationNode::create(fallback_value->as_anchor(), NumericType { NumericType::BaseType::Length, 1 }))
-        : CalculationNode::from_style_value(*fallback_value, calculation_context);
+    auto fallback_node = fallback_value->is_anchor()
+        ? CalcNodeRef::non_math_function(fallback_value->as_anchor(), NumericType { NumericType::BaseType::Length, 1 })
+        : CalcNodeRef::from_style_value(*fallback_value);
     return simplify_a_calculation_tree(fallback_node, calculation_context, calculation_resolution_context);
 }
 
@@ -76,7 +91,8 @@ bool AnchorStyleValue::equals(StyleValue const& other) const
     if (type() != other.type())
         return false;
 
-    return m_properties == other.as_anchor().m_properties;
+    auto const& other_anchor = other.as_anchor();
+    return anchor_name() == other_anchor.anchor_name() && anchor_side() == other_anchor.anchor_side() && fallback_value() == other_anchor.fallback_value();
 }
 
 }

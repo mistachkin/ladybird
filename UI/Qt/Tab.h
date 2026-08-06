@@ -7,7 +7,10 @@
 
 #pragma once
 
+#include <AK/Optional.h>
+#include <LibWakeLock/DisplaySleepInhibitor.h>
 #include <LibWeb/HTML/AudioPlayState.h>
+#include <LibWeb/Page/ScreenWakeLockHandle.h>
 #include <LibWebView/FileDownloader.h>
 #include <LibWebView/Settings.h>
 #include <UI/Qt/BookmarksBar.h>
@@ -19,6 +22,7 @@
 #include <QLabel>
 #include <QMenu>
 #include <QPointer>
+#include <QPushButton>
 #include <QToolButton>
 #include <QWidget>
 
@@ -28,6 +32,7 @@ namespace Ladybird {
 class BrowserWindow;
 enum class ChromeIcon;
 class DownloadsPopover;
+class PrivateSessionPopover;
 class WindowControlButton;
 
 class HyperlinkLabel final : public QLabel {
@@ -35,8 +40,9 @@ class HyperlinkLabel final : public QLabel {
 
 public:
     explicit HyperlinkLabel(QWidget* parent = nullptr)
-        : QLabel(parent)
+        : QLabel(parent, Qt::ToolTip | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint)
     {
+        setAttribute(Qt::WA_ShowWithoutActivating);
         setMouseTracking(true);
     }
 
@@ -122,9 +128,12 @@ private:
     void update_downloads_popover();
     void show_downloads_popover();
     void position_downloads_popover();
+    void show_private_session_popover();
+    void position_private_session_popover();
     void set_loading(bool);
     void update_tab_icon();
     int tab_index();
+    void set_screen_wake_lock_state(Web::ScreenWakeLockState);
 
     virtual void download_added(WebView::FileDownloader::Download const&) override;
     virtual void download_updated(WebView::FileDownloader::Download const&) override;
@@ -134,7 +143,6 @@ private:
     QWidget* m_toolbar { nullptr };
     QWidget* m_toolbar_window_controls_separator { nullptr };
     QWidget* m_toolbar_window_controls { nullptr };
-    QSpacerItem* m_toolbar_window_controls_spacer { nullptr };
     QSpacerItem* m_sidebar_toggle_navigation_spacer { nullptr };
     QToolButton* m_left_toggle_vertical_tabs_expanded_button { nullptr };
     QToolButton* m_right_toggle_vertical_tabs_expanded_button { nullptr };
@@ -142,12 +150,15 @@ private:
     WindowControlButton* m_maximize_window_button { nullptr };
     WindowControlButton* m_close_window_button { nullptr };
     BookmarksBar* m_bookmarks_bar { nullptr };
+    QPushButton* m_private_badge { nullptr };
     QToolButton* m_hamburger_button { nullptr };
     QToolButton* m_downloads_button { nullptr };
     QPointer<DownloadsPopover> m_downloads_popover;
+    QPointer<PrivateSessionPopover> m_private_session_popover;
     LocationEdit* m_location_edit { nullptr };
     WebContentView* m_view { nullptr };
     FindInPageWidget* m_find_in_page { nullptr };
+    Optional<WakeLock::DisplaySleepInhibitor> m_screen_display_sleep_inhibitor;
     BrowserWindow* m_window { nullptr };
     QString m_title;
     HyperlinkLabel* m_hover_label { nullptr };
@@ -162,6 +173,7 @@ private:
     QMenu* m_context_menu { nullptr };
     QMenu* m_page_context_menu { nullptr };
     QMenu* m_link_context_menu { nullptr };
+    QMenu* m_selected_text_link_context_menu { nullptr };
     QMenu* m_image_context_menu { nullptr };
     QMenu* m_media_context_menu { nullptr };
     QMenu* m_select_dropdown { nullptr };

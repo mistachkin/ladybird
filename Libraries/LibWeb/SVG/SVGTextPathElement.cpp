@@ -4,11 +4,9 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibURL/URL.h>
 #include <LibWeb/Bindings/SVGTextPathElement.h>
 #include <LibWeb/Layout/SVGTextPathBox.h>
 #include <LibWeb/SVG/AttributeNames.h>
-#include <LibWeb/SVG/SVGLength.h>
 #include <LibWeb/SVG/SVGTextPathElement.h>
 
 namespace Web::SVG {
@@ -20,12 +18,12 @@ SVGTextPathElement::SVGTextPathElement(DOM::Document& document, DOM::QualifiedNa
 {
 }
 
-void SVGTextPathElement::attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
+void SVGTextPathElement::attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_)
 {
     Base::attribute_changed(name, old_value, value, namespace_);
 
     if (name == SVG::AttributeNames::startOffset)
-        m_start_offset = AttributeParser::parse_number_percentage(value.value_or(String {}));
+        m_start_offset = AttributeParser::parse_number_percentage(value.value_or({}));
 }
 
 GC::Ptr<SVGGeometryElement const> SVGTextPathElement::path_or_shape() const
@@ -44,14 +42,6 @@ float SVGTextPathElement::start_offset_for_path_length(float path_length) const
     return m_start_offset->resolve_relative_to(path_length);
 }
 
-// https://svgwg.org/svg2-draft/text.html#__svg__SVGTextPathElement__startOffset
-GC::Ref<SVGAnimatedLength> SVGTextPathElement::start_offset() const
-{
-    auto base_length = SVGLength::create(realm(), 0, m_start_offset.value_or(NumberPercentage::create_number(0)).value(), SVGLength::ReadOnly::No);
-    auto anim_length = SVGLength::create(realm(), 0, m_start_offset.value_or(NumberPercentage::create_number(0)).value(), SVGLength::ReadOnly::Yes);
-    return SVGAnimatedLength::create(realm(), base_length, anim_length);
-}
-
 void SVGTextPathElement::initialize(JS::Realm& realm)
 {
     WEB_SET_PROTOTYPE_FOR_INTERFACE(SVGTextPathElement);
@@ -64,7 +54,7 @@ void SVGTextPathElement::visit_edges(Cell::Visitor& visitor)
     SVGURIReferenceMixin::visit_edges(visitor);
 }
 
-RefPtr<Layout::Node> SVGTextPathElement::create_layout_node(CSS::ComputedProperties const& style)
+RefPtr<Layout::Node> SVGTextPathElement::create_layout_node(NonnullRefPtr<CSS::ComputedValues const> style)
 {
     return make_ref_counted<Layout::SVGTextPathBox>(document(), *this, style);
 }

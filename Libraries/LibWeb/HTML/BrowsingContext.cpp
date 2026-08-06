@@ -22,6 +22,7 @@
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/HTML/WindowProxy.h>
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
+#include <LibWeb/Infra/SerializedURL.h>
 #include <LibWeb/Layout/Viewport.h>
 #include <LibWeb/Namespace.h>
 #include <LibWeb/Page/Page.h>
@@ -219,7 +220,7 @@ BrowsingContext::BrowsingContextAndDocument BrowsingContext::create_a_new_browsi
     document->set_document_type(DOM::Document::Type::HTML);
 
     // content type: "text/html"
-    document->set_content_type("text/html"_string);
+    document->set_content_type("text/html"_utf16_fly_string);
 
     // mode: "quirks"
     document->set_quirks_mode(DOM::QuirksMode::Yes);
@@ -247,7 +248,7 @@ BrowsingContext::BrowsingContextAndDocument BrowsingContext::create_a_new_browsi
     document->set_about_base_url(creator_base_url);
 
     // allow declarative shadow roots: true
-    document->set_allow_declarative_shadow_roots(true);
+    document->set_allow_declarative_shadow_roots(HTML::HTMLParser::AllowDeclarativeShadowRoots::Yes);
 
     // custom element registry: A new CustomElementRegistry object.
     document->set_custom_element_registry(realm.create<CustomElementRegistry>(realm));
@@ -265,7 +266,7 @@ BrowsingContext::BrowsingContextAndDocument BrowsingContext::create_a_new_browsi
     // 19. If creator is non-null:
     if (creator) {
         // 1. Set document's referrer to the serialization of creator's URL.
-        document->set_referrer(creator->url().serialize());
+        document->set_referrer(utf16_string_from_url_ascii(creator->url().serialize()));
 
         // 2. Set document's policy container to a clone of creator's policy container.
         document->set_policy_container(creator->policy_container()->clone(document->heap()));
@@ -289,7 +290,7 @@ BrowsingContext::BrowsingContextAndDocument BrowsingContext::create_a_new_browsi
     // 22. Populate with html/head/body given document.
     populate_with_html_head_body(*document);
     if (!embedder)
-        document->set_supported_color_schemes({ "light"_string, "dark"_string });
+        document->set_supported_color_schemes({ "light"_utf16_fly_string, "dark"_utf16_fly_string });
 
     // 23. Make active document.
     document->make_active();

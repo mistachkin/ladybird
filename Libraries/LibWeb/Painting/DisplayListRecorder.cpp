@@ -21,40 +21,6 @@ DisplayListRecorder::DisplayListRecorder(DisplayList& command_list, AccumulatedV
 
 DisplayListRecorder::~DisplayListRecorder() = default;
 
-DisplayListRecorder::CommandCapture::CommandCapture(DisplayListRecorder& recorder)
-    : m_recorder(&recorder)
-{
-}
-
-DisplayListRecorder::CommandCapture::~CommandCapture()
-{
-    if (m_recorder)
-        m_recorder->end_capture();
-}
-
-ByteBuffer DisplayListRecorder::CommandCapture::take()
-{
-    VERIFY(m_recorder);
-    auto commands = m_recorder->m_display_list.copy_command_bytes_from(
-        m_recorder->m_capture_start_command_offset);
-    m_recorder->m_is_capturing = false;
-    m_recorder = nullptr;
-    return commands;
-}
-
-DisplayListRecorder::CommandCapture DisplayListRecorder::begin_command_capture()
-{
-    VERIFY(!m_is_capturing);
-    m_is_capturing = true;
-    m_capture_start_command_offset = m_display_list.command_byte_size();
-    return CommandCapture(*this);
-}
-
-void DisplayListRecorder::end_capture()
-{
-    m_is_capturing = false;
-}
-
 template<DisplayListCommand Command>
 class CommandPayloadBuilder {
 public:
@@ -291,15 +257,16 @@ static DisplayListDataSpan append_filter_data(
     return payload_builder.append_data(filter_data, alignof(u32));
 }
 
-void DisplayListRecorder::replay_cached_commands(ReadonlyBytes command_bytes)
+// Captures are save/restore balanced (verified at capture end), so splicing never shifts the save nesting level.
+DisplayListCommandRange DisplayListRecorder::append_cached_command_range(DisplayList const& source_display_list, DisplayListCommandRange source_range, VisualContextIndex recorded_context_index)
 {
-    if (command_bytes.is_empty())
-        return;
-
-    DisplayList::for_each_command_header(command_bytes, [&](DisplayListCommandHeader const& header, ReadonlyBytes) {
-        m_save_nesting_level += display_list_command_nesting_level_change(header.type);
-    });
-    m_display_list.append_command_sequence(command_bytes, m_visual_context_tree, m_accumulated_visual_context_index);
+    auto destination_offset = m_display_list.append_command_range_from(
+        source_display_list,
+        source_range,
+        m_visual_context_tree,
+        recorded_context_index,
+        m_accumulated_visual_context_index);
+    return { destination_offset, source_range.size };
 }
 
 void DisplayListRecorder::paint_nested_display_list(DisplayListResource const& display_list, Gfx::IntRect rect)
@@ -311,31 +278,16 @@ void DisplayListRecorder::paint_nested_display_list(DisplayListResource const& d
     });
 }
 
+void DisplayListRecorder::register_mask_display_list(ReadonlySpan<VisualContextIndex> context_indices, DisplayListResource const& display_list)
+{
+    auto display_list_id = resource_storage().add_display_list(display_list.display_list, display_list.visual_context_tree);
+    for (auto context_index : context_indices)
+        m_display_list.set_mask_display_list_id(context_index, display_list_id);
+}
+
 void DisplayListRecorder::add_rounded_rect_clip(Gfx::CornerRadii corner_radii, Gfx::IntRect border_rect, Gfx::CornerClip corner_clip)
 {
     append_command(AddRoundedRectClip { corner_radii, border_rect, corner_clip });
-}
-
-void DisplayListRecorder::begin_masks(ReadonlySpan<MaskInfo> masks)
-{
-    for (auto const& mask : masks) {
-        save();
-        add_clip_rect(mask.rect);
-        save_layer();
-    }
-}
-
-void DisplayListRecorder::end_masks(ReadonlySpan<MaskInfo> masks)
-{
-    for (size_t i = masks.size(); i-- > 0;) {
-        auto const& mask = masks[i];
-        auto mask_kind = mask.kind == Gfx::MaskKind::Luminance ? Optional<Gfx::MaskKind>(Gfx::MaskKind::Luminance) : Optional<Gfx::MaskKind> {};
-        apply_effects(1.0f, Gfx::CompositingAndBlendingOperator::DestinationIn, {}, mask_kind);
-        paint_nested_display_list(mask.display_list, mask.rect);
-        restore(); // DstIn layer
-        restore(); // content layer
-        restore(); // clip save
-    }
 }
 
 void DisplayListRecorder::fill_rect(Gfx::IntRect const& rect, Color color)
@@ -523,47 +475,101 @@ void DisplayListRecorder::draw_composited_context(Gfx::IntRect const& dst_rect, 
     });
 }
 
-void DisplayListRecorder::draw_canvas(Gfx::IntRect const& dst_rect, CanvasId canvas_id, Gfx::ScalingMode scaling_mode)
+void DisplayListRecorder::draw_canvas(Gfx::IntRect const& dst_rect, CanvasId canvas_id, u64 content_generation, Gfx::ScalingMode scaling_mode)
 {
     if (dst_rect.is_empty())
         return;
     append_command(DrawCanvas {
         .dst_rect = dst_rect,
         .canvas_id = canvas_id,
+        .content_generation = content_generation,
         .scaling_mode = scaling_mode,
     });
 }
 
-void DisplayListRecorder::draw_video_frame(Gfx::IntRect const& dst_rect, VideoFrameResourceId frame_id, RefPtr<Media::VideoFrame const> frame, Gfx::ScalingMode scaling_mode)
+void DisplayListRecorder::draw_video_frame(Gfx::IntRect const& dst_rect, VideoSinkResourceId video_sink_id, Media::VideoSinkHandle sink_handle, Gfx::ScalingMode scaling_mode)
 {
     if (dst_rect.is_empty())
         return;
     append_command(DrawVideoFrame {
         .dst_rect = dst_rect,
-        .video_frame_id = resource_storage().add_video_frame(frame_id, move(frame)),
+        .video_sink_id = resource_storage().add_video_sink(video_sink_id, sink_handle),
         .scaling_mode = scaling_mode,
     });
 }
 
-void DisplayListRecorder::draw_scaled_decoded_image_frame(Gfx::IntRect const& dst_rect, Gfx::DecodedImageFrame frame, Gfx::ScalingMode scaling_mode)
+void DisplayListRecorder::draw_scaled_decoded_image_frame(Gfx::IntRect const& dst_rect, Gfx::DecodedImageFrame frame, Gfx::ScalingMode scaling_mode, Gfx::CompositingAndBlendingOperator compositing_and_blending_operator, Optional<Color> isolated_backdrop_color)
 {
     if (dst_rect.is_empty())
         return;
     append_command(DrawScaledDecodedImageFrame {
         .dst_rect = dst_rect,
+        .src_rect = {},
         .frame_id = resource_storage().add_image_frame(frame),
         .scaling_mode = scaling_mode,
+        .compositing_and_blending_operator = compositing_and_blending_operator,
+        .isolated_backdrop_color = isolated_backdrop_color,
     });
 }
 
-void DisplayListRecorder::draw_repeated_decoded_image_frame(Gfx::IntRect dst_rect, Gfx::IntRect clip_rect, Gfx::DecodedImageFrame frame, Gfx::ScalingMode scaling_mode, bool repeat_x, bool repeat_y)
+void DisplayListRecorder::draw_scaled_decoded_image_frame(Gfx::IntRect const& dst_rect, Gfx::FloatRect const& src_rect, Gfx::DecodedImageFrame frame, Gfx::ScalingMode scaling_mode, Gfx::CompositingAndBlendingOperator compositing_and_blending_operator, Optional<Color> isolated_backdrop_color)
 {
+    if (dst_rect.is_empty())
+        return;
+    if (src_rect.is_empty())
+        return;
+    append_command(DrawScaledDecodedImageFrame {
+        .dst_rect = dst_rect,
+        .src_rect = src_rect,
+        .frame_id = resource_storage().add_image_frame(frame),
+        .scaling_mode = scaling_mode,
+        .compositing_and_blending_operator = compositing_and_blending_operator,
+        .isolated_backdrop_color = isolated_backdrop_color,
+    });
+}
+
+void DisplayListRecorder::draw_repeated_decoded_image_frame(Gfx::IntRect dst_rect, Gfx::IntRect clip_rect, Gfx::DecodedImageFrame frame, Gfx::ScalingMode scaling_mode, bool repeat_x, bool repeat_y, Gfx::CompositingAndBlendingOperator compositing_and_blending_operator, Optional<Color> isolated_backdrop_color)
+{
+    if (dst_rect.is_empty() || clip_rect.is_empty())
+        return;
     append_command(DrawRepeatedDecodedImageFrame {
         .dst_rect = dst_rect,
         .clip_rect = clip_rect,
         .frame_id = resource_storage().add_image_frame(frame),
         .scaling_mode = scaling_mode,
         .repeat = { repeat_x, repeat_y },
+        .compositing_and_blending_operator = compositing_and_blending_operator,
+        .isolated_backdrop_color = isolated_backdrop_color,
+    });
+}
+
+void DisplayListRecorder::draw_repeated_display_list(Gfx::IntRect dst_rect, Gfx::IntRect clip_rect, DisplayListResource const& display_list, Gfx::ScalingMode scaling_mode, bool repeat_x, bool repeat_y)
+{
+    if (dst_rect.is_empty() || clip_rect.is_empty())
+        return;
+    append_command(DrawRepeatedDisplayList {
+        .dst_rect = dst_rect,
+        .clip_rect = clip_rect,
+        .display_list_id = resource_storage().add_display_list(display_list.display_list, display_list.visual_context_tree),
+        .scaling_mode = scaling_mode,
+        .repeat = { repeat_x, repeat_y },
+    });
+}
+
+void DisplayListRecorder::draw_tiled_decoded_image_frame(DrawTiledDecodedImageFrameParams const& params)
+{
+    if (params.tile_rect.is_empty() || params.clip_rect.is_empty() || params.src_rect.is_empty())
+        return;
+
+    append_command(DrawTiledDecodedImageFrame {
+        .tile_rect = params.tile_rect,
+        .clip_rect = params.clip_rect,
+        .src_rect = params.src_rect,
+        .tile_step = params.tile_step,
+        .frame_id = resource_storage().add_image_frame(params.frame),
+        .scaling_mode = params.scaling_mode,
+        .tile_count_x = params.tile_count_x,
+        .tile_count_y = params.tile_count_y,
     });
 }
 
@@ -630,9 +636,17 @@ void DisplayListRecorder::add_clip_rect(Gfx::IntRect const& rect)
     append_command(AddClipRect { rect });
 }
 
-void DisplayListRecorder::translate(Gfx::IntPoint delta)
+void DisplayListRecorder::add_clip_path(Gfx::Path const& path, Gfx::WindingRule winding_rule)
 {
-    append_command(Translate { delta });
+    CommandPayloadBuilder<AddClipPath> payload_builder(m_display_list);
+    auto path_span = append_path_data(payload_builder, path);
+    append_command(
+        AddClipPath {
+            .path_bounding_rect = enclosing_int_rect(path.bounding_box()),
+            .path_data = path_span,
+            .winding_rule = winding_rule,
+        },
+        payload_builder.inline_data());
 }
 
 void DisplayListRecorder::save()
@@ -726,10 +740,10 @@ void DisplayListRecorder::fill_rect_with_rounded_corners(Gfx::IntRect const& a_r
             { bottom_left_radius, bottom_left_radius } });
 }
 
-void DisplayListRecorder::paint_scrollbar(ScrollFrameIndex scroll_frame_index, Gfx::IntRect gutter_rect, Gfx::IntRect thumb_rect, double scroll_size, Color thumb_color, Color track_color, bool vertical)
+void DisplayListRecorder::paint_scrollbar(VisualContextIndex scroll_node_index, Gfx::IntRect gutter_rect, Gfx::IntRect thumb_rect, double scroll_size, Color thumb_color, Color track_color, bool vertical)
 {
     append_command(PaintScrollBar {
-        .scroll_frame_index = scroll_frame_index,
+        .scroll_node_index = scroll_node_index,
         .gutter_rect = gutter_rect,
         .thumb_rect = thumb_rect,
         .scroll_size = scroll_size,
@@ -778,21 +792,16 @@ void DisplayListRecorder::compositor_blocking_wheel_event_region(CompositorBlock
     append_command(region);
 }
 
-void DisplayListRecorder::apply_effects(float opacity, Gfx::CompositingAndBlendingOperator compositing_and_blending_operator, Optional<Gfx::Filter> filter, Optional<Gfx::MaskKind> mask_kind)
+void DisplayListRecorder::apply_effects(Gfx::CompositingAndBlendingOperator compositing_and_blending_operator)
 {
-    CommandPayloadBuilder<ApplyEffects> payload_builder(m_display_list);
-    auto filter_data = filter.has_value()
-        ? append_filter_data(payload_builder, resource_storage(), filter.value())
-        : DisplayListDataSpan {};
     append_command(
         ApplyEffects {
-            .opacity = opacity,
+            .opacity = 1.0f,
             .compositing_and_blending_operator = compositing_and_blending_operator,
-            .has_filter = filter.has_value(),
-            .filter_data = filter_data,
-            .has_mask_kind = mask_kind.has_value(),
-            .mask_kind = mask_kind.value_or({}) },
-        payload_builder.inline_data());
+            .has_filter = false,
+            .filter_data = {},
+            .has_mask_kind = false,
+            .mask_kind = {} });
 }
 
 }

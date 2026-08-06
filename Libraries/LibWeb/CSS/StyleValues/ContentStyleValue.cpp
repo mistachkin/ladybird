@@ -12,26 +12,37 @@
 
 namespace Web::CSS {
 
-void ContentStyleValue::serialize(StringBuilder& builder, SerializationMode mode) const
+StyleValueFFI::StyleValueData const* ContentStyleValue::make_content_data(ValueComparingNonnullRefPtr<StyleValueList const> const& content, ValueComparingRefPtr<StyleValueList const> const& alt_text)
 {
-    m_properties.content->serialize(builder, mode);
-    if (auto alt_text = m_properties.alt_text) {
-        builder.append(" / "sv);
-        alt_text->serialize(builder, mode);
-    }
+    // The Rust allocation takes ownership of one strong reference to each non-null list data.
+    auto const* alt_text_data = alt_text ? StyleValueFFI::rust_style_value_retain(alt_text->rust_style_value_data()) : nullptr;
+    return StyleValueFFI::rust_style_value_create_content(StyleValueFFI::rust_style_value_retain(content->rust_style_value_data()), alt_text_data);
 }
 
-bool ContentStyleValue::is_computationally_independent() const
+bool ContentStyleValue::properties_equal(ContentStyleValue const& other) const
 {
-    return m_properties.content->is_computationally_independent() && (!m_properties.alt_text || m_properties.alt_text->is_computationally_independent());
+    auto lists_equal = [](StyleValueList const* a, StyleValueList const* b) {
+        if (!a || !b)
+            return a == b;
+        return a->equals(*b);
+    };
+    return content().equals(other.content()) && lists_equal(alt_text(), other.alt_text());
+}
+
+void ContentStyleValue::serialize(StringBuilder& builder, SerializationMode mode) const
+{
+    content().serialize(builder, mode);
+    if (auto const* alt_text_list = alt_text()) {
+        builder.append(" / "sv);
+        alt_text_list->serialize(builder, mode);
+    }
 }
 
 void ContentStyleValue::set_style_sheet(GC::Ptr<CSSStyleSheet> style_sheet)
 {
-    Base::set_style_sheet(style_sheet);
-    const_cast<StyleValueList&>(*m_properties.content).set_style_sheet(style_sheet);
-    if (m_properties.alt_text)
-        const_cast<StyleValueList&>(*m_properties.alt_text).set_style_sheet(style_sheet);
+    const_cast<StyleValueList&>(content()).set_style_sheet(style_sheet);
+    if (auto const* alt_text_list = alt_text())
+        const_cast<StyleValueList&>(*alt_text_list).set_style_sheet(style_sheet);
 }
 
 }

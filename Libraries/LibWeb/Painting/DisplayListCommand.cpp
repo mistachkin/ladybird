@@ -8,11 +8,37 @@
 
 namespace Web::Painting {
 
+static StringView line_style_name(Gfx::LineStyle line_style)
+{
+    switch (line_style) {
+    case Gfx::LineStyle::Solid:
+        return "Solid"sv;
+    case Gfx::LineStyle::Dotted:
+        return "Dotted"sv;
+    case Gfx::LineStyle::Dashed:
+        return "Dashed"sv;
+    }
+    VERIFY_NOT_REACHED();
+}
+
+static StringView scaling_mode_name(Gfx::ScalingMode scaling_mode)
+{
+    switch (scaling_mode) {
+    case Gfx::ScalingMode::None:
+        return "None"sv;
+    case Gfx::ScalingMode::Bilinear:
+        return "Bilinear"sv;
+    case Gfx::ScalingMode::BilinearMipmap:
+        return "BilinearMipmap"sv;
+    case Gfx::ScalingMode::NearestNeighbor:
+        return "NearestNeighbor"sv;
+    }
+    VERIFY_NOT_REACHED();
+}
+
 Gfx::IntRect PaintOuterBoxShadow::bounding_rect() const
 {
-    auto rect = shadow_rect;
-    rect.inflate(blur_radius * 2, blur_radius * 2, blur_radius * 2, blur_radius * 2);
-    return rect;
+    return shadow_rect.inflated(blur_radius * 2, blur_radius * 2, blur_radius * 2, blur_radius * 2);
 }
 
 Gfx::IntRect PaintInnerBoxShadow::bounding_rect() const
@@ -33,11 +59,39 @@ void FillRect::dump(StringBuilder& builder) const
 void DrawScaledDecodedImageFrame::dump(StringBuilder& builder) const
 {
     builder.appendff(" dst_rect={}", dst_rect);
+    if (src_rect.has_value())
+        builder.appendff(" src_rect={}", src_rect.value());
+    if (compositing_and_blending_operator != Gfx::CompositingAndBlendingOperator::Normal)
+        builder.appendff(" blend_mode={}", static_cast<int>(compositing_and_blending_operator));
+    if (isolated_backdrop_color.has_value())
+        builder.appendff(" isolated_backdrop_color={}", isolated_backdrop_color.value());
 }
 
 void DrawRepeatedDecodedImageFrame::dump(StringBuilder& builder) const
 {
     builder.appendff(" dst_rect={} clip_rect={}", dst_rect, clip_rect);
+    if (compositing_and_blending_operator != Gfx::CompositingAndBlendingOperator::Normal)
+        builder.appendff(" blend_mode={}", static_cast<int>(compositing_and_blending_operator));
+    if (isolated_backdrop_color.has_value())
+        builder.appendff(" isolated_backdrop_color={}", isolated_backdrop_color.value());
+}
+
+void DrawRepeatedDisplayList::dump(StringBuilder& builder) const
+{
+    builder.appendff(" dst_rect={} clip_rect={} scaling_mode={}", dst_rect, clip_rect, scaling_mode_name(scaling_mode));
+}
+
+void DrawTiledDecodedImageFrame::dump(StringBuilder& builder) const
+{
+    builder.appendff(" tile_rect={} clip_rect={} src_rect={} tile_step={}", tile_rect, clip_rect, src_rect, tile_step);
+    if (tile_count_x.has_value())
+        builder.appendff(" tile_count_x={}", tile_count_x.value());
+    else
+        builder.appendff(" tile_count_x=repeat");
+    if (tile_count_y.has_value())
+        builder.appendff(" tile_count_y={}", tile_count_y.value());
+    else
+        builder.appendff(" tile_count_y=repeat");
 }
 
 void DrawCompositedContext::dump(StringBuilder& builder) const
@@ -47,7 +101,7 @@ void DrawCompositedContext::dump(StringBuilder& builder) const
 
 void DrawCanvas::dump(StringBuilder& builder) const
 {
-    builder.appendff(" dst_rect={}", dst_rect);
+    builder.appendff(" dst_rect={} content_generation={}", dst_rect, content_generation);
 }
 
 void DrawVideoFrame::dump(StringBuilder& builder) const
@@ -67,14 +121,14 @@ void Restore::dump(StringBuilder&) const
 {
 }
 
-void Translate::dump(StringBuilder& builder) const
-{
-    builder.appendff(" delta={}", delta);
-}
-
 void AddClipRect::dump(StringBuilder& builder) const
 {
     builder.appendff(" rect={}", rect);
+}
+
+void AddClipPath::dump(StringBuilder& builder) const
+{
+    builder.appendff(" path_bounding_rect={}", path_bounding_rect);
 }
 
 void PaintLinearGradient::dump(StringBuilder& builder) const
@@ -117,8 +171,13 @@ void FillPath::dump(StringBuilder& builder) const
     builder.appendff(" path_bounding_rect={}", path_bounding_rect);
 }
 
-void StrokePath::dump(StringBuilder&) const
+void StrokePath::dump(StringBuilder& builder) const
 {
+    builder.appendff(" path_bounding_rect={} thickness={}", path_bounding_rect, thickness);
+    if (paint_kind == PathPaintKind::Color)
+        builder.appendff(" color={}", color);
+    if (dash_array.size > 0)
+        builder.appendff(" dash_array_size={} dash_offset={:.2f}", dash_array.size / sizeof(float), dash_offset);
 }
 
 void DrawEllipse::dump(StringBuilder& builder) const
@@ -133,7 +192,9 @@ void FillEllipse::dump(StringBuilder& builder) const
 
 void DrawLine::dump(StringBuilder& builder) const
 {
-    builder.appendff(" from={} to={} color={} thickness={}", from, to, color, thickness);
+    builder.appendff(" from={} to={} color={} thickness={} style={}", from, to, color, thickness, line_style_name(style));
+    if (style != Gfx::LineStyle::Solid)
+        builder.appendff(" alternate_color={}", alternate_color);
 }
 
 void ApplyBackdropFilter::dump(StringBuilder& builder) const
@@ -158,8 +219,8 @@ void PaintNestedDisplayList::dump(StringBuilder& builder) const
 
 void CompositorScrollNode::dump(StringBuilder& builder) const
 {
-    builder.appendff(" scroll_frame_index={} parent_scroll_frame_index={} scrollport_rect={} max_scroll_offset={} is_viewport={}",
-        scroll_frame_index, parent_scroll_frame_index, scrollport_rect, max_scroll_offset, is_viewport);
+    builder.appendff(" scroll_node_index={} parent_scroll_node_index={} scrollport_rect={} max_scroll_offset={} is_viewport={}",
+        scroll_node_index, parent_scroll_node_index, scrollport_rect, max_scroll_offset, is_viewport);
 }
 
 static void dump_optional_float(StringBuilder& builder, Optional<float> value)
@@ -172,8 +233,8 @@ static void dump_optional_float(StringBuilder& builder, Optional<float> value)
 
 void CompositorStickyArea::dump(StringBuilder& builder) const
 {
-    builder.appendff(" scroll_frame_index={} parent_scroll_frame_index={} nearest_scrolling_ancestor_index={} position_relative_to_scroll_ancestor={} border_box_size={} scrollport_size={} containing_block_region={} needs_parent_offset_adjustment={} inset_top=",
-        scroll_frame_index, parent_scroll_frame_index, nearest_scrolling_ancestor_index, position_relative_to_scroll_ancestor, border_box_size, scrollport_size, containing_block_region, needs_parent_offset_adjustment);
+    builder.appendff(" scroll_node_index={} parent_scroll_node_index={} nearest_scrolling_ancestor_index={} position_relative_to_scroll_ancestor={} border_box_size={} scrollport_size={} containing_block_region={} needs_parent_offset_adjustment={} inset_top=",
+        scroll_node_index, parent_scroll_node_index, nearest_scrolling_ancestor_index, position_relative_to_scroll_ancestor, border_box_size, scrollport_size, containing_block_region, needs_parent_offset_adjustment);
     dump_optional_float(builder, inset_top);
     builder.append(" inset_right="sv);
     dump_optional_float(builder, inset_right);
@@ -190,12 +251,12 @@ void CompositorBlockingWheelEventRegion::dump(StringBuilder& builder) const
 
 void CompositorWheelHitTestTarget::dump(StringBuilder& builder) const
 {
-    builder.appendff(" target_scroll_frame_index={} rect={}", target_scroll_frame_index, rect);
+    builder.appendff(" target_scroll_node_index={} rect={}", target_scroll_node_index, rect);
 }
 
 void CompositorWheelHitTestTargetWithCornerRadii::dump(StringBuilder& builder) const
 {
-    builder.appendff(" target_scroll_frame_index={} rect={}", target_scroll_frame_index, rect);
+    builder.appendff(" target_scroll_node_index={} rect={}", target_scroll_node_index, rect);
     if (corner_radii.has_any_radius()) {
         builder.appendff(" corner_radii=[{}x{},{}x{},{}x{},{}x{}]",
             corner_radii.top_left.horizontal_radius, corner_radii.top_left.vertical_radius,
@@ -212,8 +273,8 @@ void CompositorMainThreadWheelEventRegion::dump(StringBuilder& builder) const
 
 void CompositorViewportScrollbar::dump(StringBuilder& builder) const
 {
-    builder.appendff(" scroll_frame_index={} gutter_rect={} thumb_rect={} expanded_gutter_rect={} expanded_thumb_rect={} scroll_size={} expanded_scroll_size={} max_scroll_offset={} thumb_color={} track_color={} vertical={}",
-        scroll_frame_index, gutter_rect, thumb_rect, expanded_gutter_rect, expanded_thumb_rect, scroll_size, expanded_scroll_size, max_scroll_offset, thumb_color, track_color, vertical);
+    builder.appendff(" scroll_node_index={} gutter_rect={} thumb_rect={} expanded_gutter_rect={} expanded_thumb_rect={} scroll_size={} expanded_scroll_size={} max_scroll_offset={} thumb_color={} track_color={} vertical={}",
+        scroll_node_index, gutter_rect, thumb_rect, expanded_gutter_rect, expanded_thumb_rect, scroll_size, expanded_scroll_size, max_scroll_offset, thumb_color, track_color, vertical);
 }
 
 void PaintScrollBar::dump(StringBuilder&) const

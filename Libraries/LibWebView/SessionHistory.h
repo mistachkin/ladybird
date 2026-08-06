@@ -6,10 +6,12 @@
 
 #pragma once
 
+#include <AK/Function.h>
 #include <AK/Optional.h>
 #include <AK/Vector.h>
 #include <LibWeb/HTML/SessionHistoryEntry.h>
 #include <LibWebView/Export.h>
+#include <LibWebView/Forward.h>
 
 namespace WebView {
 
@@ -53,17 +55,24 @@ public:
     Optional<size_t> current_top_level_entry_index() const;
 
     void clear();
-    void navigate(URL::URL);
-    void navigate(URL::URL, Variant<Empty, String, Web::HTML::POSTResource>);
-    void replace_current_entry_url(URL::URL);
-    void replace_current_entry(URL::URL, Variant<Empty, String, Web::HTML::POSTResource>);
+    void navigate(URL::URL, Web::HTML::CrossProcessId document_state_id);
+    void navigate(URL::URL, Web::HTML::CrossProcessId document_state_id, Web::HTML::DocumentResource);
+    void replace_current_entry_url(URL::URL, Web::HTML::CrossProcessId document_state_id);
+    void replace_current_entry(URL::URL, Web::HTML::CrossProcessId document_state_id, Web::HTML::DocumentResource);
     void mark_current_entry_reload_pending();
     void clear_current_entry_reload_pending();
+    bool update_entry(Optional<Web::HTML::CrossProcessId> nested_history_id, Utf16String const& navigation_api_key, Function<void(Entry&)> const& update_entry);
+    bool update_document_state(Optional<Web::HTML::CrossProcessId> nested_history_id, Utf16String const& navigation_api_key, Function<void(Web::HTML::SessionHistoryDocumentStateDescriptor&)> const& update_document_state);
+    bool append_nested_history(CanonicalNavigable const& parent_navigable, Web::HTML::SessionHistoryNestedHistoryDescriptor);
+    bool remove_nested_history(CanonicalNavigable const& parent_navigable, Web::HTML::CrossProcessId child_navigable_id);
+    bool finalize_same_document_navigation(Optional<Web::HTML::CrossProcessId> nested_history_id, Entry target_entry, Optional<Utf16String> entry_to_replace_navigation_api_key);
+    bool finalize_cross_document_navigation(Optional<Web::HTML::CrossProcessId> nested_history_id, Entry history_entry, Optional<Utf16String> entry_to_replace_navigation_api_key);
     UpdateResult update_from_web_content(Vector<Entry> entries, Vector<i32> used_steps, size_t current_used_step_index);
     [[nodiscard]] bool did_seed_web_content_from_ui_process(Vector<Entry> entries, Vector<i32> used_steps, size_t current_used_step_index);
     void did_seed_web_content_from_ui_process(size_t current_top_level_entry_index);
     [[nodiscard]] bool did_restore_web_content_to_current_step(i32 step);
     [[nodiscard]] bool did_apply_web_content_traversal_to_step(i32 step);
+    [[nodiscard]] bool did_set_web_content_current_session_history_step(i32 step);
     void forget_web_content_state();
     Vector<Entry> entries() const;
     Vector<i32> used_steps() const;
@@ -81,6 +90,7 @@ public:
     [[nodiscard]] bool web_content_can_traverse_to(TraversalTarget const&) const;
     [[nodiscard]] Optional<TraversalTarget> traversal_target_for_delta(int delta) const;
     [[nodiscard]] Optional<TraversalTarget> traversal_target_for_step(i32 step) const;
+    [[nodiscard]] Optional<Vector<Entry> const&> get_session_history_entries(CanonicalNavigable const&) const;
     [[nodiscard]] Optional<size_t> target_step_index_for_delta(int delta) const;
     [[nodiscard]] Optional<i32> step_at(size_t index) const;
     [[nodiscard]] Entry const* current_entry() const;

@@ -16,6 +16,7 @@
 #include <AK/RedBlackTree.h>
 #include <AK/SIMDExtras.h>
 #include <AK/SaturatingMath.h>
+#include <AK/ScopeGuard.h>
 #include <AK/ScopedValueRollback.h>
 #include <AK/Time.h>
 #include <AK/TypeCasts.h>
@@ -377,7 +378,8 @@ static constexpr u64 trace_missing = NumericLimits<u64>::max();
         auto [in_count, out_count] = instruction_operand_counts(instruction->opcode());                                                                                                                                       \
         u64 src_lows[3] { trace_missing, trace_missing, trace_missing };                                                                                                                                                      \
         u64 src_highs[3] { trace_missing, trace_missing, trace_missing };                                                                                                                                                     \
-        ScopedValueRollback stack { configuration.value_stack() };                                                                                                                                                            \
+        auto saved_stack_size = configuration.value_stack().size();                                                                                                                                                           \
+        ScopeGuard restore_stack { [&] { configuration.value_stack().restore_size(saved_stack_size); } };                                                                                                                     \
         for (ssize_t i = 0; i < in_count; ++i) {                                                                                                                                                                              \
             auto value = configuration.take_source<source_address_mix>(i, addresses.sources);                                                                                                                                 \
             src_lows[i] = value.value().low();                                                                                                                                                                                \
@@ -2914,10 +2916,7 @@ HANDLE_INSTRUCTION(memory_fill)
         if (count == 0)
             TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
 
-        for (u64 i = 0; i < count; ++i) {
-            if (interpreter.store_to_memory(*instance, destination_offset + i, value))
-                return Outcome::Return;
-        }
+        instance->data().fill(destination_offset, value, count);
     }
 
     TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
@@ -2946,19 +2945,7 @@ HANDLE_INSTRUCTION(memory_copy)
     if (count == 0)
         TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
 
-    if (destination_offset <= source_offset) {
-        for (u64 i = 0; i < count; ++i) {
-            auto value = source_instance->data()[source_offset + i];
-            if (interpreter.store_to_memory(*destination_instance, destination_offset + i, value))
-                return Outcome::Return;
-        }
-    } else {
-        for (u64 i = count; i > 0; --i) {
-            auto value = source_instance->data()[source_offset + i - 1];
-            if (interpreter.store_to_memory(*destination_instance, destination_offset + i - 1, value))
-                return Outcome::Return;
-        }
-    }
+    destination_instance->data().copy_from(source_instance->data(), source_offset, destination_offset, count);
 
     TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
 }
@@ -2986,11 +2973,7 @@ HANDLE_INSTRUCTION(memory_init)
     if (count == 0)
         TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
 
-    for (size_t i = 0; i < (size_t)count; ++i) {
-        auto value = data.data()[source_offset + i];
-        if (interpreter.store_to_memory(*memory, destination_offset + i, value))
-            return Outcome::Return;
-    }
+    memory->data().overwrite(destination_offset, data.data().data() + source_offset, count);
     TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
 }
 
@@ -6509,8 +6492,7 @@ bool BytecodeInterpreter::load_and_push(Configuration& configuration, Instructio
         dbgln_if(WASM_TRACE_DEBUG, "LibWasm: load_and_push - Memory access out of bounds (expected {} to be less than or equal to {})", instance_address + sizeof(ReadType), memory->size());
         return true;
     }
-    auto slice = memory->data().bytes().slice(instance_address, sizeof(ReadType));
-    entry = Value(static_cast<PushType>(read_value<ReadType>(slice)));
+    entry = Value(static_cast<PushType>(read_value<ReadType>({ memory->data().offset_pointer(instance_address), sizeof(ReadType) })));
     dbgln_if(WASM_TRACE_DEBUG, "  loaded value: {}", entry.value());
     return false;
 }
@@ -6538,15 +6520,15 @@ bool BytecodeInterpreter::load_and_push_mxn(Configuration& configuration, Instru
         m_trap = Trap::from_string("Memory access out of bounds");
         return true;
     }
-    auto slice = memory->data().bytes().slice(instance_address, M * N / 8);
+    auto const* data = memory->data().offset_pointer(instance_address);
     using V64 = NativeVectorType<M, N, SetSign>;
     using V128 = NativeVectorType<M * 2, N, SetSign>;
 
     V64 bytes { 0 };
-    if (bit_cast<FlatPtr>(slice.data()) % sizeof(V64) == 0)
-        bytes = *bit_cast<V64*>(slice.data());
+    if (bit_cast<FlatPtr>(data) % sizeof(V64) == 0)
+        bytes = *bit_cast<V64 const*>(data);
     else
-        ByteReader::load(slice.data(), bytes);
+        ByteReader::load(data, bytes);
 
     entry = Value(bit_cast<u128>(convert_vector<V128>(bytes)));
     dbgln_if(WASM_TRACE_DEBUG, "  loaded value: {}", entry.value());
@@ -6571,9 +6553,8 @@ bool BytecodeInterpreter::load_and_push_lane_n(Configuration& configuration, Ins
         m_trap = Trap::from_string("Memory access out of bounds");
         return true;
     }
-    auto slice = memory->data().bytes().slice(instance_address, N / 8);
     auto dst = bit_cast<u8*>(&vector) + memarg_and_lane.lane * N / 8;
-    memcpy(dst, slice.data(), N / 8);
+    memory->data().copy_to(instance_address, { dst, N / 8 });
     dbgln_if(WASM_TRACE_DEBUG, "  loaded value: {}", vector);
     configuration.push_to_destination<SourceAddressMix::Any>(Value(vector), addresses.destination);
     return false;
@@ -6596,9 +6577,8 @@ bool BytecodeInterpreter::load_and_push_zero_n(Configuration& configuration, Ins
         m_trap = Trap::from_string("Memory access out of bounds");
         return true;
     }
-    auto slice = memory->data().bytes().slice(instance_address, N / 8);
     u128 vector = 0;
-    memcpy(&vector, slice.data(), N / 8);
+    memory->data().copy_to(instance_address, { bit_cast<u8*>(&vector), N / 8 });
     dbgln_if(WASM_TRACE_DEBUG, "  loaded value: {}", vector);
     configuration.push_to_destination<SourceAddressMix::Any>(Value(vector), addresses.destination);
     return false;
@@ -6621,8 +6601,7 @@ bool BytecodeInterpreter::load_and_push_m_splat(Configuration& configuration, In
         m_trap = Trap::from_string("Memory access out of bounds");
         return true;
     }
-    auto slice = memory->data().bytes().slice(instance_address, M / 8);
-    auto value = read_value<NativeIntegralType<M>>(slice);
+    auto value = read_value<NativeIntegralType<M>>({ memory->data().offset_pointer(instance_address), M / 8 });
     dbgln_if(WASM_TRACE_DEBUG, "  loaded value: {}", value);
     set_top_m_splat<M, NativeIntegralType>(configuration, value, addresses);
     return false;
@@ -6694,8 +6673,11 @@ Outcome BytecodeInterpreter::call_address(Configuration& configuration, Function
         Vector<Value, ArgumentsStaticSize> args;
 
         if (call_type == CallType::UsingCallRecord) {
-            configuration.take_call_record(args);
-            args.shrink(type->parameters().size(), true);
+            auto param_count = type->parameters().size();
+            configuration.get_arguments_allocation_if_possible(args, param_count);
+            args.ensure_capacity(param_count);
+            for (size_t i = 0; i < param_count; ++i)
+                args.unchecked_append(configuration.call_record_entry(i));
         } else {
             configuration.get_arguments_allocation_if_possible(args, type->parameters().size());
 
@@ -6870,9 +6852,9 @@ bool BytecodeInterpreter::store_to_memory(MemoryInstance& memory, u64 address, T
 
     dbgln_if(WASM_TRACE_DEBUG, "temporary({}b) -> store({})", data_size, address);
     if constexpr (IsSame<ReadonlyBytes, T>)
-        (void)value.copy_to(memory.data().bytes().slice(address, data_size));
+        memory.data().overwrite(address, value.data(), data_size);
     else
-        memcpy(memory.data().bytes().offset_pointer(address), &value, data_size);
+        memory.data().overwrite(address, &value, data_size);
     return false;
 }
 
@@ -6921,7 +6903,7 @@ Instruction& InstructionStorage::append(Instruction instruction)
     return slot.value();
 }
 
-CompiledInstructions try_compile_instructions(Expression const& expression, Span<FunctionType const> functions)
+CompiledInstructions try_compile_instructions(Expression const& expression, Span<FunctionType const> functions, Span<CodeSection::Func const* const> callee_bodies, size_t current_function_index, size_t caller_local_count, size_t imported_function_count)
 {
     CompiledInstructions result;
 
@@ -6962,15 +6944,201 @@ CompiledInstructions try_compile_instructions(Expression const& expression, Span
         }
     };
 
+    auto callee_if_inlineable = [&](size_t func_index) -> CodeSection::Func const* {
+        if (func_index >= callee_bodies.size() || func_index >= current_function_index)
+            return nullptr; // import, forward reference, or self (cannot inline)
+
+        auto const* callee = callee_bodies[func_index];
+        if (!callee)
+            return nullptr;
+
+        auto const& ci = callee->body().compiled_instructions;
+        if (!ci.cranelift_eligible)
+            return nullptr;
+
+        if (callee->body().instructions().size() > 96) // Value arbitrarily chosen based on vibes.
+            return nullptr;
+
+        if (functions[func_index].results().size() > 1 || functions[func_index].parameters().size() > 8)
+            return nullptr;
+
+        for (auto const& local : callee->locals()) {
+            // Wasm semantics want locals to be zeroed on entry, but we're reusing locals across multiple inlined sites;
+            // we can't zero reference-typed locals without potentially dropping a live reference, so reject those callees.
+            if (local.type().is_reference())
+                return nullptr;
+        }
+        for (auto& gi : callee->body().instructions()) {
+            if (first_is_one_of(gi.opcode(),
+                    Instructions::call, Instructions::call_indirect,
+                    Instructions::return_call, Instructions::return_call_indirect,
+                    Instructions::call_ref, Instructions::return_call_ref))
+                return nullptr;
+        }
+        return callee;
+    };
+
+    size_t inlined_local_count = 0;
+    auto did_inline = false;
+    Vector<Instruction const*> expanded;
+    expanded.ensure_capacity(instruction_count);
+
+    Vector<size_t> wasm_ip_to_expanded;
+    wasm_ip_to_expanded.resize(expression.instructions().size());
+
+    Vector<size_t> caller_structured_positions;
+    auto append_caller = [&](Instruction const& insn) {
+        if (insn.arguments().has<Instruction::StructuredInstructionArgs>() || insn.arguments().has<Instruction::TryTableArgs>())
+            caller_structured_positions.append(expanded.size());
+        expanded.append(&insn);
+    };
+
+    auto is_local_op = [](OpCode op) { return first_is_one_of(op, Instructions::local_get, Instructions::local_set, Instructions::local_tee); };
+
+    size_t wasm_ip = 0;
     for (auto& instruction : expression.instructions()) {
+        wasm_ip_to_expanded[wasm_ip++] = expanded.size();
         if (instruction.opcode() == Instructions::call) {
-            auto& function = functions[instruction.arguments().get<FunctionIndex>().value()];
-            if (function.results().size() <= 1 && function.parameters().size() < 4) {
+            auto func_index = instruction.arguments().get<FunctionIndex>().value();
+            if (auto const* callee = callee_if_inlineable(func_index)) {
+                // Reuse a range above the caller's locals for the callee's locals, and remap all local accesses in the callee to that range,
+                // Currently the locals are allocated on the stack for up to 64 locals, so avoid inlining if the callee's locals would exceed that limit (with some headroom for the parameters).
+                size_t base = caller_local_count;
+                size_t g_params = functions[func_index].parameters().size();
+                size_t g_total = g_params + callee->total_local_count();
+                if (base + g_total > 56) {
+                    append_caller(instruction);
+                    continue;
+                }
+                for (size_t p = g_params; p-- > 0;)
+                    expanded.append(&append_extra_instruction(Instruction(Instructions::local_set, LocalIndex { static_cast<u32>(base + p) })));
+
+                // Zero-init all callee locals on "entry", note that we drop reference-typed locals above, so a normal zero-init is safe here.
+                for (size_t l = 0; l < callee->total_local_count(); ++l)
+                    expanded.append(&append_extra_instruction(Instructions::synthetic_local_seti32_const, LocalIndex { static_cast<u32>(base + g_params + l) }, static_cast<i32>(0)));
+
+                auto callee_cfg = false;
+                for (auto& gi : callee->body().instructions()) {
+                    if (first_is_one_of(gi.opcode(),
+                            Instructions::block, Instructions::loop, Instructions::if_, Instructions::return_,
+                            Instructions::br, Instructions::br_if, Instructions::br_table)) {
+                        callee_cfg = true;
+                        break;
+                    }
+                }
+
+                if (!callee_cfg) {
+                    for (auto& gi : callee->body().instructions()) {
+                        if (gi.opcode() == Instructions::synthetic_end_expression)
+                            continue; // drop the trailing function-end marker
+                        if (is_local_op(gi.opcode()))
+                            expanded.append(&append_extra_instruction(Instruction(gi.opcode(), LocalIndex { static_cast<u32>(gi.local_index().value() + base) })));
+                        else
+                            expanded.append(&gi);
+                    }
+                } else {
+                    // The function being inlined has some control flow, wrap it in a block and rewrite `return` to `br` out of the wrapper so that the inlined code can exit to the caller.
+                    auto block_type = functions[func_index].results().is_empty() ? BlockType {} : BlockType { functions[func_index].results()[0] };
+                    auto& wrapper = append_extra_instruction(Instruction(
+                        Instructions::block,
+                        Instruction::StructuredInstructionArgs {
+                            block_type,
+                            InstructionPointer { 0 },
+                            {},
+                            { static_cast<u32>(functions[func_index].results().size()), 0, false },
+                        }));
+                    expanded.append(&wrapper);
+
+                    Vector<size_t> g_ip_to_expanded;
+                    g_ip_to_expanded.resize(callee->body().instructions().size() + 1);
+                    Vector<size_t> g_structured_positions;
+                    int depth = 0;
+                    size_t g_idx = 0;
+                    for (auto& gi : callee->body().instructions()) {
+                        g_ip_to_expanded[g_idx++] = expanded.size();
+                        auto opc = gi.opcode();
+                        if (opc == Instructions::synthetic_end_expression)
+                            continue;
+                        if (opc == Instructions::return_) {
+                            expanded.append(&append_extra_instruction(Instruction(Instructions::br, Instruction::BranchArgs { LabelIndex { static_cast<u32>(depth) }, false })));
+                        } else if (first_is_one_of(opc, Instructions::block, Instructions::loop, Instructions::if_)) {
+                            ++depth;
+                            g_structured_positions.append(expanded.size());
+                            expanded.append(&gi);
+                        } else if (opc == Instructions::structured_end) {
+                            --depth;
+                            expanded.append(&gi);
+                        } else if (is_local_op(opc)) {
+                            expanded.append(&append_extra_instruction(Instruction(opc, LocalIndex { static_cast<u32>(gi.local_index().value() + base) })));
+                        } else {
+                            expanded.append(&gi);
+                        }
+                    }
+                    g_ip_to_expanded[g_idx] = expanded.size();
+                    auto& wrapper_end = append_extra_instruction(Instruction(Instructions::structured_end));
+                    auto wrapper_end_pos = expanded.size();
+                    expanded.append(&wrapper_end);
+                    wrapper.arguments() = Instruction::StructuredInstructionArgs {
+                        block_type,
+                        InstructionPointer { static_cast<u32>(wrapper_end_pos) },
+                        {},
+                        { static_cast<u32>(functions[func_index].results().size()), 0, false },
+                    };
+
+                    auto g_remap = [&](InstructionPointer ip) -> InstructionPointer {
+                        auto v = ip.value();
+                        return InstructionPointer { static_cast<u32>(v < g_ip_to_expanded.size() ? g_ip_to_expanded[v] : wrapper_end_pos) };
+                    };
+                    for (auto pos : g_structured_positions) {
+                        auto* sa = expanded[pos]->arguments().get_pointer<Instruction::StructuredInstructionArgs>();
+                        auto copy = *expanded[pos];
+                        auto new_else = sa->else_ip().map([&](InstructionPointer ip) { return g_remap(ip); });
+                        copy.arguments() = Instruction::StructuredInstructionArgs { sa->block_type, g_remap(sa->end_ip), new_else, sa->meta };
+                        expanded[pos] = &append_extra_instruction(move(copy));
+                    }
+                }
+                inlined_local_count = max(inlined_local_count, g_total);
+                did_inline = true;
+                continue;
+            }
+        }
+        append_caller(instruction);
+    }
+    result.cranelift_inlined_locals = static_cast<u32>(inlined_local_count);
+
+    // Regenerate all relative/IP-based structured instruction arguments to point into the new `expanded` vector.
+    if (did_inline) {
+        auto remap = [&](InstructionPointer ip) -> InstructionPointer {
+            auto v = ip.value();
+            return InstructionPointer { static_cast<u32>(v < wasm_ip_to_expanded.size() ? wasm_ip_to_expanded[v] : expanded.size()) };
+        };
+        for (auto i : caller_structured_positions) {
+            auto const* insn = expanded[i];
+            if (auto const* sa = insn->arguments().get_pointer<Instruction::StructuredInstructionArgs>()) {
+                auto copy = *insn;
+                auto new_else = sa->else_ip().map([&](InstructionPointer ip) { return remap(ip); });
+                copy.arguments() = Instruction::StructuredInstructionArgs { sa->block_type, remap(sa->end_ip), new_else, sa->meta };
+                expanded[i] = &append_extra_instruction(move(copy));
+            } else if (auto const* tta = insn->arguments().get_pointer<Instruction::TryTableArgs>()) {
+                auto copy = *insn;
+                copy.arguments() = Instruction::TryTableArgs { tta->block_type, remap(tta->end_ip), tta->catches(), tta->meta };
+                expanded[i] = &append_extra_instruction(move(copy));
+            }
+        }
+    }
+
+    for (auto const* instruction_ptr : expanded) {
+        auto& instruction = *instruction_ptr;
+        if (instruction.opcode() == Instructions::call) {
+            auto const call_func_index = instruction.arguments().get<FunctionIndex>().value();
+            auto& function = functions[call_func_index];
+            // Host calls all gather their arguments into a buffer, so reg-calling them is a net perf loss for all of them; force whatever we can to the call record path.
+            // Any remaining ones can still go through the regular call path, which is regardless faster than regcalling them.
+            bool const is_extern = call_func_index < imported_function_count;
+            if (!is_extern && function.results().size() <= 1 && function.parameters().size() < 4) {
                 pattern_state = InsnPatternState::Nothing;
                 OpCode op { static_cast<OpCode::Type>(Instructions::synthetic_call_00.value() + function.parameters().size() * 2 + function.results().size()) };
-                auto& extra_instruction = append_extra_instruction(
-                    op,
-                    instruction.arguments());
+                auto& extra_instruction = append_extra_instruction(op, instruction.arguments());
                 set_default_dispatch(extra_instruction);
                 continue;
             }

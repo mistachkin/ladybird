@@ -16,6 +16,7 @@
 #include <LibHTTP/Cache/DiskCache.h>
 #include <LibIPC/SingleServer.h>
 #include <LibMain/Main.h>
+#include <RequestServer/CURL.h>
 #include <RequestServer/ConnectionFromClient.h>
 #include <RequestServer/Resolver.h>
 #include <RequestServer/ResourceSubstitutionMap.h>
@@ -43,6 +44,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
     StringView mach_server_name;
     StringView http_disk_cache_mode;
     StringView resource_map_path;
+    StringView cache_path;
     bool wait_for_debugger = false;
     bool disable_sandbox = false;
 
@@ -51,6 +53,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
     args_parser.add_option(mach_server_name, "Mach server name", "mach-server-name", 0, "mach_server_name");
     args_parser.add_option(http_disk_cache_mode, "HTTP disk cache mode", "http-disk-cache-mode", 0, "mode");
     args_parser.add_option(resource_map_path, "Path to JSON file mapping URLs to local files", "resource-map", 0, "path");
+    args_parser.add_option(cache_path, "Path to the profile cache", "cache-path", 0, "path");
     args_parser.add_option(wait_for_debugger, "Wait for debugger", "wait-for-debugger");
     args_parser.add_option(disable_sandbox, "Disable process sandboxing", "disable-sandbox");
     args_parser.parse(arguments);
@@ -87,21 +90,21 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         auto mode = TRY([&]() -> ErrorOr<HTTP::DiskCache::Mode> {
             if (http_disk_cache_mode == "enabled"sv)
                 return HTTP::DiskCache::Mode::Normal;
-            if (http_disk_cache_mode == "partitioned"sv)
-                return HTTP::DiskCache::Mode::Partitioned;
             if (http_disk_cache_mode == "testing"sv)
                 return HTTP::DiskCache::Mode::Testing;
             return Error::from_string_literal("Unrecognized disk cache mode");
         }());
 
-        if (auto cache = HTTP::DiskCache::create(mode); cache.is_error())
+        if (auto cache = HTTP::DiskCache::create(mode, LexicalPath { cache_path }); cache.is_error())
             warnln("Unable to create disk cache: {}", cache.error());
         else
             disk_cache = cache.release_value();
     }
 
+    TRY(RequestServer::initialize_libcurl());
+
     if (!disable_sandbox)
-        TRY(RequestServer::apply_sandbox(certificates));
+        TRY(RequestServer::apply_sandbox(certificates, cache_path));
 
     // Connections are stored on the stack to ensure they are destroyed before static destruction begins. This prevents
     // crashes from notifiers trying to unregister from already-destroyed thread data during process exit.
@@ -109,7 +112,11 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
 
     auto client = TRY(IPC::take_over_accepted_client_from_system_server<RequestServer::ConnectionFromClient>(
         mach_server_name,
-        RequestServer::ConnectionFromClient::IsPrimaryConnection::Yes, connections, disk_cache));
+        RequestServer::ConnectionFromClient::IsPrimaryConnection::Yes,
+        RequestServer::IsPrivate::No,
+        connections,
+        disk_cache,
+        LexicalPath::join(cache_path, "alt-svc-cache.txt"sv).string()));
 
     return event_loop.exec();
 }

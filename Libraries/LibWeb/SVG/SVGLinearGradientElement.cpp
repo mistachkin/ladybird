@@ -28,19 +28,19 @@ void SVGLinearGradientElement::initialize(JS::Realm& realm)
     Base::initialize(realm);
 }
 
-void SVGLinearGradientElement::attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
+void SVGLinearGradientElement::attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_)
 {
     Base::attribute_changed(name, old_value, value, namespace_);
 
     // FIXME: Should allow for `<number-percentage> | <length>` for x1, x2, y1, y2
     if (name == SVG::AttributeNames::x1) {
-        m_x1 = AttributeParser::parse_number_percentage(value.value_or(String {}));
+        m_x1 = AttributeParser::parse_number_percentage(value.value_or({}));
     } else if (name == SVG::AttributeNames::y1) {
-        m_y1 = AttributeParser::parse_number_percentage(value.value_or(String {}));
+        m_y1 = AttributeParser::parse_number_percentage(value.value_or({}));
     } else if (name == SVG::AttributeNames::x2) {
-        m_x2 = AttributeParser::parse_number_percentage(value.value_or(String {}));
+        m_x2 = AttributeParser::parse_number_percentage(value.value_or({}));
     } else if (name == SVG::AttributeNames::y2) {
-        m_y2 = AttributeParser::parse_number_percentage(value.value_or(String {}));
+        m_y2 = AttributeParser::parse_number_percentage(value.value_or({}));
     }
 }
 
@@ -156,26 +156,6 @@ Optional<Painting::PaintStyle> SVGLinearGradientElement::to_gfx_paint_style(SVGP
     paint_style.set_spread_method(to_painting_spread_method(spread_method()));
     paint_style.set_color_space(color_space());
     return Painting::PaintStyle { move(paint_style) };
-}
-
-GC::Ref<SVGAnimatedLength> SVGLinearGradientElement::x1() const
-{
-    return fake_animated_length_fixme();
-}
-
-GC::Ref<SVGAnimatedLength> SVGLinearGradientElement::y1() const
-{
-    return fake_animated_length_fixme();
-}
-
-GC::Ref<SVGAnimatedLength> SVGLinearGradientElement::x2() const
-{
-    return fake_animated_length_fixme();
-}
-
-GC::Ref<SVGAnimatedLength> SVGLinearGradientElement::y2() const
-{
-    return fake_animated_length_fixme();
 }
 
 }

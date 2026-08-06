@@ -4,16 +4,230 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/ByteBuffer.h>
+#include <AK/ScopeGuard.h>
+#include <LibCore/EventLoop.h>
 #include <LibCore/File.h>
+#include <LibCore/Timer.h>
+#include <LibMedia/Containers/Matroska/ElementIDs.h>
 #include <LibMedia/Containers/Matroska/MatroskaDemuxer.h>
+#include <LibMedia/IncrementallyPopulatedStream.h>
 #include <LibMedia/ReadonlyBytesCursor.h>
 #include <LibTest/TestCase.h>
 
 #include <LibMedia/Containers/Matroska/Reader.h>
 
+#include "TestMediaCommon.h"
+
 static Media::Matroska::Streamer streamer_from_bytes(ReadonlyBytes bytes)
 {
     return Media::Matroska::Streamer(make_ref_counted<Media::ReadonlyBytesCursor>(bytes));
+}
+
+static void append_ebml_id(ByteBuffer& data, u32 id)
+{
+    bool saw_non_zero_byte = false;
+    for (int shift = 24; shift >= 0; shift -= 8) {
+        auto byte = static_cast<u8>(id >> shift);
+        if (byte != 0)
+            saw_non_zero_byte = true;
+        if (saw_non_zero_byte)
+            data.append(byte);
+    }
+}
+
+static void append_big_endian_uint(ByteBuffer& data, u64 value, size_t value_byte_width)
+{
+    VERIFY(value_byte_width <= sizeof(value));
+    for (auto shift = static_cast<int>((value_byte_width - 1) * 8); shift >= 0; shift -= 8)
+        data.append(static_cast<u8>(value >> shift));
+}
+
+static void patch_big_endian_uint(ByteBuffer& data, size_t offset, u64 value, size_t value_byte_width)
+{
+    VERIFY(offset + value_byte_width <= data.size());
+    for (size_t i = 0; i < value_byte_width; ++i)
+        data[offset + i] = static_cast<u8>(value >> ((value_byte_width - i - 1) * 8));
+}
+
+static void append_ebml_size(ByteBuffer& data, u64 element_data_size, size_t vint_byte_width = 1)
+{
+    VERIFY(vint_byte_width >= 1);
+    VERIFY(vint_byte_width <= 8);
+    VERIFY(element_data_size < (1ull << (vint_byte_width * 7)));
+
+    auto size_payload_offset = data.size();
+    append_big_endian_uint(data, element_data_size, vint_byte_width);
+    data[size_payload_offset] |= 1u << (8 - vint_byte_width);
+}
+
+static void patch_ebml_size(ByteBuffer& data, size_t offset, u64 element_data_size, size_t vint_byte_width)
+{
+    VERIFY(vint_byte_width >= 1);
+    VERIFY(vint_byte_width <= 8);
+    VERIFY(offset + vint_byte_width <= data.size());
+    VERIFY(element_data_size < (1ull << (vint_byte_width * 7)));
+
+    patch_big_endian_uint(data, offset, element_data_size, vint_byte_width);
+    data[offset] |= 1u << (8 - vint_byte_width);
+}
+
+struct EBMLMaster {
+    size_t size_offset { 0 };
+    size_t payload_start { 0 };
+};
+
+static EBMLMaster begin_ebml_master(ByteBuffer& data, u32 id)
+{
+    append_ebml_id(data, id);
+    auto size_offset = data.size();
+    append_ebml_size(data, 0, 8);
+    return { size_offset, data.size() };
+}
+
+static void finish_ebml_master(ByteBuffer& data, EBMLMaster master)
+{
+    patch_ebml_size(data, master.size_offset, data.size() - master.payload_start, 8);
+}
+
+static size_t append_ebml_uint(ByteBuffer& data, u32 id, u64 value, size_t value_byte_width = 0)
+{
+    append_ebml_id(data, id);
+    if (value_byte_width == 0) {
+        value_byte_width = 1;
+        while (value_byte_width < sizeof(value) && value >= (1ull << (value_byte_width * 8)))
+            ++value_byte_width;
+    }
+    append_ebml_size(data, value_byte_width);
+    auto payload_position = data.size();
+    append_big_endian_uint(data, value, value_byte_width);
+    return payload_position;
+}
+
+static void append_ebml_string(ByteBuffer& data, u32 id, StringView value)
+{
+    append_ebml_id(data, id);
+    append_ebml_size(data, value.length());
+    data.append(value.bytes());
+}
+
+static void append_empty_ebml_master(ByteBuffer& data, u32 id)
+{
+    auto master = begin_ebml_master(data, id);
+    finish_ebml_master(data, master);
+}
+
+static size_t append_seek_head(ByteBuffer& data, u32 target_id)
+{
+    auto seek_head = begin_ebml_master(data, Media::Matroska::SEEK_HEAD_ELEMENT_ID);
+    auto seek = begin_ebml_master(data, Media::Matroska::SEEK_ELEMENT_ID);
+    append_ebml_uint(data, Media::Matroska::SEEK_ID_ELEMENT_ID, target_id, 4);
+    auto seek_position_payload_offset = append_ebml_uint(data, Media::Matroska::SEEK_POSITION_ELEMENT_ID, 0, 8);
+    finish_ebml_master(data, seek);
+    finish_ebml_master(data, seek_head);
+    return seek_position_payload_offset;
+}
+
+struct LinkedSeekHeadsTestFile {
+    ByteBuffer data;
+    size_t cluster_end { 0 };
+    size_t cues_position { 0 };
+};
+
+static LinkedSeekHeadsTestFile make_matroska_with_linked_seek_heads(size_t seek_head_count = 3)
+{
+    VERIFY(seek_head_count > 0);
+
+    ByteBuffer data;
+    auto ebml_header = begin_ebml_master(data, Media::Matroska::EBML_MASTER_ELEMENT_ID);
+    append_ebml_string(data, Media::Matroska::DOCTYPE_ELEMENT_ID, "webm"sv);
+    append_ebml_uint(data, Media::Matroska::DOCTYPE_VERSION_ELEMENT_ID, 4);
+    finish_ebml_master(data, ebml_header);
+
+    append_ebml_id(data, Media::Matroska::SEGMENT_ELEMENT_ID);
+    data.append(0xff); // Unknown Segment size.
+    auto segment_contents_position = data.size();
+
+    Vector<size_t> seek_head_positions;
+    Vector<size_t> seek_head_position_patch_offsets;
+
+    MUST(seek_head_positions.try_append(data.size()));
+    MUST(seek_head_position_patch_offsets.try_append(append_seek_head(data, seek_head_count == 1 ? Media::Matroska::CUES_ID : Media::Matroska::SEEK_HEAD_ELEMENT_ID)));
+
+    auto info = begin_ebml_master(data, Media::Matroska::SEGMENT_INFORMATION_ELEMENT_ID);
+    append_ebml_uint(data, Media::Matroska::TIMESTAMP_SCALE_ID, 1000000);
+    finish_ebml_master(data, info);
+
+    auto tracks = begin_ebml_master(data, Media::Matroska::TRACK_ELEMENT_ID);
+    auto track_entry = begin_ebml_master(data, Media::Matroska::TRACK_ENTRY_ID);
+    append_ebml_uint(data, Media::Matroska::TRACK_NUMBER_ID, 1);
+    append_ebml_uint(data, Media::Matroska::TRACK_UID_ID, 1);
+    append_ebml_uint(data, Media::Matroska::TRACK_TYPE_ID, 1);
+    append_ebml_string(data, Media::Matroska::TRACK_CODEC_ID, "V_VP9"sv);
+    auto video = begin_ebml_master(data, Media::Matroska::TRACK_VIDEO_ID);
+    append_ebml_uint(data, Media::Matroska::PIXEL_WIDTH_ID, 1);
+    append_ebml_uint(data, Media::Matroska::PIXEL_HEIGHT_ID, 1);
+    finish_ebml_master(data, video);
+    finish_ebml_master(data, track_entry);
+    finish_ebml_master(data, tracks);
+
+    append_empty_ebml_master(data, Media::Matroska::CLUSTER_ELEMENT_ID);
+    auto cluster_end = data.size();
+
+    data.append(Media::Matroska::EBML_VOID_ELEMENT_ID);
+    data.append(0x8e);
+    for (size_t i = 0; i < 14; ++i)
+        data.append(0);
+
+    auto cues_position = data.size();
+    auto cues = begin_ebml_master(data, Media::Matroska::CUES_ID);
+    auto cue_point = begin_ebml_master(data, Media::Matroska::CUE_POINT_ID);
+    append_ebml_uint(data, Media::Matroska::CUE_TIME_ID, 0);
+    auto cue_track_positions = begin_ebml_master(data, Media::Matroska::CUE_TRACK_POSITIONS_ID);
+    append_ebml_uint(data, Media::Matroska::CUE_TRACK_ID, 1);
+    append_ebml_uint(data, Media::Matroska::CUE_CLUSTER_POSITION_ID, 0);
+    finish_ebml_master(data, cue_track_positions);
+    finish_ebml_master(data, cue_point);
+    finish_ebml_master(data, cues);
+
+    for (size_t i = 1; i < seek_head_count; ++i) {
+        MUST(seek_head_positions.try_append(data.size()));
+        auto target_id = i + 1 == seek_head_count ? Media::Matroska::CUES_ID : Media::Matroska::SEEK_HEAD_ELEMENT_ID;
+        MUST(seek_head_position_patch_offsets.try_append(append_seek_head(data, target_id)));
+    }
+
+    for (size_t i = 0; i < seek_head_count; ++i) {
+        auto target_position = i + 1 == seek_head_count ? cues_position : seek_head_positions[i + 1];
+        patch_big_endian_uint(data, seek_head_position_patch_offsets[i], target_position - segment_contents_position, 8);
+    }
+
+    return { move(data), cluster_end, cues_position };
+}
+
+TEST_CASE(reader_follows_linked_seek_heads)
+{
+    auto file = make_matroska_with_linked_seek_heads();
+    auto stream = Media::IncrementallyPopulatedStream::create_empty();
+    stream->add_chunk_at(0, file.data.span().slice(0, file.cluster_end));
+    stream->add_chunk_at(file.cues_position, file.data.span().slice(file.cues_position));
+    stream->close();
+
+    auto reader = MUST(Media::Matroska::Reader::from_stream(stream->create_cursor()));
+    auto cue_points = reader.cue_points_for_track(1);
+    EXPECT(cue_points.has_value());
+    EXPECT_EQ(cue_points->size(), 1u);
+    EXPECT_EQ(cue_points->first().timestamp, AK::Duration::zero());
+}
+
+TEST_CASE(reader_limits_linked_seek_head_traversal)
+{
+    auto file = make_matroska_with_linked_seek_heads(9);
+    auto stream = Media::IncrementallyPopulatedStream::create_from_buffer(file.data);
+
+    auto reader = MUST(Media::Matroska::Reader::from_stream(stream->create_cursor()));
+    auto cue_points = reader.cue_points_for_track(1);
+    EXPECT(cue_points.has_value());
+    EXPECT_EQ(cue_points->size(), 1u);
 }
 
 TEST_CASE(streamer_read_element_id)
@@ -500,37 +714,65 @@ static auto create_incremental_demuxer(ByteBuffer const& file_data, NonnullRefPt
     return MUST(Media::Matroska::MatroskaDemuxer::from_stream(stream));
 }
 
+// These tests assert on the video track's ranges specifically.
+static Media::TimeRanges video_track_buffered_ranges(Media::Demuxer& demuxer)
+{
+    for (auto const& track_state : demuxer.scan_state().tracks) {
+        if (track_state.track.type() == Media::TrackType::Video)
+            return track_state.buffered_ranges;
+    }
+    return {};
+}
+
+// Wait until the scan has caught up with the stream; the change handler's dispatch wakes the pump.
+template<typename Condition>
+static Media::TimeRanges wait_for_buffered_ranges(Core::EventLoop& loop, Media::Demuxer& demuxer, Condition condition)
+{
+    demuxer.set_scan_state_change_handler([] { });
+    ScopeGuard remove_handler = [&] { demuxer.set_scan_state_change_handler(nullptr); };
+
+    bool deadline_expired = false;
+    auto deadline_timer = Core::Timer::create_single_shot(1'000, [&] { deadline_expired = true; });
+    deadline_timer->start();
+
+    loop.spin_until([&] { return condition(video_track_buffered_ranges(demuxer)) || deadline_expired; });
+    EXPECT(!deadline_expired);
+    return video_track_buffered_ranges(demuxer);
+}
+
 TEST_CASE(buffered_time_ranges_full_file)
 {
+    auto& loop = never_destroyed_event_loop();
     auto file_data = load_test_file_data("./vp9_in_webm.webm"sv);
     auto stream = Media::IncrementallyPopulatedStream::create_from_buffer(file_data);
     auto demuxer = MUST(Media::Matroska::MatroskaDemuxer::from_stream(stream));
 
-    auto ranges = demuxer->buffered_time_ranges();
+    auto ranges = wait_for_buffered_ranges(loop, *demuxer, [](auto const& ranges) { return !ranges.is_empty(); });
     EXPECT_EQ(ranges.size(), 1u);
-    EXPECT_EQ(ranges[0].start, AK::Duration::from_microseconds(500));
-    EXPECT_EQ(ranges[0].end, AK::Duration::from_microseconds(1021500));
+    EXPECT_EQ(ranges[0].start, AK::Duration::from_milliseconds(11));
+    EXPECT_EQ(ranges[0].end, AK::Duration::from_milliseconds(1011));
 }
 
 TEST_CASE(buffered_time_ranges_incremental_thirds)
 {
     auto file_data = load_test_file_data("./vp9_in_webm.webm"sv);
-    auto start = AK::Duration::from_microseconds(500);
+    auto start = AK::Duration::from_milliseconds(11);
     size_t one_third = file_data.size() / 3;
     size_t two_thirds = one_third * 2;
 
+    auto& loop = never_destroyed_event_loop();
     NonnullRefPtr<Media::IncrementallyPopulatedStream> stream = Media::IncrementallyPopulatedStream::create_empty();
     auto demuxer = create_incremental_demuxer(file_data, stream, one_third);
 
     // Stage 1: first third.
-    auto ranges_1 = demuxer->buffered_time_ranges();
+    auto ranges_1 = wait_for_buffered_ranges(loop, *demuxer, [](auto const& ranges) { return !ranges.is_empty(); });
     EXPECT_EQ(ranges_1.size(), 1u);
     EXPECT_EQ(ranges_1[0].start, start);
     EXPECT_EQ(ranges_1[0].end, AK::Duration::from_microseconds(91000));
 
     // Stage 2: extend to two thirds.
     stream->add_chunk_at(one_third, file_data.bytes().slice(one_third, two_thirds - one_third));
-    auto ranges_2 = demuxer->buffered_time_ranges();
+    auto ranges_2 = wait_for_buffered_ranges(loop, *demuxer, [&](auto const& ranges) { return ranges != ranges_1; });
     EXPECT_EQ(ranges_2.size(), 1u);
     EXPECT_EQ(ranges_2[0].start, start);
     EXPECT(ranges_2[0].end > ranges_1[0].end);
@@ -539,11 +781,11 @@ TEST_CASE(buffered_time_ranges_incremental_thirds)
     // Stage 3: complete the file.
     stream->add_chunk_at(two_thirds, file_data.bytes().slice(two_thirds, CUES_START - two_thirds));
     stream->close();
-    auto ranges_3 = demuxer->buffered_time_ranges();
+    auto ranges_3 = wait_for_buffered_ranges(loop, *demuxer, [&](auto const& ranges) { return ranges != ranges_2; });
     EXPECT_EQ(ranges_3.size(), 1u);
     EXPECT_EQ(ranges_3[0].start, start);
     EXPECT(ranges_3[0].end > ranges_2[0].end);
-    EXPECT_EQ(ranges_3[0].end, AK::Duration::from_microseconds(1021500));
+    EXPECT_EQ(ranges_3[0].end, AK::Duration::from_milliseconds(1011));
 }
 
 // big_buck_bunny_5s.webm cluster layout:
@@ -574,19 +816,22 @@ TEST_CASE(buffered_time_ranges_gap_then_fill)
     stream->add_chunk_at(BBB_CUES_START, file_data.bytes().slice(BBB_CUES_START));
     stream->close();
     stream->add_chunk_at(second_chunk_start, file_data.bytes().slice(second_chunk_start, BBB_CUES_START - second_chunk_start));
+    auto& loop = never_destroyed_event_loop();
     auto demuxer = MUST(Media::Matroska::MatroskaDemuxer::from_stream(stream));
 
-    auto ranges_gap = demuxer->buffered_time_ranges();
+    auto ranges_gap = wait_for_buffered_ranges(loop, *demuxer, [](auto const& ranges) { return ranges.size() == 2; });
     EXPECT_EQ(ranges_gap.size(), 2u);
     EXPECT_EQ(ranges_gap[0].start, AK::Duration::zero());
     EXPECT_EQ(ranges_gap[1].start, AK::Duration::from_milliseconds(3500));
+    EXPECT(demuxer->scan_state().tracks[0].reached_end_of_stream);
 
     // Fill the gap with clusters 4-6.
     stream->add_chunk_at(first_chunk_end, file_data.bytes().slice(first_chunk_end, second_chunk_start - first_chunk_end));
-    auto ranges_filled = demuxer->buffered_time_ranges();
+    auto ranges_filled = wait_for_buffered_ranges(loop, *demuxer, [](auto const& ranges) { return ranges.size() == 1; });
     EXPECT_EQ(ranges_filled.size(), 1u);
     EXPECT_EQ(ranges_filled[0].start, AK::Duration::zero());
     EXPECT_EQ(ranges_filled[0].end, AK::Duration::from_nanoseconds(4999666666));
+    EXPECT(demuxer->scan_state().tracks[0].reached_end_of_stream);
 }
 
 TEST_CASE(buffered_time_ranges_reverse_order_chunks)
@@ -601,55 +846,97 @@ TEST_CASE(buffered_time_ranges_reverse_order_chunks)
     stream->add_chunk_at(0, file_data.bytes().slice(0, first_chunk_end));
     stream->add_chunk_at(second_chunk_start, file_data.bytes().slice(second_chunk_start));
     stream->close();
+    auto& loop = never_destroyed_event_loop();
     auto demuxer = MUST(Media::Matroska::MatroskaDemuxer::from_stream(stream));
 
-    auto ranges_1 = demuxer->buffered_time_ranges();
+    auto ranges_1 = wait_for_buffered_ranges(loop, *demuxer, [](auto const& ranges) { return ranges.size() == 2; });
     EXPECT_EQ(ranges_1.size(), 2u);
     EXPECT_EQ(ranges_1[0].start, AK::Duration::zero());
     EXPECT_EQ(ranges_1[1].start, AK::Duration::from_milliseconds(3500));
 
     // Fill the gap with clusters 3-6.
     stream->add_chunk_at(first_chunk_end, file_data.bytes().slice(first_chunk_end, second_chunk_start - first_chunk_end));
-    auto ranges_2 = demuxer->buffered_time_ranges();
+    auto ranges_2 = wait_for_buffered_ranges(loop, *demuxer, [](auto const& ranges) { return ranges.size() == 1; });
     EXPECT_EQ(ranges_2.size(), 1u);
     EXPECT_EQ(ranges_2[0].start, AK::Duration::zero());
     EXPECT(ranges_2[0].end > AK::Duration::from_milliseconds(4900));
 }
 
-TEST_CASE(buffered_time_ranges_repeated_query)
+TEST_CASE(buffered_time_ranges_cues_only_tail_does_not_reach_end_of_stream)
 {
-    auto file_data = load_test_file_data("./vp9_in_webm.webm"sv);
-    auto stream = Media::IncrementallyPopulatedStream::create_from_buffer(file_data);
+    auto file_data = load_test_file_data("./big_buck_bunny_5s.webm"sv);
+
+    // The closing bytes hold only the Cues element, so the last cluster's end time remains unknown.
+    auto stream = Media::IncrementallyPopulatedStream::create_empty();
+    stream->add_chunk_at(0, file_data.bytes().slice(0, 21628));
+    stream->add_chunk_at(BBB_CUES_START, file_data.bytes().slice(BBB_CUES_START));
+    stream->close();
+    auto& loop = never_destroyed_event_loop();
     auto demuxer = MUST(Media::Matroska::MatroskaDemuxer::from_stream(stream));
 
-    // Query multiple times — results should be identical and stable.
-    auto ranges_1 = demuxer->buffered_time_ranges();
-    auto ranges_2 = demuxer->buffered_time_ranges();
-    auto ranges_3 = demuxer->buffered_time_ranges();
-    EXPECT_EQ(ranges_1, ranges_2);
-    EXPECT_EQ(ranges_2, ranges_3);
+    (void)wait_for_buffered_ranges(loop, *demuxer, [](auto const& ranges) { return !ranges.is_empty(); });
+    EXPECT(!demuxer->scan_state().tracks[0].reached_end_of_stream);
+}
+
+TEST_CASE(buffered_time_ranges_are_per_track)
+{
+    // vp9_in_webm.webm contains a VP9 video track and an Opus audio track with different
+    // start offsets and end times, so the scan must report distinct ranges for each.
+    auto file_data = load_test_file_data("./vp9_in_webm.webm"sv);
+    auto stream = Media::IncrementallyPopulatedStream::create_from_buffer(file_data);
+    auto& loop = never_destroyed_event_loop();
+    auto demuxer = MUST(Media::Matroska::MatroskaDemuxer::from_stream(stream));
+
+    (void)wait_for_buffered_ranges(loop, *demuxer, [](auto const& ranges) { return !ranges.is_empty(); });
+
+    auto const& scan_state = demuxer->scan_state();
+    EXPECT_EQ(scan_state.tracks.size(), 2u);
+    for (auto const& track_state : scan_state.tracks) {
+        EXPECT(track_state.reached_end_of_stream);
+        EXPECT_EQ(track_state.buffered_ranges.size(), 1u);
+        if (track_state.buffered_ranges.is_empty())
+            continue;
+        if (track_state.track.type() == Media::TrackType::Video) {
+            EXPECT_EQ(track_state.buffered_ranges[0].start, AK::Duration::from_milliseconds(11));
+            EXPECT_EQ(track_state.buffered_ranges[0].end, AK::Duration::from_milliseconds(1011));
+        } else {
+            EXPECT_EQ(track_state.buffered_ranges[0].start, AK::Duration::from_microseconds(500));
+            EXPECT_EQ(track_state.buffered_ranges[0].end, AK::Duration::from_microseconds(1021500));
+        }
+    }
+}
+
+static u64 video_track_number(Media::Matroska::Reader& reader)
+{
+    u64 track_number = 0;
+    MUST(reader.for_each_track_of_type(Media::Matroska::TrackEntry::TrackType::Video, [&](auto const& entry) -> Media::DecoderErrorOr<IterationDecision> {
+        track_number = entry.track_number();
+        return IterationDecision::Break;
+    }));
+    return track_number;
 }
 
 TEST_CASE(buffered_time_ranges_evicted_start)
 {
-    // Simulate data eviction by calling buffered_time_ranges with the full file first,
+    // Simulate data eviction by scanning buffered ranges with the full file first,
     // then with a byte range whose start is later (as if the beginning was evicted).
     auto file_data = load_test_file_data("./big_buck_bunny_5s.webm"sv);
     auto stream = Media::IncrementallyPopulatedStream::create_from_buffer(file_data);
     auto reader = MUST(Media::Matroska::Reader::from_stream(stream->create_cursor()));
     auto cursor = stream->create_cursor();
+    auto track_number = video_track_number(reader);
 
     // Get buffered ranges for the full file.
     Vector<Media::MediaStream::ByteRange> byte_ranges;
     byte_ranges.append({ 0, file_data.size() });
-    auto time_ranges = reader.buffered_time_ranges(cursor, byte_ranges);
+    auto time_ranges = reader.buffered_time_ranges_by_track_number(cursor, byte_ranges).get(track_number).value_or({}).time_ranges;
     EXPECT_EQ(time_ranges.size(), 1u);
     EXPECT_EQ(time_ranges[0].start, AK::Duration::zero());
     EXPECT_EQ(time_ranges[0].end, AK::Duration::from_nanoseconds(4999666666));
 
     // Simulate eviction of the first four clusters.
     byte_ranges[0] = { 31913, file_data.size() };
-    time_ranges = reader.buffered_time_ranges(cursor, byte_ranges);
+    time_ranges = reader.buffered_time_ranges_by_track_number(cursor, byte_ranges).get(track_number).value_or({}).time_ranges;
     EXPECT_EQ(time_ranges.size(), 1u);
     EXPECT_EQ(time_ranges[0].start, AK::Duration::from_milliseconds(2000));
     EXPECT_EQ(time_ranges[0].end, AK::Duration::from_nanoseconds(4999666666));
@@ -663,24 +950,25 @@ TEST_CASE(buffered_time_ranges_evicted_start_appended_end)
     auto stream = Media::IncrementallyPopulatedStream::create_from_buffer(file_data);
     auto reader = MUST(Media::Matroska::Reader::from_stream(stream->create_cursor()));
     auto cursor = stream->create_cursor();
+    auto track_number = video_track_number(reader);
 
     // Get buffered ranges with only the first two clusters available.
     Vector<Media::MediaStream::ByteRange> byte_ranges;
     byte_ranges.append({ 0, 21628 });
-    auto time_ranges = reader.buffered_time_ranges(cursor, byte_ranges);
+    auto time_ranges = reader.buffered_time_ranges_by_track_number(cursor, byte_ranges).get(track_number).value_or({}).time_ranges;
     EXPECT_EQ(time_ranges.size(), 1u);
     EXPECT_EQ(time_ranges[0].start, AK::Duration::zero());
     EXPECT_EQ(time_ranges[0].end, AK::Duration::from_nanoseconds(1499666666));
 
     // Get buffered ranges with only clusters 8 and 9 available.
     byte_ranges[0] = { 91687, 113303 };
-    time_ranges = reader.buffered_time_ranges(cursor, byte_ranges);
+    time_ranges = reader.buffered_time_ranges_by_track_number(cursor, byte_ranges).get(track_number).value_or({}).time_ranges;
     EXPECT_EQ(time_ranges.size(), 1u);
     EXPECT_EQ(time_ranges[0].start, AK::Duration::from_milliseconds(4000));
     EXPECT_EQ(time_ranges[0].end, AK::Duration::from_nanoseconds(4999666666));
 
     // Get buffered ranges with a byte range containing no clusters.
     byte_ranges[0] = { 113303, file_data.size() };
-    time_ranges = reader.buffered_time_ranges(cursor, byte_ranges);
+    time_ranges = reader.buffered_time_ranges_by_track_number(cursor, byte_ranges).get(track_number).value_or({}).time_ranges;
     EXPECT_EQ(time_ranges.size(), 0u);
 }

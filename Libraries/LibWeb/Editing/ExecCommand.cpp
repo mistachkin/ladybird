@@ -4,21 +4,39 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/ScopeGuard.h>
 #include <AK/TemporaryChange.h>
+#include <LibGC/Root.h>
 #include <LibWeb/Bindings/InputEvent.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Event.h>
 #include <LibWeb/DOM/Range.h>
+#include <LibWeb/DOM/Text.h>
 #include <LibWeb/Editing/CommandNames.h>
 #include <LibWeb/Editing/Commands.h>
+#include <LibWeb/Editing/EditingHistory.h>
 #include <LibWeb/Editing/Internal/Algorithms.h>
+#include <LibWeb/HTML/HTMLLIElement.h>
 #include <LibWeb/Selection/Selection.h>
 #include <LibWeb/UIEvents/InputEvent.h>
+#include <LibWeb/UIEvents/InputTypes.h>
 
 namespace Web::DOM {
 
+GC::Ref<Editing::EditingHistory> Document::editing_history()
+{
+    if (!m_editing_history)
+        m_editing_history = Editing::EditingHistory::create(realm());
+    return *m_editing_history;
+}
+
 // https://w3c.github.io/editing/docs/execCommand/#execcommand()
-WebIDL::ExceptionOr<bool> Document::exec_command(FlyString const& command, [[maybe_unused]] bool show_ui, Utf16String const& value)
+WebIDL::ExceptionOr<bool> Document::exec_command(Utf16FlyString const& command, [[maybe_unused]] bool show_ui, Utf16View value)
+{
+    return exec_command_internal(command, show_ui, value, DispatchInputEvent::Yes);
+}
+
+WebIDL::ExceptionOr<bool> Document::exec_command_internal(Utf16FlyString const& command, [[maybe_unused]] bool show_ui, Utf16View value, DispatchInputEvent dispatch_input_event, Optional<Utf16FlyString> const& user_input_type)
 {
     // AD-HOC: This is not directly mentioned in the spec, but all major browsers limit editing API calls to HTML documents
     if (!is_html_document())
@@ -97,18 +115,92 @@ WebIDL::ExceptionOr<bool> Document::exec_command(FlyString const& command, [[may
     if (command_definition.preserves_overrides)
         overrides = Editing::record_current_overrides(*this);
 
+    // INTEROP: Chromium distinguishes pastes that begin inside text from pastes at an element boundary when deciding
+    //          whether a trailing line break is merely a placeholder. Record this before caret canonicalization can
+    //          turn an element-level boundary into an equivalent text position.
+    auto range_before_command = Editing::active_range(*this);
+    bool paste_started_in_text_node = user_input_type == UIEvents::InputTypes::insertFromPaste
+        && range_before_command && is<DOM::Text>(*range_before_command->start_container())
+        // INTEROP: An Apple-interchange-newline represents an intentional paragraph boundary, not a fragment-ending
+        //          placeholder. Blink and WebKit preserve the destination paragraph's trailing break in this case.
+        && !value.contains(u"Apple-interchange-newline"sv);
+    GC::Root<DOM::Node> paste_start_block;
+    if (paste_started_in_text_node)
+        paste_start_block = Editing::block_node_of_node(*range_before_command->start_container());
+
     // NOTE: Step 7 below asks us whether the DOM tree was modified, so keep track of the document versions.
     auto old_dom_tree_version = dom_tree_version();
     auto old_character_data_version = character_data_version();
 
+    // NB: Canonicalize the caret before the command acts and records its starting selection, so that e.g. typing at an
+    //     element-level caret inserts into the adjacent content like Chromium does. Inline formatting commands with a
+    //     collapsed selection only set overrides, and Chromium does not move the caret for those.
+    bool command_edits_at_caret = command_definition.command.is_one_of(
+        Editing::CommandNames::delete_, Editing::CommandNames::formatBlock, Editing::CommandNames::forwardDelete,
+        Editing::CommandNames::indent, Editing::CommandNames::insertHorizontalRule, Editing::CommandNames::insertHTML,
+        Editing::CommandNames::insertImage, Editing::CommandNames::insertLineBreak,
+        Editing::CommandNames::insertOrderedList, Editing::CommandNames::insertParagraph,
+        Editing::CommandNames::insertText, Editing::CommandNames::insertUnorderedList,
+        Editing::CommandNames::justifyCenter, Editing::CommandNames::justifyFull, Editing::CommandNames::justifyLeft,
+        Editing::CommandNames::justifyRight, Editing::CommandNames::outdent);
+    if (affected_editing_host && m_selection && command_edits_at_caret)
+        Editing::canonicalize_collapsed_selection_for_editing(*m_selection);
+
+    // AD-HOC: Record the mutations performed by the command action on the editing history, so the user can undo them.
+    //         end_recording() is a no-op if the guard below already ended the recording.
+    if (affected_editing_host) {
+        auto category = Editing::UndoStep::Category::Other;
+        // INTEROP: Cut and paste are standalone undo units in Chromium: they never coalesce with typing or deletion
+        //          runs, so they categorize as Other even though they run the delete and insertText commands.
+        bool is_cut_or_paste = user_input_type == UIEvents::InputTypes::deleteByCut || user_input_type == UIEvents::InputTypes::insertFromPaste;
+        if (!is_cut_or_paste) {
+            if (command_definition.command.is_one_of(Editing::CommandNames::insertText, Editing::CommandNames::insertLineBreak, Editing::CommandNames::insertParagraph))
+                category = Editing::UndoStep::Category::Insertion;
+            else if (command_definition.command == Editing::CommandNames::delete_)
+                category = Editing::UndoStep::Category::BackwardDeletion;
+            else if (command_definition.command == Editing::CommandNames::forwardDelete)
+                category = Editing::UndoStep::Category::ForwardDeletion;
+        }
+        editing_history()->begin_recording(*affected_editing_host, category);
+    }
+    ScopeGuard end_recording_guard = [&] {
+        if (auto history = editing_history_if_exists())
+            history->end_recording();
+    };
+
     // 5. Take the action for command, passing value to the instructions as an argument.
     auto command_result = command_definition.action(*this, value);
+
+    // INTEROP: Chromium removes the trailing placeholder line break after pasting into an existing text node. The
+    //          execCommand draft only removes it when insertion creates a new text node. Perform this while the paste
+    //          history transaction is still open so undo restores the placeholder and redo removes it again.
+    if (paste_started_in_text_node) {
+        if (auto range = Editing::active_range(*this)) {
+            // INTEROP: A trailing break remains the list item's line terminator after a block fragment is merged into
+            //          that item. Blink removes paragraph placeholders here, but preserves list-item terminators.
+            if (auto block = Editing::block_node_of_node(*range->start_container()); block && block == paste_start_block.ptr()
+                && !is<HTML::HTMLLIElement>(*block))
+                Editing::remove_extraneous_line_breaks_at_the_end_of_node(*block);
+        }
+    }
 
     // https://w3c.github.io/editing/docs/execCommand/#preserves-overrides
     // After taking the action, if the active range is collapsed, it must restore states and values from the recorded
     // list.
     if (!overrides.is_empty() && m_selection && m_selection->is_collapsed())
         Editing::restore_states_and_values(*this, overrides);
+
+    // NB: Canonicalize the caret the command produced before the ending selection is recorded, but only if the
+    //     command actually performed an edit; Chromium leaves the caret alone otherwise.
+    bool tree_was_modified = dom_tree_version() != old_dom_tree_version
+        || character_data_version() != old_character_data_version;
+    if (affected_editing_host && m_selection && tree_was_modified)
+        Editing::canonicalize_collapsed_selection_for_editing(*m_selection);
+
+    // NB: End the recording before dispatching the input event below, so that the undo step's ending selection is the
+    //     selection produced by the command itself, not whatever an input event handler changed it to.
+    if (auto history = editing_history_if_exists())
+        history->end_recording();
 
     // 6. If the previous step returned false, return false.
     if (!command_result)
@@ -117,19 +209,22 @@ WebIDL::ExceptionOr<bool> Document::exec_command(FlyString const& command, [[may
     // 7. If the action modified DOM tree, then fire an event named "input" at affected editing host using InputEvent,
     //    with its isTrusted and bubbles attributes initialized to true, inputType attribute initialized to the mapped
     //    value of command, and its data attribute initialized to null.
-    bool tree_was_modified = dom_tree_version() != old_dom_tree_version
-        || character_data_version() != old_character_data_version;
-    if (tree_was_modified && affected_editing_host) {
+    if (tree_was_modified && affected_editing_host && dispatch_input_event == DispatchInputEvent::Yes) {
         Bindings::InputEventInit event_init {};
         event_init.bubbles = true;
-        event_init.input_type = command_definition.mapped_value.to_string();
+        // INTEROP: When the command runs on behalf of a user cut or paste, the input event carries the user's input
+        //          type (deleteByCut or insertFromPaste) rather than the command's mapped value, like other browsers.
+        event_init.input_type = user_input_type.value_or(command_definition.mapped_value);
 
-        // AD-HOC: For insertText, we do what other browsers do and set data to value.
-        if (command == Editing::CommandNames::insertText)
-            event_init.data = value;
+        // AD-HOC: For insertText, we do what other browsers do and set data to value. A paste carries null data even
+        //         though it runs the insertText command.
+        if (event_init.input_type == UIEvents::InputTypes::insertText)
+            event_init.data = Utf16String::from_utf16(value);
 
         auto event = UIEvents::InputEvent::create_from_platform_event(realm(), HTML::EventNames::input, event_init);
         event->set_is_trusted(true);
+
+        TemporaryChange preserve_selection_offsets { m_preserve_selection_offsets_during_identical_character_data_replacement, true };
         affected_editing_host->dispatch_event(event);
     }
 
@@ -142,7 +237,7 @@ WebIDL::ExceptionOr<bool> Document::exec_command(FlyString const& command, [[may
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#querycommandenabled()
-WebIDL::ExceptionOr<bool> Document::query_command_enabled(FlyString const& command)
+WebIDL::ExceptionOr<bool> Document::query_command_enabled(Utf16FlyString const& command)
 {
     // AD-HOC: This is not directly mentioned in the spec, but all major browsers limit editing API calls to HTML documents
     if (!is_html_document())
@@ -158,11 +253,21 @@ WebIDL::ExceptionOr<bool> Document::query_command_enabled(FlyString const& comma
     // NOTE: cut and paste are actually in the Clipboard commands section
     if (command.is_one_of_ignoring_ascii_case(
             Editing::CommandNames::defaultParagraphSeparator,
-            Editing::CommandNames::redo,
             Editing::CommandNames::styleWithCSS,
-            Editing::CommandNames::undo,
             Editing::CommandNames::useCSS))
         return true;
+
+    // INTEROP: The spec lists undo and redo among the always-enabled miscellaneous commands, but in Chromium
+    //          queryCommandEnabled("undo") is true only when there is a step to undo, and execCommand("undo") on an
+    //          empty history returns false. Redo behaves symmetrically.
+    if (command.equals_ignoring_ascii_case(Editing::CommandNames::undo)) {
+        auto history = editing_history_if_exists();
+        return history && history->can_undo();
+    }
+    if (command.equals_ignoring_ascii_case(Editing::CommandNames::redo)) {
+        auto history = editing_history_if_exists();
+        return history && history->can_redo();
+    }
 
     // AD-HOC: selectAll requires a selection object to exist.
     if (command.equals_ignoring_ascii_case(Editing::CommandNames::selectAll))
@@ -237,7 +342,7 @@ WebIDL::ExceptionOr<bool> Document::query_command_enabled(FlyString const& comma
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#querycommandindeterm()
-WebIDL::ExceptionOr<bool> Document::query_command_indeterm(FlyString const& command)
+WebIDL::ExceptionOr<bool> Document::query_command_indeterm(Utf16FlyString const& command)
 {
     // AD-HOC: This is not directly mentioned in the spec, but all major browsers limit editing API calls to HTML documents
     if (!is_html_document())
@@ -285,7 +390,7 @@ WebIDL::ExceptionOr<bool> Document::query_command_indeterm(FlyString const& comm
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#querycommandstate()
-WebIDL::ExceptionOr<bool> Document::query_command_state(FlyString const& command)
+WebIDL::ExceptionOr<bool> Document::query_command_state(Utf16FlyString const& command)
 {
     // AD-HOC: This is not directly mentioned in the spec, but all major browsers limit editing API calls to HTML documents
     if (!is_html_document())
@@ -334,7 +439,7 @@ WebIDL::ExceptionOr<bool> Document::query_command_state(FlyString const& command
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#querycommandsupported()
-WebIDL::ExceptionOr<bool> Document::query_command_supported(FlyString const& command)
+WebIDL::ExceptionOr<bool> Document::query_command_supported(Utf16FlyString const& command)
 {
     // AD-HOC: This is not directly mentioned in the spec, but all major browsers limit editing API calls to HTML documents
     if (!is_html_document())
@@ -348,7 +453,7 @@ WebIDL::ExceptionOr<bool> Document::query_command_supported(FlyString const& com
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#querycommandvalue()
-WebIDL::ExceptionOr<String> Document::query_command_value(FlyString const& command)
+WebIDL::ExceptionOr<Utf16String> Document::query_command_value(Utf16FlyString const& command)
 {
     // AD-HOC: This is not directly mentioned in the spec, but all major browsers limit editing API calls to HTML documents
     if (!is_html_document())
@@ -357,42 +462,42 @@ WebIDL::ExceptionOr<String> Document::query_command_value(FlyString const& comma
     // 1. If command is not supported or has no value, return the empty string.
     auto optional_command = Editing::find_command_definition(command);
     if (!optional_command.has_value())
-        return String {};
+        return Utf16String {};
     auto const& command_definition = optional_command.release_value();
     auto value_override = command_value_override(command_definition.command);
     if (!command_definition.value && !value_override.has_value())
-        return String {};
+        return Utf16String {};
 
     // 2. If command is "fontSize" and its value override is set, convert the value override to an
     //    integer number of pixels and return the legacy font size for the result.
     if (command_definition.command == Editing::CommandNames::fontSize && value_override.has_value()) {
         auto pixel_size = Editing::font_size_to_pixel_size(value_override.release_value());
-        return Editing::legacy_font_size(pixel_size.to_int()).to_utf8_but_should_be_ported_to_utf16();
+        return Editing::legacy_font_size(pixel_size.to_int());
     }
 
     // 3. If the value override for command is set, return it.
     if (value_override.has_value())
-        return value_override.release_value().to_utf8_but_should_be_ported_to_utf16();
+        return Utf16String::from_utf16(value_override.release_value());
 
     // 4. Return command's value.
-    return command_definition.value(*this).to_utf8_but_should_be_ported_to_utf16();
+    return command_definition.value(*this);
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#value-override
-void Document::set_command_value_override(FlyString const& command, Utf16String const& value)
+void Document::set_command_value_override(Utf16FlyString const& command, Utf16View value)
 {
-    m_command_value_override.set(command, value);
+    m_command_value_override.set(command, Utf16String::from_utf16(value));
 
     // The value override for the backColor command must be the same as the value override for the hiliteColor command,
     // such that setting one sets the other to the same thing and unsetting one unsets the other.
     if (command == Editing::CommandNames::backColor)
-        m_command_value_override.set(Editing::CommandNames::hiliteColor, value);
+        m_command_value_override.set(Editing::CommandNames::hiliteColor, Utf16String::from_utf16(value));
     else if (command == Editing::CommandNames::hiliteColor)
-        m_command_value_override.set(Editing::CommandNames::backColor, value);
+        m_command_value_override.set(Editing::CommandNames::backColor, Utf16String::from_utf16(value));
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#value-override
-void Document::clear_command_value_override(FlyString const& command)
+void Document::clear_command_value_override(Utf16FlyString const& command)
 {
     m_command_value_override.remove(command);
 

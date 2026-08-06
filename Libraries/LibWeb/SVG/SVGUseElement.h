@@ -6,11 +6,11 @@
 
 #pragma once
 
-#include <AK/FlyString.h>
 #include <AK/IntrusiveList.h>
+#include <AK/Utf16String.h>
+#include <LibWeb/CSS/StyleValues/NumberStyleValue.h>
 #include <LibWeb/DOM/DocumentLoadEventDelayer.h>
 #include <LibWeb/DOM/DocumentObserver.h>
-#include <LibWeb/SVG/SVGAnimatedLength.h>
 #include <LibWeb/SVG/SVGGraphicsElement.h>
 #include <LibWeb/SVG/SVGURIReference.h>
 
@@ -27,19 +27,29 @@ public:
 
     virtual ~SVGUseElement() override = default;
 
-    virtual void attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
+    virtual void attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_) override;
 
     void svg_element_changed(SVGElement&);
     void svg_element_changed_before_document_complete(SVGElement&);
     void svg_element_removed(SVGElement&);
 
-    GC::Ref<SVGAnimatedLength> x() const;
-    GC::Ref<SVGAnimatedLength> y() const;
-    GC::Ref<SVGAnimatedLength> width() const;
-    GC::Ref<SVGAnimatedLength> height() const;
+    // AD-HOC: The spec states that the x, y, width and height IDL attributes reflect the respective computed values and their
+    //         corresponding presentation attributes but other browsers reflect the attribute values instead - see
+    //         https://github.com/w3c/svgwg/issues/1153
+
+    // https://w3c.github.io/svgwg/svg2-draft/struct.html#__svg__SVGUseElement__x
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(x, Horizontal, CSS::NumberStyleValue::create(0));
+
+    // https://w3c.github.io/svgwg/svg2-draft/struct.html#__svg__SVGUseElement__y
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(y, Vertical, CSS::NumberStyleValue::create(0));
+
+    // https://w3c.github.io/svgwg/svg2-draft/struct.html#__svg__SVGUseElement__width
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(width, Horizontal, CSS::NumberStyleValue::create(0));
+
+    // https://w3c.github.io/svgwg/svg2-draft/struct.html#__svg__SVGUseElement__height
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(height, Vertical, CSS::NumberStyleValue::create(0));
 
     GC::Ptr<SVGElement> instance_root() const;
-    GC::Ptr<SVGElement> animated_instance_root() const;
 
     virtual Gfx::AffineTransform element_transform() const override;
 
@@ -56,12 +66,10 @@ private:
 
     virtual bool is_svg_use_element() const override { return true; }
 
-    virtual RefPtr<Layout::Node> create_layout_node(CSS::ComputedProperties const&) override;
+    virtual RefPtr<Layout::Node> create_layout_node(NonnullRefPtr<CSS::ComputedValues const>) override;
 
-    void process_the_url(Optional<String> const& href);
-    Optional<String> href_value() const;
-
-    static Optional<FlyString> parse_id_from_href(StringView);
+    void process_the_url(Optional<Utf16String> const& href);
+    Optional<Utf16String> href_value() const;
 
     GC::Ptr<DOM::Element> referenced_element() const;
 

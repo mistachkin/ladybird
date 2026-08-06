@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026-present, the Ladybird developers
+ * Copyright (c) 2026-present, the Ladybird developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -28,6 +28,18 @@ void invalidate_style_after_exportparts_attribute_change(DOM::Element& element)
                 element.set_needs_style_update(true);
             return TraversalDecision::Continue;
         });
+    }
+}
+
+void invalidate_part_targets(DOM::Element& element)
+{
+    auto shadow_root = element.shadow_root();
+    if (!shadow_root)
+        return;
+
+    for (auto const& [_, part_elements] : shadow_root->part_element_map()) {
+        for (auto const& part_element : part_elements)
+            const_cast<DOM::Element&>(part_element.element()).set_needs_style_update(true);
     }
 }
 

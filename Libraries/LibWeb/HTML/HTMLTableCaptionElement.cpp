@@ -27,7 +27,7 @@ void HTMLTableCaptionElement::initialize(JS::Realm& realm)
     Base::initialize(realm);
 }
 
-bool HTMLTableCaptionElement::is_presentational_hint(FlyString const& name) const
+bool HTMLTableCaptionElement::is_presentational_hint(Utf16FlyString const& name) const
 {
     if (Base::is_presentational_hint(name))
         return true;
@@ -39,9 +39,9 @@ bool HTMLTableCaptionElement::is_presentational_hint(FlyString const& name) cons
 void HTMLTableCaptionElement::apply_presentational_hints(Vector<CSS::StyleProperty>& properties) const
 {
     HTMLElement::apply_presentational_hints(properties);
-    for_each_attribute([&](auto& name, auto& value) {
+    for_each_attribute([&](Utf16FlyString const& name, Utf16View value) {
         if (name == HTML::AttributeNames::align) {
-            if (value == "bottom"sv)
+            if (value == u"bottom"sv)
                 properties.append({ .property_id = CSS::PropertyID::CaptionSide, .value = CSS::KeywordStyleValue::create(CSS::Keyword::Bottom) });
         }
     });

@@ -14,6 +14,11 @@
 
 namespace Web::CSS::Parser {
 
+static String token_name_for_diagnostics(Utf16FlyString const& name)
+{
+    return MUST(name.view().to_utf8());
+}
+
 static bool next_is_pseudo_element(TokenStream<ComponentValue>& tokens)
 {
     auto& first = tokens.next_token();
@@ -139,7 +144,7 @@ static Vector<Selector::CompoundSelector> normalize_pseudo_element_transitions(V
                             .type = Selector::SimpleSelector::Type::Universal,
                             .value = Selector::SimpleSelector::QualifiedName {
                                 .namespace_type = Selector::SimpleSelector::QualifiedName::NamespaceType::Any,
-                                .name = Selector::SimpleSelector::Name { "*"_fly_string },
+                                .name = Selector::SimpleSelector::Name { "*"_utf16_fly_string },
                             },
                         } },
                     });
@@ -276,7 +281,7 @@ Parser::ParseErrorOr<NonnullRefPtr<Selector>> Parser::parse_complex_selector(Tok
     for (auto const& compound_selector : parsed_selector->compound_selectors()) {
         if (saw_pseudo_element_transition && compound_selector.combinator != Selector::Combinator::PseudoElement) {
             ErrorReporter::the().report(InvalidSelectorError {
-                .value_string = parsed_selector->serialize(),
+                .value_string = parsed_selector->serialize().to_utf8(),
                 .description = "Pseudo-elements cannot be followed by a non-pseudo-element combinator."_string,
             });
             return ParseError::SyntaxError;
@@ -303,7 +308,7 @@ Parser::ParseErrorOr<NonnullRefPtr<Selector>> Parser::parse_complex_selector(Tok
             && pseudo_element_count == 2;
         if (!is_valid_chain) {
             ErrorReporter::the().report(InvalidSelectorError {
-                .value_string = parsed_selector->serialize(),
+                .value_string = parsed_selector->serialize().to_utf8(),
                 .description = "Pseudo-element chaining is not yet supported for this combination."_string,
             });
             return ParseError::SyntaxError;
@@ -384,7 +389,7 @@ Optional<Selector::SimpleSelector::QualifiedName> Parser::parse_selector_qualifi
     };
     auto get_name = [](ComponentValue const& token) {
         if (token.is_delim('*'))
-            return "*"_fly_string;
+            return "*"_utf16_fly_string;
         return token.token().ident();
     };
 
@@ -464,7 +469,7 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_attribute_simple_se
 
     if (!attribute_tokens.has_next_token()) {
         ErrorReporter::the().report(InvalidSelectorError {
-            .value_string = first_value.to_string(),
+            .value_string = first_value.to_string().to_utf8(),
             .description = "Attribute selector is empty."_string,
         });
         return ParseError::SyntaxError;
@@ -473,7 +478,7 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_attribute_simple_se
     auto maybe_qualified_name = parse_selector_qualified_name(attribute_tokens, AllowWildcardName::No);
     if (!maybe_qualified_name.has_value()) {
         ErrorReporter::the().report(InvalidSelectorError {
-            .value_string = first_value.to_string(),
+            .value_string = first_value.to_string().to_utf8(),
             .description = MUST(String::formatted("Expected qualified-name, got: '{}'.", attribute_tokens.next_token().to_debug_string())),
         });
         return ParseError::SyntaxError;
@@ -500,7 +505,7 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_attribute_simple_se
         auto const& first_delim = tokens.consume_a_token();
         if (!first_delim.is(Token::Type::Delim)) {
             ErrorReporter::the().report(InvalidSelectorError {
-                .value_string = first_value.to_string(),
+                .value_string = first_value.to_string().to_utf8(),
                 .description = MUST(String::formatted("Expected delim for attribute comparison, got: '{}'.", first_delim.to_debug_string())),
             });
             return ParseError::SyntaxError;
@@ -513,7 +518,7 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_attribute_simple_se
 
         if (!tokens.has_next_token()) {
             ErrorReporter::the().report(InvalidSelectorError {
-                .value_string = first_value.to_string(),
+                .value_string = first_value.to_string().to_utf8(),
                 .description = "Attribute selector ended part way through a match type."_string,
             });
             return ParseError::SyntaxError;
@@ -522,7 +527,7 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_attribute_simple_se
         auto const& second_delim = tokens.consume_a_token();
         if (!second_delim.is_delim('=')) {
             ErrorReporter::the().report(InvalidSelectorError {
-                .value_string = first_value.to_string(),
+                .value_string = first_value.to_string().to_utf8(),
                 .description = MUST(String::formatted("Expected a double delim for attribute comparison, got: '{}{}'.", first_delim.to_debug_string(), second_delim.to_debug_string())),
             });
             return ParseError::SyntaxError;
@@ -545,7 +550,7 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_attribute_simple_se
             return Selector::SimpleSelector::Attribute::MatchType::EndsWithString;
         default:
             ErrorReporter::the().report(InvalidSelectorError {
-                .value_string = first_value.to_string(),
+                .value_string = first_value.to_string().to_utf8(),
                 .description = MUST(String::formatted("Invalid attribute selector match type `{:c}=`", first_delim.token().delim())),
             });
             return ParseError::SyntaxError;
@@ -557,7 +562,7 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_attribute_simple_se
     attribute_tokens.discard_whitespace();
     if (!attribute_tokens.has_next_token()) {
         ErrorReporter::the().report(InvalidSelectorError {
-            .value_string = first_value.to_string(),
+            .value_string = first_value.to_string().to_utf8(),
             .description = "Attribute selector ended without a value to match."_string,
         });
         return ParseError::SyntaxError;
@@ -566,13 +571,13 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_attribute_simple_se
     auto const& value_part = attribute_tokens.consume_a_token();
     if (!value_part.is(Token::Type::Ident) && !value_part.is(Token::Type::String)) {
         ErrorReporter::the().report(InvalidSelectorError {
-            .value_string = first_value.to_string(),
+            .value_string = first_value.to_string().to_utf8(),
             .description = MUST(String::formatted("Expected a string or ident for the value to match attribute against, got: '{}'.", value_part.to_debug_string())),
         });
         return ParseError::SyntaxError;
     }
     auto const& value_string = value_part.token().is(Token::Type::Ident) ? value_part.token().ident() : value_part.token().string();
-    simple_selector.attribute().value = value_string.to_string();
+    simple_selector.attribute().value = value_string.to_utf16_string();
 
     attribute_tokens.discard_whitespace();
     // Handle case-sensitivity suffixes. https://www.w3.org/TR/selectors-4/#attribute-case
@@ -586,14 +591,14 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_attribute_simple_se
                 simple_selector.attribute().case_type = Selector::SimpleSelector::Attribute::CaseType::CaseSensitiveMatch;
             } else {
                 ErrorReporter::the().report(InvalidSelectorError {
-                    .value_string = first_value.to_string(),
+                    .value_string = first_value.to_string().to_utf8(),
                     .description = MUST(String::formatted("Expected a \"i\" or \"s\" attribute selector case sensitivity identifier, got: '{}'.", case_sensitivity_part.to_debug_string())),
                 });
                 return ParseError::SyntaxError;
             }
         } else {
             ErrorReporter::the().report(InvalidSelectorError {
-                .value_string = first_value.to_string(),
+                .value_string = first_value.to_string().to_utf8(),
                 .description = MUST(String::formatted("Expected an attribute selector case sensitivity identifier, got: '{}'", case_sensitivity_part.to_debug_string())),
             });
             return ParseError::SyntaxError;
@@ -604,7 +609,7 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_attribute_simple_se
 
     if (attribute_tokens.has_next_token()) {
         ErrorReporter::the().report(InvalidSelectorError {
-            .value_string = first_value.to_string(),
+            .value_string = first_value.to_string().to_utf8(),
             .description = "Trailing tokens in attribute selector."_string,
         });
         return ParseError::SyntaxError;
@@ -635,8 +640,8 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_pseudo_class_simple
         if (auto pseudo_class = pseudo_class_from_string(pseudo_name); pseudo_class.has_value()) {
             if (!pseudo_class_metadata(pseudo_class.value()).is_valid_as_identifier) {
                 ErrorReporter::the().report(InvalidPseudoClassOrElementError {
-                    .name = MUST(String::formatted(":{}", pseudo_name)),
-                    .value_string = pseudo_name.to_string(),
+                    .name = Utf16String::formatted(":{}", pseudo_name),
+                    .value_string = token_name_for_diagnostics(pseudo_name),
                     .description = "Only valid as a function."_string,
                 });
                 return ParseError::SyntaxError;
@@ -652,7 +657,7 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_pseudo_class_simple
             return ParseError::IncludesIgnoredVendorPrefix;
 
         ErrorReporter::the().report(UnknownPseudoClassOrElementError {
-            .name = MUST(String::formatted(":{}", pseudo_name)),
+            .name = Utf16String::formatted(":{}", pseudo_name),
         });
         return ParseError::SyntaxError;
     }
@@ -663,7 +668,7 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_pseudo_class_simple
             auto an_plus_b_pattern = parse_a_n_plus_b_pattern(tokens);
             if (!an_plus_b_pattern.has_value()) {
                 ErrorReporter::the().report(InvalidPseudoClassOrElementError {
-                    .name = MUST(String::formatted(":{}", pseudo_class_name(pseudo_class))),
+                    .name = Utf16String::formatted(":{}", pseudo_class_name(pseudo_class)),
                     .value_string = tokens.dump_string(),
                     .description = "Invalid An+B format."_string,
                 });
@@ -685,7 +690,7 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_pseudo_class_simple
 
             // Parse the `of <selector-list>` syntax
             auto const& maybe_of = tokens.consume_a_token();
-            if (!maybe_of.is_ident("of"sv))
+            if (!maybe_of.is_ident("of"_utf16))
                 return ParseError::SyntaxError;
 
             tokens.discard_whitespace();
@@ -708,7 +713,7 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_pseudo_class_simple
         auto maybe_pseudo_class = pseudo_class_from_string(pseudo_function.name);
         if (!maybe_pseudo_class.has_value()) {
             ErrorReporter::the().report(UnknownPseudoClassOrElementError {
-                .name = MUST(String::formatted(":{}", pseudo_function.name)),
+                .name = Utf16String::formatted(":{}", pseudo_function.name),
             });
             return ParseError::SyntaxError;
         }
@@ -717,8 +722,8 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_pseudo_class_simple
 
         if (!metadata.is_valid_as_function) {
             ErrorReporter::the().report(InvalidPseudoClassOrElementError {
-                .name = MUST(String::formatted(":{}", pseudo_function.name)),
-                .value_string = pseudo_function.name.to_string(),
+                .name = Utf16String::formatted(":{}", pseudo_function.name),
+                .value_string = token_name_for_diagnostics(pseudo_function.name),
                 .description = "Not valid as a function."_string,
             });
             return ParseError::SyntaxError;
@@ -726,8 +731,8 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_pseudo_class_simple
 
         if (pseudo_function.value.is_empty()) {
             ErrorReporter::the().report(InvalidPseudoClassOrElementError {
-                .name = MUST(String::formatted(":{}", pseudo_function.name)),
-                .value_string = pseudo_function.name.to_string(),
+                .name = Utf16String::formatted(":{}", pseudo_function.name),
+                .value_string = token_name_for_diagnostics(pseudo_function.name),
                 .description = "Missing arguments."_string,
             });
             return ParseError::SyntaxError;
@@ -737,8 +742,8 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_pseudo_class_simple
         // https://drafts.csswg.org/selectors/#relational
         if (pseudo_class == PseudoClass::Has && m_pseudo_class_context.contains_slow(PseudoClass::Has)) {
             ErrorReporter::the().report(InvalidPseudoClassOrElementError {
-                .name = MUST(String::formatted(":{}", pseudo_function.name)),
-                .value_string = pseudo_function.name.to_string(),
+                .name = Utf16String::formatted(":{}", pseudo_function.name),
+                .value_string = token_name_for_diagnostics(pseudo_function.name),
                 .description = ":has() is not allowed inside :has()."_string,
             });
             return ParseError::SyntaxError;
@@ -757,8 +762,8 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_pseudo_class_simple
             auto compound_selector_or_error = parse_compound_selector(function_token_stream);
             if (compound_selector_or_error.is_error()) {
                 ErrorReporter::the().report(InvalidPseudoClassOrElementError {
-                    .name = MUST(String::formatted(":{}", pseudo_function.name)),
-                    .value_string = pseudo_function.name.to_string(),
+                    .name = Utf16String::formatted(":{}", pseudo_function.name),
+                    .value_string = token_name_for_diagnostics(pseudo_function.name),
                     .description = "Failed to parse argument as a compound selector."_string,
                 });
                 return ParseError::SyntaxError;
@@ -766,8 +771,8 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_pseudo_class_simple
             function_token_stream.discard_whitespace();
             if (function_token_stream.has_next_token()) {
                 ErrorReporter::the().report(InvalidPseudoClassOrElementError {
-                    .name = MUST(String::formatted("::{}", pseudo_function.name)),
-                    .value_string = pseudo_function.name.to_string(),
+                    .name = Utf16String::formatted("::{}", pseudo_function.name),
+                    .value_string = token_name_for_diagnostics(pseudo_function.name),
                     .description = "Trailing tokens after compound selector argument."_string,
                 });
                 return ParseError::SyntaxError;
@@ -809,8 +814,8 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_pseudo_class_simple
             function_token_stream.discard_whitespace();
             if (!maybe_ident_token.is(Token::Type::Ident) || function_token_stream.has_next_token()) {
                 ErrorReporter::the().report(InvalidPseudoClassOrElementError {
-                    .name = MUST(String::formatted(":{}", pseudo_function.name)),
-                    .value_string = pseudo_function.name.to_string(),
+                    .name = Utf16String::formatted(":{}", pseudo_function.name),
+                    .value_string = token_name_for_diagnostics(pseudo_function.name),
                     .description = "Failed to parse argument as an ident."_string,
                 });
                 return ParseError::SyntaxError;
@@ -830,7 +835,7 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_pseudo_class_simple
             };
         }
         case PseudoClassMetadata::ParameterType::LanguageRanges: {
-            Vector<FlyString> languages;
+            Vector<Utf16FlyString> languages;
             auto function_token_stream = TokenStream(pseudo_function.value);
             auto language_token_lists = parse_a_comma_separated_list_of_component_values(function_token_stream);
 
@@ -840,8 +845,8 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_pseudo_class_simple
                 auto const& language_token = language_token_stream.consume_a_token();
                 if (!(language_token.is(Token::Type::Ident) || language_token.is(Token::Type::String))) {
                     ErrorReporter::the().report(InvalidPseudoClassOrElementError {
-                        .name = MUST(String::formatted(":{}", pseudo_function.name)),
-                        .value_string = pseudo_function.name.to_string(),
+                        .name = Utf16String::formatted(":{}", pseudo_function.name),
+                        .value_string = token_name_for_diagnostics(pseudo_function.name),
                         .description = "Failed to parse argument as a language range: Not a string/ident."_string,
                     });
                     return ParseError::SyntaxError;
@@ -853,8 +858,8 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_pseudo_class_simple
                 language_token_stream.discard_whitespace();
                 if (language_token_stream.has_next_token()) {
                     ErrorReporter::the().report(InvalidPseudoClassOrElementError {
-                        .name = MUST(String::formatted(":{}", pseudo_function.name)),
-                        .value_string = pseudo_function.name.to_string(),
+                        .name = Utf16String::formatted(":{}", pseudo_function.name),
+                        .value_string = token_name_for_diagnostics(pseudo_function.name),
                         .description = "Failed to parse argument as a language range: Has trailing tokens."_string,
                     });
                     return ParseError::SyntaxError;
@@ -884,8 +889,8 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_pseudo_class_simple
 
                 if (!maybe_integer.is(Token::Type::Number) || !maybe_integer.token().is_integer()) {
                     ErrorReporter::the().report(InvalidPseudoClassOrElementError {
-                        .name = MUST(String::formatted(":{}", pseudo_function.name)),
-                        .value_string = pseudo_function.name.to_string(),
+                        .name = Utf16String::formatted(":{}", pseudo_function.name),
+                        .value_string = token_name_for_diagnostics(pseudo_function.name),
                         .description = "Failed to parse argument as a <level>: Not an <integer> literal."_string,
                     });
                     return ParseError::SyntaxError;
@@ -893,8 +898,8 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_pseudo_class_simple
 
                 if (level_token_stream.has_next_token()) {
                     ErrorReporter::the().report(InvalidPseudoClassOrElementError {
-                        .name = MUST(String::formatted(":{}", pseudo_function.name)),
-                        .value_string = pseudo_function.name.to_string(),
+                        .name = Utf16String::formatted(":{}", pseudo_function.name),
+                        .value_string = token_name_for_diagnostics(pseudo_function.name),
                         .description = "Failed to parse argument as a <level>: Has trailing tokens."_string,
                     });
                     return ParseError::SyntaxError;
@@ -932,7 +937,7 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_pseudo_class_simple
         }
     }
     ErrorReporter::the().report(InvalidSelectorError {
-        .value_string = tokens.next_token().to_string(),
+        .value_string = tokens.next_token().to_string().to_utf8(),
         .description = MUST(String::formatted("Pseudo-class should be an ident or function, got: '{}'", tokens.next_token().to_debug_string())),
     });
     return ParseError::SyntaxError;
@@ -957,7 +962,7 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_pseudo_element_simp
 
     auto const& name_token = tokens.consume_a_token();
     bool is_function = false;
-    FlyString pseudo_name;
+    Utf16FlyString pseudo_name;
 
     if (name_token.is(Token::Type::Ident)) {
         pseudo_name = name_token.token().ident();
@@ -966,7 +971,7 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_pseudo_element_simp
         is_function = true;
     } else {
         ErrorReporter::the().report(InvalidSelectorError {
-            .value_string = name_token.to_string(),
+            .value_string = name_token.to_string().to_utf8(),
             .description = MUST(String::formatted("Pseudo-element should be an ident or function, got: '{}'", name_token.to_debug_string())),
         });
         return ParseError::SyntaxError;
@@ -994,8 +999,8 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_pseudo_element_simp
                 };
             }
             ErrorReporter::the().report(InvalidPseudoClassOrElementError {
-                .name = MUST(String::formatted(":{}", pseudo_name)),
-                .value_string = name_token.to_string(),
+                .name = Utf16String::formatted(":{}", pseudo_name),
+                .value_string = name_token.to_string().to_utf8(),
                 .description = "This is not a legacy pseudo-element."_string,
             });
             return ParseError::SyntaxError;
@@ -1007,8 +1012,8 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_pseudo_element_simp
         if (is_function) {
             if (!metadata.is_valid_as_function) {
                 ErrorReporter::the().report(InvalidPseudoClassOrElementError {
-                    .name = MUST(String::formatted("::{}", pseudo_name)),
-                    .value_string = name_token.to_string(),
+                    .name = Utf16String::formatted("::{}", pseudo_name),
+                    .value_string = name_token.to_string().to_utf8(),
                     .description = "Not valid as a function."_string,
                 });
                 return ParseError::SyntaxError;
@@ -1022,8 +1027,8 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_pseudo_element_simp
             case PseudoElementMetadata::ParameterType::None:
                 if (function_tokens.has_next_token()) {
                     ErrorReporter::the().report(InvalidPseudoClassOrElementError {
-                        .name = MUST(String::formatted("::{}", pseudo_name)),
-                        .value_string = name_token.to_string(),
+                        .name = Utf16String::formatted("::{}", pseudo_name),
+                        .value_string = name_token.to_string().to_utf8(),
                         .description = "Should have no arguments."_string,
                     });
                     return ParseError::SyntaxError;
@@ -1033,8 +1038,8 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_pseudo_element_simp
                 auto compound_selector_or_error = parse_compound_selector(function_tokens);
                 if (compound_selector_or_error.is_error()) {
                     ErrorReporter::the().report(InvalidPseudoClassOrElementError {
-                        .name = MUST(String::formatted("::{}", pseudo_name)),
-                        .value_string = name_token.to_string(),
+                        .name = Utf16String::formatted("::{}", pseudo_name),
+                        .value_string = name_token.to_string().to_utf8(),
                         .description = "Failed to parse argument as a compound selector."_string,
                     });
                     return ParseError::SyntaxError;
@@ -1042,8 +1047,8 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_pseudo_element_simp
                 function_tokens.discard_whitespace();
                 if (function_tokens.has_next_token()) {
                     ErrorReporter::the().report(InvalidPseudoClassOrElementError {
-                        .name = MUST(String::formatted("::{}", pseudo_name)),
-                        .value_string = name_token.to_string(),
+                        .name = Utf16String::formatted("::{}", pseudo_name),
+                        .value_string = name_token.to_string().to_utf8(),
                         .description = "Trailing tokens after compound selector argument."_string,
                     });
                     return ParseError::SyntaxError;
@@ -1060,8 +1065,8 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_pseudo_element_simp
                 while (function_tokens.has_next_token()) {
                     if (!function_tokens.next_token().is(Token::Type::Ident)) {
                         ErrorReporter::the().report(InvalidPseudoClassOrElementError {
-                            .name = MUST(String::formatted("::{}", pseudo_name)),
-                            .value_string = name_token.to_string(),
+                            .name = Utf16String::formatted("::{}", pseudo_name),
+                            .value_string = name_token.to_string().to_utf8(),
                             .description = "Contains invalid <ident>."_string,
                         });
                         return ParseError::SyntaxError;
@@ -1082,8 +1087,8 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_pseudo_element_simp
                     value = Selector::PseudoElementSelector::PTNameSelector { .value = custom_ident.release_value() };
                 } else {
                     ErrorReporter::the().report(InvalidPseudoClassOrElementError {
-                        .name = MUST(String::formatted("::{}", pseudo_name)),
-                        .value_string = name_token.to_string(),
+                        .name = Utf16String::formatted("::{}", pseudo_name),
+                        .value_string = name_token.to_string().to_utf8(),
                         .description = MUST(String::formatted("Invalid <pt-name-selector> - expected `*` or `<custom-ident>`, got `{}`", function_tokens.next_token().to_debug_string())),
                     });
                     return ParseError::SyntaxError;
@@ -1091,8 +1096,8 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_pseudo_element_simp
                 function_tokens.discard_whitespace();
                 if (function_tokens.has_next_token()) {
                     ErrorReporter::the().report(InvalidPseudoClassOrElementError {
-                        .name = MUST(String::formatted("::{}", pseudo_name)),
-                        .value_string = name_token.to_string(),
+                        .name = Utf16String::formatted("::{}", pseudo_name),
+                        .value_string = name_token.to_string().to_utf8(),
                         .description = "Invalid <pt-name-selector> - trailing tokens."_string,
                     });
                     return ParseError::SyntaxError;
@@ -1104,8 +1109,8 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_pseudo_element_simp
         } else {
             if (!metadata.is_valid_as_identifier) {
                 ErrorReporter::the().report(InvalidPseudoClassOrElementError {
-                    .name = MUST(String::formatted("::{}", pseudo_name)),
-                    .value_string = name_token.to_string(),
+                    .name = Utf16String::formatted("::{}", pseudo_name),
+                    .value_string = name_token.to_string().to_utf8(),
                     .description = "Only valid as a function."_string,
                 });
                 return ParseError::SyntaxError;
@@ -1117,7 +1122,7 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_pseudo_element_simp
         if (is_aliased_pseudo) {
             return Selector::SimpleSelector {
                 .type = Selector::SimpleSelector::Type::PseudoElement,
-                .value = Selector::PseudoElementSelector { pseudo_element.release_value(), pseudo_name.to_string().to_ascii_lowercase(), move(value) }
+                .value = Selector::PseudoElementSelector { pseudo_element.release_value(), pseudo_name.to_ascii_lowercase(), move(value) }
             };
         }
 
@@ -1132,7 +1137,7 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_pseudo_element_simp
     // and that are not functional notations must be treated as valid at parse time. (That is, ::-webkit-asdf is
     // valid at parse time, but ::-webkit-jkl() is not.) If they’re not otherwise recognized and supported, they
     // must be treated as matching nothing, and are unknown -webkit- pseudo-elements.
-    if (!is_function && pseudo_name.starts_with_bytes("-webkit-"sv, CaseSensitivity::CaseInsensitive)) {
+    if (!is_function && pseudo_name.starts_with_ignoring_ascii_case("-webkit-"sv)) {
         // NB: :has() only allows a limited set of pseudo-elements inside it, which doesn't include unknown ones.
         if (m_pseudo_class_context.contains_slow(PseudoClass::Has))
             return ParseError::SyntaxError;
@@ -1140,7 +1145,7 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_pseudo_element_simp
         return Selector::SimpleSelector {
             .type = Selector::SimpleSelector::Type::PseudoElement,
             // Unknown -webkit- pseudo-elements must be serialized in ASCII lowercase.
-            .value = Selector::PseudoElementSelector { PseudoElement::UnknownWebKit, pseudo_name.to_string().to_ascii_lowercase() },
+            .value = Selector::PseudoElementSelector { PseudoElement::UnknownWebKit, pseudo_name.to_ascii_lowercase() },
         };
     }
 
@@ -1148,7 +1153,7 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_pseudo_element_simp
         return ParseError::IncludesIgnoredVendorPrefix;
 
     ErrorReporter::the().report(UnknownPseudoClassOrElementError {
-        .name = MUST(String::formatted("::{}", pseudo_name)),
+        .name = Utf16String::formatted("::{}", pseudo_name),
     });
     return ParseError::SyntaxError;
 }
@@ -1216,7 +1221,7 @@ Parser::ParseErrorOr<Optional<Selector::SimpleSelector>> Parser::parse_simple_se
             }
             return Selector::SimpleSelector {
                 .type = Selector::SimpleSelector::Type::Class,
-                .value = Selector::SimpleSelector::Name { class_name_value.token().ident() }
+                .value = Selector::SimpleSelector::ClassName { class_name_value.token().ident() }
             };
         }
         default:
@@ -1238,7 +1243,7 @@ Parser::ParseErrorOr<Optional<Selector::SimpleSelector>> Parser::parse_simple_se
         }
         return Selector::SimpleSelector {
             .type = Selector::SimpleSelector::Type::Id,
-            .value = Selector::SimpleSelector::Name { first_value.token().hash_value() }
+            .value = Selector::SimpleSelector::Id { first_value.token().hash_value() }
         };
     }
 
@@ -1261,11 +1266,11 @@ Optional<Selector::SimpleSelector::ANPlusBPattern> Parser::parse_a_n_plus_b_patt
         return value.is(Token::Type::Delim) && (value.token().delim() == '+' || value.token().delim() == '-');
     };
 
-    auto is_series_of_1_or_more_digits = [](StringView string) -> bool {
+    auto is_series_of_1_or_more_digits = [](Utf16View string) -> bool {
         if (string.is_empty())
             return false;
-        for (char c : string) {
-            if (!is_ascii_digit(c))
+        for (auto code_point : string) {
+            if (code_point > NumericLimits<u8>::max() || !is_ascii_digit(static_cast<char>(code_point)))
                 return false;
         }
         return true;
@@ -1292,24 +1297,24 @@ Optional<Selector::SimpleSelector::ANPlusBPattern> Parser::parse_a_n_plus_b_patt
     auto is_ndashdigit_dimension = [&](ComponentValue const& value) -> bool {
         return value.is(Token::Type::Dimension)
             && value.token().is_integer()
-            && value.token().dimension_unit().starts_with_bytes("n-"sv, CaseSensitivity::CaseInsensitive)
-            && is_series_of_1_or_more_digits(value.token().dimension_unit().bytes_as_string_view().substring_view(2));
+            && value.token().dimension_unit().starts_with_ignoring_ascii_case("n-"sv)
+            && is_series_of_1_or_more_digits(value.token().dimension_unit().view().substring_view(2));
     };
 
     // <ndashdigit-ident> is an <ident-token> whose value is an ASCII case-insensitive match for "n-*", where "*" is a
     // series of one or more digits
     auto is_ndashdigit_ident = [&](ComponentValue const& value) -> bool {
         return value.is(Token::Type::Ident)
-            && value.token().ident().starts_with_bytes("n-"sv, CaseSensitivity::CaseInsensitive)
-            && is_series_of_1_or_more_digits(value.token().ident().bytes_as_string_view().substring_view(2));
+            && value.token().ident().starts_with_ignoring_ascii_case("n-"sv)
+            && is_series_of_1_or_more_digits(value.token().ident().view().substring_view(2));
     };
 
     // <dashndashdigit-ident> is an <ident-token> whose value is an ASCII case-insensitive match for "-n-*", where "*"
     // is a series of one or more digits
     auto is_dashndashdigit_ident = [&](ComponentValue const& value) -> bool {
         return value.is(Token::Type::Ident)
-            && value.token().ident().starts_with_bytes("-n-"sv, CaseSensitivity::CaseInsensitive)
-            && is_series_of_1_or_more_digits(value.token().ident().bytes_as_string_view().substring_view(3));
+            && value.token().ident().starts_with_ignoring_ascii_case("-n-"sv)
+            && is_series_of_1_or_more_digits(value.token().ident().view().substring_view(3));
     };
 
     // <integer> is a <number-token> with its type flag set to "integer"
@@ -1332,12 +1337,12 @@ Optional<Selector::SimpleSelector::ANPlusBPattern> Parser::parse_a_n_plus_b_patt
     values.discard_whitespace();
 
     // odd | even
-    if (values.next_token().is_ident("odd"sv)) {
+    if (values.next_token().is_ident("odd"_utf16)) {
         values.discard_a_token(); // odd
         transaction.commit();
         return Selector::SimpleSelector::ANPlusBPattern { 2, 1 };
     }
-    if (values.next_token().is_ident("even"sv)) {
+    if (values.next_token().is_ident("even"_utf16)) {
         values.discard_a_token(); // even
         transaction.commit();
         return Selector::SimpleSelector::ANPlusBPattern { 2, 0 };
@@ -1402,7 +1407,7 @@ Optional<Selector::SimpleSelector::ANPlusBPattern> Parser::parse_a_n_plus_b_patt
     if (is_ndashdigit_dimension(values.next_token())) {
         auto const& dimension = values.consume_a_token().token();
         int a = dimension.dimension_value_int();
-        auto maybe_b = dimension.dimension_unit().bytes_as_string_view().substring_view(1).to_number<int>();
+        auto maybe_b = dimension.dimension_unit().view().substring_view(1).to_number<int>();
         if (maybe_b.has_value()) {
             transaction.commit();
             return Selector::SimpleSelector::ANPlusBPattern { a, maybe_b.value() };
@@ -1413,7 +1418,7 @@ Optional<Selector::SimpleSelector::ANPlusBPattern> Parser::parse_a_n_plus_b_patt
 
     // <dashndashdigit-ident>
     if (is_dashndashdigit_ident(values.next_token())) {
-        auto maybe_b = values.consume_a_token().token().ident().bytes_as_string_view().substring_view(2).to_number<int>();
+        auto maybe_b = values.consume_a_token().token().ident().view().substring_view(2).to_number<int>();
         if (maybe_b.has_value()) {
             transaction.commit();
             return Selector::SimpleSelector::ANPlusBPattern { -1, maybe_b.value() };
@@ -1425,7 +1430,7 @@ Optional<Selector::SimpleSelector::ANPlusBPattern> Parser::parse_a_n_plus_b_patt
     // -n
     // -n <signed-integer>
     // -n ['+' | '-'] <signless-integer>
-    if (values.next_token().is_ident("-n"sv)) {
+    if (values.next_token().is_ident("-n"_utf16)) {
         values.discard_a_token(); // -n
         values.discard_whitespace();
 
@@ -1455,7 +1460,7 @@ Optional<Selector::SimpleSelector::ANPlusBPattern> Parser::parse_a_n_plus_b_patt
         return Selector::SimpleSelector::ANPlusBPattern { -1, 0 };
     }
     // -n- <signless-integer>
-    if (values.next_token().is_ident("-n-"sv)) {
+    if (values.next_token().is_ident("-n-"_utf16)) {
         values.discard_a_token(); // -n-
         values.discard_whitespace();
         auto const& second_value = values.consume_a_token();
@@ -1485,7 +1490,7 @@ Optional<Selector::SimpleSelector::ANPlusBPattern> Parser::parse_a_n_plus_b_patt
     // '+'?† n
     // '+'?† n <signed-integer>
     // '+'?† n ['+' | '-'] <signless-integer>
-    if (first_after_plus.is_ident("n"sv)) {
+    if (first_after_plus.is_ident("n"_utf16)) {
         values.discard_whitespace();
 
         // '+'?† n <signed-integer>
@@ -1515,7 +1520,7 @@ Optional<Selector::SimpleSelector::ANPlusBPattern> Parser::parse_a_n_plus_b_patt
     }
 
     // '+'?† n- <signless-integer>
-    if (first_after_plus.is_ident("n-"sv)) {
+    if (first_after_plus.is_ident("n-"_utf16)) {
         values.discard_whitespace();
         auto const& second_value = values.consume_a_token();
         if (is_signless_integer(second_value)) {
@@ -1529,7 +1534,7 @@ Optional<Selector::SimpleSelector::ANPlusBPattern> Parser::parse_a_n_plus_b_patt
 
     // '+'?† <ndashdigit-ident>
     if (is_ndashdigit_ident(first_after_plus)) {
-        auto maybe_b = first_after_plus.token().ident().bytes_as_string_view().substring_view(1).to_number<int>();
+        auto maybe_b = first_after_plus.token().ident().view().substring_view(1).to_number<int>();
         if (maybe_b.has_value()) {
             transaction.commit();
             return Selector::SimpleSelector::ANPlusBPattern { 1, maybe_b.value() };
@@ -1563,7 +1568,7 @@ Parser::ParseErrorOr<PageSelectorList> Parser::parse_a_page_selector_list(TokenS
 
     while (tokens.has_next_token()) {
         // First optional ident
-        Optional<FlyString> maybe_ident;
+        Optional<Utf16FlyString> maybe_ident;
         if (tokens.next_token().is(Token::Type::Ident))
             maybe_ident = static_cast<Token>(tokens.consume_a_token()).ident();
 
@@ -1573,7 +1578,7 @@ Parser::ParseErrorOr<PageSelectorList> Parser::parse_a_page_selector_list(TokenS
             tokens.discard_a_token(); // :
             if (!tokens.next_token().is(Token::Type::Ident)) {
                 ErrorReporter::the().report(InvalidSelectorError {
-                    .rule_name = "@page"_fly_string,
+                    .rule_name = "@page"_utf16_fly_string,
                     .value_string = tokens.dump_string(),
                     .description = "Pseudo-classes must be idents."_string,
                 });
@@ -1584,8 +1589,8 @@ Parser::ParseErrorOr<PageSelectorList> Parser::parse_a_page_selector_list(TokenS
                 pseudo_classes.append(*pseudo_class);
             } else {
                 ErrorReporter::the().report(UnknownPseudoClassOrElementError {
-                    .rule_name = "@page"_fly_string,
-                    .name = MUST(String::formatted(":{}", pseudo_class_name)),
+                    .rule_name = "@page"_utf16_fly_string,
+                    .name = Utf16String::formatted(":{}", pseudo_class_name),
                 });
                 return ParseError::SyntaxError;
             }
@@ -1594,7 +1599,7 @@ Parser::ParseErrorOr<PageSelectorList> Parser::parse_a_page_selector_list(TokenS
         if (!maybe_ident.has_value() && pseudo_classes.is_empty()) {
             // Nothing parsed
             ErrorReporter::the().report(InvalidSelectorError {
-                .rule_name = "@page"_fly_string,
+                .rule_name = "@page"_utf16_fly_string,
                 .value_string = tokens.dump_string(),
                 .description = "Is empty."_string,
             });
@@ -1610,7 +1615,7 @@ Parser::ParseErrorOr<PageSelectorList> Parser::parse_a_page_selector_list(TokenS
             tokens.discard_whitespace();
             if (!tokens.has_next_token()) {
                 ErrorReporter::the().report(InvalidSelectorError {
-                    .rule_name = "@page"_fly_string,
+                    .rule_name = "@page"_utf16_fly_string,
                     .value_string = tokens.dump_string(),
                     .description = "Trailing comma."_string,
                 });
@@ -1619,7 +1624,7 @@ Parser::ParseErrorOr<PageSelectorList> Parser::parse_a_page_selector_list(TokenS
 
         } else if (tokens.has_next_token()) {
             ErrorReporter::the().report(InvalidSelectorError {
-                .rule_name = "@page"_fly_string,
+                .rule_name = "@page"_utf16_fly_string,
                 .value_string = tokens.dump_string(),
                 .description = "Trailing tokens."_string,
             });

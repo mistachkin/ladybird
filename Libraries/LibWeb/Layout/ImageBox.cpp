@@ -27,14 +27,14 @@ static ImageProvider const& image_provider_for_element(DOM::Element const& eleme
     VERIFY_NOT_REACHED();
 }
 
-ImageBox::ImageBox(DOM::Document& document, GC::Ptr<DOM::Element> element, CSS::ComputedProperties const& style, ImageProvider const& image_provider)
+ImageBox::ImageBox(DOM::Document& document, GC::Ptr<DOM::Element> element, NonnullRefPtr<CSS::ComputedValues const> style, ImageProvider const& image_provider)
     : ReplacedBox(document, element, style)
 {
     VERIFY(element);
     VERIFY(&image_provider == &image_provider_for_element(*element));
 }
 
-ImageBox::ImageBox(DOM::Document& document, GC::Ptr<DOM::Element> element, CSS::ComputedProperties const& style, NonnullOwnPtr<ImageProvider> image_provider)
+ImageBox::ImageBox(DOM::Document& document, GC::Ptr<DOM::Element> element, NonnullRefPtr<CSS::ComputedValues const> style, NonnullOwnPtr<ImageProvider> image_provider)
     : ReplacedBox(document, element, style)
     , m_owned_image_provider(move(image_provider))
 {
@@ -64,7 +64,11 @@ CSS::SizeWithAspectRatio ImageBox::natural_size() const
         };
     }
 
-    String alt;
+    // While a load is still pending we render blank space, not the alt text.
+    if (image_provider.is_image_pending())
+        return { 0, 0, {} };
+
+    Utf16String alt;
     if (auto element = dom_node())
         alt = element->get_attribute_value(HTML::AttributeNames::alt);
     if (alt.is_empty())
@@ -72,7 +76,7 @@ CSS::SizeWithAspectRatio ImageBox::natural_size() const
 
     auto font = Platform::FontPlugin::the().default_font(12);
     CSSPixels alt_text_width = m_cached_alt_text_width.ensure([&] {
-        return CSSPixels::nearest_value_for(font->width(Utf16String::from_utf8(alt)));
+        return CSSPixels::nearest_value_for(font->width(alt));
     });
     auto width = alt_text_width + 16;
     auto height = CSSPixels::nearest_value_for(font->pixel_size()) + 16;
@@ -91,7 +95,7 @@ void ImageBox::dom_node_did_update_alt_text(Badge<ImageProvider>)
 
 bool ImageBox::renders_as_alt_text() const
 {
-    return !image_provider().is_image_available();
+    return image_provider().renders_as_alt_text();
 }
 
 RefPtr<Painting::Paintable> ImageBox::create_paintable() const

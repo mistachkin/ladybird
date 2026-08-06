@@ -15,18 +15,71 @@ from typing import Tuple
 
 from Utils.lexer import Lexer
 
+ALLOWED_EXTENDED_ATTRIBUTES = frozenset(
+    {
+        "AllowResizable",
+        "AllowShared",
+        "AttributeCallbackName",
+        "CEReactions",
+        "CachedAttribute",
+        "Clamp",
+        "Default",
+        "DefinesAsyncIteratorReturn",
+        "EnforceRange",
+        "Enumerated",
+        "Experimental",
+        "Exposed",
+        "FIXME",
+        "FlyString",
+        "GenerateToValue",
+        "Global",
+        "HTMLConstructor",
+        "ImplementedAs",
+        "InvalidValueDefault",
+        "LegacyFactoryFunction",
+        "LegacyLenientSetter",
+        "LegacyLenientThis",
+        "LegacyNamespace",
+        "LegacyNoInterfaceObject",
+        "LegacyNullToEmptyString",
+        "LegacyOverrideBuiltIns",
+        "LegacyTreatNonObjectAsNull",
+        "LegacyUnenumerableNamedProperties",
+        "LegacyUnforgeable",
+        "LegacyWindowAlias",
+        "MissingValueDefault",
+        "NewObject",
+        "PutForwards",
+        "Reflect",
+        "ReflectRange",
+        "ReflectSetter",
+        "Replaceable",
+        "SameObject",
+        "SecureContext",
+        "Serializable",
+        "Transferable",
+        "URL",
+        "Unscopable",
+        "Utf16FlyString",
+        "WithFinalizer",
+        "WithGCVisitor",
+        "WithInitializer",
+    }
+)
+
 
 @dataclass(frozen=True)
 class IDLType:
     name: str
     nullable: bool = False
+    extended_attributes: Dict[str, str] = field(default_factory=dict, compare=False, hash=False)
 
     def __str__(self) -> str:
         nullable_suffix = "?" if self.nullable else ""
         return f"{self.name}{nullable_suffix}"
 
     def clone_with_nullable(self, nullable: bool) -> "IDLType":
-        return IDLType(self.name, nullable)
+        return IDLType(self.name, nullable, self.extended_attributes)
 
     def without_nullable(self) -> "IDLType":
         return self.clone_with_nullable(False)
@@ -54,9 +107,14 @@ class IDLType:
 class IDLUnionType(IDLType):
     member_types: Tuple[IDLType, ...]
 
-    def __init__(self, member_types: Sequence[IDLType], nullable: bool = False) -> None:
+    def __init__(
+        self,
+        member_types: Sequence[IDLType],
+        nullable: bool = False,
+        extended_attributes: Optional[Dict[str, str]] = None,
+    ) -> None:
         object.__setattr__(self, "member_types", tuple(member_types))
-        super().__init__(self.name_for_member_types(member_types), nullable)
+        super().__init__(self.name_for_member_types(member_types), nullable, extended_attributes or {})
 
     @staticmethod
     def name_for_member_types(member_types: Sequence[IDLType]) -> str:
@@ -67,7 +125,7 @@ class IDLUnionType(IDLType):
         return f"{self.name_for_member_types(self.member_types)}{nullable_suffix}"
 
     def clone_with_nullable(self, nullable: bool) -> "IDLUnionType":
-        return IDLUnionType(self.member_types, nullable)
+        return IDLUnionType(self.member_types, nullable, self.extended_attributes)
 
     def flattened_member_types(self) -> List[IDLType]:
         flattened_member_types: List[IDLType] = []
@@ -89,16 +147,22 @@ class IDLUnionType(IDLType):
 class IDLParameterizedType(IDLType):
     parameters: Tuple[IDLType, ...]
 
-    def __init__(self, name: str, parameters: Sequence[IDLType], nullable: bool = False) -> None:
+    def __init__(
+        self,
+        name: str,
+        parameters: Sequence[IDLType],
+        nullable: bool = False,
+        extended_attributes: Optional[Dict[str, str]] = None,
+    ) -> None:
         object.__setattr__(self, "parameters", tuple(parameters))
-        super().__init__(name, nullable)
+        super().__init__(name, nullable, extended_attributes or {})
 
     def __str__(self) -> str:
         nullable_suffix = "?" if self.nullable else ""
         return f"{self.name}<{', '.join(str(parameter) for parameter in self.parameters)}>{nullable_suffix}"
 
     def clone_with_nullable(self, nullable: bool) -> "IDLParameterizedType":
-        return IDLParameterizedType(self.name, self.parameters, nullable)
+        return IDLParameterizedType(self.name, self.parameters, nullable, self.extended_attributes)
 
     def child_types(self) -> Tuple[IDLType, ...]:
         return self.parameters
@@ -518,8 +582,9 @@ class Parser:
         return Typedef(name=name, path=self.path, type=typedef_type)
 
     def parse_type(self) -> IDLType:
+        extended_attributes = self.parse_leading_extended_attributes()
         if self.lexer.consume_specific("("):
-            return self.parse_union_type()
+            return self.parse_union_type(extended_attributes)
 
         type_name = self.parse_type_name()
         parameters: List[IDLType] = []
@@ -528,10 +593,10 @@ class Parser:
 
         nullable = self.lexer.consume_specific("?")
         if parameters:
-            return IDLParameterizedType(type_name, parameters, nullable)
-        return IDLType(type_name, nullable)
+            return IDLParameterizedType(type_name, parameters, nullable, extended_attributes)
+        return IDLType(type_name, nullable, extended_attributes)
 
-    def parse_union_type(self) -> IDLUnionType:
+    def parse_union_type(self, extended_attributes: Optional[Dict[str, str]] = None) -> IDLUnionType:
         member_types = [self.parse_type()]
         self.consume_whitespace()
         self.consume_keyword("or")
@@ -545,7 +610,7 @@ class Parser:
             self.consume_whitespace()
 
         self.assert_specific(")")
-        return IDLUnionType(member_types, self.lexer.consume_specific("?"))
+        return IDLUnionType(member_types, self.lexer.consume_specific("?"), extended_attributes)
 
     def parse_type_name(self) -> str:
         type_words: List[str] = []
@@ -691,7 +756,7 @@ class Parser:
                 special_operation = self.parse_special_operation("getter", extended_attributes)
                 identifier_type = special_operation.identifier_type
 
-                if identifier_type.name == "DOMString" and not identifier_type.nullable:
+                if identifier_type.name in ("DOMString", "Utf16DOMString") and not identifier_type.nullable:
                     interface.named_property_getter = special_operation
                 elif identifier_type.name == "unsigned long" and not identifier_type.nullable:
                     interface.indexed_property_getter = special_operation
@@ -705,7 +770,7 @@ class Parser:
                 special_operation = self.parse_special_operation("setter", extended_attributes)
                 identifier_type = special_operation.identifier_type
 
-                if identifier_type.name == "DOMString" and not identifier_type.nullable:
+                if identifier_type.name in ("DOMString", "Utf16DOMString") and not identifier_type.nullable:
                     interface.named_property_setter = special_operation
                 elif identifier_type.name == "unsigned long" and not identifier_type.nullable:
                     interface.indexed_property_setter = special_operation
@@ -719,7 +784,7 @@ class Parser:
                 special_operation = self.parse_special_operation("deleter", extended_attributes)
                 identifier_type = special_operation.identifier_type
 
-                if identifier_type.name == "DOMString" and not identifier_type.nullable:
+                if identifier_type.name in ("DOMString", "Utf16DOMString") and not identifier_type.nullable:
                     interface.named_property_deleter = special_operation
                 else:
                     self.raise_parse_error(f"named property deleter must use DOMString, got '{identifier_type}'")
@@ -966,6 +1031,9 @@ class Parser:
                 break
 
             name = self.parse_identifier()
+            if name not in ALLOWED_EXTENDED_ATTRIBUTES:
+                self.raise_parse_error(f"unsupported extended attribute '{name}'")
+
             value = ""
             if self.lexer.consume_specific("="):
                 value = self.consume_until_top_level(",", "]").strip()

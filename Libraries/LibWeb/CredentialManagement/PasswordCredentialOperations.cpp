@@ -36,19 +36,22 @@ WebIDL::ExceptionOr<GC::Ref<PasswordCredential>> create_password_credential(JS::
         // 2. Let name be the value of field’s name attribute.
         // 3. If formData’s has() method returns false when executed on name, then skip to the next field.
         auto name = field->attribute(HTML::AttributeNames::name);
-        if (!name.has_value() || !form_data->has(name.value()))
+        if (!name.has_value())
+            continue;
+        if (!form_data->has(*name))
             continue;
 
         // 4. If field’s autocomplete attribute’s value contains one or more autofill detail tokens (tokens), then:
         // 1. For each token in tokens:
-        for (auto tokens = field->attribute(HTML::AttributeNames::autocomplete); auto& token : MUST(tokens->split(' '))) {
+        auto autocomplete_attribute = field->attribute(HTML::AttributeNames::autocomplete).value();
+        for (auto token : autocomplete_attribute.split_view(u' ', SplitBehavior::Nothing)) {
             // 1. If token is an ASCII case-insensitive match for one of the following strings, run the associated steps:
             //    - "new-password"
             //       Set data’s password member’s value to the result of executing formData’s get() method on name,
             //       and newPasswordObserved to true.
-            if (token.equals_ignoring_ascii_case("new-password"sv)) {
-                if (auto password = form_data->get(name.value()); password.has<String>()) {
-                    data.password = password.get<String>();
+            if (token.equals_ignoring_ascii_case(u"new-password"sv)) {
+                if (auto password = form_data->get(*name); password.has<Utf16String>()) {
+                    data.password = password.get<Utf16String>();
                     new_password_observed = true;
                 }
             }
@@ -57,32 +60,32 @@ WebIDL::ExceptionOr<GC::Ref<PasswordCredential>> create_password_credential(JS::
             //       formData’s get() method on name.
             //       Note: By checking that newPasswordObserved is false, new-password fields take precedence over
             //             current-password fields.
-            if (!new_password_observed && token.equals_ignoring_ascii_case("current-password"sv)) {
-                if (auto password = form_data->get(name.value()); password.has<String>())
-                    data.password = password.get<String>();
+            if (!new_password_observed && token.equals_ignoring_ascii_case(u"current-password"sv)) {
+                if (auto password = form_data->get(*name); password.has<Utf16String>())
+                    data.password = password.get<Utf16String>();
             }
             //    - "photo"
             //      Set data’s iconURL member’s value to the result of executing formData’s get() method on name.
-            if (token.equals_ignoring_ascii_case("photo"sv)) {
-                if (auto photo = form_data->get(name.value()); photo.has<String>())
-                    data.icon_url = photo.get<String>();
+            if (token.equals_ignoring_ascii_case(u"photo"sv)) {
+                if (auto photo = form_data->get(*name); photo.has<Utf16String>())
+                    data.icon_url = photo.get<Utf16String>();
             }
             //    - "name"
             //    - "nickname"
             //      Set data’s name member’s value to the result of executing formData’s get() method on name.
-            if (token.equals_ignoring_ascii_case("name"sv)) {
-                if (auto name_ = form_data->get(name.value()); name_.has<String>())
-                    data.name = name_.get<String>();
+            if (token.equals_ignoring_ascii_case(u"name"sv)) {
+                if (auto name_ = form_data->get(*name); name_.has<Utf16String>())
+                    data.name = name_.get<Utf16String>();
             }
-            if (token.equals_ignoring_ascii_case("nickname"sv)) {
-                if (auto nickname = form_data->get(name.value()); nickname.has<String>())
-                    data.name = nickname.get<String>();
+            if (token.equals_ignoring_ascii_case(u"nickname"sv)) {
+                if (auto nickname = form_data->get(*name); nickname.has<Utf16String>())
+                    data.name = nickname.get<Utf16String>();
             }
             //    - "username"
             //      Set data’s id member’s value to the result of executing formData’s get() method on name.
-            if (token.equals_ignoring_ascii_case("username"sv)) {
-                if (auto username = form_data->get(name.value()); username.has<String>()) {
-                    auto id = username.get<String>();
+            if (token.equals_ignoring_ascii_case(u"username"sv)) {
+                if (auto username = form_data->get(*name); username.has<Utf16String>()) {
+                    auto id = username.get<Utf16String>();
                     data.id = id;
                 }
             }
@@ -107,9 +110,9 @@ WebIDL::ExceptionOr<GC::Ref<PasswordCredential>> create_password_credential(JS::
     //            in the constructor.
     //    - data’s password member’s value
     if (data.id.is_empty())
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "'id' must not be empty."sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "'id' must not be empty."_utf16 };
     if (data.password.is_empty())
-        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "'password' must not be empty."sv };
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "'password' must not be empty."_utf16 };
 
     // 3. Set c’s properties as follows:
     //    - password
