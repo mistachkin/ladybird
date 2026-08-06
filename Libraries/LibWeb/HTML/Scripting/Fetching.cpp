@@ -883,7 +883,9 @@ void fetch_th8_script(GC::Ref<HTMLScriptElement> element, URL::URL const& url, E
         }
 
         auto potential_mime_type_for_encoding = Fetch::Infrastructure::extract_mime_type(response->header_list());
-        auto extracted_character_encoding = Fetch::Infrastructure::legacy_extract_an_encoding(potential_mime_type_for_encoding, character_encoding);
+        auto fallback_character_encoding = TextCodec::get_standardized_encoding(character_encoding);
+        VERIFY(fallback_character_encoding.has_value());
+        auto extracted_character_encoding = Fetch::Infrastructure::legacy_extract_an_encoding(potential_mime_type_for_encoding, *fallback_character_encoding);
 
         auto fallback_decoder = TextCodec::decoder_for(extracted_character_encoding);
         VERIFY(fallback_decoder.has_value());

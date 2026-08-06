@@ -248,7 +248,7 @@ void HTMLScriptElement::execute_script()
             document->set_current_script({}, nullptr);
 
         if (m_from_an_external_file)
-            dbgln_if(HTML_SCRIPT_DEBUG, "HTMLScriptElement: Running TH8 script {}", attribute(HTML::AttributeNames::src).value_or(String {}));
+            dbgln_if(HTML_SCRIPT_DEBUG, "HTMLScriptElement: Running TH8 script {}", attribute(HTML::AttributeNames::src).value_or(Utf16String {}));
         else
             dbgln_if(HTML_SCRIPT_DEBUG, "HTMLScriptElement: Running inline TH8 script");
 
@@ -642,6 +642,7 @@ void HTMLScriptElement::prepare_script()
 #if LADYBIRD_ENABLE_TH8
         // [Non-standard] -> "th8"
         else if (m_script_type == ScriptType::TH8) {
+            auto source_text_utf8 = source_text.to_utf8();
             auto script = TH8Script::create(m_document->url().to_byte_string(), source_text_utf8, settings_object, base_url);
             mark_as_ready(Result(move(script)));
         }

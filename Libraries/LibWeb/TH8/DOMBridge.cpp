@@ -74,7 +74,7 @@ static ByteString serialize_event_to_dict(DOM::Event const& event, HandleTable& 
 
     // type
     dict.append("type {"sv);
-    dict.append(event.type().bytes_as_string_view());
+    dict.append(event.type().to_utf16_string().to_byte_string());
     dict.append("} "sv);
 
     // bubbles, cancelable
@@ -212,7 +212,7 @@ static int add_th8_event_listener(
 
     auto callback = realm.heap().allocate<WebIDL::CallbackType>(*callback_function, realm);
     auto listener = realm.heap().allocate<DOM::DOMEventListener>();
-    listener->type = event_type;
+    listener->type = Utf16FlyString::from_utf8(event_type);
     listener->callback = DOM::IDLEventListener::create(realm, *callback);
 
     target.add_an_event_listener(*listener);
@@ -284,7 +284,7 @@ static int document_subcommand(Th8_Interp* interp, DOM::Document& document,
         if (argc < 3)
             return set_error(interp, "wrong # args: should be \"dom::document querySelector selector\""sv);
         auto selector = string_from_th8(argv[2], argl[2]);
-        auto result = document.query_selector(selector);
+        auto result = document.query_selector(Utf16String::from_utf8(selector));
         if (result.is_error())
             return set_error(interp, "querySelector failed"sv);
         return set_result_node(interp, handles, result.release_value());
@@ -294,7 +294,7 @@ static int document_subcommand(Th8_Interp* interp, DOM::Document& document,
         if (argc < 3)
             return set_error(interp, "wrong # args: should be \"dom::document getElementById id\""sv);
         auto id = flystring_from_th8(argv[2], argl[2]);
-        auto element = document.get_element_by_id(id);
+        auto element = document.get_element_by_id(Utf16String::from_utf8(id));
         if (!element)
             return result_clear(interp);
         return set_result_node(interp, handles, element);
@@ -304,8 +304,8 @@ static int document_subcommand(Th8_Interp* interp, DOM::Document& document,
         if (argc < 3)
             return set_error(interp, "wrong # args: should be \"dom::document createElement tagName\""sv);
         auto tag = string_from_th8(argv[2], argl[2]);
-        Variant<String, Bindings::ElementCreationOptions> options { Bindings::ElementCreationOptions {} };
-        auto result = document.create_element(tag, options);
+        Variant<Utf16FlyString, Bindings::ElementCreationOptions> options { Bindings::ElementCreationOptions {} };
+        auto result = document.create_element(Utf16FlyString::from_utf8(tag), options);
         if (result.is_error())
             return set_error(interp, "createElement failed"sv);
         auto element = result.release_value();
@@ -557,9 +557,9 @@ static int object_ensemble_command(Th8_Interp* interp, void* ctx, int argc, char
         if (!is<DOM::Element>(object))
             return set_error(interp, "getAttribute: not an element"sv);
         auto name = flystring_from_th8(argv[2], argl[2]);
-        auto value = static_cast<DOM::Element&>(*object).get_attribute(name);
+        auto value = static_cast<DOM::Element&>(*object).get_attribute(Utf16FlyString::from_utf8(name));
         if (value.has_value())
-            return set_result_string(interp, value.value());
+            return set_result_string(interp, value.value().to_utf8());
         return result_clear(interp);
     }
 
@@ -570,7 +570,7 @@ static int object_ensemble_command(Th8_Interp* interp, void* ctx, int argc, char
             return set_error(interp, "setAttribute: not an element"sv);
         auto name = flystring_from_th8(argv[2], argl[2]);
         auto value = string_from_th8(argv[3], argl[3]);
-        static_cast<DOM::Element&>(*object).set_attribute_value(name, value);
+        static_cast<DOM::Element&>(*object).set_attribute_value(Utf16FlyString::from_utf8(name), Utf16String::from_utf8(value));
         return result_clear(interp);
     }
 
@@ -580,7 +580,7 @@ static int object_ensemble_command(Th8_Interp* interp, void* ctx, int argc, char
         if (!is<DOM::Element>(object))
             return set_error(interp, "removeAttribute: not an element"sv);
         auto name = flystring_from_th8(argv[2], argl[2]);
-        static_cast<DOM::Element&>(*object).remove_attribute(name);
+        static_cast<DOM::Element&>(*object).remove_attribute(Utf16FlyString::from_utf8(name));
         return result_clear(interp);
     }
 
@@ -590,13 +590,13 @@ static int object_ensemble_command(Th8_Interp* interp, void* ctx, int argc, char
         if (!is<DOM::Element>(object))
             return set_error(interp, "hasAttribute: not an element"sv);
         auto name = flystring_from_th8(argv[2], argl[2]);
-        return set_result_bool(interp, static_cast<DOM::Element&>(*object).has_attribute(name));
+        return set_result_bool(interp, static_cast<DOM::Element&>(*object).has_attribute(Utf16FlyString::from_utf8(name)));
     }
 
     if (subcommand == "tagName"sv) {
         if (!is<DOM::Element>(object))
             return set_error(interp, "tagName: not an element"sv);
-        return set_result_string(interp, static_cast<DOM::Element&>(*object).tag_name());
+        return set_result_string(interp, static_cast<DOM::Element&>(*object).tag_name().to_utf16_string().to_utf8());
     }
 
     if (subcommand == "innerHTML"sv) {
@@ -631,7 +631,7 @@ static int object_ensemble_command(Th8_Interp* interp, void* ctx, int argc, char
         if (!is<DOM::ParentNode>(object))
             return set_error(interp, "querySelector: not a parent node"sv);
         auto selector = string_from_th8(argv[2], argl[2]);
-        auto result = static_cast<DOM::ParentNode&>(*object).query_selector(selector);
+        auto result = static_cast<DOM::ParentNode&>(*object).query_selector(Utf16String::from_utf8(selector));
         if (result.is_error())
             return set_error(interp, "querySelector failed"sv);
         return set_result_node(interp, *handles, result.release_value());

@@ -259,7 +259,8 @@ void HTMLMetaElement::inserted()
 
             auto is_ws = [](char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'; };
             size_t i = 0;
-            auto const view = content.bytes_as_string_view();
+            auto const content_utf8 = content.to_utf8();
+            auto const view = content_utf8.bytes_as_string_view();
             while (i < view.length()) {
                 while (i < view.length() && (is_ws(view[i]) || view[i] == ';'))
                     ++i;
