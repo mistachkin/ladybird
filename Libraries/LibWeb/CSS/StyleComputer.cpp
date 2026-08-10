@@ -23,6 +23,7 @@
 #include <AK/NonnullRawPtr.h>
 #include <AK/QuickSort.h>
 #include <AK/Utf8View.h>
+#include <LibGC/Heap.h>
 #include <LibGfx/Font/FontDatabase.h>
 #include <LibWeb/Animations/AnimationEffect.h>
 #include <LibWeb/Animations/DocumentTimeline.h>
@@ -915,6 +916,7 @@ void StyleComputer::collect_animations_into(DOM::AbstractElement abstract_elemen
 void StyleComputer::collect_animations_into(DOM::AbstractElement abstract_element, ReadonlySpan<GC::Ref<Animations::KeyframeEffect>> effects, ComputedProperties& computed_properties) const
 {
     collect_animation_effects_into(abstract_element, effects, computed_properties, nullptr);
+    adjust_animated_element_style_if_needed(computed_properties, abstract_element);
 }
 
 void StyleComputer::collect_animation_effects_into(DOM::AbstractElement abstract_element, ReadonlySpan<GC::Ref<Animations::KeyframeEffect>> effects, ComputedProperties& computed_properties, ComputedProperties::Builder* builder) const
@@ -1334,7 +1336,7 @@ void StyleComputer::collect_animation_effects_into(DOM::AbstractElement abstract
             .transform_reference_box_width = 0,
             .transform_reference_box_height = 0,
         };
-        if (auto paintable = prepared_values.first().effect->target()->unsafe_paintable(); paintable) {
+        if (auto paintable = prepared_values.first().effect->target()->unsafe_paintable(); paintable && paintable->has_layout_node()) {
             auto reference_box = paintable->transform_reference_box();
             animation_context.has_transform_reference_box = true;
             animation_context.transform_reference_box_width = reference_box.width().to_double();
@@ -1494,11 +1496,11 @@ void StyleComputer::process_animation_definitions(ComputedProperties const& comp
 
         // An animation applies to an element if its name appears as one of the identifiers in the computed value of the
         // animation-name property and the animation uses a valid @keyframes rule
-        auto animation = CSSAnimation::create(document.realm());
+        auto animation = CSSAnimation::create(document.relevant_settings_object());
         animation->set_animation_name(animation_properties.name);
         animation->set_owning_element(abstract_element);
 
-        auto effect = Animations::KeyframeEffect::create(document.realm());
+        auto effect = Animations::KeyframeEffect::create();
         animation->set_effect(effect);
 
         animation->apply_css_properties(animation_properties);
@@ -1583,14 +1585,15 @@ static void compute_transitioned_properties(ComputedProperties const& style, DOM
 }
 
 // https://drafts.csswg.org/css-transitions/#starting
-void StyleComputer::start_needed_transitions(ComputedValues const& previous_style, ComputedProperties::Builder& new_style_builder, DOM::AbstractElement abstract_element) const
+Vector<GC::Ref<Animations::KeyframeEffect>> StyleComputer::start_needed_transitions(ComputedValues const& previous_style, ComputedProperties::Builder& new_style_builder, DOM::AbstractElement abstract_element) const
 {
     auto& new_style = new_style_builder.style();
+    auto had_pending_animated_style_update = m_document->needs_animated_style_update();
 
     // NB: We know that a DocumentTimeline's current time is always in milliseconds
     auto current_time = m_document->timeline()->current_time();
     if (!current_time.has_value())
-        return;
+        return {};
     VERIFY(current_time->type == Animations::TimeValue::Type::Milliseconds);
     auto style_change_event_time = current_time->value;
 
@@ -1623,7 +1626,12 @@ void StyleComputer::start_needed_transitions(ComputedValues const& previous_styl
         .transform_reference_box_width = 0,
         .transform_reference_box_height = 0,
     };
-    if (auto paintable = abstract_element.element().unsafe_paintable(); paintable) {
+    // A paintable outlives the layout node it was made for, and a style recompute can reach an
+    // element whose layout node is already gone: the layout tree builder updates the style of an
+    // element a bypass path reached, and `display: none` leaves the flag set until then. A reference
+    // box is a fact about a layout box, so without one there is none - exactly as when the element
+    // was never painted at all.
+    if (auto paintable = abstract_element.element().unsafe_paintable(); paintable && paintable->has_layout_node()) {
         auto reference_box = paintable->transform_reference_box();
         transition_animation_context.has_transform_reference_box = true;
         transition_animation_context.transform_reference_box_width = reference_box.width().to_double();
@@ -1799,7 +1807,11 @@ void StyleComputer::start_needed_transitions(ComputedValues const& previous_styl
         // NB: Construction does not invalidate animated style because the effects were just evaluated. Request the
         //     first animation frame directly so timeline updates can schedule subsequent animated style updates.
         m_document->page().client().request_frame();
+        if (!had_pending_animated_style_update)
+            m_document->clear_needs_animated_style_update();
     }
+
+    return newly_started_transition_effects;
 }
 
 StyleComputer::MatchingRuleSet StyleComputer::build_matching_rule_set(DOM::AbstractElement abstract_element, bool& did_match_any_pseudo_element_rules, ComputeStyleMode mode) const
@@ -2995,27 +3007,40 @@ static ComputedValuesFFI::FfiBoxTypeTransformationInput make_box_type_transforma
     };
 }
 
-static void apply_box_type_transformation(ComputedProperties::Builder& builder, ComputedValuesFFI::FfiDisplay const& display_before, ComputedValuesFFI::FfiBoxTypeTransformation const& transformation)
-{
-    builder.set_display_before_box_type_transformation(display_from_ffi_display(display_before));
-    if (transformation.set_float_none)
-        builder.set_property(PropertyID::Float, KeywordStyleValue::create(Keyword::None));
-    if (transformation.changed_display)
-        builder.set_property(PropertyID::Display, DisplayStyleValue::create(display_from_ffi_display(transformation.display)));
-}
-
-static ComputedValuesFFI::FfiInputLineHeightMetrics input_line_height_metrics(ComputedProperties::Builder& builder, DOM::AbstractElement abstract_element, bool should_measure)
+template<typename Style>
+static ComputedValuesFFI::FfiInputLineHeightMetrics input_line_height_metrics(Style& style, DOM::AbstractElement abstract_element, bool should_measure)
 {
     ComputedValuesFFI::FfiInputLineHeightMetrics line_height_metrics {};
     if (should_measure) {
-        line_height_metrics.current_line_height = builder.line_height(abstract_element.element().document().font_computer()).to_double();
-        line_height_metrics.minimum_line_height = ComputedProperties::normal_line_height(builder.first_available_computed_font(abstract_element.element().document().font_computer())->pixel_metrics()).to_double();
+        line_height_metrics.current_line_height = style.line_height(abstract_element.element().document().font_computer()).to_double();
+        line_height_metrics.minimum_line_height = ComputedProperties::normal_line_height(style.first_available_computed_font(abstract_element.element().document().font_computer())->pixel_metrics()).to_double();
     }
     return line_height_metrics;
 }
 
+template<typename Style, typename SetProperty>
+static void apply_element_style_adjustments(Style& style, DOM::AbstractElement abstract_element, ComputedValuesFFI::FfiElementStyleAdjustments const& adjustments, SetProperty set_property)
+{
+    if (adjustments.box_type.set_float_none)
+        set_property(PropertyID::Float, KeywordStyleValue::create(Keyword::None));
+    if (adjustments.box_type.changed_display)
+        set_property(PropertyID::Display, DisplayStyleValue::create(display_from_ffi_display(adjustments.box_type.display)));
+
+    auto const& element_style = adjustments.element_style;
+    if (element_style.changed_display)
+        set_property(PropertyID::Display, DisplayStyleValue::create(display_from_ffi_display(element_style.display)));
+    if (element_style.set_position_static)
+        set_property(PropertyID::Position, KeywordStyleValue::create(Keyword::Static));
+    if (element_style.changed_text_align)
+        set_property(PropertyID::TextAlign, KeywordStyleValue::create(static_cast<Keyword>(element_style.text_align)));
+
+    auto line_height_metrics = input_line_height_metrics(style, abstract_element, element_style.check_input_line_height);
+    if (element_style.set_line_height_normal || (element_style.check_input_line_height && line_height_metrics.current_line_height < line_height_metrics.minimum_line_height))
+        set_property(PropertyID::LineHeight, KeywordStyleValue::create(Keyword::Normal));
+}
+
 // https://drafts.csswg.org/css-display/#transformations
-void StyleComputer::transform_box_type_if_needed(ComputedProperties::Builder& builder, DOM::AbstractElement abstract_element) const
+void StyleComputer::adjust_element_style_if_needed(ComputedProperties::Builder& builder, DOM::AbstractElement abstract_element) const
 {
     auto& style = builder.style();
     auto input = make_box_type_transformation_input(
@@ -3023,8 +3048,48 @@ void StyleComputer::transform_box_type_if_needed(ComputedProperties::Builder& bu
         style.display(),
         style.property(PropertyID::Position).to_keyword(),
         style.property(PropertyID::Float).to_keyword());
-    auto transformation = ComputedValuesFFI::rust_transform_box_type(&input);
-    apply_box_type_transformation(builder, input.display, transformation);
+    auto adjustments = ComputedValuesFFI::rust_adjust_element_style(
+        &input, to_underlying(style.property(PropertyID::TextAlign).to_keyword()));
+
+    auto set_adjusted_property = [&](PropertyID property_id, NonnullRefPtr<StyleValue const> value) {
+        // Animated values are stored separately from the builder's base values, so post-compute
+        // adjustments must replace the sampled value as well.
+        if (style.has_animated_property(property_id)) {
+            auto is_result_of_transition = style.is_animated_property_result_of_transition(property_id)
+                ? AnimatedPropertyResultOfTransition::Yes
+                : AnimatedPropertyResultOfTransition::No;
+            auto inherited = style.is_animated_property_inherited(property_id)
+                ? ComputedProperties::Inherited::Yes
+                : ComputedProperties::Inherited::No;
+            style.set_animated_property(Badge<StyleComputer> {}, property_id, value, is_result_of_transition, inherited);
+        }
+        builder.set_property(property_id, move(value));
+    };
+
+    builder.set_display_before_box_type_transformation(display_from_ffi_display(input.display));
+    apply_element_style_adjustments(builder, abstract_element, adjustments, set_adjusted_property);
+}
+
+void StyleComputer::adjust_animated_element_style_if_needed(ComputedProperties& style, DOM::AbstractElement abstract_element) const
+{
+    auto input = make_box_type_transformation_input(
+        abstract_element,
+        style.display(),
+        style.property(PropertyID::Position).to_keyword(),
+        style.property(PropertyID::Float).to_keyword());
+    auto adjustments = ComputedValuesFFI::rust_adjust_element_style(
+        &input, to_underlying(style.property(PropertyID::TextAlign).to_keyword()));
+
+    auto set_adjusted_property = [&](PropertyID property_id, NonnullRefPtr<StyleValue const> value) {
+        auto is_result_of_transition = style.has_animated_property(property_id) && style.is_animated_property_result_of_transition(property_id)
+            ? AnimatedPropertyResultOfTransition::Yes
+            : AnimatedPropertyResultOfTransition::No;
+        auto inherited = style.has_animated_property(property_id) && style.is_animated_property_inherited(property_id)
+            ? ComputedProperties::Inherited::Yes
+            : ComputedProperties::Inherited::No;
+        style.set_animated_property(Badge<StyleComputer> {}, property_id, move(value), is_result_of_transition, inherited);
+    };
+    apply_element_style_adjustments(style, abstract_element, adjustments, set_adjusted_property);
 }
 
 NonnullRefPtr<ComputedValues const> StyleComputer::create_document_style() const
@@ -3215,7 +3280,7 @@ RefPtr<ComputedProperties> StyleComputer::compute_style_impl(DOM::AbstractElemen
         VERIFY(inherited_pseudo_element_style);
         auto builder = ComputedProperties::create_builder_with_base_values_from(*inherited_pseudo_element_style);
 
-        abstract_element.element().adjust_computed_style(builder);
+        adjust_element_style_if_needed(builder, abstract_element);
         return ComputedProperties::create(move(builder));
     }
 
@@ -3518,6 +3583,7 @@ NonnullRefPtr<ComputedProperties> StyleComputer::compute_properties(DOM::Abstrac
     }
 
     bool animation_values_applied = false;
+    Vector<GC::Ref<Animations::KeyframeEffect>> newly_started_transition_effects;
 
     // Copies the parent's animated value when a longhand inherits, as its store is
     // applied, so later properties' computation contexts observe the animated value.
@@ -3746,7 +3812,7 @@ NonnullRefPtr<ComputedProperties> StyleComputer::compute_properties(DOM::Abstrac
 
     auto animations = abstract_element.element().get_animations_internal(
         Animations::Animatable::GetAnimationsSorted::Yes,
-        Bindings::GetAnimationsOptions { .subtree = false });
+        Animations::Animatable::GetAnimationsOptions { .subtree = false, .pseudo_element = {} });
     if (animations.is_exception()) {
         dbgln("Error getting animations for element {}", abstract_element.debug_description());
     } else {
@@ -3754,7 +3820,8 @@ NonnullRefPtr<ComputedProperties> StyleComputer::compute_properties(DOM::Abstrac
         for (auto& animation : animations.value()) {
             if (auto effect = animation->effect(); effect && effect->is_keyframe_effect()) {
                 auto& keyframe_effect = *static_cast<Animations::KeyframeEffect*>(effect.ptr());
-                if (keyframe_effect.pseudo_element_type() == abstract_element.pseudo_element())
+                auto was_just_started = newly_started_transition_effects.contains_slow(GC::Ref { keyframe_effect });
+                if (!was_just_started && keyframe_effect.pseudo_element_type() == abstract_element.pseudo_element())
                     effects.append(keyframe_effect);
             }
         }
@@ -3780,17 +3847,13 @@ NonnullRefPtr<ComputedProperties> StyleComputer::compute_properties(DOM::Abstrac
 
     // Run automatic box type transformations again after animations have been applied.
     if (animation_values_applied)
-        transform_box_type_if_needed(builder, abstract_element);
+        adjust_element_style_if_needed(builder, abstract_element);
 
     // Apply any property-specific computed value logic
     if (animation_values_applied)
         resolve_effective_overflow_values(builder);
     if (animation_values_applied || parent_text_align_input_is_animated)
         compute_text_align(builder, abstract_element);
-
-    // Let the element adjust computed style
-    if (animation_values_applied && !abstract_element.pseudo_element().has_value())
-        abstract_element.element().adjust_computed_style(builder);
 
     bool parent_style_in_display_none_subtree = false;
     if (auto parent = abstract_element.element_to_inherit_style_from(); parent.has_value()) {
@@ -3810,8 +3873,13 @@ NonnullRefPtr<ComputedProperties> StyleComputer::compute_properties(DOM::Abstrac
         //        is used instead of the before-change style to compare with the after-change style to start
         //        transitions.
         if (!previous_style->in_display_none_subtree() && !parent_style_in_display_none_subtree)
-            start_needed_transitions(*previous_style, builder, abstract_element);
+            newly_started_transition_effects = start_needed_transitions(*previous_style, builder, abstract_element);
     }
+
+    // Newly-created transitions were evaluated while they were started. Keep them
+    // out of the general animation pass below so that a style change crosses the
+    // Rust animation boundary only once per effect.
+    animation_values_applied |= !newly_started_transition_effects.is_empty();
 
     if (parent_style_in_display_none_subtree || builder.display().is_none())
         builder.set_in_display_none_subtree();

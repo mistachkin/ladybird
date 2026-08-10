@@ -4,8 +4,6 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/HTMLEmbedElement.h>
-#include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/StyleValues/DisplayStyleValue.h>
 #include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
@@ -22,12 +20,6 @@ HTMLEmbedElement::HTMLEmbedElement(DOM::Document& document, DOM::QualifiedName q
 }
 
 HTMLEmbedElement::~HTMLEmbedElement() = default;
-
-void HTMLEmbedElement::initialize(JS::Realm& realm)
-{
-    WEB_SET_PROTOTYPE_FOR_INTERFACE(HTMLEmbedElement);
-    Base::initialize(realm);
-}
 
 bool HTMLEmbedElement::is_presentational_hint(Utf16FlyString const& name) const
 {
@@ -77,13 +69,6 @@ void HTMLEmbedElement::apply_presentational_hints(Vector<CSS::StyleProperty>& pr
             }
         }
     });
-}
-
-void HTMLEmbedElement::adjust_computed_style(CSS::ComputedProperties::Builder& style)
-{
-    // https://drafts.csswg.org/css-display-3/#unbox
-    if (style.display().is_contents())
-        style.set_property(CSS::PropertyID::Display, CSS::DisplayStyleValue::create(CSS::Display::from_short(CSS::Display::Short::None)));
 }
 
 }

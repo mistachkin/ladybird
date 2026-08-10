@@ -6,74 +6,20 @@
 
 #include <LibWeb/HTML/Scripting/TH8Context.h>
 
-#include <AK/Atomic.h>
-#include <AK/Time.h>
 #include <LibTH8/Interpreter.h>
 #include <LibTH8/WebPlatform.h>
-#include <LibThreading/Thread.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/TH8/DOMBridge.h>
 #include <LibWeb/TH8/HandleTable.h>
 
-#include <time.h>
-
 namespace Web::HTML {
 
-namespace {
-
-// [M2] Background watchdog that fires Th8_CancelEval (the only
-// thread-safe TH8 API) after a fixed wall-clock budget.  Constructed
-// at the top of TH8Context::evaluate, joined in its destructor on
-// every return path.  Sleeps in small slices so the destructor can
-// wake it within ~10ms regardless of the configured timeout.
-class WallClockWatchdog {
-public:
-    WallClockWatchdog(::TH8::Interpreter& interp, int timeout_ms)
-        : m_interp(interp)
-        , m_timeout(AK::Duration::from_milliseconds(timeout_ms))
-    {
-        m_thread = Threading::Thread::construct("TH8 watchdog"sv, [this]() -> intptr_t {
-            return run();
-        });
-        m_thread->start();
-    }
-
-    ~WallClockWatchdog()
-    {
-        m_cancel.store(true);
-        // Best-effort join: if the watchdog already cancelled the
-        // script, the run() body has already returned.  In all cases
-        // join is bounded by the 10ms polling slice plus syscall
-        // overhead.
-        (void)m_thread->join();
-    }
-
-private:
-    intptr_t run()
-    {
-        auto start = AK::MonotonicTime::now();
-        while (!m_cancel.load()) {
-            auto elapsed = AK::MonotonicTime::now() - start;
-            if (elapsed >= m_timeout) {
-                m_interp.cancel("TH8 script exceeded wall-clock budget"sv);
-                return 0;
-            }
-            // 10 ms polling slice -- short enough that the destructor
-            // can wake us promptly when a well-behaved script finishes,
-            // long enough that the OS scheduler does not chew up a CPU.
-            struct timespec ts { 0, 10'000'000 };
-            (void)nanosleep(&ts, nullptr);
-        }
-        return 0;
-    }
-
-    ::TH8::Interpreter& m_interp;
-    AK::Duration m_timeout;
-    AK::Atomic<bool> m_cancel { false };
-    RefPtr<Threading::Thread> m_thread;
-};
-
-}
+// [M2] Per-evaluate wall-clock bounding is provided by TH8's native
+// cooperative deadline (Th8_SetTimeLimitMs), armed and cleared around
+// each Th8_Eval in TH8Context::evaluate.  This replaced an earlier
+// hand-rolled background watchdog thread that fired Th8_CancelEval; the
+// native deadline is checked at the same step boundaries but needs no
+// per-eval thread.
 
 GC_DEFINE_ALLOCATOR(TH8Context);
 
@@ -133,10 +79,10 @@ void TH8Context::initialize_interpreter()
     // documented "not owned").  A local descriptor would therefore be freed
     // the moment initialize_interpreter() returns, leaving interp->pPlatform
     // dangling; main-thread eval survives only by reading the not-yet-reused
-    // freed block, but the WallClockWatchdog's cross-thread cancel fires
-    // ~250ms later after the block is overwritten and crashes calling a
-    // garbage xMalloc.  Keep the descriptor alive as a member for the
-    // interpreter's full lifetime.
+    // freed block, but the periodic wall-clock deadline check (Th8_GetTimeUs
+    // via the platform's xTimeUs callback) later reads the block after it has
+    // been overwritten and crashes calling a garbage callback pointer.  Keep
+    // the descriptor alive as a member for the interpreter's full lifetime.
     m_platform_descriptor = ::TH8::create_web_content_platform(*m_platform_context);
     auto interpreter_or_error = ::TH8::Interpreter::create(m_platform_descriptor->raw());
     if (interpreter_or_error.is_error()) {
@@ -166,7 +112,9 @@ void TH8Context::initialize_interpreter()
     //                  the limit.  Shared across all <script> blocks
     //                  in the document (same allocator).
     //
-    //   wall_clock   : PER-EVALUATE (see WallClockWatchdog above).
+    //   wall_clock   : PER-EVALUATE.  Armed via TH8's native deadline
+    //                  (Th8_SetTimeLimitMs) around each Th8_Eval and
+    //                  cleared afterwards; see TH8Context::evaluate.
     //
     // See Tests/LibWeb/Text/input/TH8/resource-limits.html and the
     // M1 cumulative-budget test for verification.
@@ -232,20 +180,25 @@ int TH8Context::evaluate(StringView script, StringView name)
     ++m_evaluate_depth;
     int rc;
     {
-        // [M2] Stack-local watchdog: starts a background thread that
-        // calls Th8_CancelEval after the wall-clock budget; the dtor
-        // signals and joins on every return path so a fast-completing
-        // script doesn't keep a stale watchdog thread around.  Wraps
-        // ONLY the synchronous Th8_Eval call so re-entrant cross-eval
-        // (rejected at the top of this function anyway) cannot leave
-        // multiple watchdogs racing on the same interp.
-        WallClockWatchdog watchdog(*m_interpreter, ::TH8::default_wall_clock_limit_ms);
+        // [M2] Wall-clock deadline (TH8K-010).  TH8's native, cooperative,
+        // in-interpreter deadline bounds the REAL run time of this
+        // evaluation.  It replaces the former hand-rolled watchdog thread
+        // that fired Th8_CancelEval from a background thread: both take
+        // effect cooperatively at TH8's step boundaries, but the native
+        // deadline needs no per-eval thread (no spawn/join, no polling
+        // slice, no cross-thread cancel).  Armed just before the
+        // synchronous Th8_Eval and cleared immediately after, so the bound
+        // is scoped to exactly this evaluation (re-entrant cross-eval is
+        // rejected at the top of this function anyway).  On expiry TH8
+        // stops with a "time limit exceeded" error and returns TH8_ERROR.
+        m_interpreter->set_time_limit_ms(::TH8::default_wall_clock_limit_ms);
         rc = m_interpreter->evaluate(script, name);
-        // The destructor joining here also clears the cancel state for
-        // the next evaluate() (Th8_ResetCancel is invoked below).
+        m_interpreter->set_time_limit_ms(0);
     }
-    // If the watchdog fired we need to allow future evaluate() calls to
-    // proceed; Th8 keeps the cancellation flag set until reset.
+    // Clear any residual cancellation state (e.g. from an explicit
+    // cancel()) so future evaluate() calls can proceed; TH8 keeps the
+    // cancellation flag set until reset.  (The deadline itself reports via
+    // a normal error, not the cancel flag, so this is a no-op for it.)
     if (rc != TH8_OK)
         m_interpreter->reset_cancel();
     --m_evaluate_depth;

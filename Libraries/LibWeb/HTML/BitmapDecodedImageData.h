@@ -17,7 +17,12 @@ class BitmapDecodedImageData final : public DecodedImageData {
     GC_DECLARE_ALLOCATOR(BitmapDecodedImageData);
 
 public:
-    static GC::Ref<BitmapDecodedImageData> create(JS::Realm&, Gfx::DecodedImageFrame&& frame);
+    struct Frame {
+        Gfx::DecodedImageFrame frame;
+        int duration { 0 };
+    };
+
+    static ErrorOr<GC::Ref<BitmapDecodedImageData>> create(Vector<Frame>&&, size_t loop_count, bool animated);
     virtual ~BitmapDecodedImageData() override;
 
     virtual Optional<Gfx::DecodedImageFrame> default_frame(Gfx::IntSize = {}) const override;
@@ -27,7 +32,7 @@ public:
     virtual Optional<CSSPixels> intrinsic_height() const override;
     virtual Optional<CSSPixelFraction> intrinsic_aspect_ratio() const override;
 
-    virtual void paint(DisplayListRecordingContext&, Gfx::IntRect dst_rect, CSS::ImageRendering) const override;
+    virtual void paint(DisplayListRecordingContext&, Gfx::IntRect dst_rect, CSS::ImageRendering, CSS::PreferredColorScheme) const override;
 
 private:
     BitmapDecodedImageData(Gfx::DecodedImageFrame&& frame);

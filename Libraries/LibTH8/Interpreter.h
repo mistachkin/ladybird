@@ -35,6 +35,23 @@ public:
     void set_memory_limit(size_t limit);
     size_t memory_limit() const;
 
+    // Wall-clock deadline (TH8K-010): bound the REAL run time of an
+    // evaluation, not just its step/memory budget.  This is TH8's native,
+    // cooperative, in-interpreter deadline -- checked at the same
+    // Th8_Ready/step boundaries as the step limit -- and it replaces the
+    // hand-rolled watchdog thread the integration used before the API
+    // existed.  set_time_limit_ms(ms) bounds the run to ms milliseconds
+    // from now; ms <= 0 clears the deadline.  deadline_us() returns the
+    // absolute monotonic-microsecond deadline (0 = none).
+    void set_time_limit_ms(i64 ms);
+    i64 deadline_us() const;
+
+    // Apply TH8's recommended hardened resource profile (allocation, step,
+    // and result limits) in one call -- for embedders that want the vetted
+    // untrusted-script defaults rather than tuning each limit.  (The web
+    // integration sets its own, more generous, per-limit values instead.)
+    void apply_safe_limits();
+
     void freeze();
     void thaw();
 

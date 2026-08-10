@@ -5,7 +5,6 @@
  */
 
 #include <AK/Array.h>
-#include <AK/Atomic.h>
 #include <AK/Debug.h>
 #include <AK/GenericShorthands.h>
 #include <AK/Math.h>
@@ -41,7 +40,6 @@
 #include <LibWeb/Dump.h>
 #include <LibWeb/HTML/AttributeNames.h>
 #include <LibWeb/HTML/HTMLElement.h>
-#include <LibWeb/HTML/HTMLInputElement.h>
 #include <LibWeb/Layout/Box.h>
 #include <LibWeb/Layout/DominantBaseline.h>
 #include <LibWeb/Layout/FieldSetBox.h>
@@ -49,8 +47,6 @@
 #include <LibWeb/Layout/GridLayoutData.h>
 #include <LibWeb/Layout/InlineNode.h>
 #include <LibWeb/Layout/LayoutRustBridge.h>
-#include <LibWeb/Layout/ListItemBox.h>
-#include <LibWeb/Layout/ListItemMarkerBox.h>
 #include <LibWeb/Layout/Node.h>
 #include <LibWeb/Layout/NodeArena.h>
 #include <LibWeb/Layout/SVGClipBox.h>
@@ -61,7 +57,6 @@
 #include <LibWeb/Layout/SVGSVGBox.h>
 #include <LibWeb/Layout/SVGTextBox.h>
 #include <LibWeb/Layout/SVGTextPathBox.h>
-#include <LibWeb/Layout/TextInputBox.h>
 #include <LibWeb/Layout/TextNode.h>
 #include <LibWeb/Layout/Viewport.h>
 #include <LibWeb/Painting/PaintableWithLines.h>
@@ -72,11 +67,9 @@
 #include <LibWeb/SVG/SVGClipPathElement.h>
 #include <LibWeb/SVG/SVGMaskElement.h>
 #include <LibWeb/SVG/SVGSVGElement.h>
+#include <LibWeb/SVG/SVGTextElement.h>
 
 namespace Web::Layout {
-
-static Atomic<size_t> s_outstanding_anchor_name_handles;
-static Atomic<size_t> s_outstanding_svg_path_handles;
 
 static_assert(to_underlying(CSS::StyleGroupIndex::Count) == RustFFI::STYLE_GROUP_COUNT);
 static_assert(to_underlying(CSS::StyleGroupIndex::GridValues) == RustFFI::STYLE_GROUP_INDEX_GRID);
@@ -410,28 +403,77 @@ static Utf16String rendered_svg_text_contents(SVG::SVGTextContentElement const& 
     return builder.to_string().trim_ascii_whitespace();
 }
 
+// The advance of the text run rendered by the given box; that is, of its direct child text content.
+static float svg_text_run_advance(SVGTextBox const& text_box)
+{
+    // FIXME: Use per-code-point fonts.
+    return text_box.first_available_font().width(text_box.dom_node().text_contents());
+}
+
+// https://svgwg.org/svg2-draft/text.html#TermTextChunk
+// Each new absolute positioning adjustment (due to an 'x' or 'y' attribute, or forced line break) creates a new text chunk.
+// https://svgwg.org/svg2-draft/text.html#TextElementXAttribute
+// NB: The initial value of 'x' and 'y' is "0 for 'text'; (none) for 'tspan'". So, a <text> element always positions its
+//     first character absolutely, and so always starts a chunk.
+static bool svg_text_box_starts_text_chunk(SVGTextBox const& text_box)
+{
+    if (is<SVG::SVGTextElement>(text_box.dom_node()))
+        return true;
+    auto text_positioning = text_box.dom_node().text_positioning();
+    return !text_positioning.x.is_empty() || !text_positioning.y.is_empty();
+}
+
+struct SvgTextChunkMeasurement {
+    float advance { 0 };
+    CSS::TextAnchor anchor { CSS::TextAnchor::Start };
+};
+
+// Measures the total advance of the text chunk that starts at the given box, and determines the 'text-anchor' value
+// that applies to the chunk. The chunk extends in document order through the subtree of the containing <text> element
+// until the next box that starts a chunk of its own.
+static SvgTextChunkMeasurement measure_svg_text_chunk(SVGTextBox const& chunk_start_box)
+{
+    auto const* subtree_root = &chunk_start_box;
+    for (auto const* ancestor = chunk_start_box.parent(); ancestor && is<SVGTextBox>(*ancestor); ancestor = ancestor->parent())
+        subtree_root = static_cast<SVGTextBox const*>(ancestor);
+
+    SvgTextChunkMeasurement measurement;
+    bool found_chunk_start = false;
+    bool found_first_rendered_text = false;
+    subtree_root->for_each_in_inclusive_subtree([&](Node const& node) {
+        // AD-HOC: Text on a path is laid out independently; see compute_path_for_svg_text_path().
+        if (is<SVGTextPathBox>(node))
+            return TraversalDecision::SkipChildrenAndContinue;
+        auto const* text_box = as_if<SVGTextBox>(node);
+        if (!text_box)
+            return TraversalDecision::Continue;
+        if (text_box == &chunk_start_box)
+            found_chunk_start = true;
+        else if (found_chunk_start && svg_text_box_starts_text_chunk(*text_box))
+            return TraversalDecision::Break;
+        if (found_chunk_start && !text_box->dom_node().text_contents().is_empty()) {
+            if (!found_first_rendered_text) {
+                // https://svgwg.org/svg2-draft/text.html#TextLayoutAlgorithm
+                // Adjust shift based on the value of 'text-anchor' and 'direction' of the element the character at index i.
+                // FIXME: Take text direction into account.
+                measurement.anchor = text_box->computed_values().text_anchor();
+                found_first_rendered_text = true;
+            }
+            measurement.advance += svg_text_run_advance(*text_box);
+        }
+        return TraversalDecision::Continue;
+    });
+    return measurement;
+}
+
 static Gfx::Path compute_path_for_svg_text(SVGTextBox const& text_box, Gfx::FloatPoint current_text_position)
 {
     auto& text_element = text_box.dom_node();
     // FIXME: Use per-code-point fonts.
     auto& font = text_box.first_available_font();
     auto text_contents = text_element.text_contents();
-    auto text_width = font.width(text_contents);
+
     auto text_offset = current_text_position;
-
-    switch (text_element.text_anchor().value_or(SVG::TextAnchor::Start)) {
-    case SVG::TextAnchor::Start:
-        break;
-    case SVG::TextAnchor::Middle:
-        text_offset.translate_by(-text_width / 2, 0);
-        break;
-    case SVG::TextAnchor::End:
-        text_offset.translate_by(-text_width, 0);
-        break;
-    default:
-        VERIFY_NOT_REACHED();
-    }
-
     auto baseline_metric = resolve_dominant_baseline_metric(text_box.computed_values());
     text_offset.translate_by(0, dominant_baseline_offset(baseline_metric, font.pixel_metrics()));
 
@@ -489,16 +531,55 @@ static RustFFI::FfiSvgPathResult compute_svg_path(NodeWithStyle const& node, Rus
     if (auto const* geometry_box = as_if<SVGGeometryBox>(graphics_box)) {
         path = const_cast<SVGGeometryBox&>(*geometry_box).dom_node().get_path(viewport_size);
     } else if (auto const* text_box = as_if<SVGTextBox>(graphics_box)) {
-        auto text_positioning = text_box->dom_node().text_positioning();
-        text_positioning.apply_to_text_position(viewport_size, text_position, 0u);
+        auto const& text_element = text_box->dom_node();
+        // https://svgwg.org/svg2-draft/text.html#TextElementXAttribute
+        // the starting X (Y) coordinate for rendering the glyphs corresponding to the given character is the X (Y) coordinate
+        // of the resulting current text position from the most recently rendered glyph for the current 'text' element.
+        // NB: The initial value of 'x' and 'y' is "0 for 'text'; (none) for 'tspan'": a <text> element starts at (0, 0)
+        //     regardless of the current text position, while a <tspan> without 'x'/'y' continues at the current text position.
+        if (is<SVG::SVGTextElement>(text_element))
+            text_position = {};
+        text_element.text_positioning().apply_to_text_position(viewport_size, text_position, 0u);
+        if (svg_text_box_starts_text_chunk(*text_box)) {
+            // https://svgwg.org/svg2-draft/text.html#TextAnchoringProperties
+            // The 'text-anchor' property is applied to each individual text chunk within a given 'text' element.
+            // AD-HOC: The spec applies 'text-anchor' as a shift of the chunk's rendered glyphs after layout; shifting
+            //         the chunk's starting position up front by the chunk's total advance is equivalent for horizontal
+            //         text — since every run in the chunk is laid out sequentially from this position.
+            auto chunk = measure_svg_text_chunk(*text_box);
+            switch (chunk.anchor) {
+            case CSS::TextAnchor::Start:
+                // The rendered characters are aligned such that the start of the resulting rendered text is at the
+                // initial current text position."
+                break;
+            case CSS::TextAnchor::Middle:
+                // The rendered characters are shifted such that the geometric middle of the resulting rendered text
+                // (determined from the initial and final current text position before applying the 'text-anchor'
+                // property) is at the initial current text position.
+                text_position.translate_by(-chunk.advance / 2, 0);
+                break;
+            case CSS::TextAnchor::End:
+                // The rendered characters are shifted such that the end of the resulting rendered text (final current
+                // text position before applying the 'text-anchor' property) is at the initial current text position."
+                text_position.translate_by(-chunk.advance, 0);
+                break;
+            default:
+                VERIFY_NOT_REACHED();
+            }
+        }
         path = compute_path_for_svg_text(*text_box, text_position);
+        // https://svgwg.org/svg2-draft/text.html#TextLayoutIntroduction
+        // After each glyph is placed, the current text position is advanced by the glyph's advance value (typically the
+        // width for horizontal text or height for vertical text).
+        // FIXME: Take writing mode and text direction into account.
+        text_position.translate_by(svg_text_run_advance(*text_box), 0);
     } else if (auto const* text_path_box = as_if<SVGTextPathBox>(graphics_box)) {
         path = compute_path_for_svg_text_path(*text_path_box, viewport_size);
     }
 
     auto bounding_box = path.bounding_box();
+    // Rust adopts this heap-allocated path and destroys it via ladybird_gfx_path_destroy().
     auto* path_handle = new Gfx::Path(move(path));
-    ++s_outstanding_svg_path_handles;
     return {
         .path_handle = path_handle,
         .bounding_box = {
@@ -507,19 +588,11 @@ static RustFFI::FfiSvgPathResult compute_svg_path(NodeWithStyle const& node, Rus
             .width = bounding_box.width(),
             .height = bounding_box.height(),
         },
-        .text_position_for_children = {
+        .text_position_after = {
             .x = text_position.x(),
             .y = text_position.y(),
         },
     };
-}
-
-static void release_svg_path_handle(void const* handle)
-{
-    VERIFY(handle);
-    VERIFY(s_outstanding_svg_path_handles.load() > 0);
-    --s_outstanding_svg_path_handles;
-    delete static_cast<Gfx::Path const*>(handle);
 }
 
 Optional<RustFFI::FfiFormattingContextType> formatting_context_type_created_by_box(Box const& box)
@@ -584,7 +657,6 @@ void LayoutRustBridge::run_root_layout(Box& viewport, CSSPixels viewport_inline_
     };
 
     viewport.document().invalidate_stacking_context_tree();
-    viewport.document().layout_node_arena().sync_enrolled_text_node_content();
     auto callbacks = formatting_context_callbacks();
     auto sink = commit_sink();
     {
@@ -609,7 +681,6 @@ void LayoutRustBridge::compute_subtree_layout(Box& root, Painting::Paintable& pa
     };
 
     root.document().invalidate_stacking_context_tree();
-    root.document().layout_node_arena().sync_enrolled_text_node_content();
     auto viewport_rect = root.document().viewport_rect();
     auto callbacks = formatting_context_callbacks();
     auto sink = commit_sink();
@@ -636,7 +707,6 @@ void LayoutRustBridge::replay_saved_abspos_layout(Box& box, Painting::Paintable&
     };
 
     box.document().invalidate_stacking_context_tree();
-    box.document().layout_node_arena().sync_enrolled_text_node_content();
     auto callbacks = formatting_context_callbacks();
     auto sink = commit_sink();
     {
@@ -875,10 +945,10 @@ RustFFI::FfiCommitSink LayoutRustBridge::commit_sink()
         .set_computed_svg_path = [](void*, void* paintable_pointer, void* path_pointer) {
             VERIFY(path_pointer);
             auto& paintable = *static_cast<Painting::Paintable*>(paintable_pointer);
+            // The path stays owned by the Rust layout state; only its contents move out.
             auto* path = static_cast<Gfx::Path*>(path_pointer);
             if (auto* svg_path_paintable = as_if<Painting::SVGPathPaintable>(paintable))
-                svg_path_paintable->set_computed_path(move(*path));
-            release_svg_path_handle(path); },
+                svg_path_paintable->set_computed_path(move(*path)); },
         .set_grid_layout_data = [](void*, void* paintable_pointer, RustFFI::FfiGridLayoutData const* data) {
             VERIFY(data);
             static_cast<Painting::Paintable*>(paintable_pointer)->set_grid_layout_data(build_grid_layout_data(*data)); },
@@ -1026,19 +1096,6 @@ RustFFI::FfiLayoutFcCallbacks LayoutRustBridge::formatting_context_callbacks()
     static_assert(to_underlying(SVG::PreserveAspectRatio::MeetOrSlice::Slice) == 1);
     static_assert(to_underlying(SVG::SVGUnits::ObjectBoundingBox) == 0);
     static_assert(to_underlying(SVG::SVGUnits::UserSpaceOnUse) == 1);
-    static_assert(to_underlying(RustFFI::FfiAnchorSideKind::Invalid) == 0);
-    static_assert(to_underlying(RustFFI::FfiAnchorSideKind::Top) == 1);
-    static_assert(to_underlying(RustFFI::FfiAnchorSideKind::Right) == 2);
-    static_assert(to_underlying(RustFFI::FfiAnchorSideKind::Bottom) == 3);
-    static_assert(to_underlying(RustFFI::FfiAnchorSideKind::Left) == 4);
-    static_assert(to_underlying(RustFFI::FfiAnchorSideKind::Center) == 5);
-    static_assert(to_underlying(RustFFI::FfiAnchorSideKind::Start) == 6);
-    static_assert(to_underlying(RustFFI::FfiAnchorSideKind::End) == 7);
-    static_assert(to_underlying(RustFFI::FfiAnchorSideKind::SelfStart) == 8);
-    static_assert(to_underlying(RustFFI::FfiAnchorSideKind::SelfEnd) == 9);
-    static_assert(to_underlying(RustFFI::FfiAnchorSideKind::Inside) == 10);
-    static_assert(to_underlying(RustFFI::FfiAnchorSideKind::Outside) == 11);
-    static_assert(to_underlying(RustFFI::FfiAnchorSideKind::Percentage) == 12);
     static_assert(to_underlying(Gfx::GlyphRun::TextType::Common) == 0);
     static_assert(to_underlying(Gfx::GlyphRun::TextType::ContextDependent) == 1);
     static_assert(to_underlying(Gfx::GlyphRun::TextType::EndPadding) == 2);
@@ -1072,70 +1129,6 @@ RustFFI::FfiLayoutFcCallbacks LayoutRustBridge::formatting_context_callbacks()
             auto const& box = *static_cast<Box const*>(node);
             dbgln("FIXME: InlineFormattingContext::dimension_box_on_line got unexpected box in inline context:");
             dump_tree(box); },
-        .release_anchor_name_handle = ladybird_layout_release_anchor_name_handle,
-        .build_replaced_content_facts = [](void*, void* node) {
-            RustFFI::FfiReplacedContentFacts facts {};
-            auto const* box = as_if<Box>(*static_cast<Node const*>(node));
-            if (!box)
-                return facts;
-            auto auto_content_size = box->auto_content_box_size();
-            facts.has_auto_content_width = auto_content_size.has_width();
-            facts.auto_content_width = auto_content_size.width.value_or(0).raw_value();
-            facts.has_auto_content_height = auto_content_size.has_height();
-            facts.auto_content_height = auto_content_size.height.value_or(0).raw_value();
-            if (auto_content_size.aspect_ratio.has_value()) {
-                facts.auto_content_aspect_ratio_numerator = auto_content_size.aspect_ratio->numerator().raw_value();
-                facts.auto_content_aspect_ratio_denominator = auto_content_size.aspect_ratio->denominator().raw_value();
-            }
-            if (box->computed_values().appearance() == CSS::Appearance::None) {
-                if (auto const* input = as_if<HTML::HTMLInputElement>(box->dom_node())) {
-                    switch (input->type_state()) {
-                    case HTML::HTMLInputElement::TypeAttributeState::Text:
-                    case HTML::HTMLInputElement::TypeAttributeState::Search:
-                    case HTML::HTMLInputElement::TypeAttributeState::URL:
-                    case HTML::HTMLInputElement::TypeAttributeState::Telephone:
-                    case HTML::HTMLInputElement::TypeAttributeState::Email:
-                    case HTML::HTMLInputElement::TypeAttributeState::Password:
-                    case HTML::HTMLInputElement::TypeAttributeState::Number: {
-                        auto default_preferred_size = TextInputBox::default_preferred_size_for_text_control(*input, *box);
-                        facts.has_default_preferred_width = default_preferred_size.has_width();
-                        facts.default_preferred_width = default_preferred_size.width.value_or(0).raw_value();
-                        facts.has_default_preferred_height = default_preferred_size.has_height();
-                        facts.default_preferred_height = default_preferred_size.height.value_or(0).raw_value();
-                        break;
-                    }
-                    default:
-                        break;
-                    }
-                }
-            }
-            return facts; },
-        .build_list_item_facts = [](void*, void* node) {
-            RustFFI::FfiListItemFacts facts {};
-            auto const& layout_node = *static_cast<Node const*>(node);
-            if (auto const* list_item_box = as_if<ListItemBox>(layout_node))
-                facts.marker = Node::slot_id(list_item_box->marker());
-            if (auto const* marker = as_if<ListItemMarkerBox>(layout_node)) {
-                facts.marker_is_symbolic = marker->is_symbolic();
-                if (facts.marker_is_symbolic) {
-                    CSSPixels marker_content_inline_size = 0;
-                    CSSPixels marker_content_block_size = 0;
-                    if (auto const* list_style_image = marker->list_style_image()) {
-                        marker_content_inline_size = list_style_image->natural_width(marker->document()).value_or(0);
-                        marker_content_block_size = list_style_image->natural_height(marker->document()).value_or(0);
-                    } else {
-                        auto marker_size = marker->relative_size();
-                        marker_content_inline_size = marker_size;
-                        marker_content_block_size = marker_size;
-                    }
-                    facts.marker_content_inline_size = marker_content_inline_size.raw_value();
-                    facts.marker_content_block_size = marker_content_block_size.raw_value();
-                    if (marker->has_symbolic_counter_style())
-                        facts.marker_distance = CSSPixels::nearest_value_for(.5f * marker->first_available_font().pixel_size()).raw_value();
-                }
-                facts.marker_list_style_position = static_cast<u8>(to_underlying(marker->list_style_position()));
-            }
-            return facts; },
         .build_svg_facts = [](void*, void* node) {
             auto const* node_with_style = as_if<NodeWithStyle>(*static_cast<Node const*>(node));
             VERIFY(node_with_style);
@@ -1202,7 +1195,6 @@ RustFFI::FfiLayoutFcCallbacks LayoutRustBridge::formatting_context_callbacks()
             auto const* node_with_style = as_if<NodeWithStyle>(*static_cast<Node const*>(node));
             VERIFY(node_with_style);
             return compute_svg_path(*node_with_style, request); },
-        .release_svg_path = [](void*, void* path_handle) { release_svg_path_handle(path_handle); },
         .svg_image_bounding_box = [](void*, void* node, i32 viewport_width, i32 viewport_height) {
             auto const& image_box = as<SVGImageBox>(*static_cast<Node const*>(node));
             auto bounding_box = image_box.dom_node().bounding_box({
@@ -1252,126 +1244,6 @@ RustFFI::FfiLayoutFcCallbacks LayoutRustBridge::formatting_context_callbacks()
             if (!anchor_box)
                 return RustFFI::NodeSlotId_INVALID;
             return Node::slot_id(anchor_box); },
-        .build_anchor_function_facts = [](void*, void const* shell) {
-            auto value = CSS::StyleValue::adopt_rust_style_value_data(
-                CSS::StyleValueFFI::rust_style_value_retain(
-                    static_cast<CSS::StyleValueFFI::StyleValueData const*>(shell)));
-            if (!value->is_anchor()) {
-                return RustFFI::FfiAnchorFunctionFacts {
-                    .has_anchor_name = false,
-                    .anchor_name = 0,
-                    .side_kind = RustFFI::FfiAnchorSideKind::Invalid,
-                    .side_percentage = 0,
-                };
-            }
-            auto const& anchor = value->as_anchor();
-            auto const& side = *anchor.anchor_side();
-            auto side_kind = RustFFI::FfiAnchorSideKind::Invalid;
-            double side_percentage = 0;
-            if (side.is_keyword()) {
-                switch (side.to_keyword()) {
-                case CSS::Keyword::Top:
-                    side_kind = RustFFI::FfiAnchorSideKind::Top;
-                    break;
-                case CSS::Keyword::Right:
-                    side_kind = RustFFI::FfiAnchorSideKind::Right;
-                    break;
-                case CSS::Keyword::Bottom:
-                    side_kind = RustFFI::FfiAnchorSideKind::Bottom;
-                    break;
-                case CSS::Keyword::Left:
-                    side_kind = RustFFI::FfiAnchorSideKind::Left;
-                    break;
-                case CSS::Keyword::Center:
-                    side_kind = RustFFI::FfiAnchorSideKind::Center;
-                    break;
-                case CSS::Keyword::Start:
-                    side_kind = RustFFI::FfiAnchorSideKind::Start;
-                    break;
-                case CSS::Keyword::End:
-                    side_kind = RustFFI::FfiAnchorSideKind::End;
-                    break;
-                case CSS::Keyword::SelfStart:
-                    side_kind = RustFFI::FfiAnchorSideKind::SelfStart;
-                    break;
-                case CSS::Keyword::SelfEnd:
-                    side_kind = RustFFI::FfiAnchorSideKind::SelfEnd;
-                    break;
-                case CSS::Keyword::Inside:
-                    side_kind = RustFFI::FfiAnchorSideKind::Inside;
-                    break;
-                case CSS::Keyword::Outside:
-                    side_kind = RustFFI::FfiAnchorSideKind::Outside;
-                    break;
-                default:
-                    break;
-                }
-            } else if (side.is_percentage()) {
-                side_kind = RustFFI::FfiAnchorSideKind::Percentage;
-                side_percentage = side.as_percentage().percentage().as_fraction();
-            }
-            size_t anchor_name = 0;
-            if (auto name = anchor.anchor_name(); name.has_value()) {
-                anchor_name = name->to_raw_leaked();
-                ++s_outstanding_anchor_name_handles;
-            }
-            return RustFFI::FfiAnchorFunctionFacts {
-                .has_anchor_name = anchor_name != 0,
-                .anchor_name = anchor_name,
-                .side_kind = side_kind,
-                .side_percentage = side_percentage,
-            }; },
-        .anchor_function_fallback = [](void*, void const* shell) {
-            auto value = CSS::StyleValue::adopt_rust_style_value_data(
-                CSS::StyleValueFFI::rust_style_value_retain(
-                    static_cast<CSS::StyleValueFFI::StyleValueData const*>(shell)));
-            if (!value->is_anchor())
-                return RustFFI::FfiAnchorFallbackFacts {
-                    .kind = RustFFI::FfiAnchorFallbackKind::None,
-                    .px = 0,
-                    .fraction = 0,
-                    .value = nullptr,
-                };
-            auto fallback = value->as_anchor().fallback_value();
-            if (!fallback)
-                return RustFFI::FfiAnchorFallbackFacts {
-                    .kind = RustFFI::FfiAnchorFallbackKind::None,
-                    .px = 0,
-                    .fraction = 0,
-                    .value = nullptr,
-                };
-            if (fallback->is_length()) {
-                VERIFY(fallback->as_length().length().is_absolute());
-                return RustFFI::FfiAnchorFallbackFacts {
-                    .kind = RustFFI::FfiAnchorFallbackKind::Px,
-                    .px = fallback->as_length().length().absolute_length_to_px().raw_value(),
-                    .fraction = 0,
-                    .value = nullptr,
-                };
-            }
-            if (fallback->is_percentage()) {
-                return RustFFI::FfiAnchorFallbackFacts {
-                    .kind = RustFFI::FfiAnchorFallbackKind::Percentage,
-                    .px = 0,
-                    .fraction = fallback->as_percentage().percentage().as_fraction(),
-                    .value = nullptr,
-                };
-            }
-            if (fallback->is_calculated()) {
-                return RustFFI::FfiAnchorFallbackFacts {
-                    .kind = RustFFI::FfiAnchorFallbackKind::Calculated,
-                    .px = 0,
-                    .fraction = 0,
-                    .value = fallback->as_calculated().rust_style_value_data(),
-                };
-            }
-            VERIFY(fallback->is_anchor());
-            return RustFFI::FfiAnchorFallbackFacts {
-                .kind = RustFFI::FfiAnchorFallbackKind::Anchor,
-                .px = 0,
-                .fraction = 0,
-                .value = fallback->rust_style_value_data(),
-            }; },
         .set_default_scroll_shift = [](void*, void* node, void* anchor, bool horizontal, bool vertical) {
             auto& box = *static_cast<Box*>(node);
             if (!anchor) {
@@ -1382,13 +1254,6 @@ RustFFI::FfiLayoutFcCallbacks LayoutRustBridge::formatting_context_callbacks()
     };
 }
 
-}
-
-extern "C" WEB_API void ladybird_layout_release_anchor_name_handle(size_t raw)
-{
-    VERIFY(Web::Layout::s_outstanding_anchor_name_handles.load() > 0);
-    --Web::Layout::s_outstanding_anchor_name_handles;
-    Utf16FlyString::unref_raw(raw);
 }
 
 extern "C" WEB_API u8 ladybird_layout_text_type_for_code_point(u32 code_point)

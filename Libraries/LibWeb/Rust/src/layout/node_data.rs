@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+use crate::layout::CssPixels;
 use std::ffi::c_void;
 
 pub const INVALID_NODE_SLOT_INDEX: u32 = u32::MAX;
@@ -12,6 +13,21 @@ pub const GENERATED_FOR_MARKER: u8 = 6;
 // The full C++ StyleGroupIndex space; LayoutRustBridge.cpp static-asserts the
 // count so the style container array and the registered group indices line up.
 pub const STYLE_GROUP_COUNT: usize = 23;
+
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+pub struct FfiReplacedContentFacts {
+    pub has_auto_content_width: bool,
+    pub auto_content_width: CssPixels,
+    pub has_auto_content_height: bool,
+    pub auto_content_height: CssPixels,
+    pub auto_content_aspect_ratio_numerator: CssPixels,
+    pub auto_content_aspect_ratio_denominator: CssPixels,
+    pub has_default_preferred_width: bool,
+    pub default_preferred_width: CssPixels,
+    pub has_default_preferred_height: bool,
+    pub default_preferred_height: CssPixels,
+}
 
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -142,6 +158,8 @@ pub enum NodeFlag {
     SavedAbsposCbDerivesFromOwnComputedValues = 1 << 20,
     SavedAbsposAlignmentDerivesFromOwnComputedValues = 1 << 21,
     ProducesLineBoxFragmentWhenEmpty = 1 << 22,
+    ListMarkerIsInside = 1 << 23,
+    HasAnchorNames = 1 << 24,
 }
 
 #[repr(C)]
@@ -226,6 +244,11 @@ mod tests {
             NodeFlag::SavedAbsposAlignmentDerivesFromOwnComputedValues as u32,
             1 << 21
         );
+    }
+
+    #[test]
+    fn list_marker_position_uses_expected_flag_bit() {
+        assert_eq!(NodeFlag::ListMarkerIsInside as u32, 1 << 23);
     }
 
     #[test]

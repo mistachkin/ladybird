@@ -35,6 +35,19 @@ fn line_style_score(line_style: u8) -> u8 {
     }
 }
 
+pub(crate) fn child_participates_in_table_run(container_display: FfiDisplay, child_facts: &NodeFacts<'_>) -> bool {
+    if container_display.is_table_inside() {
+        let child_display = child_facts.display();
+        child_display.is_table_row() || child_display.is_table_row_group_kind()
+    } else if container_display.is_table_row_group_kind() {
+        child_facts.display().is_table_row()
+    } else if container_display.is_table_row() {
+        child_facts.display().is_table_cell()
+    } else {
+        true
+    }
+}
+
 pub(crate) fn border_is_less_specific(incumbent: FfiBorderData, candidate: FfiBorderData) -> bool {
     // Implements criteria for steps 1, 2 and 3 of border conflict resolution algorithm, as described in
     // https://www.w3.org/TR/CSS22/tables.html#border-conflict-resolution.
@@ -781,6 +794,9 @@ struct TableFormattingContext<'pass> {
     min_border_box_block_size_from_flex_item: Option<CssPixels>,
     needs_fixed_mode_row_measurement: bool,
     cells: Vec<TableCell>,
+    cell_inside_layout_inputs: Vec<AvailableSpace>,
+    cell_pre_layout_content_block_sizes: Vec<CssPixels>,
+    deferred_cell_inside_layouts: Vec<bool>,
     columns: Vec<Column>,
     rows: Vec<Row>,
     derived_baselines_of_root_box: Cell<DerivedBaselines>,
@@ -840,6 +856,9 @@ impl<'pass> TableFormattingContext<'pass> {
             min_border_box_block_size_from_flex_item: None,
             needs_fixed_mode_row_measurement: false,
             cells: Vec::new(),
+            cell_inside_layout_inputs: Vec::new(),
+            cell_pre_layout_content_block_sizes: Vec::new(),
+            deferred_cell_inside_layouts: Vec::new(),
             columns: Vec::new(),
             rows: Vec::new(),
             derived_baselines_of_root_box: Cell::new(DerivedBaselines::default()),
@@ -1036,9 +1055,7 @@ impl<'pass> TableFormattingContext<'pass> {
     }
 
     fn seed_table_participant_used_values(&mut self) {
-        for group in self.matching_children(self.table_box, |facts| {
-            facts.is_table_row_group() || facts.is_table_header_group() || facts.is_table_footer_group()
-        }) {
+        for group in self.matching_children(self.table_box, |display| display.is_table_row_group_kind()) {
             self.create_used_values(group, self.participant_constraints);
         }
         for row in &self.rows {
@@ -1838,6 +1855,9 @@ impl<'pass> TableFormattingContext<'pass> {
         // Determine the number of rows/columns the table requires.
         let table_grid = calculate_table_grid(self, self.table_box);
         self.cells = table_grid.cells;
+        self.cell_inside_layout_inputs = vec![AvailableSpace::default(); self.cells.len()];
+        self.cell_pre_layout_content_block_sizes = vec![CssPixels::default(); self.cells.len()];
+        self.deferred_cell_inside_layouts = vec![false; self.cells.len()];
         self.rows = table_grid.rows;
         self.columns = vec![Column::default(); table_grid.column_count];
         for cell in &self.cells {
@@ -1903,26 +1923,51 @@ impl<'pass> TableFormattingContext<'pass> {
         cell: TableCell,
         input: AvailableSpace,
         adopt_automatic_content_block_size: bool,
-    ) {
+        intrinsic_block_padding: Option<(CssPixels, CssPixels)>,
+    ) -> DerivedBaselines {
         let layout_input = LayoutInput {
             available_space: input,
             containing_block_constraints: ContainingBlockConstraints::default(),
             content_box_position_in_bfc_root: None,
             sizing: RootSizingDirectives {
                 adopt_automatic_content_block_size,
+                table_cell_intrinsic_block_padding: intrinsic_block_padding,
                 ..RootSizingDirectives::default()
             },
             participation: ParticipationInParentFormattingContext::Item,
         };
-        if let crate::layout::ChildLayoutOutcome::ReenterCurrent =
-            crate::layout::layout_inside_child(run, None, None, cell.box_, self.layout_mode, layout_input, false)
-        {
-            self.run(run, layout_input);
+        match crate::layout::layout_inside_child(run, None, None, cell.box_, self.layout_mode, layout_input, false) {
+            crate::layout::ChildLayoutOutcome::Created(result) => result.baselines,
+            crate::layout::ChildLayoutOutcome::ReenterCurrent => {
+                self.run(run, layout_input);
+                self.used_values(cell.box_).content_baselines_from_cells()
+            }
+            crate::layout::ChildLayoutOutcome::Skipped => self.used_values(cell.box_).content_baselines_from_cells(),
         }
     }
 
+    fn cell_box_baseline(&self, cell_box: Node, committing_run_baselines: Option<DerivedBaselines>) -> CssPixels {
+        let Some(content_baselines) = committing_run_baselines else {
+            return self.box_baseline(cell_box);
+        };
+        crate::layout::box_baseline_with_content_baselines(
+            self.state,
+            &self.callbacks,
+            cell_box,
+            self.used_values(cell_box),
+            crate::layout::BaselineSet::First,
+            content_baselines,
+        )
+    }
+
     fn box_baseline(&self, node: Node) -> CssPixels {
-        crate::layout::box_baseline(self.state, &self.callbacks, node, crate::layout::BaselineSet::First)
+        crate::layout::box_baseline(
+            self.state,
+            &self.callbacks,
+            node,
+            self.used_values(node),
+            crate::layout::BaselineSet::First,
+        )
     }
 
     fn measure_cell(
@@ -1930,6 +1975,7 @@ impl<'pass> TableFormattingContext<'pass> {
         cell: TableCell,
         used: &UsedValues,
         inner: AvailableSpace,
+        adopt_automatic_content_block_size: bool,
     ) -> Option<MeasuredCellContent> {
         // The table formatting context owns the cell's outer geometry. Seed the inputs
         // needed to lay out its contents without copying placement or layout outputs.
@@ -1963,18 +2009,27 @@ impl<'pass> TableFormattingContext<'pass> {
         let result = measurement.run_with_layout_mode(
             cell.box_,
             self.layout_mode,
-            LayoutInput::new(inner, ContainingBlockConstraints::default(), ParticipationInParentFormattingContext::Item),
+            LayoutInput {
+                available_space: inner,
+                containing_block_constraints: ContainingBlockConstraints::default(),
+                content_box_position_in_bfc_root: None,
+                sizing: RootSizingDirectives {
+                    adopt_automatic_content_block_size,
+                    ..RootSizingDirectives::default()
+                },
+                participation: ParticipationInParentFormattingContext::Item,
+            },
         );
-        measurement
-            .root_used()
-            .set_content_block_size(result.automatic_content_block_size);
+        let measured_cell_used = measurement.layout_state().used_values(measurement.callbacks(), cell.box_);
         Some(MeasuredCellContent {
             content_block_size: result.automatic_content_block_size,
-            first_baseline: crate::layout::box_baseline(
-                measurement.rust_state(),
+            first_baseline: crate::layout::box_baseline_with_content_baselines(
+                measurement.layout_state(),
                 measurement.callbacks(),
                 cell.box_,
+                measured_cell_used,
                 crate::layout::BaselineSet::First,
+                result.baselines,
             ),
         })
     }
@@ -2036,16 +2091,23 @@ impl<'pass> TableFormattingContext<'pass> {
 
             let outer_space = self.available_space;
             let inner = used.available_inner_space_or_constraints_from(outer_space);
+            self.cell_inside_layout_inputs[cell_index] = inner;
+            self.cell_pre_layout_content_block_sizes[cell_index] = used.content_block_size.get();
+            let defer_inside_layout = style.height().is_percentage()
+                || style.vertical_align_is_keyword()
+                || self.anonymous_cell_wraps_flex_or_grid(cell);
+            self.deferred_cell_inside_layouts[cell_index] = defer_inside_layout;
             let mut measured_baseline = None;
-            if style.height().is_percentage() {
-                // This cell's final inside layout happens in the second pass below; measure its
+            let mut committing_run_baselines = None;
+            if defer_inside_layout {
+                // This cell's final inside layout happens once row heights are final; measure its
                 // content in a throwaway state instead of laying out the committing state twice.
-                if let Some(measured) = self.measure_cell(cell, used, inner) {
+                if let Some(measured) = self.measure_cell(cell, used, inner, true) {
                     used.set_content_block_size(measured.content_block_size);
                     measured_baseline = Some(measured.first_baseline);
                 }
             } else {
-                self.layout_inside_cell(run, cell, inner, true);
+                committing_run_baselines = Some(self.layout_inside_cell(run, cell, inner, true, None));
             }
             if self.needs_fixed_mode_row_measurement {
                 let min_size = style.min_height().to_px(participant_block_basis);
@@ -2057,7 +2119,8 @@ impl<'pass> TableFormattingContext<'pass> {
             // https://drafts.csswg.org/css2/#height-layout
             // The baseline of a cell is the baseline of the first in-flow line box in the cell, or the first in-flow
             // table-row in the cell, whichever comes first.
-            let baseline = measured_baseline.unwrap_or_else(|| self.box_baseline(cell.box_));
+            let baseline =
+                measured_baseline.unwrap_or_else(|| self.cell_box_baseline(cell.box_, committing_run_baselines));
             self.cells[cell_index].baseline = baseline;
             // Implements https://www.w3.org/TR/css-tables-3/#computing-the-table-height
 
@@ -2144,6 +2207,7 @@ impl<'pass> TableFormattingContext<'pass> {
             let cell_size = style.height().to_px(self.table_block_size);
             let used = self.used_values(cell.box_);
             used.set_content_block_size(cell_size - used.border_box_top(collapsed) - used.border_box_bottom(collapsed));
+            self.cell_pre_layout_content_block_sizes[cell_index] = used.content_block_size.get();
             if !self.rows[cell.row_index].is_collapsed {
                 self.rows[cell.row_index].reference_block_size =
                     self.rows[cell.row_index].reference_block_size.max(cell_size);
@@ -2156,10 +2220,12 @@ impl<'pass> TableFormattingContext<'pass> {
                     + inline_spacing * (cell.column_span - 1),
             );
             let inner = used.available_inner_space_or_constraints_from(self.available_space);
-            // The first pass only measured this cell in a throwaway state; this is its one and
-            // only inside layout in the committing state.
-            self.layout_inside_cell(run, cell, inner, false);
-            let baseline = self.box_baseline(cell.box_);
+            self.cell_inside_layout_inputs[cell_index] = inner;
+            // The first pass measured this cell at its automatic block size; measure it again at
+            // the percentage-resolved size to preserve the baseline its final inside layout will use.
+            let baseline = self
+                .measure_cell(cell, used, inner, false)
+                .map_or_else(|| self.box_baseline(cell.box_), |measured| measured.first_baseline);
             self.cells[cell_index].baseline = baseline;
             if !self.rows[cell.row_index].is_collapsed {
                 let border_size = used.border_box_block_size(collapsed);
@@ -2252,9 +2318,7 @@ impl<'pass> TableFormattingContext<'pass> {
         }
 
         let mut group_block_offset = self.table_box_content_block_offset_in_wrapper + block_spacing;
-        for group in self.matching_children(self.table_box, |facts| {
-            facts.is_table_row_group() || facts.is_table_header_group() || facts.is_table_footer_group()
-        }) {
+        for group in self.matching_children(self.table_box, |display| display.is_table_row_group_kind()) {
             let group_rows = self.matching_children(group, |facts| facts.is_table_row());
             let mut block_size = CssPixels::default();
             let mut inline_size = CssPixels::default();
@@ -2281,6 +2345,81 @@ impl<'pass> TableFormattingContext<'pass> {
         let total =
             row_block_offset.max(group_block_offset) - self.table_box_content_block_offset_in_wrapper - padding_top;
         self.table_block_size = self.table_block_size.max(total);
+    }
+
+    fn layout_deferred_cells_inside(&mut self, run: &FormattingContextRun<'pass>) {
+        // Deferred cells get their one and only committing inside layout here, once row
+        // block sizes are final.
+        let collapsed = self.style_facts(self.table_box).border_collapse() != BORDER_COLLAPSE_SEPARATE;
+        for cell_index in 0..self.cells.len() {
+            if !self.deferred_cell_inside_layouts[cell_index] {
+                continue;
+            }
+            let cell = self.cells[cell_index];
+            let adopt_automatic_content_block_size = !self.style_facts(cell.box_).height().is_percentage();
+            let intrinsic_block_padding = self.cell_intrinsic_block_padding(cell, collapsed);
+            let used = self.used_values(cell.box_);
+            let measured_content_block_size = used.content_block_size.get();
+            // The first pass adopted the measured automatic block size so row sizing could read
+            // it; restore the pre-layout size so the cell's children resolve percentages against
+            // the same basis the measurement saw.
+            used.set_content_block_size(self.cell_pre_layout_content_block_sizes[cell_index]);
+            let inner = self.cell_inside_layout_inputs[cell_index];
+            self.layout_inside_cell(run, cell, inner, adopt_automatic_content_block_size, intrinsic_block_padding);
+            if adopt_automatic_content_block_size {
+                debug_assert_eq!(
+                    used.content_block_size.get(),
+                    measured_content_block_size,
+                    "measured and committed automatic block sizes diverged"
+                );
+            }
+        }
+    }
+
+    fn cell_intrinsic_block_padding(&mut self, cell: TableCell, collapsed: bool) -> Option<(CssPixels, CssPixels)> {
+        let row_size = self.compute_row_content_block_size(cell);
+        let used = self.used_values(cell.box_);
+        let style = self.style_facts(cell.box_);
+        // When a table cell is an anonymous wrapper around a flex or grid container (e.g., a <td> with display:flex is
+        // wrapped in an anonymous table-cell box per CSS Tables 3), the cell should be aligned to the top. This allows
+        // the flex/grid container to fill the cell and handle alignment of its children via its own properties.
+        if self.anonymous_cell_wraps_flex_or_grid(cell) {
+            return Some((CssPixels::default(), row_size - used.border_box_block_size(collapsed)));
+        }
+        if !style.vertical_align_is_keyword() {
+            return None;
+        }
+        // The following image shows various alignment lines of a row:
+        // https://www.w3.org/TR/css-tables-3/images/cell-align-explainer.png
+        // https://drafts.csswg.org/css2/#height-layout
+        // In the context of tables, values for vertical-align have the following meanings:
+        match style.vertical_align_keyword() {
+            vertical_align::MIDDLE => {
+                // The center of the cell is aligned with the center of the rows it spans.
+                let difference = row_size - used.border_box_block_size(collapsed);
+                Some((difference / 2, difference / 2))
+            }
+            vertical_align::TOP => {
+                // The top of the cell box is aligned with the top of the first row it spans.
+                Some((CssPixels::default(), row_size - used.border_box_block_size(collapsed)))
+            }
+            vertical_align::BOTTOM => {
+                // The bottom of the cell box is aligned with the bottom of the last row it spans.
+                Some((row_size - used.border_box_block_size(collapsed), CssPixels::default()))
+            }
+            vertical_align::SUB
+            | vertical_align::SUPER
+            | vertical_align::TEXT_BOTTOM
+            | vertical_align::TEXT_TOP
+            | vertical_align::BASELINE => {
+                // These values do not apply to cells; the cell is aligned at the baseline instead.
+
+                // The baseline of the cell is put at the same height as the baseline of the first of the rows it spans.
+                let padding_top = self.rows[cell.row_index].baseline - cell.baseline;
+                Some((padding_top, row_size - (used.border_box_block_size(collapsed) + padding_top)))
+            }
+            _ => panic!("invalid vertical-align keyword"),
+        }
     }
 
     fn compute_row_content_block_size(&mut self, cell: TableCell) -> CssPixels {
@@ -2313,7 +2452,7 @@ impl<'pass> TableFormattingContext<'pass> {
         span + self.border_spacing_block() * (cell.row_span - 1)
     }
 
-    fn anonymous_cell_wraps_flex_or_grid(&mut self, cell: TableCell) -> bool {
+    fn anonymous_cell_wraps_flex_or_grid(&self, cell: TableCell) -> bool {
         if !self.node_facts(cell.box_).is_anonymous() {
             return false;
         }
@@ -2337,53 +2476,6 @@ impl<'pass> TableFormattingContext<'pass> {
             let cell = self.cells[cell_index];
             let used = self.used_values(cell.box_);
             let row_used = self.used_values(self.rows[cell.row_index].box_);
-            let row_size = self.compute_row_content_block_size(cell);
-            let style = self.style_facts(cell.box_);
-            // When a table cell is an anonymous wrapper around a flex or grid container (e.g., a <td> with display:flex is
-            // wrapped in an anonymous table-cell box per CSS Tables 3), the cell should be aligned to the top. This allows
-            // the flex/grid container to fill the cell and handle alignment of its children via its own properties.
-            let anonymous_wrapper = self.anonymous_cell_wraps_flex_or_grid(cell);
-            if anonymous_wrapper {
-                used.padding_bottom
-                    .set(used.padding_bottom.get() + row_size - used.border_box_block_size(collapsed));
-            } else if style.vertical_align_is_keyword() {
-                // The following image shows various alignment lines of a row:
-                // https://www.w3.org/TR/css-tables-3/images/cell-align-explainer.png
-                // https://drafts.csswg.org/css2/#height-layout
-                // In the context of tables, values for vertical-align have the following meanings:
-                match style.vertical_align_keyword() {
-                    vertical_align::MIDDLE => {
-                        // The center of the cell is aligned with the center of the rows it spans.
-                        let difference = row_size - used.border_box_block_size(collapsed);
-                        used.padding_top.set(used.padding_top.get() + difference / 2);
-                        used.padding_bottom.set(used.padding_bottom.get() + difference / 2);
-                    }
-                    vertical_align::TOP => {
-                        // The top of the cell box is aligned with the top of the first row it spans.
-                        used.padding_bottom
-                            .set(used.padding_bottom.get() + row_size - used.border_box_block_size(collapsed));
-                    }
-                    vertical_align::BOTTOM => {
-                        // The bottom of the cell box is aligned with the bottom of the last row it spans.
-                        used.padding_top
-                            .set(used.padding_top.get() + row_size - used.border_box_block_size(collapsed));
-                    }
-                    vertical_align::SUB
-                    | vertical_align::SUPER
-                    | vertical_align::TEXT_BOTTOM
-                    | vertical_align::TEXT_TOP
-                    | vertical_align::BASELINE => {
-                        // These values do not apply to cells; the cell is aligned at the baseline instead.
-
-                        // The baseline of the cell is put at the same height as the baseline of the first of the rows it spans.
-                        used.padding_top
-                            .set(used.padding_top.get() + self.rows[cell.row_index].baseline - cell.baseline);
-                        used.padding_bottom
-                            .set(used.padding_bottom.get() + row_size - used.border_box_block_size(collapsed));
-                    }
-                    _ => panic!("invalid vertical-align keyword"),
-                }
-            }
             // Compute cell position as specified by https://www.w3.org/TR/css-tables-3/#bounding-box-assignment:
             // left/top location is the sum of:
             // - for top: the height reserved for top captions (including margins), if any
@@ -2440,6 +2532,7 @@ impl<'pass> TableFormattingContext<'pass> {
         self.compute_table_block_size(run);
         self.distribute_block_size_to_rows();
         self.position_row_boxes();
+        self.layout_deferred_cells_inside(run);
         self.position_cell_boxes();
         table_used.set_content_block_size(self.table_block_size);
         // Derive baselines for the table internals bottom-up (rows, then row groups, then the table box)
@@ -2448,9 +2541,7 @@ impl<'pass> TableFormattingContext<'pass> {
         for row in &self.rows {
             self.compute_and_store_baselines(row.box_);
         }
-        for group in self.matching_children(self.table_box, |facts| {
-            facts.is_table_row_group() || facts.is_table_header_group() || facts.is_table_footer_group()
-        }) {
+        for group in self.matching_children(self.table_box, |display| display.is_table_row_group_kind()) {
             self.compute_and_store_baselines(group);
         }
         self.compute_and_store_baselines(self.table_box);

@@ -181,23 +181,23 @@ bool ImageStyleValue::is_paintable(DOM::Document const& document) const
     return image_data(document);
 }
 
-void ImageStyleValue::paint(DisplayListRecordingContext& context, DOM::Document const& document, DevicePixelRect const& dest_rect, CSS::ImageRendering image_rendering) const
+void ImageStyleValue::paint(DisplayListRecordingContext& context, DOM::Document const& document, DevicePixelRect const& dest_rect, CSS::ImageRendering image_rendering, PreferredColorScheme color_scheme) const
 {
     auto image_data = this->image_data(document);
     if (!image_data)
         return;
 
     auto dest_int_rect = dest_rect.to_type<int>();
-    image_data->paint(context, dest_int_rect, image_rendering);
+    image_data->paint(context, dest_int_rect, image_rendering, color_scheme);
 }
 
-Optional<Painting::DisplayListResource> ImageStyleValue::record_display_list(DisplayListRecordingContext& context, DOM::Document const& document, DevicePixelRect const& dest_rect) const
+Optional<Painting::DisplayListResource> ImageStyleValue::record_display_list(DisplayListRecordingContext& context, DOM::Document const& document, DevicePixelRect const& dest_rect, PreferredColorScheme color_scheme) const
 {
     auto image_data = this->image_data(document);
     if (!image_data)
         return {};
 
-    return image_data->record_display_list(dest_rect.size().to_type<int>(), context.display_list_recorder().resource_storage());
+    return image_data->record_display_list(dest_rect.size().to_type<int>(), color_scheme, context.display_list_recorder().resource_storage());
 }
 
 Optional<Gfx::DecodedImageFrame> ImageStyleValue::current_frame(DOM::Document const& document, DevicePixelRect const& dest_rect) const
@@ -259,7 +259,11 @@ void ImageStyleValue::update_style_sheet_resource_context(CSSStyleSheet const& s
 {
     m_style_resource_base_url = style_sheet.base_url()
                                     .value_or_lazy_evaluated_optional([&]() { return style_sheet.location(); })
-                                    .value_or_lazy_evaluated_optional([&]() { return HTML::relevant_settings_object(style_sheet).api_base_url(); });
+                                    .value_or_lazy_evaluated_optional([&]() -> Optional<::URL::URL> {
+                                        if (auto document = style_sheet.owning_document())
+                                            return HTML::relevant_settings_object(*document).api_base_url();
+                                        return {};
+                                    });
     m_parent_style_sheet_origin_clean = style_sheet.is_origin_clean();
     m_should_absolutize_url_for_computed_value = true;
 }

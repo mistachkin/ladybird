@@ -16,13 +16,13 @@
 #include <LibCore/Process.h>
 #include <LibCore/Timer.h>
 #include <LibDevTools/IndexedDBSerialization.h>
+#include <LibGC/Heap.h>
 #include <LibGfx/Bitmap.h>
 #include <LibGfx/ShareableBitmap.h>
 #include <LibHTTP/Cookie/ParsedCookie.h>
 #include <LibIPC/TransportHandle.h>
 #include <LibJS/Console.h>
 #include <LibJS/Runtime/ConsoleObject.h>
-#include <LibWeb/Bindings/MainThreadVM.h>
 #include <LibWeb/CSS/CSSImportRule.h>
 #include <LibWeb/CSS/StyleScope.h>
 #include <LibWeb/CSS/StyleSheetIdentifier.h>
@@ -127,14 +127,14 @@ void PageClient::set_async_scrolling_enabled(bool enabled)
     s_async_scrolling_enabled = enabled;
 }
 
-GC::Ref<PageClient> PageClient::create(JS::VM& vm, PageHost& page_host, u64 id, Optional<Web::HTML::CrossProcessId> pending_root_navigable_id)
+GC::Ref<PageClient> PageClient::create(PageHost& page_host, u64 id, Optional<Web::HTML::CrossProcessId> pending_root_navigable_id)
 {
-    return vm.heap().allocate<PageClient>(page_host, id, pending_root_navigable_id);
+    return GC::Heap::the().allocate<PageClient>(page_host, id, pending_root_navigable_id);
 }
 
 PageClient::PageClient(PageHost& owner, u64 id, Optional<Web::HTML::CrossProcessId> pending_root_navigable_id)
     : m_owner(owner)
-    , m_page(Web::Page::create(Web::Bindings::main_thread_vm(), *this))
+    , m_page(Web::Page::create(*this))
     , m_id(id)
     , m_pending_root_navigable_id(pending_root_navigable_id)
 {
@@ -263,6 +263,12 @@ void PageClient::notify_webdriver_of_window_replacement()
 {
     if (m_webdriver)
         m_webdriver->page_did_start_window_replacement({}, page().top_level_traversable()->window_handle().to_utf8());
+}
+
+void PageClient::close_webdriver_connection_after_sending_pending_messages()
+{
+    if (m_webdriver)
+        m_webdriver->transport().close_after_sending_all_pending_messages();
 }
 
 void PageClient::request_new_process_for_child_frame_navigation(Web::HTML::CrossProcessId frame_id, URL::URL const& url, Web::HTML::DocumentResource document_resource, Web::Bindings::NavigationHistoryBehavior history_handling, Optional<Web::HTML::NavigationSourceSnapshot> const& source_snapshot)
@@ -614,7 +620,7 @@ void PageClient::page_did_create_new_document(Web::DOM::Document& document)
 
 void PageClient::page_did_change_active_document_in_top_level_browsing_context(Web::DOM::Document& document)
 {
-    auto& realm = document.realm();
+    auto& realm = document.relevant_settings_object().realm();
 
     clear_pending_dom_mutations();
 
@@ -749,7 +755,7 @@ void PageClient::page_did_set_browser_zoom(double factor)
     traversable->set_pending_set_browser_zoom_request(true);
     client().async_did_set_browser_zoom(m_id, factor);
     auto& event_loop = Web::HTML::main_thread_event_loop();
-    event_loop.spin_until(GC::create_function(event_loop.heap(), [this, traversable]() {
+    event_loop.spin_until(GC::create_function(GC::Heap::the(), [this, traversable]() {
         return !traversable->pending_set_browser_zoom_request() || !is_connection_open();
     }));
 }
@@ -1148,6 +1154,8 @@ PageClient::NewWebViewResult PageClient::page_did_request_new_web_view(Web::HTML
     if (no_opener == Web::HTML::TokenizedFeature::NoOpener::Yes) {
         // FIXME: Create an abstraction to let this WebContent process know about a new process we create?
         // FIXME: For now, just create a new page in the same process anyway
+        // FIXME: Proper agent-cluster separation must also cover same-process
+        // COOP/noopener popups before they receive distinct main-world cells.
     }
 
     auto response = client().send_sync_but_allow_failure<Messages::WebContentClient::DidRequestNewWebView>(m_id, activate_tab, hints);
@@ -1156,7 +1164,11 @@ PageClient::NewWebViewResult PageClient::page_did_request_new_web_view(Web::HTML
         Core::Process::terminate_immediately(0);
     }
 
-    auto& new_client = m_owner.create_page(response->new_page_id());
+    if (!response->new_page_id().has_value())
+        return {};
+    VERIFY(response->root_navigable_id().has_value());
+
+    auto& new_client = m_owner.create_page(*response->new_page_id(), *response->root_navigable_id());
     return { &new_client.page(), response->take_handle() };
 }
 
@@ -1178,6 +1190,11 @@ void PageClient::page_did_close_top_level_traversable()
     // NOTE: This only removes the strong reference the PageHost has for this PageClient.
     //       It will be GC'd 'later'.
     m_owner.remove_page({}, m_id);
+}
+
+void PageClient::page_did_create_top_level_traversable(Web::HTML::CrossProcessId navigable_id, Web::HTML::SessionHistoryEntryDescriptor const& initial_history_entry)
+{
+    client().async_did_create_top_level_traversable(m_id, navigable_id, initial_history_entry);
 }
 
 void PageClient::page_did_change_needs_beforeunload_check(bool needs_beforeunload_check)
@@ -1225,9 +1242,17 @@ void PageClient::page_did_remove_nested_history(Web::HTML::CrossProcessId parent
     client().async_did_remove_nested_history(m_id, parent_navigable_id, child_navigable_id);
 }
 
-void PageClient::page_did_finalize_same_document_navigation(Web::HTML::CrossProcessId navigable_id, Web::HTML::SessionHistoryEntryDescriptor const& target_entry, Optional<Utf16String> const& entry_to_replace_navigation_api_key)
+void PageClient::page_did_request_finalize_same_document_navigation(u64 operation_id, Web::HTML::CrossProcessId navigable_id, Web::HTML::SameDocumentNavigationEntry const& target_entry, bool replaces_current_entry, Web::HTML::HistoryHandlingBehavior history_handling, Web::HTML::UserNavigationInvolvement user_involvement)
 {
-    client().async_did_finalize_same_document_navigation(m_id, navigable_id, target_entry, entry_to_replace_navigation_api_key);
+    client().async_did_request_finalize_same_document_navigation(m_id, operation_id, navigable_id, target_entry, replaces_current_entry, history_handling, user_involvement);
+}
+
+void PageClient::did_complete_finalize_same_document_navigation(u64 operation_id, bool committed, int entry_step, int target_step, u64 script_history_length, u64 script_history_index)
+{
+    page().top_level_traversable()->did_complete_finalize_same_document_navigation(operation_id, committed, entry_step, target_step, {
+                                                                                                                                         .script_history_length = script_history_length,
+                                                                                                                                         .script_history_index = script_history_index,
+                                                                                                                                     });
 }
 
 void PageClient::page_did_finalize_cross_document_navigation(Web::HTML::CrossProcessId navigable_id, Web::HTML::SessionHistoryEntryDescriptor const& history_entry, Optional<Utf16String> const& entry_to_replace_navigation_api_key)
@@ -1561,10 +1586,10 @@ void PageClient::initialize_js_console(Web::DOM::Document& document)
     if (document.is_temporary_document_for_fragment_parsing())
         return;
 
-    auto& realm = document.realm();
+    auto& realm = document.relevant_settings_object().realm();
     auto console_object = realm.intrinsics().console_object();
 
-    auto console_client = DevToolsConsoleClient::create(document.realm(), console_object->console(), *this);
+    auto console_client = DevToolsConsoleClient::create(realm, console_object->console(), *this);
     document.set_console_client(console_client);
 }
 

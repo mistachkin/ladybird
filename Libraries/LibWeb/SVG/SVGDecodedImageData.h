@@ -7,8 +7,7 @@
 #pragma once
 
 #include <AK/Optional.h>
-#include <LibGC/Weak.h>
-#include <LibGC/WeakHashSet.h>
+#include <LibGC/Heap.h>
 #include <LibGfx/DecodedImageFrame.h>
 #include <LibWeb/HTML/DecodedImageData.h>
 #include <LibWeb/Page/Page.h>
@@ -25,7 +24,7 @@ public:
     static constexpr bool OVERRIDES_FINALIZE = true;
 
     class SVGPageClient;
-    static ErrorOr<GC::Ref<SVGDecodedImageData>> create(JS::Realm&, GC::Ref<Page>, URL::URL const&, ReadonlyBytes encoded_svg);
+    static ErrorOr<GC::Ref<SVGDecodedImageData>> create(GC::Ref<Page>, URL::URL const&, ReadonlyBytes encoded_svg);
     virtual ~SVGDecodedImageData() override;
 
     virtual Optional<Gfx::DecodedImageFrame> default_frame(Gfx::IntSize = {}) const override;
@@ -35,7 +34,7 @@ public:
     virtual Optional<CSSPixels> intrinsic_height() const override;
     virtual Optional<CSSPixelFraction> intrinsic_aspect_ratio() const override;
 
-    virtual Optional<Painting::DisplayListResource> record_display_list(Gfx::IntSize, Painting::DisplayListResourceStorage&) const override;
+    virtual Optional<Painting::DisplayListResource> record_display_list(Gfx::IntSize, CSS::PreferredColorScheme, Painting::DisplayListResourceStorage&) const override;
 
     // FIXME: Support SVG animations. :^)
     DOM::Document const& svg_document() const { return *m_document; }
@@ -44,7 +43,11 @@ public:
     virtual void finalize() override;
     virtual size_t external_memory_size() const override;
 
-    virtual void paint(DisplayListRecordingContext&, Gfx::IntRect dst_rect, CSS::ImageRendering) const override;
+    virtual void paint(DisplayListRecordingContext&, Gfx::IntRect dst_rect, CSS::ImageRendering, CSS::PreferredColorScheme) const override;
+
+    // The scheme the SVG document currently answers `prefers-color-scheme` with. Held on the image
+    // rather than on the page, because the page is shared with every other image.
+    CSS::PreferredColorScheme color_scheme() const { return m_color_scheme; }
 
 private:
     SVGDecodedImageData(GC::Ref<Page>, GC::Ref<SVGPageClient>, GC::Ref<DOM::Document>, GC::Ref<SVG::SVGSVGElement>);
@@ -59,6 +62,7 @@ private:
     // FIXME: Remove this once everything is using surfaces instead.
     mutable HashMap<Gfx::IntSize, Gfx::DecodedImageFrame> m_cached_rendered_frames;
 
+    mutable CSS::PreferredColorScheme m_color_scheme { CSS::PreferredColorScheme::Auto };
     mutable HashMap<Gfx::IntSize, NonnullRefPtr<Gfx::PaintingSurface>> m_cached_rendered_surfaces;
 
     struct CachedDisplayList {
@@ -67,7 +71,22 @@ private:
         // Precomputed by collect_referenced_resources(); the display list is immutable, so this never changes.
         Painting::DisplayListResourceSet referenced_resources;
     };
-    mutable HashMap<Gfx::IntSize, CachedDisplayList> m_cached_display_lists;
+    // An SVG used as an image resolves `prefers-color-scheme` from the used `color-scheme` of the
+    // element referencing it, so one image can render two ways on one page and the recording is
+    // keyed by both.
+    struct RenderKey {
+        Gfx::IntSize size;
+        CSS::PreferredColorScheme color_scheme;
+        bool operator==(RenderKey const&) const = default;
+    };
+    struct RenderKeyTraits : public Traits<RenderKey> {
+        static unsigned hash(RenderKey const& key)
+        {
+            return pair_int_hash(Traits<Gfx::IntSize>::hash(key.size), to_underlying(key.color_scheme));
+        }
+        static bool equals(RenderKey const& a, RenderKey const& b) { return a == b; }
+    };
+    mutable HashMap<RenderKey, CachedDisplayList, RenderKeyTraits> m_cached_display_lists;
 
     GC::Ref<Page> m_page;
     GC::Ref<SVGPageClient> m_page_client;
@@ -84,9 +103,9 @@ class SVGDecodedImageData::SVGPageClient final : public PageClient {
     GC_DECLARE_ALLOCATOR(SVGDecodedImageData::SVGPageClient);
 
 public:
-    static GC::Ref<SVGPageClient> create(JS::VM& vm, Page& page)
+    static GC::Ref<SVGPageClient> create(Page& page)
     {
-        return vm.heap().allocate<SVGPageClient>(page);
+        return GC::Heap::the().allocate<SVGPageClient>(page);
     }
 
     virtual ~SVGPageClient() override = default;

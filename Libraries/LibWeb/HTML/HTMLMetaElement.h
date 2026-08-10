@@ -23,7 +23,7 @@ namespace Web::HTML {
     __ENUMERATE_HTML_META_HTTP_EQUIV_ATTRIBUTE(u"th8-script-policy", TH8ScriptPolicy)
 
 class HTMLMetaElement final : public HTMLElement {
-    WEB_PLATFORM_OBJECT(HTMLMetaElement, HTMLElement);
+    WEB_WRAPPABLE(HTMLMetaElement, HTMLElement);
     GC_DECLARE_ALLOCATOR(HTMLMetaElement);
 
 public:
@@ -39,8 +39,6 @@ public:
 
 private:
     HTMLMetaElement(DOM::Document&, DOM::QualifiedName);
-
-    virtual void initialize(JS::Realm&) override;
 
     void update_metadata(Optional<Utf16String> const& old_name = {});
     void update_referrer_policy();

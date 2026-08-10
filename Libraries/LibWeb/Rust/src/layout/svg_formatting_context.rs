@@ -99,7 +99,7 @@ pub struct FfiSvgPathRequest {
 pub struct FfiSvgPathResult {
     pub path_handle: *mut c_void,
     pub bounding_box: FfiFloatRect,
-    pub text_position_for_children: FfiFloatPoint,
+    pub text_position_after: FfiFloatPoint,
 }
 
 pub(crate) const PRESERVE_ASPECT_RATIO_NONE: u8 = 0;
@@ -420,6 +420,19 @@ impl<'pass> SvgFormattingContext<'pass> {
             viewport_height: CssPixels::default(),
             current_text_position: FfiFloatPoint::default(),
         }
+    }
+
+    // The input a nested viewport or resource context is laid out with: it inherits this context's
+    // available space and quirks-mode percentage basis, and participates as an item.
+    fn nested_layout_input(&self) -> LayoutInput {
+        LayoutInput::new(
+            self.available_space.unwrap(),
+            ContainingBlockConstraints {
+                quirks_mode_percentage_basis_block_size: self.quirks_mode_percentage_basis_block_size,
+                ..Default::default()
+            },
+            ParticipationInParentFormattingContext::Item,
+        )
     }
 
     fn first_child(&self, node: Node) -> Node {
@@ -816,19 +829,7 @@ impl<'pass> SvgFormattingContext<'pass> {
             parent_viewbox_transform,
             Some(parent_svg_transform),
         );
-        nested_context.run(
-            run,
-            LayoutInput {
-                available_space: self.available_space.unwrap(),
-                containing_block_constraints: ContainingBlockConstraints {
-                    quirks_mode_percentage_basis_block_size: self.quirks_mode_percentage_basis_block_size,
-                    ..Default::default()
-                },
-                content_box_position_in_bfc_root: None,
-                sizing: RootSizingDirectives::default(),
-                participation: ParticipationInParentFormattingContext::Item,
-            },
-        );
+        nested_context.run(run, self.nested_layout_input());
         self.set_svg_viewport_size(
             viewport,
             FfiCssPixelSize {
@@ -918,7 +919,7 @@ impl<'pass> SvgFormattingContext<'pass> {
 
         let facts = self.svg_facts(graphics_box);
         // SAFETY: The callback computes geometry synchronously and transfers
-        // one retained path handle into the result.
+        // sole ownership of a heap-allocated path into the result.
         let result = unsafe {
             (self.callbacks.compute_svg_path)(
                 self.callbacks.context,
@@ -930,10 +931,12 @@ impl<'pass> SvgFormattingContext<'pass> {
                 },
             )
         };
-        assert!(!result.path_handle.is_null());
+        // SAFETY: The callback just handed over its one owning pointer.
+        let path = unsafe { libgfx_rust::path::OwnedPath::adopt(result.path_handle) };
 
         if self.node_kind(graphics_box) == NodeKind::SVGTextBox {
-            self.current_text_position = result.text_position_for_children;
+            // Descendant and following text elements continue from the text position after this element's own text run.
+            self.current_text_position = result.text_position_after;
             // <text> and <tspan> elements can contain more text elements.
             let mut child = self.first_child(graphics_box);
             while !child.is_invalid() {
@@ -945,10 +948,6 @@ impl<'pass> SvgFormattingContext<'pass> {
             }
         }
 
-        self.current_text_position = FfiFloatPoint {
-            x: result.bounding_box.x + result.bounding_box.width,
-            y: result.bounding_box.y + result.bounding_box.height,
-        };
         let mut transformed_bounding_box =
             float_rect_to_css_pixels(to_css_pixels_transform.map_rect(result.bounding_box));
         // Stroke increases the path's size by stroke_width/2 per side.
@@ -964,11 +963,7 @@ impl<'pass> SvgFormattingContext<'pass> {
         used.has_definite_block_size.set(true);
         self.state
             .used_values_rare_data_for_node_mut(&self.callbacks, graphics_box)
-            .computed_svg_path = Some(crate::layout::RetainedLayoutHandle::new(
-            result.path_handle,
-            self.callbacks.context,
-            self.callbacks.release_svg_path,
-        ));
+            .computed_svg_path = Some(path);
     }
 
     fn layout_image_element(&self, image_box: Node) {
@@ -1074,19 +1069,7 @@ impl<'pass> SvgFormattingContext<'pass> {
             parent_viewbox_transform,
             Some(FfiAffineTransform::default()),
         );
-        nested_context.run(
-            run,
-            LayoutInput {
-                available_space: self.available_space.unwrap(),
-                containing_block_constraints: ContainingBlockConstraints {
-                    quirks_mode_percentage_basis_block_size: self.quirks_mode_percentage_basis_block_size,
-                    ..Default::default()
-                },
-                content_box_position_in_bfc_root: None,
-                sizing: RootSizingDirectives::default(),
-                participation: ParticipationInParentFormattingContext::Item,
-            },
-        );
+        nested_context.run(run, self.nested_layout_input());
 
         let used = used_pointer;
         let mapped_rect = parent_viewbox_transform.map_rect(FfiFloatRect {

@@ -182,12 +182,11 @@ pub struct FfiCommittedBoxMetrics {
     pub has_containing_line_box_index: bool,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum LineFragmentLookup {
-    #[default]
     NotFound,
     LineOnly,
-    Found,
+    Found(crate::layout::FfiCssPixelPoint),
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -263,547 +262,18 @@ pub struct FfiCommitSink {
     pub assign_inline_box_geometry: unsafe extern "C" fn(*mut c_void, *mut c_void),
 }
 
-pub(crate) type ReleaseRetainedLayoutHandle = unsafe extern "C" fn(*mut c_void, *mut c_void);
-
-pub(crate) struct RetainedLayoutHandle {
-    handle: *mut c_void,
-    callback_context: *mut c_void,
-    release: ReleaseRetainedLayoutHandle,
-}
-
-impl RetainedLayoutHandle {
-    pub(crate) fn new(
-        handle: *mut c_void,
-        callback_context: *mut c_void,
-        release: ReleaseRetainedLayoutHandle,
-    ) -> Self {
-        assert!(!handle.is_null());
-        Self {
-            handle,
-            callback_context,
-            release,
-        }
-    }
-
-    pub(crate) fn take(&mut self) -> *mut c_void {
-        let handle = self.handle;
-        self.handle = null_mut();
-        handle
-    }
-}
-
-impl Drop for RetainedLayoutHandle {
-    fn drop(&mut self) {
-        if self.handle.is_null() {
-            return;
-        }
-        // SAFETY: Each retained layout handle is returned with one ownership
-        // unit by its creating callback and is either transferred to the
-        // commit sink or released exactly once with the paired callback.
-        unsafe {
-            (self.release)(self.callback_context, self.handle);
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PendingAbsposChild {
     pub(crate) child_box: Node,
     pub(crate) static_position_rect: StaticPositionRect,
     pub(crate) containing_block_info_override: Option<AbsposContainingBlockInfo>,
 }
-
-/// A pass-scoped lens over one node's facts. Pure classification reads the
-/// arena NodeData directly; style-derived answers read the per-slot style
-/// snapshot; content-derived answers read the kind-gated lazy fact stores.
-/// Nothing is materialized per node, so every answer is as live as its source.
-#[derive(Clone, Copy)]
-pub(crate) struct NodeFacts<'pass> {
-    state: &'pass LayoutState,
-    callbacks: &'pass FfiLayoutFcCallbacks,
-    node: Node,
-}
-
-impl<'pass> NodeFacts<'pass> {
-    fn data(&self) -> &'pass NodeData {
-        self.callbacks.node_data(self.node)
-    }
-
-    fn parent_data(&self) -> Option<&'pass NodeData> {
-        let parent = self.data().parent;
-        (!parent.is_invalid()).then(|| self.callbacks.node_data(parent))
-    }
-
-    fn style(&self) -> StyleValues<'pass> {
-        self.state.style_facts(self.callbacks, self.node)
-    }
-
-    fn computed_values_view_if_styled(&self) -> Option<ComputedValuesView<'pass>> {
-        self.callbacks.computed_values_view_if_styled(self.node)
-    }
-
-    fn parent_computed_values_view_if_styled(&self) -> Option<ComputedValuesView<'pass>> {
-        let parent = self.data().parent;
-        if parent.is_invalid() {
-            return None;
-        }
-        self.callbacks.computed_values_view_if_styled(parent)
-    }
-
-    fn replaced_content(&self) -> crate::layout::FfiReplacedContentFacts {
-        self.state.replaced_content_facts(self.callbacks, self.node)
-    }
-
-    fn list_item(&self) -> crate::layout::FfiListItemFacts {
-        self.state.list_item_facts(self.callbacks, self.node)
-    }
-
-    pub(crate) fn is_text_node(&self) -> bool {
-        crate::layout::kind_is_text(self.data().kind)
-    }
-
-    pub(crate) fn is_break_node(&self) -> bool {
-        self.data().kind == NodeKind::BreakNode
-    }
-
-    pub(crate) fn is_box(&self) -> bool {
-        crate::layout::kind_is_box(self.data().kind)
-    }
-
-    pub(crate) fn is_block_container(&self) -> bool {
-        crate::layout::kind_is_block_container(self.data().kind)
-    }
-
-    pub(crate) fn is_replaced_box(&self) -> bool {
-        crate::layout::kind_is_replaced_box(self.data().kind)
-    }
-
-    pub(crate) fn is_replaced_box_with_children(&self) -> bool {
-        let data = self.data();
-        crate::layout::kind_is_replaced_box(data.kind) && crate::layout::node_can_have_children(data)
-    }
-
-    pub(crate) fn is_floating(&self) -> bool {
-        self.computed_values_view_if_styled().is_some_and(|style| style.is_floating())
-    }
-
-    pub(crate) fn is_absolutely_positioned(&self) -> bool {
-        self.computed_values_view_if_styled()
-            .is_some_and(|style| style.is_absolutely_positioned())
-    }
-
-    pub(crate) fn is_relatively_positioned(&self) -> bool {
-        self.computed_values_view_if_styled()
-            .is_some_and(|style| style.position() == crate::css::css_enums::positioning::RELATIVE)
-    }
-
-    pub(crate) fn is_in_flow(&self) -> bool {
-        !crate::layout::node_is_out_of_flow(self.data(), self.computed_values_view_if_styled())
-    }
-
-    pub(crate) fn is_inline(&self) -> bool {
-        crate::layout::kind_is_text(self.data().kind)
-            || self
-                .computed_values_view_if_styled()
-                .is_some_and(|style| style.display().is_inline_outside())
-    }
-
-    pub(crate) fn is_atomic_inline(&self) -> bool {
-        let data = self.data();
-        crate::layout::has_flag(data, NodeFlag::IsReplacedElement)
-            || data.kind == NodeKind::ListItemMarkerBox
-            || self.computed_values_view_if_styled().is_some_and(|style| {
-                let display = style.display();
-                display.is_inline_outside() && !display.is_flow_inside()
-            })
-    }
-
-    pub(crate) fn has_box_model_metrics(&self) -> bool {
-        !matches!(
-            self.data().kind,
-            NodeKind::Unset
-                | NodeKind::Node
-                | NodeKind::NodeWithStyle
-                | NodeKind::GeneratedTextNode
-                | NodeKind::TextNode
-                | NodeKind::TextSliceNode
-        )
-    }
-
-    pub(crate) fn is_fragmented_inline(&self) -> bool {
-        let data = self.data();
-        data.kind == NodeKind::InlineNode
-            || (data.kind == NodeKind::ListItemBox
-                && self.computed_values_view_if_styled().is_some_and(|style| {
-                    let display = style.display();
-                    display.is_inline_outside() && display.is_flow_inside()
-                }))
-    }
-
-    pub(crate) fn is_inline_flow_interrupting_block(&self) -> bool {
-        if !self.has_box_model_metrics() {
-            return false;
-        }
-        let data = self.data();
-        let Some(parent) = self.parent_data() else {
-            return false;
-        };
-        let parent_is_inline_flow = self.parent_computed_values_view_if_styled().is_some_and(|style| {
-            let display = style.display();
-            display.is_inline_outside() && display.is_flow_inside()
-        });
-        if !parent_is_inline_flow {
-            return false;
-        }
-        let style = self.computed_values_view_if_styled();
-        if style.is_some_and(|style| style.display().is_inline_outside())
-            || crate::layout::node_is_out_of_flow(data, style)
-        {
-            return false;
-        }
-        let display = self.display();
-        if display.is_contents() {
-            return false;
-        }
-        if display.is_internal_table() || display.is_table_caption() {
-            return false;
-        }
-        if parent.kind == NodeKind::SVGForeignObjectBox {
-            return false;
-        }
-        if crate::layout::kind_is_svg_box(data.kind) || data.kind == NodeKind::SVGForeignObjectBox {
-            return false;
-        }
-        if data.kind == NodeKind::SVGSVGBox
-            && (crate::layout::kind_is_svg_box(parent.kind) || parent.kind == NodeKind::SVGSVGBox)
-        {
-            return false;
-        }
-        if crate::layout::kind_is_replaced_box(parent.kind) && crate::layout::node_can_have_children(parent) {
-            return false;
-        }
-        true
-    }
-
-    pub(crate) fn is_list_item_marker_box(&self) -> bool {
-        self.data().kind == NodeKind::ListItemMarkerBox
-    }
-
-    pub(crate) fn is_list_item_box(&self) -> bool {
-        self.data().kind == NodeKind::ListItemBox
-    }
-
-    pub(crate) fn is_svg_mask_box(&self) -> bool {
-        self.data().kind == NodeKind::SVGMaskBox
-    }
-
-    pub(crate) fn is_svg_clip_box(&self) -> bool {
-        self.data().kind == NodeKind::SVGClipBox
-    }
-
-    pub(crate) fn display_before_box_type_transformation_is_block_outside(&self) -> bool {
-        self.computed_values_view_if_styled()
-            .is_some_and(|style| style.display_before_box_type_transformation().is_block_outside())
-    }
-
-    pub(crate) fn inline_axis_is_reverse(&self) -> bool {
-        let style = self.style();
-        match style.writing_mode() {
-            writing_mode::HORIZONTAL_TB
-            | writing_mode::VERTICAL_RL
-            | writing_mode::VERTICAL_LR
-            | writing_mode::SIDEWAYS_RL => style.direction() == 1,
-            writing_mode::SIDEWAYS_LR => style.direction() == 0,
-            _ => unreachable!("invalid writing mode"),
-        }
-    }
-
-    pub(crate) fn has_dom_node(&self) -> bool {
-        !crate::layout::has_flag(self.data(), NodeFlag::Anonymous)
-    }
-
-    pub(crate) fn is_generated_for_pseudo_element(&self) -> bool {
-        self.data().generated_for != 0
-    }
-
-    pub(crate) fn children_are_inline(&self) -> bool {
-        crate::layout::has_flag(self.data(), NodeFlag::ChildrenAreInline)
-    }
-
-    pub(crate) fn is_anonymous(&self) -> bool {
-        crate::layout::has_flag(self.data(), NodeFlag::Anonymous)
-    }
-
-    pub(crate) fn can_have_children(&self) -> bool {
-        crate::layout::node_can_have_children(self.data())
-    }
-
-    pub(crate) fn has_replaced_element_table_display_adjustment(&self) -> bool {
-        crate::layout::has_flag(self.data(), NodeFlag::IsReplacedElement)
-            && self
-                .computed_values_view_if_styled()
-                .is_some_and(|style| {
-                    let display = style.display_before_box_type_transformation();
-                    display.is_table_inside() || display.is_internal_table() || display.is_table_caption()
-                })
-    }
-
-    pub(crate) fn creates_block_formatting_context(&self) -> bool {
-        crate::layout::node_creates_block_formatting_context(
-            self.data(),
-            self.computed_values_view_if_styled(),
-            self.parent_computed_values_view_if_styled(),
-        )
-    }
-
-    pub(crate) fn is_editing_host(&self) -> bool {
-        crate::layout::has_flag(self.data(), NodeFlag::IsEditingHost)
-    }
-
-    pub(crate) fn produces_line_box_fragment_when_empty(&self) -> bool {
-        crate::layout::has_flag(self.data(), NodeFlag::ProducesLineBoxFragmentWhenEmpty)
-    }
-
-    pub(crate) fn uses_button_layout(&self) -> bool {
-        crate::layout::has_flag(self.data(), NodeFlag::UsesButtonLayout)
-    }
-
-    pub(crate) fn vertical_align_applies(&self) -> bool {
-        let data = self.data();
-        crate::layout::kind_is_box(data.kind)
-            && !crate::layout::has_flag(data, NodeFlag::IsFlexItem)
-            && !crate::layout::has_flag(data, NodeFlag::IsGridItem)
-    }
-
-    pub(crate) fn is_html_input_element(&self) -> bool {
-        crate::layout::has_flag(self.data(), NodeFlag::IsHtmlInputElement)
-    }
-
-    pub(crate) fn is_fieldset_box(&self) -> bool {
-        self.data().kind == NodeKind::FieldSetBox
-    }
-
-    pub(crate) fn rendered_legend(&self) -> Node {
-        let data = self.data();
-        if data.kind != NodeKind::FieldSetBox {
-            return Node::INVALID;
-        }
-        let mut child = data.first_child;
-        while !child.is_invalid() {
-            let child_data = self.callbacks.node_data(child);
-            if child_data.kind == NodeKind::LegendBox
-                && !crate::layout::node_is_out_of_flow(child_data, self.callbacks.computed_values_view_if_styled(child))
-            {
-                return child;
-            }
-            child = child_data.next_sibling;
-        }
-        Node::INVALID
-    }
-
-    pub(crate) fn list_item_marker(&self) -> Node {
-        self.list_item().marker
-    }
-
-    pub(crate) fn marker_is_symbolic(&self) -> bool {
-        self.list_item().marker_is_symbolic
-    }
-
-    pub(crate) fn marker_content_inline_size(&self) -> crate::layout::CssPixels {
-        self.list_item().marker_content_inline_size
-    }
-
-    pub(crate) fn marker_content_block_size(&self) -> crate::layout::CssPixels {
-        self.list_item().marker_content_block_size
-    }
-
-    pub(crate) fn marker_distance(&self) -> crate::layout::CssPixels {
-        self.list_item().marker_distance
-    }
-
-    pub(crate) fn marker_list_style_position(&self) -> u8 {
-        self.list_item().marker_list_style_position
-    }
-
-    pub(crate) fn has_auto_content_width(&self) -> bool {
-        self.replaced_content().has_auto_content_width
-    }
-
-    pub(crate) fn auto_content_width(&self) -> crate::layout::CssPixels {
-        self.replaced_content().auto_content_width
-    }
-
-    pub(crate) fn has_auto_content_height(&self) -> bool {
-        self.replaced_content().has_auto_content_height
-    }
-
-    pub(crate) fn auto_content_height(&self) -> crate::layout::CssPixels {
-        self.replaced_content().auto_content_height
-    }
-
-    pub(crate) fn has_auto_content_aspect_ratio(&self) -> bool {
-        self.replaced_content().auto_content_aspect_ratio_denominator != crate::layout::CssPixels::default()
-    }
-
-    pub(crate) fn auto_content_aspect_ratio_numerator(&self) -> crate::layout::CssPixels {
-        self.replaced_content().auto_content_aspect_ratio_numerator
-    }
-
-    pub(crate) fn auto_content_aspect_ratio_denominator(&self) -> crate::layout::CssPixels {
-        self.replaced_content().auto_content_aspect_ratio_denominator
-    }
-
-    pub(crate) fn has_auto_content_box_size(&self) -> bool {
-        crate::layout::node_has_auto_content_box_size(self.data())
-    }
-
-    pub(crate) fn node_has_size_containment(&self) -> bool {
-        let display = self.display();
-        if display.is_table_inside() || display.is_internal_table() {
-            return false;
-        }
-        let style = self.style();
-        style.has_size_containment() || style.is_size_container()
-    }
-
-    pub(crate) fn has_preferred_aspect_ratio(&self) -> bool {
-        self.preferred_aspect_ratio().is_some()
-    }
-
-    pub(crate) fn preferred_aspect_ratio(&self) -> Option<PixelFraction> {
-        let style = self.style();
-        if !self.node_has_size_containment() && style.aspect_ratio_uses_natural_when_available() {
-            let replaced = self.replaced_content();
-            if replaced.auto_content_aspect_ratio_denominator != crate::layout::CssPixels::default() {
-                return Some(PixelFraction {
-                    numerator: replaced.auto_content_aspect_ratio_numerator,
-                    denominator: replaced.auto_content_aspect_ratio_denominator,
-                });
-            }
-        }
-        let (numerator, denominator) = style.css_preferred_aspect_ratio();
-        (denominator != crate::layout::CssPixels::default()).then_some(PixelFraction { numerator, denominator })
-    }
-
-    pub(crate) fn has_default_preferred_width(&self) -> bool {
-        self.replaced_content().has_default_preferred_width
-    }
-
-    pub(crate) fn default_preferred_width(&self) -> crate::layout::CssPixels {
-        self.replaced_content().default_preferred_width
-    }
-
-    pub(crate) fn has_default_preferred_height(&self) -> bool {
-        self.replaced_content().has_default_preferred_height
-    }
-
-    pub(crate) fn default_preferred_height(&self) -> crate::layout::CssPixels {
-        self.replaced_content().default_preferred_height
-    }
-
-    pub(crate) fn initial_containing_block_inline_size(&self) -> crate::layout::CssPixels {
-        self.callbacks.initial_containing_block_inline_size
-    }
-
-    pub(crate) fn is_scroll_container(&self) -> bool {
-        if self.data().kind == NodeKind::Viewport {
-            return true;
-        }
-        let style = self.style();
-        let overflow_value_makes_box_a_scroll_container =
-            |overflow: u8| matches!(overflow, overflow::AUTO | overflow::HIDDEN | overflow::SCROLL);
-        overflow_value_makes_box_a_scroll_container(style.overflow_x())
-            || overflow_value_makes_box_a_scroll_container(style.overflow_y())
-    }
-
-    pub(crate) fn display(&self) -> crate::layout::FfiDisplay {
-        if self.data().style.is_null() {
-            return crate::layout::FfiDisplay::block();
-        }
-        self.state.style_facts(self.callbacks, self.node).display()
-    }
-
-    pub(crate) fn is_svg_box(&self) -> bool {
-        crate::layout::kind_is_svg_box(self.data().kind)
-    }
-
-    pub(crate) fn is_svg_svg_box(&self) -> bool {
-        self.data().kind == NodeKind::SVGSVGBox
-    }
-
-    pub(crate) fn is_table_box(&self) -> bool {
-        self.display().is_table_inside()
-    }
-
-    pub(crate) fn is_table_wrapper(&self) -> bool {
-        self.data().kind == NodeKind::TableWrapper
-    }
-
-    pub(crate) fn is_table_row_group(&self) -> bool {
-        self.display().is_table_row_group()
-    }
-
-    pub(crate) fn is_table_header_group(&self) -> bool {
-        self.display().is_table_header_group()
-    }
-
-    pub(crate) fn is_table_footer_group(&self) -> bool {
-        self.display().is_table_footer_group()
-    }
-
-    pub(crate) fn is_table_row(&self) -> bool {
-        self.display().is_table_row()
-    }
-
-    pub(crate) fn is_table_cell(&self) -> bool {
-        self.display().is_table_cell()
-    }
-
-    pub(crate) fn is_table_column_group(&self) -> bool {
-        self.display().is_table_column_group()
-    }
-
-    pub(crate) fn is_table_column(&self) -> bool {
-        self.display().is_table_column()
-    }
-
-    pub(crate) fn is_table_caption(&self) -> bool {
-        self.display().is_table_caption()
-    }
-
-    pub(crate) fn is_viewport(&self) -> bool {
-        self.data().kind == NodeKind::Viewport
-    }
-
-    pub(crate) fn document_in_quirks_mode(&self) -> bool {
-        self.callbacks.document_in_quirks_mode
-    }
-
-    pub(crate) fn is_in_user_agent_shadow_tree(&self) -> bool {
-        crate::layout::has_flag(self.data(), NodeFlag::IsInUserAgentShadowTree)
-    }
-
-    pub(crate) fn is_html_html_element(&self) -> bool {
-        crate::layout::has_flag(self.data(), NodeFlag::IsHtmlHtmlElement)
-    }
-
-    pub(crate) fn is_html_body_element(&self) -> bool {
-        crate::layout::has_flag(self.data(), NodeFlag::IsBody)
-    }
-}
-
 pub(crate) struct LayoutState {
     used_values: PagedStore<UsedValues>,
     contained_abspos_children: PagedStore<RefCell<VecDeque<PendingAbsposChild>>>,
-    abspos_layout_pass_queue_in_completion_order: RefCell<VecDeque<Node>>,
-    abspos_layout_pass_is_active: Cell<bool>,
     anchor_inset_store: AnchorInsetStore,
-    replaced_content_facts: PagedStore<crate::layout::FfiReplacedContentFacts>,
-    list_item_facts: PagedStore<crate::layout::FfiListItemFacts>,
-    line_data: PagedStore<RefCell<LineData>>,
-    block_rare_data: PagedStore<RefCell<BlockRareData>>,
-    used_values_rare_data: PagedStore<RefCell<UsedValuesRareData>>,
     inline_containing_blocks: RefCell<HashSet<Node>>,
+    anchor_candidate_shells: RefCell<Vec<*mut c_void>>,
     purpose: LayoutStatePurpose,
 }
 
@@ -819,10 +289,6 @@ impl Default for LayoutState {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct BlockRareData {
-    pub(crate) lowest_floating_descendant_bottom_margin_edge: Option<crate::layout::CssPixels>,
-}
 
 #[derive(Default)]
 pub(crate) struct LineData {
@@ -833,7 +299,7 @@ pub(crate) struct LineData {
 #[derive(Default)]
 pub(crate) struct UsedValuesRareData {
     pub(crate) table_cell_coordinates: Option<FfiTableCellCoordinates>,
-    pub(crate) computed_svg_path: Option<RetainedLayoutHandle>,
+    pub(crate) computed_svg_path: Option<libgfx_rust::path::OwnedPath>,
     pub(crate) computed_svg_transforms: Option<crate::layout::FfiSvgComputedTransforms>,
     pub(crate) svg_viewport_size: Option<crate::layout::FfiCssPixelSize>,
     pub(crate) grid_layout_data: Option<OwnedGridLayoutData>,
@@ -849,15 +315,9 @@ impl LayoutState {
         Self {
             used_values: PagedStore::default(),
             contained_abspos_children: PagedStore::default(),
-            abspos_layout_pass_queue_in_completion_order: RefCell::new(VecDeque::new()),
-            abspos_layout_pass_is_active: Cell::new(false),
             anchor_inset_store: AnchorInsetStore::default(),
-            replaced_content_facts: PagedStore::default(),
-            list_item_facts: PagedStore::default(),
-            line_data: PagedStore::default(),
-            block_rare_data: PagedStore::default(),
-            used_values_rare_data: PagedStore::default(),
             inline_containing_blocks: RefCell::new(HashSet::new()),
+            anchor_candidate_shells: RefCell::new(Vec::new()),
             purpose,
         }
     }
@@ -1034,7 +494,9 @@ impl LayoutState {
         used.content_inline_size.set(content_inline_size.unwrap_or_default());
         used.content_block_size.set(content_block_size.unwrap_or_default());
 
-        self.used_values.allocate(slot_index, used)
+        let used = self.used_values.allocate(slot_index, used);
+        self.register_anchor_candidate_if_carries_anchor_names(callbacks, node);
+        used
     }
 
     pub(crate) fn populate_from_paintable(
@@ -1067,7 +529,6 @@ impl LayoutState {
         used.set_content_block_size(geometry.content_block_size);
         used.has_definite_inline_size.set(true);
         used.has_definite_block_size.set(true);
-        used.has_content_offset.set(true);
         used.content_offset.set(geometry.content_offset);
         used.margin_left.set(geometry.margin_left);
         used.margin_right.set(geometry.margin_right);
@@ -1085,11 +546,17 @@ impl LayoutState {
         used.inset_right.set(geometry.inset_right);
         used.inset_top.set(geometry.inset_top);
         used.inset_bottom.set(geometry.inset_bottom);
+        // Materialization is this box's placement: the previous paintable's
+        // committed geometry is final from the moment it is adopted.
+        used.has_content_offset.set(true);
+        used.seal_committed_box_metrics();
+
+        let used = self.used_values.allocate(slot_index, used);
         if self.node_facts(callbacks, node).is_svg_svg_box() {
             self.used_values_rare_data_mut(slot_index).svg_viewport_size = Some(geometry.svg_viewport_size);
         }
-
-        Some(self.used_values.allocate(slot_index, used))
+        self.register_anchor_candidate_if_carries_anchor_names(callbacks, node);
+        Some(used)
     }
 
     pub(crate) fn note_inline_containing_block(&self, inline_containing_block: Node) {
@@ -1108,10 +575,15 @@ impl LayoutState {
         self.used_values_rare_data(slot_index)?.inline_containing_block_first_last_rect
     }
 
-    pub(crate) fn used_value_nodes(&self) -> Vec<Node> {
-        let mut nodes = Vec::new();
-        self.used_values.for_each(|used| nodes.push(used.node));
-        nodes
+    fn register_anchor_candidate_if_carries_anchor_names(&self, callbacks: &FfiLayoutFcCallbacks, node: Node) {
+        if !self.node_facts(callbacks, node).has_anchor_names() {
+            return;
+        }
+        self.anchor_candidate_shells.borrow_mut().push(callbacks.shell(node));
+    }
+
+    pub(crate) fn anchor_candidate_shells(&self) -> Ref<'_, Vec<*mut c_void>> {
+        self.anchor_candidate_shells.borrow()
     }
 
     pub(crate) fn set_box_is_grid_item(&self, callbacks: &FfiLayoutFcCallbacks, node: Node, is_grid_item: bool) {
@@ -1159,53 +631,6 @@ impl LayoutState {
         }
     }
 
-    pub(crate) fn replaced_content_facts(
-        &self,
-        callbacks: &FfiLayoutFcCallbacks,
-        node: Node,
-    ) -> crate::layout::FfiReplacedContentFacts {
-        let slot_index = callbacks.slot_index(node);
-        if let Some(facts) = self.replaced_content_facts.get(slot_index) {
-            return *facts;
-        }
-        let data = callbacks.node_data(node);
-        // Size containment gives any box an auto content box size of zero, so
-        // size-contained boxes join the replaced kinds in fetching real facts.
-        let size_containment_may_apply = crate::layout::kind_is_box(data.kind) && !data.style.is_null() && {
-            let style = self.style_facts(callbacks, node);
-            style.has_size_containment() || style.is_size_container()
-        };
-        let facts = if crate::layout::node_may_have_replaced_content_facts(data) || size_containment_may_apply {
-            // SAFETY: The callback table and node are supplied by the live C++
-            // formatting-context shim and remain valid for this layout pass.
-            unsafe { (callbacks.build_replaced_content_facts)(callbacks.context, callbacks.shell(node)) }
-        } else {
-            crate::layout::FfiReplacedContentFacts::default()
-        };
-        self.replaced_content_facts.allocate(slot_index, facts);
-        facts
-    }
-
-    pub(crate) fn list_item_facts(
-        &self,
-        callbacks: &FfiLayoutFcCallbacks,
-        node: Node,
-    ) -> crate::layout::FfiListItemFacts {
-        let slot_index = callbacks.slot_index(node);
-        if let Some(facts) = self.list_item_facts.get(slot_index) {
-            return *facts;
-        }
-        let facts = if crate::layout::node_may_have_list_item_facts(callbacks.node_data(node)) {
-            // SAFETY: The callback table and node are supplied by the live C++
-            // formatting-context shim and remain valid for this layout pass.
-            unsafe { (callbacks.build_list_item_facts)(callbacks.context, callbacks.shell(node)) }
-        } else {
-            crate::layout::FfiListItemFacts::default()
-        };
-        self.list_item_facts.allocate(slot_index, facts);
-        facts
-    }
-
     pub(crate) fn text_chunks(
         &self,
         callbacks: &FfiLayoutFcCallbacks,
@@ -1240,44 +665,38 @@ impl LayoutState {
     }
 
     pub(crate) fn line_data_cell(&self, slot_index: u32) -> &RefCell<LineData> {
-        self.line_data
-            .get(slot_index)
-            .unwrap_or_else(|| self.line_data.allocate(slot_index, RefCell::new(LineData::default())))
+        self.used_values_by_slot(slot_index)
+            .expect("missing used values")
+            .line_data
+            .get_or_init(LineData::default)
     }
 
     pub(crate) fn line_data(&self, slot_index: u32) -> Option<Ref<'_, LineData>> {
-        self.line_data.get(slot_index).map(RefCell::borrow)
+        self.used_values_by_slot(slot_index)?
+            .line_data
+            .get()
+            .map(RefCell::borrow)
     }
 
     pub(crate) fn line_data_mut_if_present(&self, slot_index: u32) -> Option<RefMut<'_, LineData>> {
-        self.line_data.get(slot_index).map(RefCell::borrow_mut)
-    }
-
-    pub(crate) fn block_rare_data(&self, slot_index: u32) -> Option<Ref<'_, BlockRareData>> {
-        self.block_rare_data.get(slot_index).map(RefCell::borrow)
-    }
-
-    pub(crate) fn block_rare_data_mut(&self, slot_index: u32) -> RefMut<'_, BlockRareData> {
-        self.block_rare_data
-            .get(slot_index)
-            .unwrap_or_else(|| {
-                self.block_rare_data
-                    .allocate(slot_index, RefCell::new(BlockRareData::default()))
-            })
-            .borrow_mut()
+        self.used_values_by_slot(slot_index)?
+            .line_data
+            .get()
+            .map(RefCell::borrow_mut)
     }
 
     pub(crate) fn used_values_rare_data(&self, slot_index: u32) -> Option<Ref<'_, UsedValuesRareData>> {
-        self.used_values_rare_data.get(slot_index).map(RefCell::borrow)
+        self.used_values_by_slot(slot_index)?
+            .rare_data
+            .get()
+            .map(RefCell::borrow)
     }
 
     pub(crate) fn used_values_rare_data_mut(&self, slot_index: u32) -> RefMut<'_, UsedValuesRareData> {
-        self.used_values_rare_data
-            .get(slot_index)
-            .unwrap_or_else(|| {
-                self.used_values_rare_data
-                    .allocate(slot_index, RefCell::new(UsedValuesRareData::default()))
-            })
+        self.used_values_by_slot(slot_index)
+            .expect("missing used values")
+            .rare_data
+            .get_or_init(UsedValuesRareData::default)
             .borrow_mut()
     }
 
@@ -1289,7 +708,7 @@ impl LayoutState {
         self.used_values_rare_data_mut(callbacks.slot_index(node))
     }
 
-    pub(crate) fn used_values_by_slot(&self, slot_index: u32) -> Option<&UsedValues> {
+    fn used_values_by_slot(&self, slot_index: u32) -> Option<&UsedValues> {
         self.used_values.get(slot_index)
     }
 
@@ -1297,14 +716,6 @@ impl LayoutState {
         self.used_values
             .get(callbacks.slot_index(node))
             .expect("missing used values")
-    }
-
-    pub(crate) fn try_used_values(
-        &self,
-        callbacks: &FfiLayoutFcCallbacks,
-        node: Node,
-    ) -> Option<&UsedValues> {
-        self.used_values.get(callbacks.slot_index(node))
     }
 
     pub(crate) fn register_contained_abspos_child(
@@ -1352,27 +763,6 @@ impl LayoutState {
         all_laid_out
     }
 
-    /// Every completed root enqueues even when its queue is still empty:
-    /// fixed-position descendants of abspos subtrees register against the
-    /// viewport only while the pass lays those subtrees out.
-    pub(crate) fn enqueue_for_abspos_layout_pass(&self, target_box: Node) {
-        self.abspos_layout_pass_queue_in_completion_order
-            .borrow_mut()
-            .push_back(target_box);
-    }
-
-    pub(crate) fn pop_from_abspos_layout_pass_queue(&self) -> Option<Node> {
-        self.abspos_layout_pass_queue_in_completion_order.borrow_mut().pop_front()
-    }
-
-    pub(crate) fn abspos_layout_pass_is_active(&self) -> bool {
-        self.abspos_layout_pass_is_active.get()
-    }
-
-    pub(crate) fn set_abspos_layout_pass_is_active(&self, is_active: bool) {
-        self.abspos_layout_pass_is_active.set(is_active);
-    }
-
     /// By completion time the grid-area geometry is final and every abspos
     /// child registering against this containing block has done so.
     pub(crate) fn override_contained_abspos_child_containing_blocks(
@@ -1417,71 +807,52 @@ impl LayoutState {
             }
             result.found_fragmented_inline_node |= facts.is_fragmented_inline();
             if facts.is_relatively_positioned() {
-                // An inline that never went through inline layout this pass has
-                // no used values; its committed box model is zeroed, so it
-                // contributes no inset.
-                if let Some(used) = self.try_used_values(callbacks, ancestor) {
-                    result.offset_x += used.inset_left.get();
-                    result.offset_y += used.inset_top.get();
-                }
+                // A relatively positioned inline-flow ancestor reachable from a
+                // committed fragment or piece was entered by its inline
+                // formatting context this pass, which created its used values
+                // and resolved its insets.
+                let used = self.used_values(callbacks, ancestor);
+                result.offset_x += used.inset_left.get();
+                result.offset_y += used.inset_top.get();
             }
             ancestor = callbacks.parent(ancestor);
         }
         result
     }
 
-    /// Composes the offset the paintable receives: the containing line box
-    /// fragment override for atomic inlines, the box's own relative-position
-    /// inset, and the relative insets accumulated from a fragmented inline
-    /// ancestor chain (block-in-inline). Offsets materialized from a previous
-    /// layout's paintable already include all of these. Also returns the line
-    /// box index to record for atomic inlines whose containing line survived
-    /// line post-processing.
-    fn committed_content_offset(
+    /// The line box index to record for atomic inlines whose containing line
+    /// survived line post-processing.
+    fn containing_line_box_index(
         &self,
         callbacks: &FfiLayoutFcCallbacks,
         node: Node,
         used: &UsedValues,
-    ) -> (crate::layout::FfiCssPixelPoint, Option<usize>) {
-        let mut offset = used.content_offset.get();
-        let mut containing_line_box_index = None;
-        if !used.materialized_from_paintable.get() {
-            let facts = self.node_facts(callbacks, node);
-            if facts.is_box() && !facts.is_fragmented_inline() {
-                let (lookup, line_fragment_offset) = self.line_fragment_lookup(callbacks, used);
-                if lookup != LineFragmentLookup::NotFound {
-                    containing_line_box_index = Some(used.containing_line_box_fragment.get().line_box_index);
-                }
-                if lookup == LineFragmentLookup::Found {
-                    offset = line_fragment_offset;
-                }
-                if facts.is_relatively_positioned() {
-                    offset.x += used.inset_left.get();
-                    offset.y += used.inset_top.get();
-                }
-                if facts.is_in_flow() && facts.display().is_block_outside() {
-                    let chain = self.accumulated_relative_insets_from_inline_ancestor_chain(
-                        callbacks,
-                        callbacks.parent(node),
-                        callbacks.containing_block(node),
-                    );
-                    if chain.found_fragmented_inline_node {
-                        offset.x += chain.offset_x;
-                        offset.y += chain.offset_y;
-                    }
-                }
+    ) -> Option<usize> {
+        if used.materialized_from_paintable.get() {
+            return None;
+        }
+        let facts = self.node_facts(callbacks, node);
+        if !facts.is_non_fragmented_box() {
+            return None;
+        }
+        match self.line_fragment_lookup(callbacks, used) {
+            LineFragmentLookup::NotFound => None,
+            LineFragmentLookup::LineOnly => Some(used.containing_line_box_fragment.get().line_box_index),
+            LineFragmentLookup::Found(line_fragment_offset) => {
+                debug_assert_eq!(
+                    line_fragment_offset,
+                    used.content_offset.get(),
+                    "stored line fragment offset diverged from the placed offset (is_block_outside={})",
+                    facts.display().is_block_outside()
+                );
+                Some(used.containing_line_box_fragment.get().line_box_index)
             }
         }
-        (offset, containing_line_box_index)
     }
 
-    fn line_fragment_lookup(
-        &self,
-        callbacks: &FfiLayoutFcCallbacks,
-        used: &UsedValues,
-    ) -> (LineFragmentLookup, crate::layout::FfiCssPixelPoint) {
+    fn line_fragment_lookup(&self, callbacks: &FfiLayoutFcCallbacks, used: &UsedValues) -> LineFragmentLookup {
         if !used.has_containing_line_box_fragment.get() {
-            return (LineFragmentLookup::NotFound, crate::layout::FfiCssPixelPoint::default());
+            return LineFragmentLookup::NotFound;
         }
         // SAFETY: Commit traverses the still-live C++ layout tree
         // synchronously with the pass callback table.
@@ -1489,17 +860,17 @@ impl LayoutState {
         assert!(!containing_block.is_invalid());
         let slot_index = callbacks.slot_index(containing_block);
         let Some(data) = self.line_data(slot_index) else {
-            return (LineFragmentLookup::NotFound, crate::layout::FfiCssPixelPoint::default());
+            return LineFragmentLookup::NotFound;
         };
         let coordinate = used.containing_line_box_fragment.get();
         let Some(line) = data.line_boxes.get(coordinate.line_box_index) else {
-            return (LineFragmentLookup::NotFound, crate::layout::FfiCssPixelPoint::default());
+            return LineFragmentLookup::NotFound;
         };
         let Some(fragment) = line.fragments.get(coordinate.fragment_index) else {
-            return (LineFragmentLookup::LineOnly, crate::layout::FfiCssPixelPoint::default());
+            return LineFragmentLookup::LineOnly;
         };
         let (x, y) = fragment.offset();
-        (LineFragmentLookup::Found, crate::layout::FfiCssPixelPoint { x, y })
+        LineFragmentLookup::Found(crate::layout::FfiCssPixelPoint { x, y })
     }
 
     fn commit_subtree(
@@ -1527,7 +898,8 @@ impl LayoutState {
         if let Some(used) = used
             && !paintable.is_null()
         {
-            let (content_offset, containing_line_box_index) = self.committed_content_offset(callbacks, node, used);
+            let content_offset = point_add(used.content_offset.get(), used.committed_offset_delta.get());
+            let containing_line_box_index = self.containing_line_box_index(callbacks, node, used);
             // SAFETY: Every callback below copies its plain-data argument or
             // consumes one retained handle synchronously.
             unsafe {
@@ -1585,7 +957,13 @@ impl LayoutState {
                         emit_fragment: sink.emit_fragment,
                         emit_inline_box_piece: sink.emit_inline_box_piece,
                     };
-                    assert!(push_line_data(self, slot_index, callbacks, line_sink));
+                    assert!(push_line_data(
+                        self,
+                        slot_index,
+                        used.content_inline_size.get(),
+                        callbacks,
+                        line_sink
+                    ));
                     unsafe {
                         (sink.finish_line_data)(sink.context);
                     }
@@ -1596,12 +974,12 @@ impl LayoutState {
             }
 
             let (transforms, viewport_size, path) = self
-                .used_values_rare_data_mut_if_present(slot_index)
-                .map_or((None, None, None), |mut rare| {
+                .used_values_rare_data(slot_index)
+                .map_or((None, None, None), |rare| {
                     (
                         rare.computed_svg_transforms,
                         rare.svg_viewport_size,
-                        rare.computed_svg_path.as_mut().map(RetainedLayoutHandle::take),
+                        rare.computed_svg_path.as_ref().map(libgfx_rust::path::OwnedPath::as_raw),
                     )
                 });
             unsafe {
@@ -1612,6 +990,8 @@ impl LayoutState {
                     (sink.set_svg_viewport_size)(sink.context, paintable, viewport_size);
                 }
                 if let Some(path) = path {
+                    // The sink only borrows the path and moves its contents
+                    // out; the rare data keeps ownership until state teardown.
                     (sink.set_computed_svg_path)(sink.context, paintable, path);
                 }
             }
@@ -1689,11 +1069,5 @@ impl LayoutState {
         unsafe {
             (sink.finish_commit)(sink.context);
         }
-    }
-}
-
-impl LayoutState {
-    fn used_values_rare_data_mut_if_present(&self, slot_index: u32) -> Option<RefMut<'_, UsedValuesRareData>> {
-        self.used_values_rare_data.get(slot_index).map(RefCell::borrow_mut)
     }
 }

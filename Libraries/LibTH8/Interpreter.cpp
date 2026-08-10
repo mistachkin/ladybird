@@ -109,6 +109,24 @@ size_t Interpreter::memory_limit() const
     return Th8_GetAllocLimit(m_interp);
 }
 
+void Interpreter::set_time_limit_ms(i64 ms)
+{
+    // Fail-open: if the platform clock cannot be read the deadline is
+    // simply not armed (matching TH8's own semantics); the step and
+    // memory limits still bound the evaluation.
+    (void)Th8_SetTimeLimitMs(m_interp, static_cast<th8_int64_t>(ms));
+}
+
+i64 Interpreter::deadline_us() const
+{
+    return static_cast<i64>(Th8_GetDeadline(m_interp));
+}
+
+void Interpreter::apply_safe_limits()
+{
+    Th8_SetSafeLimits(m_interp);
+}
+
 void Interpreter::freeze()
 {
     Th8_Freeze(m_interp);

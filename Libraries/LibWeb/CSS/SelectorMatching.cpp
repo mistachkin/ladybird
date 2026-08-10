@@ -536,7 +536,12 @@ extern "C" bool selector_ffi_element_is_html_element_in_html_document(void const
 
 extern "C" bool selector_ffi_element_is_document_root(void const* element)
 {
-    return is<HTML::HTMLHtmlElement>(ffi_element(element));
+    // https://drafts.csswg.org/selectors/#root-pseudo
+    // `:root` names the root of the document, which is an `<html>` element only in an HTML
+    // document. A standalone SVG or XML document has one too, and a `<html>` element that is not
+    // its document's root is not it.
+    auto const& subject = ffi_element(element);
+    return &subject == subject.document().document_element();
 }
 
 extern "C" bool selector_ffi_element_is_link(void const* element)
@@ -583,8 +588,10 @@ extern "C" bool selector_ffi_element_has_custom_state(void const* element, uintp
     auto const& target = ffi_element(element);
     if (!target.is_custom())
         return false;
-    if (auto custom_state_set = target.custom_state_set())
-        return custom_state_set->has_state(*reinterpret_cast<Utf16FlyString const*>(&state));
+    if (auto custom_state_set = target.custom_state_set()) {
+        auto const& utf16_state = *reinterpret_cast<Utf16FlyString const*>(&state);
+        return custom_state_set->has_state(utf16_state);
+    }
     return false;
 }
 

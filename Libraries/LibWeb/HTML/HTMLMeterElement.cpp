@@ -5,7 +5,6 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/HTMLMeterElement.h>
 #include <LibWeb/CSS/CSSStyleProperties.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/StyleValues/DisplayStyleValue.h>
@@ -26,12 +25,6 @@ HTMLMeterElement::HTMLMeterElement(DOM::Document& document, DOM::QualifiedName q
 }
 
 HTMLMeterElement::~HTMLMeterElement() = default;
-
-void HTMLMeterElement::initialize(JS::Realm& realm)
-{
-    WEB_SET_PROTOTYPE_FOR_INTERFACE(HTMLMeterElement);
-    Base::initialize(realm);
-}
 
 void HTMLMeterElement::visit_edges(Cell::Visitor& visitor)
 {
@@ -170,19 +163,12 @@ void HTMLMeterElement::inserted()
     create_shadow_tree_if_needed();
 }
 
-void HTMLMeterElement::adjust_computed_style(CSS::ComputedProperties::Builder& style)
-{
-    // https://drafts.csswg.org/css-display-3/#unbox
-    if (style.display().is_contents())
-        style.set_property(CSS::PropertyID::Display, CSS::DisplayStyleValue::create(CSS::Display::from_short(CSS::Display::Short::None)));
-}
-
 void HTMLMeterElement::create_shadow_tree_if_needed()
 {
     if (shadow_root())
         return;
 
-    auto shadow_root = realm().create<DOM::ShadowRoot>(document(), *this, Bindings::ShadowRootMode::Closed);
+    auto shadow_root = DOM::ShadowRoot::create(document(), *this, Web::DOM::ShadowRootMode::Closed);
     shadow_root->set_user_agent_internal(true);
     set_shadow_root(shadow_root);
 
@@ -234,7 +220,8 @@ void HTMLMeterElement::update_meter_value_element()
         return;
 
     double position = (value - min) / (max - min) * 100;
-    MUST(m_meter_value_element->style_for_bindings()->set_property(CSS::PropertyID::Width, Utf16String::formatted("{}%", position)));
+    auto width = Utf16String::formatted("{}%", position);
+    MUST(m_meter_value_element->style()->set_property(CSS::PropertyID::Width, width.utf16_view()));
 }
 
 }

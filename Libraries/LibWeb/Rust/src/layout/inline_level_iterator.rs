@@ -31,6 +31,7 @@ pub(crate) struct Item {
     pub(crate) is_collapsible_whitespace: bool,
     pub(crate) can_break_before: bool,
     pub(crate) preceded_by_unattached_inline_start_edges: bool,
+    pub(crate) content_baselines: DerivedBaselines,
 }
 
 impl Item {
@@ -51,6 +52,7 @@ impl Item {
             is_collapsible_whitespace: false,
             can_break_before: false,
             preceded_by_unattached_inline_start_edges: false,
+            content_baselines: DerivedBaselines::default(),
         }
     }
 
@@ -130,8 +132,7 @@ impl<'iterator, 'context, 'pass> InlineLevelIteratorGenerator<'iterator, 'contex
     }
 
     fn is_out_of_flow(&self, node: Node) -> bool {
-        let facts = self.context().facts(node);
-        facts.is_floating() || facts.is_absolutely_positioned()
+        self.context().facts(node).is_floating_or_absolutely_positioned()
     }
 
     fn compute_is_unidirectional_left_to_right(&mut self) -> bool {
@@ -282,6 +283,7 @@ impl<'iterator, 'context, 'pass> InlineLevelIteratorGenerator<'iterator, 'contex
             let facts = self.context().facts(self.next_node);
             if facts.is_inline()
                 && facts.has_box_model_metrics()
+                && !facts.is_break_node()
                 && self.context().style(self.next_node).display().is_flow_inside()
                 && !self.is_out_of_flow(self.next_node)
                 && !facts.is_atomic_inline()
@@ -527,7 +529,7 @@ impl<'iterator, 'context, 'pass> InlineLevelIteratorGenerator<'iterator, 'contex
             self.skip_to_next();
             return self.generate_next_item();
         }
-        if facts.is_list_item_marker_box() && facts.marker_list_style_position() != list_style_position::INSIDE {
+        if facts.is_list_item_marker_box() && !facts.list_marker_is_inside() {
             let parent = self.context().parent_node(node);
             if parent.is_invalid()
                 || !self.context().facts(parent).is_list_item_box()
@@ -547,15 +549,14 @@ impl<'iterator, 'context, 'pass> InlineLevelIteratorGenerator<'iterator, 'contex
         }
 
         let used = if self.box_model_node_stack.last().copied() == Some(node) {
-            self.context()
-                .try_used_pointer(node)
-                .expect("inline box must have precreated used values")
+            self.context().used(node)
         } else {
             self.context()
                 .create_used_values(node, self.context().input.containing_block_constraints)
         };
-        self.context_mut().dimension_box_on_line(node);
+        let content_baselines = self.context_mut().dimension_box_on_line(node);
         let mut item = Item::new(ItemType::Element, node);
+        item.content_baselines = content_baselines;
         item.inline_size = used.content_inline_size.get();
         item.padding_start = used.padding_left.get();
         item.padding_end = used.padding_right.get();

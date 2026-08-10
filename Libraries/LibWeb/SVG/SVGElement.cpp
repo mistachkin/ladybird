@@ -6,9 +6,6 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/ExceptionOrUtils.h>
-#include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/SVGElement.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
 #include <LibWeb/DOM/Document.h>
@@ -31,12 +28,6 @@ GC_DEFINE_ALLOCATOR(SVGElement);
 SVGElement::SVGElement(DOM::Document& document, DOM::QualifiedName qualified_name)
     : Element(document, move(qualified_name))
 {
-}
-
-void SVGElement::initialize(JS::Realm& realm)
-{
-    WEB_SET_PROTOTYPE_FOR_INTERFACE(SVGElement);
-    Base::initialize(realm);
 }
 
 struct NamedPropertyID {
@@ -337,35 +328,12 @@ void SVGElement::remove_from_use_element_that_reference_this()
     }
 }
 
-void SVGElement::adjust_computed_style(CSS::ComputedProperties::Builder& computed_properties)
-{
-    Base::adjust_computed_style(computed_properties);
-
-    // An <svg> element that is not in SVG layout participates in CSS box layout
-    // and may be positioned. That includes the outermost <svg>, and <svg>
-    // elements in HTML content inside <foreignObject>.
-    if (is<SVGSVGElement>(*this)) {
-        for (auto ancestor = parent_element(); ancestor; ancestor = ancestor->parent_element()) {
-            if (is<SVGForeignObjectElement>(*ancestor))
-                return;
-            if (is<SVGSVGElement>(*ancestor))
-                break;
-        }
-        if (!owner_svg_element())
-            return;
-    }
-
-    // SVG elements in SVG layout use SVG's coordinate system and must be forced
-    // to position: static.
-    computed_properties.set_property(CSS::PropertyID::Position, CSS::KeywordStyleValue::create(CSS::Keyword::Static));
-}
-
 // https://svgwg.org/svg2-draft/types.html#__svg__SVGElement__classNames
 GC::Ref<SVGAnimatedString> SVGElement::class_name()
 {
     // The className IDL attribute reflects the ‘class’ attribute.
     if (!m_class_name_animated_string)
-        m_class_name_animated_string = SVGAnimatedString::create(realm(), *this, DOM::QualifiedName { AttributeNames::class_, OptionalNone {}, OptionalNone {} });
+        m_class_name_animated_string = SVGAnimatedString::create(*this, DOM::QualifiedName { AttributeNames::class_, OptionalNone {}, OptionalNone {} });
 
     return *m_class_name_animated_string;
 }
@@ -437,12 +405,12 @@ GC::Ref<SVGAnimatedLength> SVGElement::svg_animated_length_for_attribute(Utf16Fl
     if (auto cached = m_reflected_attribute_cache.get(attribute_name); cached.has_value())
         return as<SVGAnimatedLength>(*cached.value());
 
-    auto base_length = SVGLength::create_reflected_attribute(realm(), *this, attribute_name, directionality, SVGLength::ReflectedAttributeType::BaseValue, default_value, SVGLength::ReadOnly::No);
+    auto base_length = SVGLength::create_reflected_attribute(document().relevant_settings_object().realm(), *this, attribute_name, directionality, SVGLength::ReflectedAttributeType::BaseValue, default_value, SVGLength::ReadOnly::No);
     // AD-HOC: The spec says this should reflect the base value of the attribute but other browsers reflect the SMIL
     //         animated value instead.
-    auto anim_length = SVGLength::create_reflected_attribute(realm(), *this, attribute_name, directionality, SVGLength::ReflectedAttributeType::AnimatedValue, default_value, SVGLength::ReadOnly::Yes);
+    auto anim_length = SVGLength::create_reflected_attribute(document().relevant_settings_object().realm(), *this, attribute_name, directionality, SVGLength::ReflectedAttributeType::AnimatedValue, default_value, SVGLength::ReadOnly::Yes);
 
-    auto animated_length = SVGAnimatedLength::create(realm(), base_length, anim_length);
+    auto animated_length = SVGAnimatedLength::create(base_length, anim_length);
     m_reflected_attribute_cache.set(attribute_name, animated_length);
     return animated_length;
 }

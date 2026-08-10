@@ -6,7 +6,6 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/MainThreadVM.h>
 #include <LibWeb/Compositor/CompositorHost.h>
 #include <LibWeb/HTML/LocalTraversableNavigable.h>
 
@@ -35,7 +34,7 @@ PageClient& PageHost::create_page(u64 page_id, Optional<Web::HTML::CrossProcessI
 {
     VERIFY(page_id > 0);
     VERIFY(!m_pages.contains(page_id));
-    m_pages.set(page_id, PageClient::create(Web::Bindings::main_thread_vm(), *this, page_id, pending_root_navigable_id));
+    m_pages.set(page_id, PageClient::create(*this, page_id, pending_root_navigable_id));
     return *m_pages.get(page_id).value();
 }
 
@@ -53,6 +52,12 @@ Web::HTML::CrossProcessId PageHost::allocate_navigable_id()
 void PageHost::remove_page(Badge<PageClient>, u64 page_id)
 {
     m_pages.remove(page_id);
+}
+
+void PageHost::close_webdriver_connections_after_sending_pending_messages()
+{
+    for (auto& page : m_pages)
+        page.value->close_webdriver_connection_after_sending_pending_messages();
 }
 
 Optional<PageClient&> PageHost::page(u64 page_id)

@@ -17,7 +17,7 @@ namespace Web::HTML {
 class HTMLObjectElement final
     : public NavigableContainer
     , public Layout::ImageProvider {
-    WEB_PLATFORM_OBJECT(HTMLObjectElement, NavigableContainer)
+    WEB_WRAPPABLE(HTMLObjectElement, NavigableContainer)
     GC_DECLARE_ALLOCATOR(HTMLObjectElement);
 
     enum class Representation {
@@ -59,14 +59,12 @@ private:
 
     virtual bool is_html_object_element() const override { return true; }
 
-    virtual void initialize(JS::Realm&) override;
+    virtual void initialize_element() override;
 
     virtual bool is_presentational_hint(Utf16FlyString const&) const override;
     virtual void apply_presentational_hints(Vector<CSS::StyleProperty>&) const override;
 
     virtual RefPtr<Layout::Node> create_layout_node(NonnullRefPtr<CSS::ComputedValues const>) override;
-    virtual void adjust_computed_style(CSS::ComputedProperties::Builder&) override;
-
     bool has_ancestor_media_element_or_object_element_not_showing_fallback_content() const;
 
     void queue_element_task_to_run_object_representation_steps();

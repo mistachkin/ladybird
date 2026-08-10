@@ -66,6 +66,7 @@ struct FlexItem<'pass> {
     padding: DirectionAgnosticMargins,
     is_min_violation: bool,
     is_max_violation: bool,
+    content_baselines: DerivedBaselines,
 }
 
 impl<'pass> FlexItem<'pass> {
@@ -94,6 +95,7 @@ impl<'pass> FlexItem<'pass> {
             padding: DirectionAgnosticMargins::default(),
             is_min_violation: false,
             is_max_violation: false,
+            content_baselines: DerivedBaselines::default(),
         }
     }
 
@@ -212,15 +214,7 @@ impl<'pass> FlexFormattingContext<'pass> {
         self.flex_items[index].used_values
     }
 
-    fn item_used_mut(&self, index: usize) -> &'pass UsedValues {
-        self.flex_items[index].used_values
-    }
-
     fn container_used(&self) -> &'pass UsedValues {
-        self.flex_container_state
-    }
-
-    fn container_used_mut(&self) -> &'pass UsedValues {
         self.flex_container_state
     }
 
@@ -295,15 +289,28 @@ impl<'pass> FlexFormattingContext<'pass> {
     }
 
     fn main_axis_is_horizontal(&self) -> bool {
-        if self.is_row_layout() {
-            self.inline_axis_is_horizontal(self.flex_container)
-        } else {
-            !self.inline_axis_is_horizontal(self.flex_container)
-        }
+        self.inline_axis_is_horizontal(self.flex_container) == self.is_row_layout()
     }
 
     fn cross_axis_is_horizontal(&self) -> bool {
         !self.main_axis_is_horizontal()
+    }
+
+    // Picks whichever of the two values describes the main (resp. cross) axis of this flex container.
+    fn select_main<T>(&self, horizontal: T, vertical: T) -> T {
+        if self.main_axis_is_horizontal() { horizontal } else { vertical }
+    }
+
+    fn select_cross<T>(&self, horizontal: T, vertical: T) -> T {
+        self.select_main(vertical, horizontal)
+    }
+
+    fn main_sizing_axis(&self) -> SizingAxis {
+        self.select_main(SizingAxis::Inline, SizingAxis::Block)
+    }
+
+    fn cross_sizing_axis(&self) -> SizingAxis {
+        self.select_cross(SizingAxis::Inline, SizingAxis::Block)
     }
 
     fn main_axis_is_parallel_to_inline_axis(&self, node: Node) -> bool {
@@ -381,19 +388,11 @@ impl<'pass> FlexFormattingContext<'pass> {
     }
 
     fn has_definite_main_size_used(&self, used: &UsedValues) -> bool {
-        if self.main_axis_is_horizontal() {
-            used.has_definite_inline_size()
-        } else {
-            used.has_definite_block_size()
-        }
+        self.select_main(used.has_definite_inline_size(), used.has_definite_block_size())
     }
 
     fn has_definite_cross_size_used(&self, used: &UsedValues) -> bool {
-        if self.cross_axis_is_horizontal() {
-            used.has_definite_inline_size()
-        } else {
-            used.has_definite_block_size()
-        }
+        self.select_cross(used.has_definite_inline_size(), used.has_definite_block_size())
     }
 
     fn has_definite_main_size(&self, index: usize) -> bool {
@@ -405,19 +404,11 @@ impl<'pass> FlexFormattingContext<'pass> {
     }
 
     fn inner_main_size_used(&self, used: &UsedValues) -> CssPixels {
-        if self.main_axis_is_horizontal() {
-            used.content_inline_size.get()
-        } else {
-            used.content_block_size.get()
-        }
+        self.select_main(used.content_inline_size.get(), used.content_block_size.get())
     }
 
     fn inner_cross_size_used(&self, used: &UsedValues) -> CssPixels {
-        if self.cross_axis_is_horizontal() {
-            used.content_inline_size.get()
-        } else {
-            used.content_block_size.get()
-        }
+        self.select_cross(used.content_inline_size.get(), used.content_block_size.get())
     }
 
     fn inner_main_size(&self, index: usize) -> CssPixels {
@@ -429,105 +420,83 @@ impl<'pass> FlexFormattingContext<'pass> {
     }
 
     fn set_has_definite_main_size(&mut self, index: usize) {
-        if self.main_axis_is_horizontal() {
-            self.item_used_mut(index).has_definite_inline_size.set(true);
-        } else {
-            self.item_used_mut(index).has_definite_block_size.set(true);
-        }
+        let used = self.item_used(index);
+        self.select_main(&used.has_definite_inline_size, &used.has_definite_block_size)
+            .set(true);
     }
 
     fn set_has_definite_cross_size(&mut self, index: usize) {
-        if self.cross_axis_is_horizontal() {
-            self.item_used_mut(index).has_definite_inline_size.set(true);
-        } else {
-            self.item_used_mut(index).has_definite_block_size.set(true);
-        }
+        let used = self.item_used(index);
+        self.select_cross(&used.has_definite_inline_size, &used.has_definite_block_size)
+            .set(true);
     }
 
     fn set_main_size(&mut self, index: usize, size: CssPixels) {
-        if self.main_axis_is_horizontal() {
-            self.item_used_mut(index).set_content_inline_size(size);
-        } else {
-            self.item_used_mut(index).set_content_block_size(size);
-        }
+        self.set_main_size_used(self.item_used(index), size);
     }
 
     fn set_cross_size(&mut self, index: usize, size: CssPixels) {
-        if self.cross_axis_is_horizontal() {
-            self.item_used_mut(index).set_content_inline_size(size);
-        } else {
-            self.item_used_mut(index).set_content_block_size(size);
-        }
+        self.set_cross_size_used(self.item_used(index), size);
     }
 
     fn set_container_main_size(&mut self, size: CssPixels) {
-        if self.main_axis_is_horizontal() {
-            self.container_used_mut().set_content_inline_size(size);
-        } else {
-            self.container_used_mut().set_content_block_size(size);
-        }
+        self.set_main_size_used(self.container_used(), size);
     }
 
     fn set_container_cross_size(&mut self, size: CssPixels) {
-        if self.cross_axis_is_horizontal() {
-            self.container_used_mut().set_content_inline_size(size);
+        self.set_cross_size_used(self.container_used(), size);
+    }
+
+    fn set_main_size_used(&self, used: &UsedValues, size: CssPixels) {
+        if self.main_axis_is_horizontal() {
+            used.set_content_inline_size(size);
         } else {
-            self.container_used_mut().set_content_block_size(size);
+            used.set_content_block_size(size);
+        }
+    }
+
+    fn set_cross_size_used(&self, used: &UsedValues, size: CssPixels) {
+        if self.cross_axis_is_horizontal() {
+            used.set_content_inline_size(size);
+        } else {
+            used.set_content_block_size(size);
         }
     }
 
     fn computed_main_size(&self, node: Node) -> (&'pass ComputedSize, SizingProperty) {
         let style = self.style(node);
-        if self.main_axis_is_horizontal() {
-            (style.width(), SizingProperty::Width)
-        } else {
-            (style.height(), SizingProperty::Height)
-        }
+        self.select_main((style.width(), SizingProperty::Width), (style.height(), SizingProperty::Height))
     }
 
     fn computed_main_min_size(&self, node: Node) -> (&'pass ComputedSize, SizingProperty) {
         let style = self.style(node);
-        if self.main_axis_is_horizontal() {
-            (style.min_width(), SizingProperty::MinWidth)
-        } else {
-            (style.min_height(), SizingProperty::MinHeight)
-        }
+        self.select_main((style.min_width(), SizingProperty::MinWidth), (style.min_height(), SizingProperty::MinHeight))
     }
 
     fn computed_main_max_size(&self, node: Node) -> (&'pass ComputedSize, SizingProperty) {
         let style = self.style(node);
-        if self.main_axis_is_horizontal() {
-            (style.max_width(), SizingProperty::MaxWidth)
-        } else {
-            (style.max_height(), SizingProperty::MaxHeight)
-        }
+        self.select_main((style.max_width(), SizingProperty::MaxWidth), (style.max_height(), SizingProperty::MaxHeight))
     }
 
     fn computed_cross_size(&self, node: Node) -> (&'pass ComputedSize, SizingProperty) {
         let style = self.style(node);
-        if self.cross_axis_is_horizontal() {
-            (style.width(), SizingProperty::Width)
-        } else {
-            (style.height(), SizingProperty::Height)
-        }
+        self.select_cross((style.width(), SizingProperty::Width), (style.height(), SizingProperty::Height))
     }
 
     fn computed_cross_min_size(&self, node: Node) -> (&'pass ComputedSize, SizingProperty) {
         let style = self.style(node);
-        if self.cross_axis_is_horizontal() {
-            (style.min_width(), SizingProperty::MinWidth)
-        } else {
-            (style.min_height(), SizingProperty::MinHeight)
-        }
+        self.select_cross(
+            (style.min_width(), SizingProperty::MinWidth),
+            (style.min_height(), SizingProperty::MinHeight),
+        )
     }
 
     fn computed_cross_max_size(&self, node: Node) -> (&'pass ComputedSize, SizingProperty) {
         let style = self.style(node);
-        if self.cross_axis_is_horizontal() {
-            (style.max_width(), SizingProperty::MaxWidth)
-        } else {
-            (style.max_height(), SizingProperty::MaxHeight)
-        }
+        self.select_cross(
+            (style.max_width(), SizingProperty::MaxWidth),
+            (style.max_height(), SizingProperty::MaxHeight),
+        )
     }
 
     fn calculate_inner_size(
@@ -627,11 +596,7 @@ impl<'pass> FlexFormattingContext<'pass> {
     fn should_treat_main_size_as_auto(&self, node: Node) -> bool {
         self.should_treat_size_as_auto(
             node,
-            if self.main_axis_is_horizontal() {
-                SizingAxis::Inline
-            } else {
-                SizingAxis::Block
-            },
+            self.main_sizing_axis(),
         )
     }
 
@@ -732,7 +697,7 @@ impl<'pass> FlexFormattingContext<'pass> {
         let padding_top = style.padding_top().to_px(basis);
         let padding_bottom = style.padding_bottom().to_px(basis);
         {
-            let used = self.item_used_mut(index);
+            let used = self.item_used(index);
             used.padding_left.set(padding_left);
             used.padding_right.set(padding_right);
             used.padding_top.set(padding_top);
@@ -974,35 +939,31 @@ impl<'pass> FlexFormattingContext<'pass> {
     }
 
     fn calculate_min_content_main_size(&self, index: usize) -> CssPixels {
-        if self.main_axis_is_horizontal() {
-            self.calculate_min_content_inline_size(index)
-        } else {
-            self.calculate_min_content_block_size(index, self.intrinsic_block_inline_size(index))
-        }
+        self.select_main(
+            self.calculate_min_content_inline_size(index),
+            self.calculate_min_content_block_size(index, self.intrinsic_block_inline_size(index)),
+        )
     }
 
     fn calculate_max_content_main_size(&self, index: usize) -> CssPixels {
-        if self.main_axis_is_horizontal() {
-            self.calculate_max_content_inline_size(index)
-        } else {
-            self.calculate_max_content_block_size(index, self.intrinsic_block_inline_size(index))
-        }
+        self.select_main(
+            self.calculate_max_content_inline_size(index),
+            self.calculate_max_content_block_size(index, self.intrinsic_block_inline_size(index)),
+        )
     }
 
     fn calculate_min_content_cross_size(&self, index: usize) -> CssPixels {
-        if self.cross_axis_is_horizontal() {
-            self.calculate_min_content_inline_size(index)
-        } else {
-            self.calculate_min_content_block_size(index, self.intrinsic_block_inline_size(index))
-        }
+        self.select_cross(
+            self.calculate_min_content_inline_size(index),
+            self.calculate_min_content_block_size(index, self.intrinsic_block_inline_size(index)),
+        )
     }
 
     fn calculate_max_content_cross_size(&self, index: usize) -> CssPixels {
-        if self.cross_axis_is_horizontal() {
-            self.calculate_max_content_inline_size(index)
-        } else {
-            self.calculate_max_content_block_size(index, self.intrinsic_block_inline_size(index))
-        }
+        self.select_cross(
+            self.calculate_max_content_inline_size(index),
+            self.calculate_max_content_block_size(index, self.intrinsic_block_inline_size(index)),
+        )
     }
 
     fn calculate_fit_content_main_size(&self, index: usize) -> CssPixels {
@@ -1234,21 +1195,13 @@ impl<'pass> FlexFormattingContext<'pass> {
 
     fn main_gap(&self) -> CssPixels {
         let style = self.style(self.flex_container);
-        let gap = if self.is_row_layout() {
-            style.column_gap()
-        } else {
-            style.row_gap()
-        };
+        let gap = if self.is_row_layout() { style.column_gap() } else { style.row_gap() };
         gap.to_px(self.inner_main_size_used(self.container_used()))
     }
 
     fn cross_gap(&self) -> CssPixels {
         let style = self.style(self.flex_container);
-        let gap = if self.is_row_layout() {
-            style.row_gap()
-        } else {
-            style.column_gap()
-        };
+        let gap = if self.is_row_layout() { style.row_gap() } else { style.column_gap() };
         gap.to_px(self.inner_cross_size_used(self.container_used()))
     }
 
@@ -1719,11 +1672,7 @@ impl<'pass> FlexFormattingContext<'pass> {
     }
 
     fn calculate_inner_container_cross_size(&self, property: SizingProperty) -> CssPixels {
-        let axis = if self.cross_axis_is_horizontal() {
-            SizingAxis::Inline
-        } else {
-            SizingAxis::Block
-        };
+        let axis = self.cross_sizing_axis();
         self.calculate_inner_size_with_constraints(
             self.flex_container,
             axis,
@@ -1869,20 +1818,14 @@ impl<'pass> FlexFormattingContext<'pass> {
 
     fn set_main_axis_first_margin(&mut self, index: usize, margin: CssPixels) {
         self.flex_items[index].margins.main_before = margin;
-        if self.main_axis_is_horizontal() {
-            self.item_used_mut(index).margin_left.set(margin);
-        } else {
-            self.item_used_mut(index).margin_top.set(margin);
-        }
+        let used = self.item_used(index);
+        self.select_main(&used.margin_left, &used.margin_top).set(margin);
     }
 
     fn set_main_axis_second_margin(&mut self, index: usize, margin: CssPixels) {
         self.flex_items[index].margins.main_after = margin;
-        if self.main_axis_is_horizontal() {
-            self.item_used_mut(index).margin_right.set(margin);
-        } else {
-            self.item_used_mut(index).margin_bottom.set(margin);
-        }
+        let used = self.item_used(index);
+        self.select_main(&used.margin_right, &used.margin_bottom).set(margin);
     }
 
     // https://www.w3.org/TR/css-flexbox-1/#algo-main-align
@@ -2295,8 +2238,16 @@ impl<'pass> FlexFormattingContext<'pass> {
         }
     }
 
-    fn box_baseline(&self, node: Node) -> CssPixels {
-        crate::layout::box_baseline(self.state, &self.callbacks, node, crate::layout::BaselineSet::First)
+    fn item_box_baseline(&self, index: usize) -> CssPixels {
+        let item = &self.flex_items[index];
+        crate::layout::box_baseline_with_content_baselines(
+            self.state,
+            &self.callbacks,
+            item.box_,
+            item.used_values,
+            crate::layout::BaselineSet::First,
+            item.content_baselines,
+        )
     }
 
     // https://drafts.csswg.org/css-flexbox-1/#valdef-align-items-baseline
@@ -2319,13 +2270,13 @@ impl<'pass> FlexFormattingContext<'pass> {
             let mut max_baseline = CssPixels::default();
             for index in self.flex_lines[line_index].items.iter().copied() {
                 if participates(self, index) {
-                    max_baseline = max_baseline.max(self.box_baseline(self.flex_items[index].box_));
+                    max_baseline = max_baseline.max(self.item_box_baseline(index));
                 }
             }
             for item_position in 0..self.flex_lines[line_index].items.len() {
                 let index = self.flex_lines[line_index].items[item_position];
                 if participates(self, index) {
-                    let baseline = self.box_baseline(self.flex_items[index].box_);
+                    let baseline = self.item_box_baseline(index);
                     self.flex_items[index].cross_offset += max_baseline - baseline;
                 }
             }
@@ -2337,7 +2288,7 @@ impl<'pass> FlexFormattingContext<'pass> {
         for index in 0..self.flex_items.len() {
             let style = self.style(self.flex_items[index].box_);
             {
-                let used = self.item_used_mut(index);
+                let used = self.item_used(index);
                 used.margin_left.set(style.margin_left().to_px(reference));
                 used.margin_right.set(style.margin_right().to_px(reference));
                 used.margin_top.set(style.margin_top().to_px(reference));
@@ -2387,11 +2338,15 @@ impl<'pass> FlexFormattingContext<'pass> {
             input.sizing.forced_min_border_box_block_size = Some(intrinsic_size + extra);
         }
 
-        match crate::layout::layout_inside_child(run, None, None, node, LayoutMode::Normal, input, false) {
-            crate::layout::ChildLayoutOutcome::Created(_) => {}
-            crate::layout::ChildLayoutOutcome::ReenterCurrent => self.run(run, input),
-            crate::layout::ChildLayoutOutcome::Skipped => {}
-        }
+        self.flex_items[index].content_baselines =
+            match crate::layout::layout_inside_child(run, None, None, node, LayoutMode::Normal, input, false) {
+                crate::layout::ChildLayoutOutcome::Created(result) => result.baselines,
+                crate::layout::ChildLayoutOutcome::ReenterCurrent => {
+                    self.run(run, input);
+                    self.item_used(index).content_baselines_from_cells()
+                }
+                crate::layout::ChildLayoutOutcome::Skipped => self.item_used(index).content_baselines_from_cells(),
+            };
 
         let container_inline_size = self.container_used().content_inline_size.get();
         let container_block_size = self.container_used().content_block_size.get();
@@ -2401,6 +2356,8 @@ impl<'pass> FlexFormattingContext<'pass> {
             node,
             container_inline_size,
             container_block_size,
+            self.flex_container,
+            run.treat_block_axis_percentage_insets_as_auto_beyond_root,
         );
     }
 

@@ -9,6 +9,7 @@
 #include <LibWeb/Painting/DisplayList.h>
 #include <LibWeb/Painting/DisplayListDamage.h>
 #include <LibWeb/Painting/ScrollState.h>
+#include <math.h>
 
 namespace Web::Painting {
 
@@ -123,15 +124,18 @@ static bool visual_context_data_is_equal(VisualContextIndex a_index, VisualConte
         },
         [&](TransformData const& data) {
             auto const* other = b.get_pointer<TransformData>();
-            return other && matrices_are_equal(data.matrix, other->matrix) && data.origin == other->origin;
+            return other && matrices_are_equal(data.matrix, other->matrix) && data.origin == other->origin
+                && data.flattens_inherited_transform == other->flattens_inherited_transform;
         },
         [&](PerspectiveData const& data) {
             auto const* other = b.get_pointer<PerspectiveData>();
-            return other && matrices_are_equal(data.matrix, other->matrix);
+            return other && matrices_are_equal(data.matrix, other->matrix)
+                && data.flattens_inherited_transform == other->flattens_inherited_transform;
         },
         [&](BackfaceVisibilityData const& data) {
             auto const* other = b.get_pointer<BackfaceVisibilityData>();
-            return other && data.plane_root_index == other->plane_root_index;
+            return other && data.plane_root_index == other->plane_root_index
+                && data.flattens_inherited_transform == other->flattens_inherited_transform;
         },
         [&](ClipPathData const& data) {
             auto const* other = b.get_pointer<ClipPathData>();
@@ -248,6 +252,19 @@ Optional<Gfx::IntRect> compute_display_list_damage(
             return;
         }
         auto transformed_rect = visual_context_tree.transform_rect_to_viewport(command.header.context_index, command.header.bounding_rect.to_type<float>(), scroll_state);
+        // Transform matrices with entries near float max can overflow the projection to non-finite values.
+        // NaN survives both intersect() and is_empty(), so treat such rects as unbounded damage instead of
+        // feeding them to enclosing_int_rect(), where the float-to-int conversion would be undefined.
+        if (!isfinite(transformed_rect.x()) || !isfinite(transformed_rect.y()) || !isfinite(transformed_rect.width()) || !isfinite(transformed_rect.height())) {
+            changed_unbounded_command = true;
+            return;
+        }
+        // Eye-plane clamping in the projection can produce coordinates beyond integer range, and converting
+        // such a float to int is undefined.
+        constexpr float damage_coordinate_limit = 16777216.0f;
+        transformed_rect.intersect({ -damage_coordinate_limit, -damage_coordinate_limit, 2 * damage_coordinate_limit, 2 * damage_coordinate_limit });
+        if (transformed_rect.is_empty())
+            return;
         auto command_damage = Gfx::enclosing_int_rect(transformed_rect);
         if (damage_rect.has_value())
             damage_rect->unite(command_damage);

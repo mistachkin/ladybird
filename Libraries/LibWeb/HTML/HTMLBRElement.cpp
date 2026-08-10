@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/HTMLBRElement.h>
+#include <LibGC/Heap.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/StyleValues/DisplayStyleValue.h>
 #include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
@@ -25,12 +25,6 @@ HTMLBRElement::HTMLBRElement(DOM::Document& document, DOM::QualifiedName qualifi
 }
 
 HTMLBRElement::~HTMLBRElement() = default;
-
-void HTMLBRElement::initialize(JS::Realm& realm)
-{
-    WEB_SET_PROTOTYPE_FOR_INTERFACE(HTMLBRElement);
-    Base::initialize(realm);
-}
 
 RefPtr<Layout::Node> HTMLBRElement::create_layout_node(NonnullRefPtr<CSS::ComputedValues const> style)
 {
@@ -106,16 +100,6 @@ bool HTMLBRElement::represents_empty_line() const
             return false;
     }
     return true;
-}
-
-void HTMLBRElement::adjust_computed_style(CSS::ComputedProperties::Builder& style)
-{
-    // https://drafts.csswg.org/css-display-3/#unbox
-    if (style.display().is_contents())
-        style.set_property(CSS::PropertyID::Display, CSS::DisplayStyleValue::create(CSS::Display::from_short(CSS::Display::Short::None)));
-    else if (!style.display().is_none())
-        // AD-HOC: Prevent other display values from applying, so that we always create a BreakNode
-        style.set_property(CSS::PropertyID::Display, CSS::DisplayStyleValue::create(CSS::Display::from_short(CSS::Display::Short::Inline)));
 }
 
 }
