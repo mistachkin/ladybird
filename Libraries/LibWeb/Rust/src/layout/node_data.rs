@@ -14,7 +14,7 @@ pub const GENERATED_FOR_MARKER: u8 = 6;
 // count so the style container array and the registered group indices line up.
 pub const STYLE_GROUP_COUNT: usize = 23;
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 #[repr(C)]
 pub struct FfiReplacedContentFacts {
     pub has_auto_content_width: bool,
@@ -108,7 +108,6 @@ pub enum NodeKind {
     NavigableContainerViewport = 14,
     Node = 15,
     NodeWithStyle = 16,
-    NodeWithStyleAndBoxModelMetrics = 17,
     RadioButton = 18,
     RangeInputBox = 19,
     ReplacedBox = 20,
@@ -160,6 +159,8 @@ pub enum NodeFlag {
     ProducesLineBoxFragmentWhenEmpty = 1 << 22,
     ListMarkerIsInside = 1 << 23,
     HasAnchorNames = 1 << 24,
+    InsetsUseAnchorFunctions = 1 << 25,
+    HasSavedCommittedGeometry = 1 << 26,
 }
 
 #[repr(C)]
@@ -175,7 +176,13 @@ pub struct NodeData {
     pub generated_for: u8,
     pub intrinsic_cache_epoch: u16,
     pub flags: u32,
-    pub initial_quote_nesting_level: u32,
+    /// Advanced on every layout invalidation that reaches this node or its
+    /// subtree, with no propagation boundary: unlike the intrinsic epoch,
+    /// changes inside absolutely positioned and SVG descendants must reach
+    /// every ancestor, because their fragments live in ancestor run trees.
+    /// Wide enough that wrapping between a cache store and the next probe
+    /// is unreachable.
+    pub fragment_cache_epoch: u32,
     pub slot_generation: u8,
     pub table_column_span: u16,
     pub table_row_span: u16,
@@ -197,10 +204,10 @@ impl Default for NodeData {
             generated_for: 0,
             intrinsic_cache_epoch: 0,
             flags: 0,
-            initial_quote_nesting_level: 0,
             slot_generation: 0,
             table_column_span: 1,
             table_row_span: 1,
+            fragment_cache_epoch: 0,
             style: std::ptr::null(),
             shell: std::ptr::null_mut(),
         }
@@ -222,7 +229,10 @@ mod tests {
         assert_eq!(std::mem::size_of::<NodeData>(), 64);
         assert_eq!(std::mem::offset_of!(NodeData, intrinsic_cache_epoch), 30);
         assert_eq!(std::mem::offset_of!(NodeData, flags), 32);
+        assert_eq!(std::mem::offset_of!(NodeData, fragment_cache_epoch), 36);
         assert_eq!(std::mem::offset_of!(NodeData, slot_generation), 40);
+        assert_eq!(std::mem::offset_of!(NodeData, table_column_span), 42);
+        assert_eq!(std::mem::offset_of!(NodeData, table_row_span), 44);
         assert_eq!(std::mem::offset_of!(NodeData, style), 48);
         assert_eq!(std::mem::offset_of!(NodeData, shell), 56);
     }
@@ -249,6 +259,11 @@ mod tests {
     #[test]
     fn list_marker_position_uses_expected_flag_bit() {
         assert_eq!(NodeFlag::ListMarkerIsInside as u32, 1 << 23);
+    }
+
+    #[test]
+    fn saved_committed_geometry_flag_uses_a_previously_unassigned_bit() {
+        assert_eq!(NodeFlag::HasSavedCommittedGeometry as u32, 1 << 26);
     }
 
     #[test]

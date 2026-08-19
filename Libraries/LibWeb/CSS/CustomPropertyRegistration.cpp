@@ -42,7 +42,9 @@ NonnullRefPtr<StyleValue const> compute_registered_custom_property_initial_value
         ComputationContext computation_context {
             .length_resolution_context = Length::ResolutionContext::for_document(document),
         };
+        computation_context.reset_viewport_metric_dependency_tracking();
         computed_initial_value = compute_registered_custom_property_value(registration, *registration.initial_value, computation_context);
+        const_cast<CustomPropertyRegistration&>(registration).computed_initial_value_depends_on_viewport_metrics = computation_context.depends_on_viewport_metrics();
     }
 
     const_cast<CustomPropertyRegistration&>(registration).computed_initial_value = computed_initial_value;
@@ -59,7 +61,7 @@ NonnullRefPtr<StyleValue const> initial_custom_property_value(Optional<CustomPro
     return GuaranteedInvalidStyleValue::create();
 }
 
-NonnullRefPtr<StyleValue const> inherited_custom_property_value(Optional<CustomPropertyRegistration const&> registration, AbstractOrHypotheticalElement const& element, Utf16FlyString const& name, ComputedProperties const* computed_style_for_custom_property_resolution, Optional<Parser::GuardedSubstitutionContexts&> guarded_contexts)
+NonnullRefPtr<StyleValue const> inherited_custom_property_value(Optional<CustomPropertyRegistration const&> registration, AbstractOrHypotheticalElement const& element, Utf16FlyString const& name, ComputedStyleWorkingSet const* computed_style_for_custom_property_resolution, Optional<Parser::GuardedSubstitutionContexts&> guarded_contexts)
 {
     if (auto element_to_inherit_style_from = element.element_to_inherit_style_from(); element_to_inherit_style_from.has_value()) {
         if (auto parent_property = element_to_inherit_style_from->get_custom_property(name)) {

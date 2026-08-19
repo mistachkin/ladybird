@@ -5,7 +5,9 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibWeb/CSS/Invalidation/LanguageInvalidator.h>
 #include <LibWeb/CSS/Invalidation/SlotInvalidator.h>
+#include <LibWeb/CSS/StyleEngineInput.h>
 #include <LibWeb/DOM/Element.h>
 #include <LibWeb/DOM/MutationObserver.h>
 #include <LibWeb/DOM/Node.h>
@@ -19,10 +21,59 @@ namespace Web::DOM {
 
 SlottableMixin::~SlottableMixin() = default;
 
-void SlottableMixin::visit_edges(JS::Cell::Visitor& visitor)
+void SlottableMixin::RareData::visit_edges(JS::Cell::Visitor& visitor)
 {
-    visitor.visit(m_assigned_slot);
-    visitor.visit(m_manual_slot_assignment);
+    visitor.visit(assigned_slot);
+    visitor.visit(manual_slot_assignment);
+}
+
+Utf16FlyString const& SlottableMixin::slottable_name() const
+{
+    static Utf16FlyString const empty_name;
+    auto const* rare_data = slottable_rare_data();
+    return rare_data ? rare_data->name : empty_name;
+}
+
+void SlottableMixin::set_slottable_name(Utf16FlyString name)
+{
+    if (name.is_empty()) {
+        if (auto* rare_data = slottable_rare_data())
+            rare_data->name = Utf16FlyString {};
+        return;
+    }
+    ensure_slottable_rare_data().name = move(name);
+}
+
+GC::Ptr<HTML::HTMLSlotElement> SlottableMixin::assigned_slot_internal() const
+{
+    auto const* rare_data = slottable_rare_data();
+    return rare_data ? rare_data->assigned_slot : nullptr;
+}
+
+void SlottableMixin::set_assigned_slot(GC::Ptr<HTML::HTMLSlotElement> assigned_slot)
+{
+    if (!assigned_slot) {
+        if (auto* rare_data = slottable_rare_data())
+            rare_data->assigned_slot = nullptr;
+        return;
+    }
+    ensure_slottable_rare_data().assigned_slot = assigned_slot;
+}
+
+GC::Ptr<HTML::HTMLSlotElement> SlottableMixin::manual_slot_assignment()
+{
+    auto const* rare_data = slottable_rare_data();
+    return rare_data ? rare_data->manual_slot_assignment : nullptr;
+}
+
+void SlottableMixin::set_manual_slot_assignment(GC::Ptr<HTML::HTMLSlotElement> manual_slot_assignment)
+{
+    if (!manual_slot_assignment) {
+        if (auto* rare_data = slottable_rare_data())
+            rare_data->manual_slot_assignment = nullptr;
+        return;
+    }
+    ensure_slottable_rare_data().manual_slot_assignment = manual_slot_assignment;
 }
 
 // https://dom.spec.whatwg.org/#dom-slotable-assignedslot
@@ -200,34 +251,47 @@ void assign_slottables(GC::Ref<HTML::HTMLSlotElement> slot)
     auto slottables = find_slottables(slot);
 
     // 2. If slottables and slot’s assigned nodes are not identical, then run signal a slot change for slot.
-    if (slottables != slot->assigned_nodes_internal())
+    auto assignment_changed = slottables != slot->assigned_nodes_internal();
+    if (assignment_changed)
         signal_a_slot_change(slot);
 
     // AD-HOC: Clear the assigned slot for slottables that are no longer assigned to this slot.
     //         This must happen before setting the new assigned slots to avoid stale references
-    //         during style computation.
+    //         during style computation. A tree-wide assignment can already have moved one of the
+    //         old slottables to another slot, which the old slot must not overwrite when it is
+    //         processed afterward.
     for (auto const& old_slottable : slot->assigned_nodes_internal()) {
+        if (old_slottable.visit([](auto const& node) { return node->assigned_slot_internal(); }) != slot)
+            continue;
+        if (slottables.contains_slow(old_slottable))
+            continue;
         old_slottable.visit([&](auto const& node) {
             node->set_assigned_slot(nullptr);
         });
-        // ::slotted(...) rules in the slot's shadow scope no longer apply to a slottable that just lost its
-        // assignment, so its style must be recomputed.
-        CSS::Invalidation::invalidate_style_after_slottable_assignment_change(old_slottable);
+        if (auto const* element = old_slottable.template get_pointer<GC::Ref<Element>>())
+            CSS::record_element_assigned_slot_changed(**element, slot.ptr());
     }
 
     // 4. For each slottable in slottables, set slottable’s assigned slot to slot.
     for (auto& slottable : slottables) {
+        auto old_slot = slottable.visit([](auto const& node) { return node->assigned_slot_internal(); });
+        if (old_slot == slot)
+            continue;
         slottable.visit([&](auto& node) {
             node->set_assigned_slot(slot);
         });
-        // Newly-assigned slottables become subject to ::slotted(...) rules in the slot's shadow scope, so their style
-        // needs to be recomputed.
-        CSS::Invalidation::invalidate_style_after_slottable_assignment_change(slottable);
+        if (auto* element = slottable.template get_pointer<GC::Ref<Element>>())
+            CSS::record_element_assigned_slot_changed(**element, old_slot.ptr());
     }
 
     // 3. Set slot’s assigned nodes to slottables.
     // NOTE: We do this step last so that we can move the slottables list.
     slot->set_assigned_nodes(move(slottables));
+
+    if (assignment_changed) {
+        slot->set_needs_layout_tree_update(true, SetNeedsLayoutTreeUpdateReason::SlotAssignmentChange);
+        CSS::Invalidation::invalidate_style_after_slot_assignment_change(slot);
+    }
 }
 
 // https://dom.spec.whatwg.org/#assign-slotables-for-a-tree

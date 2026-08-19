@@ -15,10 +15,12 @@
 #include <AK/Weakable.h>
 #include <AK/kmalloc.h>
 #include <LibGC/Ptr.h>
+#include <LibGfx/AffineTransform.h>
 #include <LibGfx/Forward.h>
 #include <LibWeb/CSS/ComputedValues.h>
 #include <LibWeb/CSS/Display.h>
-#include <LibWeb/CSS/StyleValues/GridTrackSizeListStyleValue.h>
+#include <LibWeb/CSS/GridTrackSize.h>
+#include <LibWeb/CSS/StyleValues/AbstractImageStyleValue.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/InvalidateDisplayList.h>
 #include <LibWeb/Layout/FlexLayoutData.h>
@@ -28,6 +30,7 @@
 #include <LibWeb/Painting/BoxModelMetrics.h>
 #include <LibWeb/Painting/ChromeMetrics.h>
 #include <LibWeb/Painting/ChromeWidget.h>
+#include <LibWeb/Painting/CollapsedTableBorders.h>
 #include <LibWeb/Painting/DisplayList.h>
 #include <LibWeb/Painting/DisplayListCommand.h>
 #include <LibWeb/Painting/HitTestResult.h>
@@ -50,9 +53,24 @@ class Scrollbar;
 
 WEB_API void set_paint_viewport_scrollbars(bool enabled);
 bool should_paint_viewport_scrollbars();
-ResolvedCSSFilter resolve_css_filter(CSS::Filter const& computed_filter, Paintable const& paintable_box);
+ResolvedCSSFilter resolve_css_filter(CSS::ComputedFilterView computed_filter, Paintable const& paintable_box);
+
+// Walks layout ancestors so it also covers content of unconnected resource subtrees.
+WEB_API Paintable const* nearest_svg_viewport_paintable_of(Layout::Node const&);
+// The viewport's rect in its own user units: the active viewBox rect, else {0,0} + the used size.
+WEB_API Gfx::FloatRect svg_viewport_user_rect(Paintable const& viewport_paintable);
 
 bool body_background_is_propagated_to_root(Layout::NodeWithStyle const&);
+
+// Used grid track data captured at layout time as plain values; getComputedStyle
+// reflection mints style values from it on demand.
+struct UsedGridTrackList {
+    bool is_subgrid { false };
+    // One entry per grid line (one more line than there are tracks, unless subgrid);
+    // a line's name list may be empty.
+    Vector<CSS::GridLineNames> lines;
+    Vector<CSSPixels> track_sizes;
+};
 
 struct MaskLayerPresence {
     MaskLayerOrigin origin;
@@ -65,12 +83,7 @@ enum class MaskLayerSet : u8 {
     SvgOnly,
 };
 
-struct MaskLayerDisplayList {
-    MaskLayerOrigin origin;
-    DisplayListResource resource;
-};
-
-void register_mask_display_lists(DisplayListRecordingContext&, Paintable const&, ReadonlySpan<MaskLayerDisplayList>);
+bool register_mask_display_lists(DisplayListRecordingContext&, Paintable const&, MaskLayerSet);
 
 class WEB_API Paintable
     : public RefCounted<Paintable>
@@ -83,11 +96,7 @@ public:
     virtual ~Paintable();
     virtual StringView class_name() const { return "Paintable"sv; }
 
-    [[nodiscard]] bool is_visible() const
-    {
-        auto const& cv = computed_values();
-        return cv.visibility() == CSS::Visibility::Visible && cv.opacity() != 0;
-    }
+    [[nodiscard]] bool is_visible() const;
     [[nodiscard]] bool is_positioned() const { return m_positioned; }
     [[nodiscard]] bool is_fixed_position() const { return m_fixed_position; }
     [[nodiscard]] bool is_sticky_position() const { return m_sticky_position; }
@@ -104,18 +113,18 @@ public:
     virtual bool forms_unconnected_subtree() const { return false; }
 
     bool has_layout_node() const { return m_layout_node; }
-    Layout::NodeWithStyleAndBoxModelMetrics const& layout_node() const
+    Layout::NodeWithStyle const& layout_node() const
     {
         VERIFY(m_layout_node);
         return *m_layout_node;
     }
-    Layout::NodeWithStyleAndBoxModelMetrics& layout_node() { return const_cast<Layout::NodeWithStyleAndBoxModelMetrics&>(const_cast<Paintable const&>(*this).layout_node()); }
+    Layout::NodeWithStyle& layout_node() { return const_cast<Layout::NodeWithStyle&>(const_cast<Paintable const&>(*this).layout_node()); }
 
     [[nodiscard]] GC::Ptr<DOM::Node> dom_node();
     [[nodiscard]] GC::Ptr<DOM::Node const> dom_node() const;
     void set_dom_node(GC::Ptr<DOM::Node>);
 
-    CSS::ComputedValues const& computed_values() const;
+    CSS::StyleRecordID style_record_identity() const;
 
     bool visible_for_hit_testing() const;
 
@@ -139,6 +148,7 @@ public:
     [[nodiscard]] virtual bool is_svg_svg_paintable() const { return false; }
     [[nodiscard]] virtual bool is_svg_path_paintable() const { return false; }
     [[nodiscard]] virtual bool is_svg_graphics_paintable() const { return false; }
+    [[nodiscard]] virtual bool is_svg_foreign_object_paintable() const { return false; }
 
     DOM::Document const& document() const;
     DOM::Document& document();
@@ -183,6 +193,12 @@ public:
 
     virtual void reset_for_relayout();
 
+    // The viewBox/preserveAspectRatio transform a viewport-establishing box applies to its
+    // content, in content-box-local user coordinates. Presence marks the paintable as
+    // viewport-establishing for the accumulated visual context tree.
+    virtual Optional<Gfx::AffineTransform> svg_viewport_transform() const { return {}; }
+    virtual void set_svg_viewport_transform(Gfx::AffineTransform) { VERIFY_NOT_REACHED(); }
+
     virtual void paint(DisplayListRecordingContext&, PaintPhase) const;
     virtual void record_hit_test_items(DisplayListRecordingContext&, PaintPhase) const;
     void record_async_scrolling_metadata(DisplayListRecordingContext&) const;
@@ -215,6 +231,11 @@ public:
         bool has_scrollable_overflow { false };
     };
 
+    struct CachedOverflowData {
+        CSSPixelRect rect_relative_to_padding_box;
+        bool has_scrollable_overflow { false };
+    };
+
     // Offset from the top left of the containing block's content edge.
     [[nodiscard]] CSSPixelPoint offset() const;
 
@@ -224,6 +245,8 @@ public:
     };
 
     CSSPixelPoint scroll_offset() const;
+    CSSPixelPoint minimum_scroll_offset() const;
+    CSSPixelPoint maximum_scroll_offset() const;
     CSSPixelPoint clamp_scroll_offset(CSSPixelPoint) const;
     CSSPixelRect scroll_snapport_rect() const;
     CSSPixelRect scroll_snapport_rect(CSSPixelRect scrollport) const;
@@ -271,12 +294,7 @@ public:
 
     CSSPixelPoint transform_to_local_coordinates(CSSPixelPoint position) const;
 
-    [[nodiscard]] bool has_scrollable_overflow() const
-    {
-        if (!m_overflow_data.has_value())
-            return false;
-        return m_overflow_data->has_scrollable_overflow;
-    }
+    [[nodiscard]] bool has_scrollable_overflow() const;
 
     [[nodiscard]] bool has_css_transform() const;
 
@@ -285,16 +303,23 @@ public:
 
     [[nodiscard]] bool overflow_property_applies() const;
 
-    [[nodiscard]] Optional<CSSPixelRect> scrollable_overflow_rect() const
-    {
-        if (!m_overflow_data.has_value())
-            return {};
-        return m_overflow_data->scrollable_overflow_rect;
-    }
+    [[nodiscard]] Optional<CSSPixelRect> scrollable_overflow_rect() const;
 
     [[nodiscard]] Optional<OverflowData> const& overflow_data() const { return m_overflow_data; }
     void set_overflow_data(OverflowData data) { m_overflow_data = move(data); }
     void clear_overflow_data() { m_overflow_data.clear(); }
+
+    Optional<CachedOverflowData> const& cached_overflow_data() const { return m_cached_overflow_data; }
+    void set_cached_overflow_data(CachedOverflowData data) { m_cached_overflow_data = move(data); }
+    void clear_cached_overflow_data() { m_cached_overflow_data.clear(); }
+    void set_layout_fragment_identity(u64 identity)
+    {
+        VERIFY(identity);
+        if (m_layout_fragment_identity == identity)
+            return;
+        m_layout_fragment_identity = identity;
+        clear_cached_overflow_data();
+    }
 
     virtual void set_needs_repaint(InvalidateDisplayList = InvalidateDisplayList::Yes);
 
@@ -325,41 +350,11 @@ public:
     RefPtr<Scrollbar> scrollbar(ScrollDirection) const;
     NonnullRefPtr<Scrollbar> ensure_scrollbar(ScrollDirection);
 
-    enum class ConflictingElementKind {
-        Cell,
-        Row,
-        RowGroup,
-        Column,
-        ColumnGroup,
-        Table,
-    };
+    void set_uses_collapsing_borders_model(bool value) { m_uses_collapsing_borders_model = value; }
+    bool uses_collapsing_borders_model() const { return m_uses_collapsing_borders_model; }
 
-    struct BorderDataWithElementKind {
-        CSS::BorderData border_data;
-        ConflictingElementKind element_kind;
-    };
-
-    struct BordersDataWithElementKind {
-        BorderDataWithElementKind top;
-        BorderDataWithElementKind right;
-        BorderDataWithElementKind bottom;
-        BorderDataWithElementKind left;
-    };
-
-    void set_override_borders_data(BordersDataWithElementKind const& override_borders_data) { m_override_borders_data = override_borders_data; }
-    Optional<BordersDataWithElementKind> const& override_borders_data() const { return m_override_borders_data; }
-
-    static BordersData remove_element_kind_from_borders_data(Paintable::BordersDataWithElementKind borders_data);
-
-    struct TableCellCoordinates {
-        size_t row_index;
-        size_t column_index;
-        size_t row_span;
-        size_t column_span;
-    };
-
-    void set_table_cell_coordinates(TableCellCoordinates const& table_cell_coordinates) { m_table_cell_coordinates = table_cell_coordinates; }
-    auto const& table_cell_coordinates() const { return m_table_cell_coordinates; }
+    void set_collapsed_table_borders(OwnPtr<CollapsedTableBorders> collapsed_table_borders) { m_collapsed_table_borders = move(collapsed_table_borders); }
+    CollapsedTableBorders const* collapsed_table_borders() const { return m_collapsed_table_borders.ptr(); }
 
     enum class ShrinkRadiiForBorders {
         Yes,
@@ -371,10 +366,15 @@ public:
     BorderRadiiData border_radii_data() const;
 
     Optional<BordersData> outline_data() const;
+    Optional<BordersData> outline_data(CSS::ComputedValues const&) const;
     CSSPixels outline_offset() const;
 
     void set_filter(ResolvedCSSFilter filter) { m_filter = move(filter); }
     ResolvedCSSFilter const& filter() const { return m_filter; }
+
+    // Box-size-keyed memo of size-dependent image painting state (resolved gradient
+    // data), so image style values stay immutable shared data.
+    CSS::ResolvedImage const& resolved_image_for_size(CSS::AbstractImageStyleValue const&, CSSPixelSize) const;
 
     Optional<CSSPixelRect> get_clip_rect() const;
 
@@ -403,11 +403,11 @@ public:
     [[nodiscard]] bool could_be_scrolled_by_wheel_event() const;
     [[nodiscard]] bool could_be_scrolled_by_wheel_event(ScrollDirection direction) const;
 
-    void set_used_values_for_grid_template_columns(RefPtr<CSS::GridTrackSizeListStyleValue const> style_value) { m_used_values_for_grid_template_columns = move(style_value); }
-    RefPtr<CSS::GridTrackSizeListStyleValue const> const& used_values_for_grid_template_columns() const { return m_used_values_for_grid_template_columns; }
+    void set_used_values_for_grid_template_columns(UsedGridTrackList used_values) { m_used_values_for_grid_template_columns = move(used_values); }
+    Optional<UsedGridTrackList> const& used_values_for_grid_template_columns() const { return m_used_values_for_grid_template_columns; }
 
-    void set_used_values_for_grid_template_rows(RefPtr<CSS::GridTrackSizeListStyleValue const> style_value) { m_used_values_for_grid_template_rows = move(style_value); }
-    RefPtr<CSS::GridTrackSizeListStyleValue const> const& used_values_for_grid_template_rows() const { return m_used_values_for_grid_template_rows; }
+    void set_used_values_for_grid_template_rows(UsedGridTrackList used_values) { m_used_values_for_grid_template_rows = move(used_values); }
+    Optional<UsedGridTrackList> const& used_values_for_grid_template_rows() const { return m_used_values_for_grid_template_rows; }
 
     void set_grid_layout_data(OwnPtr<Layout::GridLayoutData> grid_layout_data) { m_grid_layout_data = move(grid_layout_data); }
     Layout::GridLayoutData const* grid_layout_data() const { return m_grid_layout_data.ptr(); }
@@ -419,7 +419,12 @@ public:
     void set_enclosing_scroll_node_index(VisualContextIndex index) { m_enclosing_scroll_node_index = index; }
     void set_own_scroll_node_index(VisualContextIndex index) { m_own_scroll_node_index = index; }
 
-    void set_accumulated_visual_context(VisualContextIndex index) { m_accumulated_visual_context_index = index; }
+    void set_accumulated_visual_context(VisualContextIndex index)
+    {
+        m_accumulated_visual_context_index = index;
+        m_has_accumulated_visual_context = true;
+    }
+    [[nodiscard]] bool has_accumulated_visual_context() const { return m_has_accumulated_visual_context; }
     [[nodiscard]] VisualContextIndex accumulated_visual_context_index() const { return m_accumulated_visual_context_index; }
     void set_accumulated_visual_context_for_descendants(VisualContextIndex index) { m_accumulated_visual_context_for_descendants_index = index; }
     [[nodiscard]] VisualContextIndex accumulated_visual_context_for_descendants_index() const { return m_accumulated_visual_context_for_descendants_index; }
@@ -432,6 +437,8 @@ public:
     static constexpr size_t paint_phase_count = to_underlying(PaintPhase::Overlay) + 1;
 
     void invalidate_paint_cache() const;
+    void invalidate_propagated_text_decoration_caches() const;
+    void repaint_after_style_change(CSS::RequiredInvalidationAfterStyleChange const&);
 
     // Commands recorded under an empty effective clip are dropped at append time, so a cached range is
     // usable only while the emptiness of the phase's effective clip matches what it was at capture time.
@@ -469,7 +476,7 @@ public:
     [[nodiscard]] VisualContextIndex own_scroll_node_index() const { return m_own_scroll_node_index; }
 
 protected:
-    explicit Paintable(Layout::NodeWithStyleAndBoxModelMetrics const&);
+    explicit Paintable(Layout::NodeWithStyle const&);
     explicit Paintable(Layout::Box const&);
 
     void paint_with_inspector_overlay_context(DisplayListRecordingContext&, Function<void()> const&) const;
@@ -483,6 +490,7 @@ protected:
     void paint_background_within(DisplayListRecordingContext&, CSSPixelRect const& background_rect, BorderRadiiData const&) const;
     void paint_box_shadow(DisplayListRecordingContext&, CSSPixelRect const& border_box_rect, CSSPixelRect const& padding_box_rect, BorderRadiiData const&) const;
     void paint_outline(DisplayListRecordingContext&, CSSPixelRect const& border_box_rect, BorderRadiiData const&) const;
+    void paint_focused_area_outline(DisplayListRecordingContext&) const;
 
     virtual void paint_inspector_overlay_internal(DisplayListRecordingContext&) const;
 
@@ -509,9 +517,10 @@ private:
 
     void paint_middle_button_scroll_indicator(DisplayListRecordingContext&) const;
     void invalidate_absolute_geometry_cache(InvalidateDescendantGeometry);
+    void translate_reused_subtree_absolute_geometry(CSSPixelPoint);
 
     GC::Weak<DOM::Node> m_dom_node;
-    WeakPtr<Layout::NodeWithStyleAndBoxModelMetrics const> m_layout_node;
+    WeakPtr<Layout::NodeWithStyle const> m_layout_node;
     Paintable* m_containing_block { nullptr };
 
     SelectionState m_selection_state { SelectionState::None };
@@ -522,11 +531,14 @@ private:
     bool m_absolutely_positioned : 1 { false };
     bool m_floating : 1 { false };
     bool m_inline : 1 { false };
+    bool m_uses_collapsing_borders_model : 1 { false };
     CSS::Display m_display;
 
     RefPtr<StackingContext> m_stacking_context;
 
     Optional<OverflowData> m_overflow_data;
+    Optional<CachedOverflowData> m_cached_overflow_data;
+    u64 m_layout_fragment_identity { 0 };
 
     CSSPixelPoint m_offset;
     CSSPixelSize m_content_size;
@@ -537,17 +549,24 @@ private:
 
     VisualContextIndex m_enclosing_scroll_node_index {};
     VisualContextIndex m_own_scroll_node_index {};
+    bool m_has_accumulated_visual_context { false };
     VisualContextIndex m_accumulated_visual_context_index { VISUAL_VIEWPORT_NODE_INDEX };
     VisualContextIndex m_accumulated_visual_context_for_descendants_index { VISUAL_VIEWPORT_NODE_INDEX };
     Optional<VisualContextIndex> m_fixed_background_visual_context;
     size_t m_visual_context_nodes_begin { 0 };
     size_t m_visual_context_nodes_end { 0 };
 
-    Optional<BordersDataWithElementKind> m_override_borders_data;
-    Optional<TableCellCoordinates> m_table_cell_coordinates;
+    OwnPtr<CollapsedTableBorders> m_collapsed_table_borders;
     Optional<size_t> m_containing_line_box_index;
 
     ResolvedCSSFilter m_filter;
+
+    struct ResolvedImageForSize {
+        RefPtr<CSS::AbstractImageStyleValue const> image;
+        CSSPixelSize size;
+        CSS::ResolvedImage resolved;
+    };
+    mutable Vector<ResolvedImageForSize> m_resolved_images_for_size;
 
     RefPtr<Scrollbar> m_horizontal_scrollbar;
     RefPtr<Scrollbar> m_vertical_scrollbar;
@@ -556,8 +575,8 @@ private:
 
     OwnPtr<StickyInsets> m_sticky_insets;
 
-    RefPtr<CSS::GridTrackSizeListStyleValue const> m_used_values_for_grid_template_columns;
-    RefPtr<CSS::GridTrackSizeListStyleValue const> m_used_values_for_grid_template_rows;
+    Optional<UsedGridTrackList> m_used_values_for_grid_template_columns;
+    Optional<UsedGridTrackList> m_used_values_for_grid_template_rows;
     OwnPtr<Layout::GridLayoutData> m_grid_layout_data;
     OwnPtr<Layout::FlexLayoutData> m_flex_layout_data;
 

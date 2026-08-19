@@ -22,6 +22,7 @@
 #include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/HTML/ActivateTab.h>
+#include <LibWeb/HTML/ApplyHistoryStep.h>
 #include <LibWeb/HTML/DocumentState.h>
 #include <LibWeb/HTML/HistoryHandlingBehavior.h>
 #include <LibWeb/HTML/InitialInsertion.h>
@@ -33,6 +34,7 @@
 #include <LibWeb/HTML/PaintConfig.h>
 #include <LibWeb/HTML/ReplicatedNavigableState.h>
 #include <LibWeb/HTML/SandboxingFlagSet.h>
+#include <LibWeb/HTML/SessionHistoryEntry.h>
 #include <LibWeb/HTML/SourceSnapshotParams.h>
 #include <LibWeb/HTML/StructuredSerializeTypes.h>
 #include <LibWeb/HTML/TokenizedFeatures.h>
@@ -48,22 +50,6 @@
 namespace Web::HTML {
 
 struct PopulateSessionHistoryEntryDocumentOutput;
-
-// https://html.spec.whatwg.org/multipage/browsing-the-web.html#apply-the-history-step
-// They return "initiator-disallowed", "canceled-by-beforeunload", "canceled-by-navigate", or
-// "applied".
-enum class HistoryStepResult {
-    InitiatorDisallowed,
-    CanceledByBeforeUnload,
-    CanceledByNavigate,
-    // AD-HOC: This is an internal result used when WebContent no longer has the requested page.
-    CanceledByMissingPage,
-    // INTEROP: This is an internal result for browser UI handling and is not one of the results
-    //          returned by the HTML Standard's apply the history step algorithm.
-    CanceledPendingNavigation,
-    Applied,
-};
-using OnApplyHistoryStepComplete = GC::Function<void(HistoryStepResult)>;
 
 // https://html.spec.whatwg.org/multipage/browsing-the-web.html#target-snapshot-params
 struct TargetSnapshotParams {
@@ -114,9 +100,15 @@ public:
     RefPtr<SessionHistoryEntry> current_session_history_entry() const;
     void set_current_session_history_entry(RefPtr<SessionHistoryEntry>);
 
-    Vector<NonnullRefPtr<SessionHistoryEntry>>& get_session_history_entries() const;
+    void set_child_navigable_history_reconstruction_ids(Vector<Optional<CrossProcessId>> ids)
+    {
+        m_child_navigable_history_reconstruction_ids = move(ids);
+    }
+    Optional<CrossProcessId> child_navigable_history_reconstruction_id(size_t index) const;
+    void consume_child_navigable_history_reconstruction_id(size_t index);
 
     void activate_history_entry(RefPtr<SessionHistoryEntry>, GC::Ref<DOM::Document>);
+    void notify_navigation_observers_navigation_complete();
 
     GC::Ptr<DOM::Document> active_document() const;
     Optional<UniqueNodeID> active_document_id() const;
@@ -129,11 +121,10 @@ public:
     virtual Optional<URL::Origin> active_document_origin() const override;
     ReplicatedNavigableState replicated_state() const;
 
-    RefPtr<SessionHistoryEntry> get_the_target_history_entry(int target_step) const;
-    RefPtr<SessionHistoryEntry> get_the_target_history_entry_if_present(int target_step) const;
-
     void save_persisted_state_to_active_session_history_entry();
     void restore_persisted_state_from_session_history_entry(SessionHistoryEntry const&);
+    void schedule_persisted_state_restoration_retry(SessionHistoryEntry const&);
+    void restore_pending_persisted_state_for_completed_document(GC::Ref<DOM::Document>);
     void restore_scroll_position_data(SessionHistoryEntry const&);
 
     virtual Utf16String const& target_name() const override;
@@ -216,6 +207,10 @@ public:
         //         source document only exists in the process where the navigation started, so this carries the state
         //         the navigate algorithm would otherwise snapshot from it.
         Optional<NavigationSourceSnapshot> cross_process_source_snapshot = {};
+        // AD-HOC: A cross-process continuation resumes after historyHandling has already been resolved in the
+        //         process where the navigation started.
+        bool history_handling_already_determined { false };
+        Optional<SessionHistoryEntryDescriptor> session_history_entry_to_restore = {};
 
         void visit_edges(Cell::Visitor& visitor);
     };
@@ -259,6 +254,7 @@ public:
     Utf16String cut_selected_text() const;
     void select_all();
     void paste(Utf16View);
+    void paste_from_clipboard();
     void undo();
     void redo();
     void set_marked_text_from_input_method(Utf16View text);
@@ -280,6 +276,7 @@ public:
 
     bool has_pending_navigations() const { return !m_pending_navigations.is_empty(); }
     void clear_pending_navigations() { m_pending_navigations.clear(); }
+    void route_initial_navigation_to_session_history_entry(SessionHistoryEntryDescriptor, GC::Ref<DOM::Document> source_document);
 
     bool record_display_list_and_scroll_state(PaintConfig, Gfx::IntRect* damage_rect = nullptr);
     void paint_next_frame();
@@ -387,6 +384,9 @@ private:
     // https://html.spec.whatwg.org/multipage/document-sequences.html#nav-active-history-entry
     RefPtr<SessionHistoryEntry> m_active_session_history_entry;
 
+    // Child navigable identities retained only while reconstructing the active document from canonical session history.
+    Vector<Optional<CrossProcessId>> m_child_navigable_history_reconstruction_ids;
+
     // AD-HOC: Direct reference to the active document, decoupled from session history.
     //         This is the authoritative source for active_document().
     GC::Ptr<DOM::Document> m_active_document;
@@ -419,6 +419,12 @@ private:
 
     CSSPixelSize m_viewport_size;
     CSSPixelPoint m_viewport_scroll_offset;
+    struct PendingPersistedStateRestoration {
+        GC::Weak<DOM::Document> document;
+        CrossProcessId document_state_id;
+        Utf16String navigation_api_key;
+    };
+    Optional<PendingPersistedStateRestoration> m_pending_persisted_state_restoration;
 
     Web::EventHandler m_event_handler;
 
@@ -503,10 +509,8 @@ private:
 WEB_API HashTable<GC::RawRef<LocalNavigable>>& all_local_navigables();
 WEB_API GC::Ptr<LocalNavigable> local_navigable_with_id(CrossProcessId);
 
-Vector<NonnullRefPtr<SessionHistoryEntry>>* append_nested_history_for_child_navigable(
-    LocalNavigable& parent_navigable, LocalNavigable& child_navigable, SessionHistoryEntry& history_entry);
 bool navigation_must_be_a_replace(URL::URL const& url, DOM::Document const& document);
-void finalize_a_cross_document_navigation(GC::Ref<LocalNavigable>, HistoryHandlingBehavior, UserNavigationInvolvement, NonnullRefPtr<SessionHistoryEntry>, GC::Ptr<DOM::Document> pending_document, Optional<Utf16String> expected_ongoing_navigation_id, GC::Ref<OnApplyHistoryStepComplete> on_complete);
+void finalize_a_cross_document_navigation(GC::Ref<LocalNavigable>, HistoryHandlingBehavior, UserNavigationInvolvement, NonnullRefPtr<SessionHistoryEntry>, GC::Ptr<DOM::Document> pending_document, Optional<Utf16String> expected_ongoing_navigation_id, GC::Ref<OnApplyHistoryStepComplete> on_complete, Optional<SessionHistoryEntryDescriptor> entry_to_restore = {});
 void perform_url_and_history_update_steps(DOM::Document& document, URL::URL new_url, Optional<StorageSerializationRecord> = {}, HistoryHandlingBehavior history_handling = HistoryHandlingBehavior::Replace);
 
 }

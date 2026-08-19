@@ -4,18 +4,19 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibWeb/HTML/HTMLCanvasElement.h>
 #include <LibWeb/Painting/BorderRadiusCornerClipper.h>
 #include <LibWeb/Painting/CanvasPaintable.h>
 #include <LibWeb/Painting/DisplayListRecorder.h>
 
 namespace Web::Painting {
 
-NonnullRefPtr<CanvasPaintable> CanvasPaintable::create(Layout::CanvasBox const& layout_box)
+NonnullRefPtr<CanvasPaintable> CanvasPaintable::create(Layout::Box const& layout_box)
 {
     return adopt_ref(*new CanvasPaintable(layout_box));
 }
 
-CanvasPaintable::CanvasPaintable(Layout::CanvasBox const& layout_box)
+CanvasPaintable::CanvasPaintable(Layout::Box const& layout_box)
     : Paintable(layout_box)
 {
 }
@@ -36,7 +37,7 @@ void CanvasPaintable::paint(DisplayListRecordingContext& context, PaintPhase pha
             auto canvas_id = canvas_element.canvas_id();
             VERIFY(canvas_id.has_value());
             auto canvas_int_rect = canvas_rect.to_type<int>();
-            auto scaling_mode = to_gfx_scaling_mode(computed_values().image_rendering(),
+            auto scaling_mode = to_gfx_scaling_mode(layout_node().image_rendering(),
                 *content_size, canvas_int_rect.size());
             context.display_list_recorder().draw_canvas(canvas_int_rect,
                 *canvas_id, canvas_element.content_generation(), scaling_mode);

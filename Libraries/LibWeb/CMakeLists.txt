@@ -94,7 +94,7 @@ set(SOURCES
     CSS/BooleanExpression.cpp
     CSS/CascadedProperties.cpp
     CSS/Clip.cpp
-    CSS/ComputedProperties.cpp
+    CSS/ComputedStyleWorkingSet.cpp
     CSS/ComputedValues.cpp
     CSS/RustStyleBridge.cpp
     CSS/ContainerQuery.cpp
@@ -102,6 +102,7 @@ set(SOURCES
     CSS/CounterStyle.cpp
     CSS/CounterStyleDefinition.cpp
     CSS/CustomPropertyRegistration.cpp
+    CSS/GeneratedContent.cpp
     CSS/CSS.cpp
     CSS/CSSAnimation.cpp
     CSS/CSSConditionRule.cpp
@@ -171,7 +172,6 @@ set(SOURCES
     CSS/EdgeRect.cpp
     CSS/FeatureQuery.cpp
     CSS/Fetch.cpp
-    CSS/Filter.cpp
     CSS/Flex.cpp
     CSS/FontComputer.cpp
     CSS/FontFace.cpp
@@ -190,19 +190,12 @@ set(SOURCES
     CSS/Invalidation/EmbeddedContentInvalidator.cpp
     CSS/Invalidation/ElementStateInvalidator.cpp
     CSS/Invalidation/FormControlInvalidator.cpp
-    CSS/Invalidation/HasMutationFeatureCollector.cpp
-    CSS/Invalidation/HasMutationInvalidator.cpp
-    CSS/Invalidation/InvalidationSetMatcher.cpp
     CSS/Invalidation/LanguageInvalidator.cpp
     CSS/Invalidation/LinkInvalidator.cpp
     CSS/Invalidation/MediaQueryInvalidator.cpp
-    CSS/Invalidation/NodeInvalidator.cpp
     CSS/Invalidation/PartInvalidator.cpp
     CSS/Invalidation/PseudoClassInvalidator.cpp
     CSS/Invalidation/SlotInvalidator.cpp
-    CSS/Invalidation/StyleInvalidator.cpp
-    CSS/Invalidation/StructuralMutationInvalidator.cpp
-    CSS/InvalidationSet.cpp
     CSS/Length.cpp
     CSS/LengthBox.cpp
     CSS/MediaList.cpp
@@ -236,6 +229,7 @@ set(SOURCES
     CSS/PreferredColorScheme.cpp
     CSS/Ratio.cpp
     CSS/Resolution.cpp
+    CSS/ResolvedTransform.cpp
     CSS/Screen.cpp
     CSS/ScreenOrientation.cpp
     CSS/Selector.cpp
@@ -244,8 +238,9 @@ set(SOURCES
     CSS/Serialize.cpp
     CSS/Sizing.cpp
     CSS/StyleComputer.cpp
+    CSS/StyleEngineBridge.cpp
+    CSS/StyleEngineInput.cpp
     CSS/StyleInvalidation.cpp
-    CSS/StyleInvalidationData.cpp
     CSS/StyleProperty.cpp
     CSS/StylePropertyMapReadOnly.cpp
     CSS/StylePropertyMap.cpp
@@ -728,7 +723,6 @@ set(SOURCES
     HTML/SelectItem.cpp
     HTML/SerializedPolicyContainer.cpp
     HTML/SessionHistoryEntry.cpp
-    HTML/SessionHistoryTraversalQueue.cpp
     HTML/SharedResourceRequest.cpp
     HTML/AnimatedBitmapDecodedImageData.cpp
     HTML/AnimatedDecodedImageData.cpp
@@ -805,46 +799,16 @@ set(SOURCES
     Internals/XRTest.cpp
     IntersectionObserver/IntersectionObserver.cpp
     IntersectionObserver/IntersectionObserverEntry.cpp
-    Layout/AudioBox.cpp
-    Layout/AvailableSpace.cpp
     Layout/BlockContainer.cpp
     Layout/Box.cpp
-    Layout/BreakNode.cpp
-    Layout/CanvasBox.cpp
-    Layout/CheckBox.cpp
-    Layout/FieldSetBox.cpp
-    Layout/ImageBox.cpp
     Layout/ImageProvider.cpp
-    Layout/InlineNode.cpp
     Layout/LayoutRustBridge.cpp
-    Layout/LegendBox.cpp
-    Layout/ListItemBox.cpp
-    Layout/ListItemMarkerBox.cpp
-    Layout/NavigableContainerViewport.cpp
     Layout/Node.cpp
     Layout/NodeArena.cpp
-    Layout/RadioButton.cpp
-    Layout/RangeInputBox.cpp
-    Layout/ReplacedBox.cpp
-    Layout/SVGBox.cpp
-    Layout/SVGClipBox.cpp
-    Layout/SVGForeignObjectBox.cpp
-    Layout/SVGGeometryBox.cpp
-    Layout/SVGGraphicsBox.cpp
-    Layout/SVGImageBox.cpp
-    Layout/SVGMaskBox.cpp
-    Layout/SVGPatternBox.cpp
-    Layout/SVGSVGBox.cpp
-    Layout/SVGTextBox.cpp
-    Layout/SVGTextPathBox.cpp
     Layout/ScrollableOverflow.cpp
-    Layout/TableWrapper.cpp
-    Layout/TextAreaBox.cpp
-    Layout/TextInputBox.cpp
     Layout/TextNode.cpp
     Layout/TextOffsetMapping.cpp
     Layout/TreeBuilder.cpp
-    Layout/VideoBox.cpp
     Layout/Viewport.cpp
     Loader/ContentBlocker.cpp
     Loader/DownloadFilename.cpp
@@ -915,6 +879,7 @@ set(SOURCES
     Painting/FieldSetPaintable.cpp
     Painting/GradientPainting.cpp
     Painting/HitTestDisplayList.cpp
+    Painting/ImagePaint.cpp
     Painting/ImagePaintable.cpp
     Painting/InlinePaintable.cpp
     Painting/NavigableContainerViewportPaintable.cpp
@@ -922,6 +887,7 @@ set(SOURCES
     Painting/PaintStyle.cpp
     Painting/PaintableFragment.cpp
     Painting/PaintableWithLines.cpp
+    Painting/PrerecordedNestedDisplayLists.cpp
     Painting/RadioButtonPaintable.cpp
     Painting/ReplacedElementCommon.cpp
     Painting/ResolvedCSSFilter.cpp
@@ -1072,6 +1038,7 @@ set(SOURCES
     SVG/SVGImageElement.cpp
     SVG/SVGLength.cpp
     SVG/SVGLengthList.cpp
+    SVG/SVGLengthValue.cpp
     SVG/SVGLinearGradientElement.cpp
     SVG/SVGLineElement.cpp
     SVG/SVGList.cpp
@@ -1349,14 +1316,25 @@ endforeach()
 import_rust_crate(
     MANIFEST_PATH Rust/Cargo.toml
     CRATE_NAME libweb_rust
+    FEATURES style-recording
     FFI_HEADERS
         HTML/Parser/RustFFI.h
         RustFFI.h
         SelectorRustFFI.h
         StyleValueRustFFI.h
         ComputedValuesRustFFI.h
+        StyleEngineRustFFI.h
+        StyleEngineBridgeGenerated.h
+        StyleEngineBridgeGenerated.inc
+        StyleEngineStateFactsGenerated.inc
         Layout/TreeBuilderRustFFI.h
         Layout/LayoutRustFFI.h
+)
+build_rust_binary(
+    MANIFEST_PATH Rust/Cargo.toml
+    CRATE_NAME libweb_rust
+    BINARY_NAME style-replay
+    FEATURES style-recording
 )
 target_link_libraries(libweb_rust INTERFACE LibGfx)
 

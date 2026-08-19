@@ -6,8 +6,8 @@
 
 #include <LibGC/Heap.h>
 #include <LibGfx/DecodedImageFrame.h>
-#include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/Invalidation/EmbeddedContentInvalidator.h>
+#include <LibWeb/CSS/PropertyID.h>
 #include <LibWeb/CSS/StyleComputer.h>
 #include <LibWeb/CSS/StyleValues/DisplayStyleValue.h>
 #include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
@@ -33,8 +33,7 @@
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/SharedResourceRequest.h>
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
-#include <LibWeb/Layout/ImageBox.h>
-#include <LibWeb/Layout/NavigableContainerViewport.h>
+#include <LibWeb/Layout/Box.h>
 #include <LibWeb/Loader/ResourceLoader.h>
 #include <LibWeb/MimeSniff/MimeType.h>
 #include <LibWeb/MimeSniff/Resource.h>
@@ -207,16 +206,16 @@ void HTMLObjectElement::set_data(Utf16View data)
     set_attribute_value(HTML::AttributeNames::data, data);
 }
 
-RefPtr<Layout::Node> HTMLObjectElement::create_layout_node(NonnullRefPtr<CSS::ComputedValues const> style)
+RefPtr<Layout::Node> HTMLObjectElement::create_layout_node(CSS::LayoutStyle style)
 {
     switch (m_representation) {
     case Representation::Children:
         return NavigableContainer::create_layout_node(style);
     case Representation::ContentNavigable:
-        return make_ref_counted<Layout::NavigableContainerViewport>(document(), *this, style);
+        return make_ref_counted<Layout::Box>(document(), *this, style, Layout::RustFFI::NodeKind::NavigableContainerViewport);
     case Representation::Image:
         if (image_data())
-            return make_ref_counted<Layout::ImageBox>(document(), *this, style, *this);
+            return make_ref_counted<Layout::Box>(document(), *this, style, Layout::RustFFI::NodeKind::ImageBox);
         break;
     default:
         break;
@@ -531,7 +530,7 @@ void HTMLObjectElement::run_object_representation_fallback_steps()
 void HTMLObjectElement::load_image()
 {
     // FIXME: This currently reloads the image instead of reusing the resource we've already downloaded.
-    auto data = get_attribute_value_view(HTML::AttributeNames::data).value_or({});
+    auto data = attribute(HTML::AttributeNames::data).value_or({});
     auto url = document().encoding_parse_url(data);
 
     if (!url.has_value()) {
@@ -569,7 +568,6 @@ void HTMLObjectElement::update_layout_and_child_objects(Representation represent
     }
 
     m_representation = representation;
-    CSS::Invalidation::invalidate_style_after_object_representation_change(*this);
 
     if (auto parent_element = this->parent_element())
         parent_element->set_needs_layout_tree_update(true, DOM::SetNeedsLayoutTreeUpdateReason::HTMLObjectElementUpdateLayoutAndChildObjects);

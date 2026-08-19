@@ -19,6 +19,7 @@
 #include <LibIPC/ConnectionFromClient.h>
 #include <LibJS/Forward.h>
 #include <LibWeb/Bindings/Navigation.h>
+#include <LibWeb/Bindings/NavigationType.h>
 #include <LibWeb/CSS/PreferredColorScheme.h>
 #include <LibWeb/CSS/PreferredContrast.h>
 #include <LibWeb/CSS/PreferredMotion.h>
@@ -72,13 +73,13 @@ private:
     Optional<PageClient const&> page(u64 index, SourceLocation = SourceLocation::current()) const;
 
     virtual Messages::WebContentServer::InitTransportResponse init_transport(int peer_pid) override;
-    virtual void initialize(u64 initial_page_id, Web::HTML::CrossProcessId root_navigable_id, Web::HTML::CrossProcessIdAllocator cross_process_id_allocator) override;
+    virtual void initialize(u64 initial_page_id, Web::HTML::CrossProcessId root_navigable_id, Web::HTML::CrossProcessIdAllocator cross_process_id_allocator, Web::HTML::CrossProcessId initial_document_state_id) override;
     virtual void close_server() override;
     virtual Messages::WebContentServer::GetWindowHandleResponse get_window_handle(u64 page_id) override;
     virtual void set_window_handle(u64 page_id, String handle) override;
     virtual void connect_to_webdriver(u64 page_id, ByteString webdriver_endpoint) override;
     virtual void notify_webdriver_of_window_replacement(u64 page_id) override;
-    virtual void complete_webdriver_history_traversal(u64 page_id, u64 request_id, bool accepted, bool will_replace_web_content_process, bool will_change_top_level_entry) override;
+    virtual void complete_webdriver_history_traversal(u64 page_id, u64 request_id, bool accepted) override;
     virtual void complete_webdriver_navigation_completion(u64 page_id, u64 request_id, Web::WebDriver::Response response) override;
     virtual void connect_to_web_ui(u64 page_id, IPC::TransportHandle handle) override;
     virtual void connect_to_request_server(IPC::TransportHandle handle) override;
@@ -99,11 +100,12 @@ private:
     virtual void run_iframe_load_event_steps(u64 page_id, Web::HTML::CrossProcessId frame_id) override;
     virtual void set_page_parent_context(u64 page_id, Optional<Web::Compositor::CompositorContextId>) override;
     virtual void set_remote_child_frame_compositor_context(u64 page_id, Web::HTML::CrossProcessId frame_id, Optional<Web::Compositor::CompositorContextId>) override;
-    virtual void resolve_session_history_traversal_target(u64 page_id, u64 request_id, Optional<i32> target_step) override;
-    virtual void complete_finalize_same_document_navigation(u64 page_id, u64 operation_id, bool committed, i32 entry_step, i32 target_step, u64 script_history_length, u64 script_history_index) override;
-    virtual void traverse_the_history_to_step(u64 page_id, i32 step) override;
-    virtual void check_if_traverse_history_step_is_canceled(u64 page_id, u64 request_id, i32 step) override;
-    virtual void set_top_level_session_history(u64 page_id, Vector<Web::HTML::SessionHistoryEntryDescriptor>, size_t current_top_level_entry_index, bool allow_reconstructing_current_entry) override;
+    virtual void history_operation_started(u64 page_id, u64 operation_id, u64 initiation_id, Optional<Web::HTML::SessionHistoryEntryDescriptor> creation_target_entry) override;
+    virtual void run_history_step_unload_cancelation_job(u64 page_id, u64 operation_id, Web::HTML::SessionHistoryEntryDescriptor target_entry, Vector<Web::HTML::CrossProcessId> navigables_crossing_documents, Web::HTML::UserNavigationInvolvement user_involvement) override;
+    virtual void run_changing_navigable_history_job(u64 page_id, u64 operation_id, Web::HTML::CrossProcessId navigable_id, Web::HTML::SessionHistoryEntryDescriptor target_entry, Web::HTML::UserNavigationInvolvement user_involvement, Optional<Web::Bindings::NavigationType> navigation_type, Web::HTML::LocalNavigable::NavigationAPIAbortBehavior navigation_api_abort_behavior, Optional<u64> initiation_id) override;
+    virtual void apply_changing_navigable_continuation(u64 page_id, u64 operation_id, Web::HTML::CrossProcessId navigable_id, u64 script_history_length, u64 script_history_index, Vector<Web::HTML::SessionHistoryEntryDescriptor> entries_for_navigation_api) override;
+    virtual void update_nonchanging_navigable_history_state(u64 page_id, u64 operation_id, Web::HTML::CrossProcessId navigable_id, u64 script_history_length, u64 script_history_index) override;
+    virtual void complete_history_operation(u64 page_id, u64 operation_id, Web::HTML::HistoryStepResult result, Optional<i32> committed_step, u64 session_history_entry_count, Optional<u64> initiation_id) override;
     virtual void reset_session_history_for_testing(u64 page_id) override;
     virtual void set_viewport(u64 page_id, Web::DevicePixelSize, double device_pixel_ratio, Web::ViewportIsFullscreen is_fullscreen) override;
     virtual void key_event(u64 page_id, Web::KeyEvent) override;
@@ -221,6 +223,7 @@ private:
     virtual void find_in_page_previous_match(u64 page_id) override;
 
     virtual void paste(u64 page_id, Utf16String text) override;
+    virtual void paste_from_clipboard(u64 page_id) override;
     virtual void set_marked_text_from_input_method(u64 page_id, Utf16String text) override;
     virtual void commit_text_from_input_method(u64 page_id, Utf16String text, i32 replacement_start, i32 replacement_length) override;
     virtual void unmark_text_from_input_method(u64 page_id) override;

@@ -157,6 +157,16 @@ HTMLParser::HTMLParser(DOM::Document& document, ParserScriptingMode scripting_mo
     m_document->set_encoding(utf16_string_from_standardized_encoding_label(standardized_encoding.value()));
 }
 
+HTMLParser::HTMLParser(DOM::Document& document, ParserScriptingMode scripting_mode, Utf16View input, FragmentParser fragment_parser)
+    : m_tokenizer(input)
+    , m_parsing_fragment(fragment_parser == FragmentParser::Yes)
+    , m_scripting_mode(scripting_mode)
+    , m_document(document)
+{
+    VERIFY(m_parsing_fragment);
+    m_rust_parser = rust_html_parser_create();
+}
+
 HTMLParser::HTMLParser(DOM::Document& document, ParserScriptingMode scripting_mode, ScriptCreatedParser script_created)
     : m_scripting_mode(scripting_mode)
     , m_script_created(script_created == ScriptCreatedParser::Yes)
@@ -246,8 +256,10 @@ void HTMLParser::configure_element_created_by_rust_parser(DOM::Element& element)
         // AD-HOC: Let <link> elements know which document they were originally parsed for.
         //         This is used for the render-blocking logic.
         auto& link_element = as<HTMLLinkElement>(element);
-        link_element.set_parser_document({}, document());
-        link_element.set_was_enabled_when_created_by_parser({}, !element.has_attribute(HTML::AttributeNames::disabled));
+        if (!m_parsing_fragment) {
+            link_element.set_parser_document({}, document());
+            link_element.set_was_enabled_when_created_by_parser({}, !element.has_attribute(HTML::AttributeNames::disabled));
+        }
         return;
     }
 
@@ -255,10 +267,10 @@ void HTMLParser::configure_element_created_by_rust_parser(DOM::Element& element)
         return;
 
     auto& script_element = as<HTMLScriptElement>(element);
-    if (m_scripting_mode != ParserScriptingMode::Fragment)
+    if (!m_parsing_fragment && m_scripting_mode != ParserScriptingMode::Fragment)
         script_element.set_parser_document(Badge<HTMLParser> {}, document());
     script_element.set_force_async(Badge<HTMLParser> {}, false);
-    if (m_scripting_mode == ParserScriptingMode::Inert)
+    if (m_parsing_fragment && m_scripting_mode != ParserScriptingMode::Fragment)
         script_element.set_already_started(Badge<HTMLParser> {}, true);
 }
 
@@ -323,7 +335,7 @@ bool HTMLParser::process_script_end_tag_from_rust_parser(HTMLScriptElement& scri
     m_tokenizer.restore_old_insertion_point();
 
     // At this stage, if the pending parsing-blocking script is not null, then:
-    if (document().pending_parsing_blocking_script()) {
+    if (!m_parsing_fragment && document().pending_parsing_blocking_script()) {
         // -> If the script nesting level is not zero:
         if (script_nesting_level() != 0) {
             // Set the parser pause flag to true,
@@ -414,7 +426,7 @@ bool HTMLParser::process_svg_script_end_tag_from_rust_parser(SVG::SVGScriptEleme
     // If the SVG script registered itself as a pending parsing-blocking script (external fetch in flight),
     // pause the parser and schedule a resume check. The parser will resume from
     // resume_after_parser_blocking_script when the fetch completes.
-    if (document().pending_parsing_blocking_svg_script()) {
+    if (!m_parsing_fragment && document().pending_parsing_blocking_svg_script()) {
         m_parser_pause_flag = true;
         schedule_resume_check();
     }
@@ -462,22 +474,13 @@ void HTMLParser::the_end(GC::Ref<DOM::Document> document, GC::Ptr<HTMLParser> pa
     if (parser)
         VERIFY(document == parser->m_document);
 
-    // The entirety of "the end" should be a no-op for HTML fragment parsers, because:
-    // - the temporary document is not accessible, making the DOMContentLoaded event and "ready for post load tasks" do
-    //   nothing, making the parser not re-entrant from document.{open,write,close} and document.readyState inaccessible
-    // - there is no Window associated with it and no associated browsing context with the temporary document (meaning
-    //   the Window load event is skipped and making the load timing info inaccessible)
-    // - scripts are not able to be prepared, meaning the script queues are empty.
-    // However, the unconditional "spin the event loop" invocations cause two issues:
-    // - Microtask timing is changed, as "spin the event loop" performs an unconditional microtask checkpoint, causing
-    //   things to happen out of order. For example, YouTube sets the innerHTML of a <template> element in the constructor
-    //   of the ytd-app custom element _before_ setting up class attributes. Since custom elements use microtasks to run
-    //   callbacks, this causes custom element callbacks that rely on attributes setup by the constructor to run before
-    //   the attributes are set up, causing unhandled exceptions.
-    // - Load event delaying can spin forever, e.g. if the fragment contains an <img> element which stops delaying the
-    //   load event from an element task. Since tasks are not considered runnable if they're from a document with no
-    //   browsing context (i.e. the temporary document made for innerHTML), the <img> element will forever delay the load
-    //   event and cause an infinite loop.
+    // The entirety of "the end" should be a no-op for HTML fragment parsers. Fragment parsing does not complete its
+    // context document, dispatch document or Window events, or process the context document's script queues. Moreover,
+    // the unconditional "spin the event loop" invocations perform a microtask checkpoint, causing things to happen out
+    // of order. For example, YouTube sets the innerHTML of a <template> element in the constructor of the ytd-app custom
+    // element _before_ setting up class attributes. Since custom elements use microtasks to run callbacks, this causes
+    // custom element callbacks that rely on attributes setup by the constructor to run before the attributes are set up,
+    // causing unhandled exceptions.
     // We can avoid these issues and also avoid doing unnecessary work by simply skipping "the end" for HTML fragment
     // parsers.
     // See the message of the commit that added this for more details.
@@ -642,6 +645,10 @@ void HTMLParserEndState::check_progress()
 
     case Phase::WaitingForLoadEventDelay:
         // 8. Spin the event loop until there is nothing that delays the load event in the Document.
+        // AD-HOC: Update style first — so any font fetches that the computed styles depend on get started; an in-flight
+        //         font fetch delays the load event.
+        // INTEROP: Gecko also flushes layout before firing the load event — so lazily-started font loads hold it back.
+        m_document->update_style();
         if (m_document->anything_is_delaying_the_load_event())
             return;
 
@@ -714,6 +721,10 @@ void HTMLParserEndState::complete()
         // parser mark the replacement document ready for post-load tasks.
         if (parser_was_replaced(document, parser, parser_generation))
             return;
+
+        state->m_timeout->stop();
+        document->set_html_parser_end_state(nullptr);
+
         // 1. Update the current document readiness to "complete".
         document->update_readiness(HTML::DocumentReadyState::Complete);
 
@@ -728,6 +739,12 @@ void HTMLParserEndState::complete()
         // 2. If the Document object's browsing context is null, then abort these steps.
         if (!document->browsing_context())
             return;
+
+        // AD-HOC: Give the document a styled, laid-out state before load listeners run. Style and
+        //         layout otherwise wait for the next rendering update, and a load handler that
+        //         changes style would fold its change into the document's very first style pass,
+        //         where a transition it expects to start has no before-change style to start from.
+        document->update_layout(DOM::UpdateLayoutReason::DocumentReadinessComplete);
 
         // 3. Let window be the Document's relevant global object.
         auto& window = relevant_window(*document);
@@ -840,7 +857,7 @@ GC::Ref<DOM::Element> HTMLParser::create_element_for(HTMLToken const& token, Opt
 
     // AD-HOC: Let <link> elements know which document they were originally parsed for.
     //         This is used for the render-blocking logic.
-    if (local_name == HTML::TagNames::link && namespace_ == Namespace::HTML) {
+    if (!m_parsing_fragment && local_name == HTML::TagNames::link && namespace_ == Namespace::HTML) {
         auto& link_element = as<HTMLLinkElement>(*element);
         link_element.set_parser_document({}, document);
         link_element.set_was_enabled_when_created_by_parser({}, !token.has_attribute(HTML::AttributeNames::disabled));
@@ -854,8 +871,7 @@ GC::Ref<DOM::Element> HTMLParser::create_element_for(HTMLToken const& token, Opt
     // 11. Append each attribute in the given token to element.
     token.for_each_attribute([&](auto const& attribute) {
         DOM::QualifiedName qualified_name { attribute.local_name, attribute.prefix, attribute.namespace_ };
-        auto dom_attribute = DOM::Attr::create(*document, move(qualified_name), attribute.value, element);
-        element->append_attribute(dom_attribute);
+        element->append_attribute(move(qualified_name), attribute.value);
         return IterationDecision::Continue;
     });
 
@@ -925,7 +941,7 @@ void HTMLParser::resume_after_parser_blocking_script()
 
     // INTEROP: Blink and WebKit detach a parser when document.open() replaces it. Do not let resume work from the
     //          detached parser consume a parsing-blocking script owned by the replacement parser.
-    if (m_document->parser() != this)
+    if (m_document->parser().ptr() != this)
         return;
 
     auto pending = document().pending_parsing_blocking_script();
@@ -1051,29 +1067,12 @@ WebIDL::ExceptionOr<GC::Ref<DOM::DocumentFragment>> HTMLParser::parse_html_fragm
     VERIFY(context);
 
     // 4. Let document be a Document node whose type is "html".
-    auto temp_document = DOM::Document::create_for_fragment_parsing(
-        context->document().page(),
-        context->document().relevant_global_event_target());
-    temp_document->set_document_type(DOM::Document::Type::HTML);
-
-    temp_document->set_temporary_document_for_fragment_parsing({});
-
-    // AD-HOC: We set the about base URL of the document to the same as the context's document.
-    //         This is required for Document::parse_url() to work inside iframe srcdoc documents.
-    //         Spec issue: https://github.com/whatwg/html/issues/12210
-    temp_document->set_about_base_url(context->document().about_base_url());
 
     // 5. Let contextDocument be context's node document.
     auto& context_document = context->document();
 
     // 6. If contextDocument is in quirks mode, then set document's mode to "quirks".
-    if (context_document.in_quirks_mode()) {
-        temp_document->set_quirks_mode(DOM::QuirksMode::Yes);
-    }
     // 7. Otherwise, if contextDocument is in limited-quirks mode, then set document's mode to "limited-quirks".
-    else if (context_document.in_limited_quirks_mode()) {
-        temp_document->set_quirks_mode(DOM::QuirksMode::Limited);
-    }
 
     // 8. Create a new HTML parser whose allow declarative shadow roots is allowDeclarativeShadowRoots, and associate it with document.
     // 9. If contextDocument's scripting is disabled, then set scriptingMode to Disabled.
@@ -1081,10 +1080,13 @@ WebIDL::ExceptionOr<GC::Ref<DOM::DocumentFragment>> HTMLParser::parse_html_fragm
     if (context_document.is_scripting_disabled())
         scripting_mode = HTML::ParserScriptingMode::Disabled;
 
-    auto parser = HTMLParser::create_for_decoded_string(*temp_document, input, scripting_mode, "utf-8"_utf16);
+    // OPTIMIZATION: Use the context document directly while keeping the parser detached from its document parser state.
+    //               The detached root below supplies the temporary tree-builder state, while all output nodes are
+    //               created for their final document. This avoids initializing a complete Document for every fragment.
+    auto parser = GC::Heap::the().allocate<HTMLParser>(context_document, scripting_mode, input, FragmentParser::Yes);
+    parser->initialize(context_document.relevant_settings_object().realm());
     parser->set_allow_declarative_shadow_roots(allow_declarative_shadow_roots);
     parser->m_context_element = context; // FIXME: Is this needed?
-    parser->m_parsing_fragment = true;
 
     // 11. Set the state of the HTML parser's tokenization stage as follows, switching on context:
     bool const context_element_is_html = context->namespace_uri() == Namespace::HTML;
@@ -1131,10 +1133,11 @@ WebIDL::ExceptionOr<GC::Ref<DOM::DocumentFragment>> HTMLParser::parse_html_fragm
     // 12. Let root be the result of creating an element given document, "html", the HTML namespace, null, null, false,
     //     and the result of looking up a custom element registry given target.
     auto root_registry = look_up_a_custom_element_registry(target_node);
-    auto root = MUST(DOM::create_element(*temp_document, HTML::TagNames::html, Namespace::HTML, {}, {}, false, root_registry));
+    auto root = MUST(DOM::create_element(context_document, HTML::TagNames::html, Namespace::HTML, {}, {}, false, root_registry));
 
     // 13. Append root to document.
-    MUST(temp_document->append_child(root));
+    // OPTIMIZATION: Keep the root detached. It is only a sentinel for the tree builder, whose root insertions are
+    //               redirected to the output fragment.
 
     // 14. Set up the HTML parser's stack of open elements so that it contains just the single element root.
     // 15. Let fragment be a new DocumentFragment whose node document is target's node document.
@@ -1175,10 +1178,11 @@ WebIDL::ExceptionOr<GC::Ref<DOM::DocumentFragment>> HTMLParser::parse_html_fragm
         attribute_prefixes.ensure_capacity(attributes->length());
         attribute_values.ensure_capacity(attributes->length());
         for (size_t i = 0; i < attributes->length(); ++i) {
-            auto const* attribute = attributes->item(i);
+            auto attribute = attributes->item(i);
             attribute_names.unchecked_append(utf16_code_units_for_ffi(attribute->local_name().view()));
             auto const& local_name = attribute_names.last();
-            attribute_values.unchecked_append(utf16_code_units_for_ffi(attribute->value().utf16_view()));
+            auto attribute_value = attribute->value();
+            attribute_values.unchecked_append(utf16_code_units_for_ffi(attribute_value));
             auto const& value = attribute_values.last();
             Vector<u16> const* prefix = nullptr;
             if (attribute->prefix().has_value()) {
@@ -1208,13 +1212,13 @@ WebIDL::ExceptionOr<GC::Ref<DOM::DocumentFragment>> HTMLParser::parse_html_fragm
         context_local_name.size(),
         context_attributes.data(),
         context_attributes.size(),
-        quirks_mode_to_html_parser_ffi(temp_document->mode()),
+        quirks_mode_to_html_parser_ffi(context_document.mode()),
         allow_declarative_shadow_roots == AllowDeclarativeShadowRoots::Yes,
         parser->m_form_element ? reinterpret_cast<size_t>(parser->m_form_element.ptr()) : 0);
 
     // 22. Place the input into the input stream for the HTML parser just created. The encoding confidence is irrelevant.
     // 23. Start the HTML parser and let it run until it has consumed all the characters just inserted into the input stream.
-    parser->run(context->document().url());
+    parser->run_until_completion();
 
     return fragment;
 }
@@ -1376,7 +1380,8 @@ Utf16String HTMLParser::serialize_html_fragment(DOM::Node const& node, Serializa
             }
 
             builder.append_ascii("=\""sv);
-            builder.append(escape_string(attribute.value().utf16_view(), AttributeMode::Yes));
+            auto attribute_value = attribute.value();
+            builder.append(escape_string(attribute_value.utf16_view(), AttributeMode::Yes));
             builder.append_ascii('"');
         });
 
@@ -2174,8 +2179,7 @@ extern "C" void ladybird_html_parser_add_missing_attribute(size_t element, u16 c
     if (dom_element.has_attribute(local_name))
         return;
     auto value = utf16_string_from_ffi(value_ptr, value_len);
-    auto attribute = DOM::Attr::create(dom_element.document(), move(local_name), move(value));
-    dom_element.append_attribute(attribute);
+    dom_element.append_attribute(DOM::QualifiedName { move(local_name), {}, {} }, move(value));
 }
 
 extern "C" void ladybird_html_parser_remove_node(size_t node)

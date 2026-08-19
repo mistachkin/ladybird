@@ -35,6 +35,7 @@
 #include <LibWebView/BookmarkStore.h>
 #include <LibWebView/BrowserProcess.h>
 #include <LibWebView/DownloadStore.h>
+#include <LibWebView/ExternalURLHandler.h>
 #include <LibWebView/FileDownloader.h>
 #include <LibWebView/Forward.h>
 #include <LibWebView/Options.h>
@@ -121,6 +122,7 @@ public:
     static CookieJar& cookie_jar(IsPrivate);
     static HSTSStore& hsts_store(IsPrivate);
     static StorageJar& storage_jar(IsPrivate);
+    static SessionStore& session_store(IsPrivate);
 
     static ProcessManager& process_manager() { return *the().m_process_manager; }
 #if defined(AK_OS_MACOS)
@@ -133,12 +135,12 @@ public:
     ErrorOr<Core::GeolocationProvider::WatchId, Core::GeolocationError> start_watching_geolocation_position(Core::GeolocationProvider::SuccessCallback on_success, Core::GeolocationProvider::ErrorCallback on_error);
     void stop_watching_geolocation_position(Core::GeolocationProvider::WatchId);
 
-    ErrorOr<NonnullRefPtr<WebContentClient>> launch_web_content_process(ViewImplementation&);
+    ErrorOr<NonnullRefPtr<WebContentClient>> launch_web_content_process(ViewImplementation&, Optional<Web::HTML::CrossProcessId> root_navigable_id = {}, Optional<Web::HTML::CrossProcessId> initial_document_state_id = {});
     struct ChildFrameWebContentProcess {
         NonnullRefPtr<WebContentClient> client;
         u64 page_id { 0 };
     };
-    ErrorOr<ChildFrameWebContentProcess> launch_child_frame_web_content_process(IsPrivate, Web::HTML::CrossProcessId root_navigable_id);
+    ErrorOr<ChildFrameWebContentProcess> launch_child_frame_web_content_process(IsPrivate, Web::HTML::CrossProcessId root_navigable_id, Web::HTML::CrossProcessId initial_document_state_id);
     u64 allocate_page_id();
     Web::HTML::CrossProcessIdAllocator allocate_cross_process_id_allocator();
     Web::HTML::CrossProcessId allocate_ui_process_cross_process_id();
@@ -169,6 +171,8 @@ public:
     virtual void open_url_in_new_tab(URL::URL const&, Web::HTML::ActivateTab) const;
     virtual void open_urls_in_new_tabs(ReadonlySpan<URL::URL>) const;
     virtual void open_url_in_new_window(URL::URL const&, IsPrivate) { }
+
+    virtual void resolve_external_url_handler(URL::URL const&, ExternalURLHandlerCallback callback) const { callback(nullptr); }
 
     void open_bookmark_in_new_tab(String const& bookmark_id, Web::HTML::ActivateTab) const;
     void open_bookmark_folder_in_new_tabs(String const& folder_id) const;
@@ -230,7 +234,7 @@ public:
         Delete delete_download_history { Delete::No };
         Delete delete_site_data { Delete::No };
     };
-    void clear_browsing_data(ClearBrowsingDataOptions const&);
+    NonnullRefPtr<Core::Promise<Empty>> clear_browsing_data(ClearBrowsingDataOptions const&);
 
     Action& reload_action() { return *m_reload_action; }
     Action& copy_selection_action() { return *m_copy_selection_action; }
@@ -310,7 +314,7 @@ protected:
     Main::Arguments& arguments() { return m_arguments; }
 
 private:
-    ErrorOr<NonnullRefPtr<WebContentClient>> create_web_content_client(Optional<ViewImplementation&>, IsPrivate, u64 initial_page_id, Optional<Web::HTML::CrossProcessId> root_navigable_id = {});
+    ErrorOr<NonnullRefPtr<WebContentClient>> create_web_content_client(Optional<ViewImplementation&>, IsPrivate, u64 initial_page_id, Optional<Web::HTML::CrossProcessId> root_navigable_id = {}, Optional<Web::HTML::CrossProcessId> initial_document_state_id = {});
     PrivateBrowsingSession& ensure_private_browsing_session();
     ErrorOr<void> launch_services();
     void launch_spare_web_content_process();
@@ -455,6 +459,8 @@ private:
     OwnPtr<StorageJar> m_storage_jar;
     OwnPtr<DownloadStore> m_download_store;
     OwnPtr<PrivateBrowsingSession> m_private_browsing_session;
+    RefPtr<Database::Database> m_session_database;
+    OwnPtr<SessionStore> m_session_store;
 
     OwnPtr<Core::GeolocationProvider> m_geolocation_provider;
     OwnPtr<Core::TimeZoneWatcher> m_time_zone_watcher;

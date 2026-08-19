@@ -16,12 +16,11 @@
 #include <AK/Utf16StringBuilder.h>
 #include <AK/Utf16View.h>
 #include <AK/Vector.h>
-#include <LibWeb/CSS/InvalidationSet.h>
+#include <LibWeb/Bindings/Node.h>
 #include <LibWeb/DOM/EventTarget.h>
 #include <LibWeb/DOM/FragmentSerializationMode.h>
 #include <LibWeb/DOM/NodeType.h>
 #include <LibWeb/DOM/Slottable.h>
-#include <LibWeb/DOM/StyleInvalidationReason.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/InvalidateDisplayList.h>
 #include <LibWeb/TraversalDecision.h>
@@ -77,6 +76,7 @@ enum class RootNodeComposed {
 
 #define ENUMERATE_SET_NEEDS_LAYOUT_REASONS(X)         \
     X(CharacterDataReplaceData)                       \
+    X(DefaultPreferredSizeAttributeChange)            \
     X(EditableStateChange)                            \
     X(FinalizeACrossDocumentNavigation)               \
     X(GeneratedContentImageFinishedLoading)           \
@@ -86,13 +86,13 @@ enum class RootNodeComposed {
     X(HTMLVideoElementNaturalDimensionsChanged)       \
     X(HTMLVideoElementSetVideoTrack)                  \
     X(KeyframeEffect)                                 \
+    X(LanguageChangeUnderCasingTextTransform)         \
     X(LayoutTreeUpdate)                               \
     X(NavigableSetViewportSize)                       \
-    X(SVGGraphicsElementTransformChange)              \
     X(SVGImageElementFetchTheDocument)                \
-    X(SVGImageFilterFetch)                            \
     X(SVGViewBoxChange)                               \
-    X(StyleChange)
+    X(StyleChange)                                    \
+    X(TableSpanAttributeChange)
 
 enum class SetNeedsLayoutReason {
 #define ENUMERATE_SET_NEEDS_LAYOUT_REASON(e) e,
@@ -111,6 +111,7 @@ enum class SetNeedsLayoutReason {
     X(HTMLInputElementSrcAttribute)                       \
     X(HTMLObjectElementUpdateLayoutAndChildObjects)       \
     X(KeyframeEffect)                                     \
+    X(LanguageChangeUnderCasingTextTransform)             \
     X(ListItemCounters)                                   \
     X(NodeInsertBefore)                                   \
     X(NodeInsertBeforeWithDisplayContents)                \
@@ -118,6 +119,7 @@ enum class SetNeedsLayoutReason {
     X(NodeSetTextContent)                                 \
     X(None)                                               \
     X(ShadowRootSetInnerHTML)                             \
+    X(SlotAssignmentChange)                               \
     X(StyleChange)                                        \
     X(SVGResourceElementRemoved)                          \
     X(TopLayerMembershipChange)
@@ -226,6 +228,8 @@ public:
     virtual bool is_html_title_element() const { return false; }
     virtual bool is_html_br_element() const { return false; }
     virtual bool is_html_button_element() const { return false; }
+    virtual bool is_html_details_element() const { return false; }
+    virtual bool is_html_dialog_element() const { return false; }
     virtual bool is_html_slot_element() const { return false; }
     virtual bool is_html_embed_element() const { return false; }
     virtual bool is_html_object_element() const { return false; }
@@ -239,6 +243,7 @@ public:
     virtual bool is_html_textarea_element() const { return false; }
     virtual bool is_html_frameset_element() const { return false; }
     virtual bool is_html_fieldset_element() const { return false; }
+    virtual bool is_html_meter_element() const { return false; }
     virtual bool is_html_li_element() const { return false; }
     virtual bool is_html_menu_element() const { return false; }
     virtual bool is_html_olist_element() const { return false; }
@@ -307,7 +312,7 @@ public:
 
     GC::Ptr<Document> owner_document() const;
 
-    HTML::HTMLAnchorElement const* enclosing_link_element() const;
+    HTML::HTMLHyperlinkElementUtils const* enclosing_link_element() const;
     HTML::HTMLElement const* enclosing_html_element() const;
     HTML::HTMLElement const* enclosing_html_element_with_attribute(Utf16FlyString const&) const;
 
@@ -364,6 +369,11 @@ public:
 
     Layout::Node const* unsafe_layout_node() const { return m_layout_node.ptr(); }
     Layout::Node* unsafe_layout_node() { return m_layout_node.ptr(); }
+    Element const* first_letter_owner_for_layout_subtree_from(Node const& inclusive_ancestor) const;
+    Element* first_letter_owner_for_layout_subtree_from(Node const& inclusive_ancestor)
+    {
+        return const_cast<Element*>(const_cast<Node const*>(this)->first_letter_owner_for_layout_subtree_from(inclusive_ancestor));
+    }
 
     RefPtr<Painting::Paintable const> paintable_box() const;
     RefPtr<Painting::Paintable> paintable_box();
@@ -391,27 +401,17 @@ public:
     [[nodiscard]] bool needs_layout_tree_update() const { return m_needs_layout_tree_update; }
     void set_needs_layout_tree_update(bool, SetNeedsLayoutTreeUpdateReason);
 
+    [[nodiscard]] bool may_reuse_layout_node_for_child_list_insertion() const { return m_may_reuse_layout_node_for_child_list_insertion; }
+
     [[nodiscard]] bool child_needs_layout_tree_update() const { return m_child_needs_layout_tree_update; }
     void set_child_needs_layout_tree_update(bool b) { m_child_needs_layout_tree_update = b; }
-
-    bool needs_style_update() const { return m_needs_style_update; }
-    void set_needs_style_update(bool);
-    void set_needs_style_update_internal(bool) { m_needs_style_update = true; }
-
-    bool child_needs_style_update() const { return m_child_needs_style_update; }
-    void set_child_needs_style_update(bool b) { m_child_needs_style_update = b; }
-
-    [[nodiscard]] bool entire_subtree_needs_style_update() const { return m_entire_subtree_needs_style_update; }
-    void set_entire_subtree_needs_style_update(bool b) { m_entire_subtree_needs_style_update = b; }
 
     [[nodiscard]] bool children_may_depend_on_non_inherited_property_inheritance() const { return m_children_may_depend_on_non_inherited_property_inheritance; }
     void set_children_may_depend_on_non_inherited_property_inheritance() { m_children_may_depend_on_non_inherited_property_inheritance = true; }
 
-    void invalidate_style(StyleInvalidationReason);
-    void invalidate_style(StyleInvalidationReason, Vector<CSS::InvalidationSet::Property> const&, StyleInvalidationOptions);
+    void record_style_environment_change();
     CSS::StyleScope& style_scope();
     CSS::StyleScope const& style_scope() const { return const_cast<Node*>(this)->style_scope(); }
-    void for_each_style_scope_which_may_observe_the_node(Function<void(CSS::StyleScope&)> const&);
 
     void set_document(Badge<Document, NamedNodeMap>, Document&);
 
@@ -452,8 +452,8 @@ public:
     void string_replace_all(Utf16View);
     void string_replace_all(Utf16String);
 
-    bool is_same_node(Node const*) const;
-    bool is_equal_node(Node const*) const;
+    bool is_same_node(GC::Ptr<Node const>) const;
+    bool is_equal_node(GC::Ptr<Node const>) const;
 
     GC::Ref<Node> get_root_node(RootNodeComposed = RootNodeComposed::No);
     GC::Ref<Node> get_root_node(Bindings::GetRootNodeOptions const&);
@@ -464,8 +464,8 @@ public:
 
     size_t length() const;
 
-    auto& registered_observer_list() { return m_registered_observer_list; }
-    auto const& registered_observer_list() const { return m_registered_observer_list; }
+    Vector<GC::Ref<RegisteredObserver>>* registered_observer_list();
+    Vector<GC::Ref<RegisteredObserver>> const* registered_observer_list() const;
 
     void add_registered_observer(RegisteredObserver&);
 
@@ -536,9 +536,29 @@ public:
     }
 
 protected:
+    struct RareData {
+        virtual ~RareData();
+        virtual void visit_edges(Cell::Visitor&);
+        virtual size_t external_memory_size() const;
+
+        mutable Optional<UniqueNodeID> unique_id;
+
+        // https://dom.spec.whatwg.org/#registered-observer-list
+        // "Nodes have a strong reference to registered observers in their registered observer list." https://dom.spec.whatwg.org/#garbage-collection
+        OwnPtr<Vector<GC::Ref<RegisteredObserver>>> registered_observer_list;
+
+        GC::Ptr<NodeList> child_nodes;
+        GC::Ptr<HTMLCollection> children;
+    };
+
     Node(Document&, NodeType);
 
     void set_document(Document&);
+
+    virtual OwnPtr<RareData> create_rare_data() const;
+    RareData& ensure_rare_data() const;
+    RareData* rare_data() { return m_rare_data; }
+    RareData const* rare_data() const { return m_rare_data; }
 
     virtual void visit_edges(Cell::Visitor&) override;
     virtual void finalize() override;
@@ -550,20 +570,12 @@ protected:
     NodeType m_type { NodeType::INVALID };
     bool m_needs_layout_tree_update { false };
     bool m_child_needs_layout_tree_update { false };
+    bool m_may_reuse_layout_node_for_child_list_insertion { false };
 
-    bool m_needs_style_update { false };
-    bool m_child_needs_style_update { false };
-    bool m_entire_subtree_needs_style_update { false };
     bool m_children_may_depend_on_non_inherited_property_inheritance { false };
     bool m_in_editable_subtree { false };
     bool m_is_connected { false };
     bool m_inside_blocking_wheel_event_handler { false };
-
-    mutable Optional<UniqueNodeID> m_unique_id;
-
-    // https://dom.spec.whatwg.org/#registered-observer-list
-    // "Nodes have a strong reference to registered observers in their registered observer list." https://dom.spec.whatwg.org/#garbage-collection
-    OwnPtr<Vector<GC::Ref<RegisteredObserver>>> m_registered_observer_list;
 
     void build_accessibility_tree(AccessibilityTreeNode& parent);
 
@@ -581,7 +593,7 @@ private:
 
     static Optional<Utf16View> first_valid_id(Utf16View, Document const&);
 
-    GC::Ptr<NodeList> m_child_nodes;
+    mutable OwnPtr<RareData> m_rare_data;
 };
 
 }

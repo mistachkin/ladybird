@@ -18,21 +18,35 @@ pub(crate) enum LayoutMode {
     IntrinsicSizing,
 }
 
+/// The anchor() inset resolutions of one positioned box, produced by the
+/// abspos engine's resolve pass; sides without anchor functions stay
+/// unresolved and read from style.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[repr(C)]
-pub struct FfiResolvedAnchorInsets {
-    pub resolves_top: bool,
-    pub top_is_auto: bool,
-    pub top: CssPixels,
-    pub resolves_right: bool,
-    pub right_is_auto: bool,
-    pub right: CssPixels,
-    pub resolves_bottom: bool,
-    pub bottom_is_auto: bool,
-    pub bottom: CssPixels,
-    pub resolves_left: bool,
-    pub left_is_auto: bool,
-    pub left: CssPixels,
+pub(crate) struct ResolvedAnchorInsets {
+    pub(crate) resolves_top: bool,
+    pub(crate) top_is_auto: bool,
+    pub(crate) top: CssPixels,
+    pub(crate) resolves_right: bool,
+    pub(crate) right_is_auto: bool,
+    pub(crate) right: CssPixels,
+    pub(crate) resolves_bottom: bool,
+    pub(crate) bottom_is_auto: bool,
+    pub(crate) bottom: CssPixels,
+    pub(crate) resolves_left: bool,
+    pub(crate) left_is_auto: bool,
+    pub(crate) left: CssPixels,
+}
+
+impl ResolvedAnchorInsets {
+    pub(crate) fn override_for(&self, field: InsetField) -> Option<ResolvedInsetOverride> {
+        let (resolves, is_auto, px) = match field {
+            InsetField::Top => (self.resolves_top, self.top_is_auto, self.top),
+            InsetField::Right => (self.resolves_right, self.right_is_auto, self.right),
+            InsetField::Bottom => (self.resolves_bottom, self.bottom_is_auto, self.bottom),
+            InsetField::Left => (self.resolves_left, self.left_is_auto, self.left),
+        };
+        resolves.then_some(ResolvedInsetOverride { is_auto, px })
+    }
 }
 
 
@@ -77,29 +91,10 @@ fn point_sub(left: FfiCssPixelPoint, right: FfiCssPixelPoint) -> FfiCssPixelPoin
     }
 }
 
-pub(crate) fn translate_static_position_between_chains(
-    mut rect: StaticPositionRect,
-    static_chain_offset: FfiCssPixelPoint,
-    containing_chain_offset: FfiCssPixelPoint,
-) -> StaticPositionRect {
-    let physical_offset = point_sub(static_chain_offset, containing_chain_offset);
-    rect.rect.offset.inline_offset += physical_offset.x;
-    rect.rect.offset.block_offset += physical_offset.y;
+pub(crate) fn translate_static_position_rect(mut rect: StaticPositionRect, offset: FfiCssPixelPoint) -> StaticPositionRect {
+    rect.rect.offset.inline_offset += offset.x;
+    rect.rect.offset.block_offset += offset.y;
     rect
-}
-
-pub(crate) fn anchor_rect_from_geometry(
-    anchor_state: &UsedValues,
-    containing_block_state: &UsedValues,
-    anchor_offset: FfiCssPixelPoint,
-) -> PhysicalRect {
-    let collapsed = anchor_state.uses_collapsing_borders_model.get();
-    PhysicalRect {
-        x: anchor_offset.x - anchor_state.border_box_left(collapsed) + containing_block_state.padding_left.get(),
-        y: anchor_offset.y - anchor_state.border_box_top(collapsed) + containing_block_state.padding_top.get(),
-        width: anchor_state.border_box_inline_size(collapsed),
-        height: anchor_state.border_box_block_size(collapsed),
-    }
 }
 
 pub(crate) type Node = NodeSlotId;
@@ -149,41 +144,43 @@ pub(crate) enum TableWrapperInlineSizeMode {
     UseTableUsedInlineSizeIfNotAuto,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LayoutPurpose {
+    Commit,
+    Measurement,
+}
+
+impl LayoutPurpose {
+    pub(crate) fn is_measurement(self) -> bool {
+        self == LayoutPurpose::Measurement
+    }
+}
+
 pub(crate) struct MeasurementState {
-    state: LayoutState,
     callbacks: FfiLayoutFcCallbacks,
-    root: Node,
 }
 
 impl MeasurementState {
-    pub(crate) fn create(callbacks: FfiLayoutFcCallbacks, node: Node, constraints: ContainingBlockConstraints) -> Self {
-        let state = LayoutState::new(LayoutStatePurpose::Measurement);
-        state.create_used_values(&callbacks, node, constraints);
-        Self {
-            state,
-            callbacks,
-            root: node,
-        }
+    pub(crate) fn create(callbacks: FfiLayoutFcCallbacks) -> Self {
+        Self { callbacks }
     }
 
-    pub(crate) fn root_used(&self) -> &UsedValues {
-        self.state.used_values(&self.callbacks, self.root)
-    }
-
-    fn run(&self, node: Node, input: LayoutInput) -> crate::layout::ChildLayoutResult {
-        self.run_with_layout_mode(node, LayoutMode::IntrinsicSizing, input)
+    fn run(&self, node: Node, node_used: &UsedValues, input: LayoutInput) -> ChildLayoutResult {
+        self.run_with_layout_mode(node, node_used, LayoutMode::IntrinsicSizing, input)
     }
 
     pub(crate) fn run_with_layout_mode(
         &self,
         node: Node,
+        node_used: &UsedValues,
         layout_mode: LayoutMode,
         input: LayoutInput,
-    ) -> crate::layout::ChildLayoutResult {
-        let layout_state = self.layout_state();
-        let fc_type = crate::layout::independent_formatting_context_type(layout_state, node, &self.callbacks);
+    ) -> ChildLayoutResult {
+        let fc_type = crate::layout::independent_formatting_context_type(node, &self.callbacks);
         crate::layout::run_formatting_context(
-            layout_state,
+            LayoutPurpose::Measurement,
+            None,
+            node_used,
             node,
             None,
             fc_type,
@@ -195,21 +192,23 @@ impl MeasurementState {
         )
     }
 
-    pub(crate) fn layout_state(&self) -> &LayoutState {
-        &self.state
-    }
-
     pub(crate) fn callbacks(&self) -> &FfiLayoutFcCallbacks {
         &self.callbacks
+    }
+
+    pub(crate) fn create_used_values(&self, node: Node, constraints: ContainingBlockConstraints) -> std::rc::Rc<UsedValues> {
+        create_used_values(&self.callbacks, node, constraints)
     }
 }
 
 fn cache_key(
     measured_at_inline_size: Option<CssPixels>,
+    measured_at_block_size: Option<CssPixels>,
     constraints: ContainingBlockConstraints,
 ) -> IntrinsicSizeCacheKey {
     IntrinsicSizeCacheKey {
         measured_at_inline_size,
+        measured_at_block_size,
         percentage_basis_inline_size: constraints.percentage_basis_inline_size,
         percentage_basis_block_size: constraints.percentage_basis_block_size,
         quirks_mode_percentage_basis_block_size: constraints.quirks_mode_percentage_basis_block_size,
@@ -343,31 +342,108 @@ pub(crate) enum BaselineSet {
 }
 
 pub(crate) fn place_child(
-    state: &LayoutState,
-    callbacks: &FfiLayoutFcCallbacks,
+    run: &FormattingContextRun,
     node: Node,
     offset: FfiCssPixelPoint,
+    containing_line_box_fragment: Option<LineBoxFragmentCoordinate>,
 ) {
-    let used = state.used_values(callbacks, node);
+    let purpose = run.purpose;
+    let records = &*run.records;
+    let callbacks = &run.callbacks;
+    let fragments = run.fragments.as_deref();
+    let used = records.used_values(node);
     assert!(!used.has_content_offset.get());
     used.has_content_offset.set(true);
     used.content_offset.set(offset);
-    used.committed_offset_delta
-        .set(committed_offset_delta_at_placement(state, callbacks, node, used));
     used.seal_committed_box_metrics();
+    if let Some(fragments) = fragments {
+        fragments.normalize_arrivals_for_placement(node);
+        loop {
+            let batch = fragments.take_drainable_abspos(node, records, callbacks);
+            if batch.is_empty() {
+                break;
+            }
+            let engine = crate::layout::AbsposEngine::for_run(run);
+            for entry in batch {
+                engine.layout_pending_child(run, entry);
+            }
+        }
+        let containing_block = callbacks.containing_block(node);
+        let containing_block_is_sealed = !containing_block.is_invalid()
+            && records
+                .used_values_if_owned(containing_block)
+                .is_none_or(|containing_block_used| containing_block_used.has_content_offset.get());
+        let node_facts = NodeFacts::new(callbacks, node);
+        let own_anchor_candidate_border_box_rect = (node_facts.is_box() && node_facts.has_anchor_names())
+            .then(|| {
+                let collapsed = used.uses_collapsing_borders_model.get();
+                PhysicalRect {
+                    x: used.content_offset.get().x - used.border_box_left(collapsed),
+                    y: used.content_offset.get().y - used.border_box_top(collapsed),
+                    width: used.border_box_inline_size(collapsed),
+                    height: used.border_box_block_size(collapsed),
+                }
+            });
+        fragments.build_fragment_for_placed_box(
+            callbacks,
+            node,
+            (!containing_block.is_invalid()).then_some(containing_block),
+            &used,
+            containing_block_is_sealed,
+            resolve_containing_line_box_index(records, callbacks, node, containing_block, containing_line_box_fragment, offset),
+            point_add(
+                offset,
+                committed_offset_delta_at_placement(purpose, records, callbacks, node, containing_block, &used),
+            ),
+            own_anchor_candidate_border_box_rect,
+        );
+    }
+}
+
+/// The line box index to record for atomic inlines whose containing line
+/// survived line post-processing.
+fn resolve_containing_line_box_index(
+    records: &RunRecords,
+    callbacks: &FfiLayoutFcCallbacks,
+    node: Node,
+    containing_block: Node,
+    coordinate: Option<LineBoxFragmentCoordinate>,
+    placed_offset: FfiCssPixelPoint,
+) -> Option<usize> {
+    let coordinate = coordinate?;
+    let facts = NodeFacts::new(callbacks, node);
+    if !facts.is_non_fragmented_box() {
+        return None;
+    }
+    assert!(!containing_block.is_invalid());
+    let containing_block_used = records.used_values(containing_block);
+    let data = containing_block_used.line_data_ref()?;
+    let line = data.line_boxes.get(coordinate.line_box_index)?;
+    if let Some(fragment) = line.fragments.get(coordinate.fragment_index) {
+        let (x, y) = fragment.offset();
+        debug_assert_eq!(
+            crate::layout::FfiCssPixelPoint { x, y },
+            placed_offset,
+            "stored line fragment offset diverged from the placed offset (is_block_outside={})",
+            facts.display().is_block_outside()
+        );
+    }
+    Some(coordinate.line_box_index)
 }
 
 fn committed_offset_delta_at_placement(
-    state: &LayoutState,
+    purpose: LayoutPurpose,
+    records: &RunRecords,
     callbacks: &FfiLayoutFcCallbacks,
     node: Node,
+    containing_block: Node,
     used: &UsedValues,
 ) -> FfiCssPixelPoint {
     let mut delta = FfiCssPixelPoint::default();
-    if state.is_measurement() {
+    if purpose.is_measurement() {
         return delta;
     }
-    let facts = state.node_facts(callbacks, node);
+    let facts = NodeFacts::new(callbacks, node);
     if !facts.is_non_fragmented_box() {
         return delta;
     }
@@ -376,10 +452,11 @@ fn committed_offset_delta_at_placement(
         delta.y += used.inset_top.get();
     }
     if facts.is_in_flow() && facts.display().is_block_outside() {
-        let chain = state.accumulated_relative_insets_from_inline_ancestor_chain(
+        let chain = accumulated_relative_insets_from_inline_ancestor_chain(
+            records,
             callbacks,
             callbacks.parent(node),
-            callbacks.containing_block(node),
+            containing_block,
         );
         if chain.found_fragmented_inline_node {
             delta.x += chain.offset_x;
@@ -390,66 +467,50 @@ fn committed_offset_delta_at_placement(
 }
 
 pub(crate) fn register_contained_abspos_child(
-    state: &LayoutState,
     callbacks: &FfiLayoutFcCallbacks,
+    fragments: Option<&RunFragmentBuilder>,
+    coordinate_space_box: Node,
     child: Node,
     static_position_rect: StaticPositionRect,
+    containing_block_info_override: Option<AbsposContainingBlockInfo>,
 ) {
-    let mut target = callbacks.containing_block(child);
-    if target.is_invalid() {
+    let Some(fragments) = fragments else {
+        return;
+    };
+    if callbacks.containing_block(child).is_invalid() {
         return;
     }
     let inline_containing_block = callbacks.inline_containing_block(child);
-    if !inline_containing_block.is_invalid() {
-        state.note_inline_containing_block(inline_containing_block);
-    }
-    loop {
-        let containing_block = callbacks.containing_block(target);
-        let facts = state.node_facts(callbacks, target);
-        if containing_block.is_invalid()
-            || (formatting_context_type_created_by_box(facts).is_some()
-                && !containing_block_geometry_is_finalized_by_the_table_run(state, callbacks, target))
-        {
-            break;
-        }
-        target = containing_block;
-    }
-    state.register_contained_abspos_child(callbacks, target, child, static_position_rect);
-}
-
-fn containing_block_geometry_is_finalized_by_the_table_run(
-    state: &LayoutState,
-    callbacks: &FfiLayoutFcCallbacks,
-    containing_block: Node,
-) -> bool {
-    let facts = state.node_facts(callbacks, containing_block);
-    facts.is_table_cell()
-        || facts.is_table_row()
-        || facts.is_table_row_group()
-        || facts.is_table_header_group()
-        || facts.is_table_footer_group()
+    fragments.register_pending_abspos(
+        coordinate_space_box,
+        PendingAbsposChild {
+            child_box: child,
+            coordinate_space_box,
+            static_position_rect,
+            containing_block_info_override,
+            inline_containing_block,
+        },
+    );
 }
 
 pub(crate) fn box_baseline(
-    state: &LayoutState,
     callbacks: &FfiLayoutFcCallbacks,
     box_: Node,
     used: &UsedValues,
     baseline_set: BaselineSet,
 ) -> CssPixels {
-    box_baseline_with_content_baselines(state, callbacks, box_, used, baseline_set, used.content_baselines_from_cells())
+    box_baseline_with_content_baselines(callbacks, box_, used, baseline_set, used.content_baselines_from_cells())
 }
 
 pub(crate) fn box_baseline_with_content_baselines(
-    state: &LayoutState,
     callbacks: &FfiLayoutFcCallbacks,
     box_: Node,
     used: &UsedValues,
     mut baseline_set: BaselineSet,
     content_baselines: DerivedBaselines,
 ) -> CssPixels {
-    let facts = state.node_facts(callbacks, box_);
-    let style = state.style_facts(callbacks, box_);
+    let facts = NodeFacts::new(callbacks, box_);
+    let style = StyleValues::for_node(callbacks, box_);
     let collapsed = used.uses_collapsing_borders_model.get();
 
     // https://drafts.csswg.org/css2/#propdef-vertical-align
@@ -463,7 +524,7 @@ pub(crate) fn box_baseline_with_content_baselines(
                 // Middle: Align the vertical midpoint of the box with the baseline of the parent box plus half the x-height of the parent.
                 let containing_block = callbacks.containing_block(box_);
                 assert!(!containing_block.is_invalid());
-                let containing_style = state.style_facts(callbacks, containing_block);
+                let containing_style = StyleValues::for_node(callbacks, containing_block);
                 return used.margin_box_block_size(collapsed) / 2
                     + CssPixels::nearest_value_for_f32(containing_style.font_x_height() / 2.0);
             }
@@ -479,7 +540,7 @@ pub(crate) fn box_baseline_with_content_baselines(
                 // TextBottom: Align the bottom of the box with the bottom of the parent's content area (see 10.6.1).
                 let containing_block = callbacks.containing_block(box_);
                 assert!(!containing_block.is_invalid());
-                let containing_style = state.style_facts(callbacks, containing_block);
+                let containing_style = StyleValues::for_node(callbacks, containing_block);
                 return used.margin_box_block_size(collapsed)
                     - CssPixels::nearest_value_for_f32(containing_style.font_descent());
             }
@@ -560,18 +621,19 @@ pub(crate) fn store_derived_baselines(used: &UsedValues, baselines: DerivedBasel
 }
 
 pub(crate) fn derive_baselines(
-    state: &LayoutState,
+    records: &RunRecords,
     callbacks: &FfiLayoutFcCallbacks,
     box_: Node,
     inhibits_floating: bool,
 ) -> DerivedBaselines {
-    let facts = state.node_facts(callbacks, box_);
-    let slot_index = callbacks.slot_index(box_);
-    let line_count = state.line_data(slot_index).map_or(0, |data| data.line_boxes.len());
+    let facts = NodeFacts::new(callbacks, box_);
+    let own_used = records.used_values(box_);
+    let own_line_data = own_used.line_data_ref();
+    let line_count = own_line_data.as_ref().map_or(0, |data| data.line_boxes.len());
     if line_count > 0 {
         let baseline_for_line_box = |line_index: usize, baseline_set: BaselineSet| -> CssPixels {
             let (has_block_level_box, block_start, baseline, fragment_count, fragment_node) = {
-                let line = &state.line_data(slot_index).unwrap().line_boxes[line_index];
+                let line = &own_line_data.as_ref().unwrap().line_boxes[line_index];
                 (
                     line.has_block_level_box,
                     line.physical_vertical_end() - line.block_length,
@@ -586,15 +648,15 @@ pub(crate) fn derive_baselines(
 
             assert_eq!(fragment_count, 1);
             let fragment_node = fragment_node.expect("block-level line must have one fragment");
-            let block_child_state = state.used_values(callbacks, fragment_node);
+            let block_child_state = records.used_values(fragment_node);
             let child_offset_from_margin_edge = block_child_state.content_offset.get().y
                 - block_child_state.margin_box_top(block_child_state.uses_collapsing_borders_model.get());
-            child_offset_from_margin_edge + box_baseline(state, callbacks, fragment_node, block_child_state, baseline_set)
+            child_offset_from_margin_edge + box_baseline(callbacks, fragment_node, &block_child_state, baseline_set)
         };
 
         let mut first_line_index = 0;
         while first_line_index < line_count {
-            let is_empty = state.line_data(slot_index).unwrap().line_boxes[first_line_index].is_empty();
+            let is_empty = own_line_data.as_ref().unwrap().line_boxes[first_line_index].is_empty();
             if !is_empty {
                 break;
             }
@@ -607,7 +669,7 @@ pub(crate) fn derive_baselines(
 
         let mut last_line_index = line_count - 1;
         while last_line_index > 0 {
-            let is_empty = state.line_data(slot_index).unwrap().line_boxes[last_line_index].is_empty();
+            let is_empty = own_line_data.as_ref().unwrap().line_boxes[last_line_index].is_empty();
             if !is_empty {
                 break;
             }
@@ -647,7 +709,7 @@ pub(crate) fn derive_baselines(
             children.reverse();
         }
         for child in children {
-            let child_facts = state.node_facts(callbacks, child);
+            let child_facts = NodeFacts::new(callbacks, child);
             if !child_facts.is_flow_layout_participant() || (!inhibits_floating && child_facts.is_floating()) {
                 continue;
             }
@@ -657,7 +719,7 @@ pub(crate) fn derive_baselines(
             if container_skips_anonymous_whitespace_runs && callbacks.can_skip_is_anonymous_text_run(child) {
                 continue;
             }
-            let child_state = state.used_values(callbacks, child);
+            let child_state = records.used_values(child);
             match baseline_set {
                 BaselineSet::First if child_state.has_first_baseline.get() => {}
                 BaselineSet::Last if child_state.has_last_baseline.get() => {}
@@ -665,7 +727,7 @@ pub(crate) fn derive_baselines(
             }
             let child_offset_from_margin_edge = child_state.content_offset.get().y
                 - child_state.margin_box_top(child_state.uses_collapsing_borders_model.get());
-            return Some(child_offset_from_margin_edge + box_baseline(state, callbacks, child, child_state, baseline_set));
+            return Some(child_offset_from_margin_edge + box_baseline(callbacks, child, &child_state, baseline_set));
         }
         None
     };
@@ -702,27 +764,42 @@ pub struct FfiBorderData {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[repr(C)]
-pub struct FfiBorderDataWithElementKind {
-    pub border_data: FfiBorderData,
-    pub element_kind: u8,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[repr(C)]
-pub struct FfiBordersData {
-    pub top: FfiBorderDataWithElementKind,
-    pub right: FfiBorderDataWithElementKind,
-    pub bottom: FfiBorderDataWithElementKind,
-    pub left: FfiBorderDataWithElementKind,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ChildLayoutResult {
     pub automatic_content_inline_size: CssPixels,
+    pub min_content_inline_size_from_max_content_layout: Option<CssPixels>,
     pub automatic_content_block_size: CssPixels,
     pub baselines: DerivedBaselines,
     pub table_box_in_wrapper_border_box_block_size: Option<CssPixels>,
+}
+
+#[derive(Clone)]
+pub(crate) struct RunRootOutcome {
+    cells: UsedValuesCellState,
+    own_metrics_sealed: bool,
+    line_data: Option<std::rc::Rc<LineData>>,
+    rare: Option<UsedValuesRareData>,
+}
+
+impl RunRootOutcome {
+    fn apply_to_record(self, record: &UsedValues) {
+        self.cells.apply_to_record(record);
+        if let Some(line_data) = self.line_data {
+            *record.line_data_cell().borrow_mut() = line_data;
+        }
+        if let Some(rare) = self.rare {
+            rare.install_present_payloads_into(record);
+        }
+        if self.own_metrics_sealed {
+            record.seal_own_metrics();
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct RunOutputs {
+    pub(crate) result: ChildLayoutResult,
+    pub(crate) root: Option<UnplacedRootFragment>,
+    pub(crate) root_outcome: RunRootOutcome,
 }
 
 pub(crate) enum ChildLayoutOutcome {
@@ -778,7 +855,7 @@ pub enum FfiFlexLayoutGrowthState {
     Shrinking,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
 pub struct FfiFlexLayoutItem {
     pub node: *mut c_void,
@@ -818,6 +895,7 @@ pub struct FfiFlexLayoutData {
     pub line_count: usize,
 }
 
+#[derive(PartialEq)]
 pub(crate) struct OwnedFlexLayoutLine {
     pub(crate) growth_state: FfiFlexLayoutGrowthState,
     pub(crate) cross_start: CssPixels,
@@ -825,6 +903,7 @@ pub(crate) struct OwnedFlexLayoutLine {
     pub(crate) items: Vec<FfiFlexLayoutItem>,
 }
 
+#[derive(PartialEq)]
 pub(crate) struct OwnedFlexLayoutData {
     pub(crate) align_content: u8,
     pub(crate) align_items: u8,
@@ -871,14 +950,8 @@ pub struct FfiLayoutFcCallbacks {
     pub arena: *mut c_void,
     pub initial_containing_block_inline_size: CssPixels,
     pub document_in_quirks_mode: bool,
-    pub static_position_containing_block: unsafe extern "C" fn(*mut c_void, *mut c_void) -> NodeSlotId,
-    pub needs_inset_resolution: unsafe extern "C" fn(*mut c_void, *mut c_void) -> bool,
     pub report_unexpected_fragmented_inline: unsafe extern "C" fn(*mut c_void, *mut c_void),
     pub build_svg_facts: unsafe extern "C" fn(*mut c_void, *mut c_void) -> FfiSvgElementFacts,
-    pub read_paintable_geometry:
-        unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *mut crate::layout::FfiPaintableGeometry) -> bool,
-    pub read_paintable_svg_transforms:
-        unsafe extern "C" fn(*mut c_void, *mut c_void, *mut FfiSvgComputedTransforms) -> bool,
     pub compute_svg_path: unsafe extern "C" fn(*mut c_void, *mut c_void, FfiSvgPathRequest) -> FfiSvgPathResult,
     pub svg_image_bounding_box: unsafe extern "C" fn(*mut c_void, *mut c_void, CssPixels, CssPixels) -> FfiFloatRect,
     pub anchor_lookup: unsafe extern "C" fn(*mut c_void, *mut c_void, usize, *const *mut c_void, usize) -> NodeSlotId,
@@ -974,6 +1047,14 @@ impl FfiLayoutFcCallbacks {
         self.arena().saved_abspos_layout_inputs(data)
     }
 
+    pub(crate) fn saved_committed_geometry(&self, node: Node) -> Option<crate::layout::FfiPaintableGeometry> {
+        self.arena().saved_committed_geometry(self.arena().data(node))
+    }
+
+    pub(crate) fn set_saved_committed_geometry(&self, node: Node, geometry: crate::layout::FfiPaintableGeometry) {
+        self.arena().set_saved_committed_geometry(self.arena().data(node), geometry);
+    }
+
     pub(crate) fn set_saved_abspos_layout_inputs(&self, node: Node, inputs: Option<crate::layout::AbsposLayoutInputs>) {
         let data = self.arena().data(node);
         // Match prepare_node's former as_if<Box>() guard.
@@ -1004,10 +1085,6 @@ impl FfiLayoutFcCallbacks {
         self.node_data(node).inline_containing_block
     }
 
-    pub(crate) fn static_position_containing_block(&self, node: Node) -> Node {
-        unsafe { (self.static_position_containing_block)(self.context, self.shell(node)) }
-    }
-
     pub(crate) fn is_ancestor(&self, ancestor: Node, mut node: Node) -> bool {
         while !node.is_invalid() {
             if node == ancestor {
@@ -1029,41 +1106,45 @@ impl FfiLayoutFcCallbacks {
     }
 }
 
-pub(crate) struct FormattingContextRun<'pass> {
-    pub(crate) state: &'pass LayoutState,
+pub(crate) struct FormattingContextRun {
+    pub(crate) purpose: LayoutPurpose,
+    pub(crate) records: std::rc::Rc<RunRecords>,
     pub(crate) box_: Node,
     pub(crate) layout_mode: LayoutMode,
     pub(crate) callbacks: FfiLayoutFcCallbacks,
     pub(crate) should_collect_devtools_layout_data: bool,
     pub(crate) treat_block_axis_percentage_insets_as_auto_beyond_root: bool,
+    pub(crate) fragments: Option<std::rc::Rc<RunFragmentBuilder>>,
+    pub(crate) previous_line_data: Option<std::rc::Rc<LineData>>,
 }
 
-impl<'pass> FormattingContextRun<'pass> {
-    pub(crate) fn new(
-        state: &'pass LayoutState,
-        box_: Node,
-        layout_mode: LayoutMode,
-        callbacks: FfiLayoutFcCallbacks,
-        should_collect_devtools_layout_data: bool,
-        treat_block_axis_percentage_insets_as_auto_beyond_root: bool,
-    ) -> Self {
-        Self {
-            state,
-            box_,
-            layout_mode,
-            callbacks,
-            should_collect_devtools_layout_data,
-            treat_block_axis_percentage_insets_as_auto_beyond_root,
+impl FormattingContextRun {
+    pub(crate) fn sizing(&self) -> SizingContext {
+        SizingContext::new(self.purpose, self.records.clone(), self.callbacks)
+    }
+
+    pub(crate) fn outputs(&self, result: ChildLayoutResult, root: Option<UnplacedRootFragment>) -> RunOutputs {
+        let record = self.records.used_values(self.box_);
+        let root_outcome = RunRootOutcome {
+            cells: UsedValuesCellState::capture(&record),
+            own_metrics_sealed: record.own_metrics_are_sealed(),
+            line_data: record.line_data.get().map(std::cell::RefCell::take),
+            rare: record.rare_data.get().map(std::cell::RefCell::take),
+        };
+        RunOutputs {
+            result,
+            root,
+            root_outcome,
         }
     }
 }
 
 enum FormattingContextImplementation<'pass> {
-    Block(Box<BlockFormattingContext<'pass>>),
+    Block(Box<BlockFormattingContext>),
     Flex(Box<FlexFormattingContext<'pass>>),
-    Grid(Box<GridFormattingContext<'pass>>),
-    Table(Box<TableFormattingContext<'pass>>),
-    Svg(Box<SvgFormattingContext<'pass>>),
+    Grid(Box<GridFormattingContext>),
+    Table(Box<TableFormattingContext>),
+    Svg(Box<SvgFormattingContext>),
     ReplacedWithChildren,
     InternalReplaced,
     InternalDummy,
@@ -1168,33 +1249,20 @@ pub extern "C" fn rust_layout_formatting_context_type_for_box(facts: FfiFormatti
 }
 
 fn create_formatting_context_implementation<'pass>(
-    run: &FormattingContextRun<'pass>,
-    parent_grid: Option<&GridFormattingContext<'pass>>,
+    run: &FormattingContextRun,
+    parent_grid: Option<&GridFormattingContext>,
     fc_type: FfiFormattingContextType,
 ) -> FormattingContextImplementation<'pass> {
     match fc_type {
-        FfiFormattingContextType::Block => FormattingContextImplementation::Block(Box::new(BlockFormattingContext::new(
-            run.state,
-            run.box_,
-            run.layout_mode,
-            run.callbacks,
-        ))),
+        FfiFormattingContextType::Block => {
+            FormattingContextImplementation::Block(Box::new(BlockFormattingContext::new(run)))
+        }
         FfiFormattingContextType::Flex => FormattingContextImplementation::Flex(Box::new(FlexFormattingContext::new(run))),
-        FfiFormattingContextType::Grid => FormattingContextImplementation::Grid(Box::new(GridFormattingContext::new(
-            run.state,
-            run.box_,
-            parent_grid,
-            run.layout_mode,
-            run.callbacks,
-            run.should_collect_devtools_layout_data,
-        ))),
+        FfiFormattingContextType::Grid => {
+            FormattingContextImplementation::Grid(Box::new(GridFormattingContext::new(run, parent_grid)))
+        }
         FfiFormattingContextType::Table => FormattingContextImplementation::Table(Box::new(TableFormattingContext::new(run))),
-        FfiFormattingContextType::Svg => FormattingContextImplementation::Svg(Box::new(SvgFormattingContext::new(
-            run.state,
-            run.box_,
-            run.layout_mode,
-            run.callbacks,
-        ))),
+        FfiFormattingContextType::Svg => FormattingContextImplementation::Svg(Box::new(SvgFormattingContext::new(run))),
         FfiFormattingContextType::ReplacedWithChildren => FormattingContextImplementation::ReplacedWithChildren,
         FfiFormattingContextType::InternalReplaced => FormattingContextImplementation::InternalReplaced,
         FfiFormattingContextType::InternalDummy => FormattingContextImplementation::InternalDummy,
@@ -1206,12 +1274,13 @@ fn register_table_abspos_descendants(run: &FormattingContextRun, parent: Node) {
     let mut child = run.callbacks.first_child(parent);
     while !child.is_invalid() {
         let next = run.callbacks.next_sibling(child);
-        let facts = run.state.node_facts(&run.callbacks, child);
+        let facts = NodeFacts::new(&run.callbacks, child);
         if facts.is_box() {
             if facts.is_absolutely_positioned() {
                 register_contained_abspos_child(
-                    run.state,
                     &run.callbacks,
+                    run.fragments.as_deref(),
+                    run.box_,
                     child,
                     StaticPositionRect {
                         rect: Default::default(),
@@ -1219,6 +1288,7 @@ fn register_table_abspos_descendants(run: &FormattingContextRun, parent: Node) {
                         block_alignment: StaticPositionAlignment::Start,
                         alignment_derives_from_own_computed_values: false,
                     },
+                    None,
                 );
             }
             if formatting_context_type_created_by_box(facts).is_none() {
@@ -1232,24 +1302,31 @@ fn register_table_abspos_descendants(run: &FormattingContextRun, parent: Node) {
 }
 
 pub(crate) fn independent_root_automatic_block_size(
-    state: &LayoutState,
+    purpose: LayoutPurpose,
+    records: &std::rc::Rc<RunRecords>,
     callbacks: &FfiLayoutFcCallbacks,
     node: Node,
     available_inner_space: AvailableSpace,
     constraints: ContainingBlockConstraints,
     automatic_content_block_size_of_completed_run: Option<CssPixels>,
 ) -> CssPixels {
-    let facts = state.node_facts(callbacks, node);
+    let facts = NodeFacts::new(callbacks, node);
     if facts.creates_block_formatting_context() {
         return automatic_content_block_size_of_completed_run.unwrap_or_default();
     }
-    let style = state.style_facts(callbacks, node);
+    let style = StyleValues::for_node(callbacks, node);
+    if style.display().is_flex_inside()
+        && let Some(automatic_content_block_size_reported_by_completed_run) =
+            automatic_content_block_size_of_completed_run
+    {
+        return automatic_content_block_size_reported_by_completed_run;
+    }
     if style.display().is_flex_inside() || style.display().is_grid_inside() || style.display().is_table_inside() {
         // The automatic block size of a flex, grid, or table container is its
         // max-content size.
         // https://drafts.csswg.org/css-flexbox-1/#algo-main-container
         // https://www.w3.org/TR/css-grid-2/#intrinsic-sizes
-        return SizingContext::new(state, *callbacks).calculate_max_content_block_size(
+        return SizingContext::new(purpose, records.clone(), *callbacks).calculate_max_content_block_size(
             node,
             available_inner_space.inline_size.to_px_or_zero(),
             constraints,
@@ -1259,35 +1336,102 @@ pub(crate) fn independent_root_automatic_block_size(
     CssPixels::default()
 }
 
-fn apply_root_sizing_directives(
+fn flex_self_block_size_resolution_space(
+    child_run_builds_fragments: bool,
+    sizing: &SizingContext,
+    node: Node,
+    resolution_space: AvailableSpace,
+    constraints: ContainingBlockConstraints,
+) -> Option<AvailableSpace> {
+    if !child_run_builds_fragments {
+        return None;
+    }
+    let style = sizing.style(node);
+    if !style.display().is_flex_inside() || !style.min_height().is_auto() {
+        return None;
+    }
+    if sizing.facts(node).document_in_quirks_mode() {
+        return None;
+    }
+    if !sizing.should_treat_block_size_as_auto(node, resolution_space, constraints)
+        || sizing.box_is_sized_as_replaced_element(node, resolution_space, constraints)
+    {
+        return None;
+    }
+    Some(resolution_space)
+}
+
+// Flex containers with an automatic block size are treated as max-content, so resolve it early.
+fn eagerly_resolve_atomic_flex_root_auto_block_size(
     run: &FormattingContextRun,
     input: &LayoutInput,
-    parent_block: Option<&BlockFormattingContext>,
-) -> LayoutInput {
+    inline_definite_space: AvailableSpace,
+) {
+    let node = run.box_;
+    let sizing = run.sizing();
+    if !StyleValues::for_node(&run.callbacks, node).display().is_flex_inside()
+        || sizing.box_is_sized_as_replaced_element(node, input.available_space, input.containing_block_constraints)
+    {
+        return;
+    }
+    sizing.resolve_used_block_size_if_treated_as_auto(
+        node,
+        inline_definite_space,
+        input.containing_block_constraints,
+        None,
+        || {
+            independent_root_automatic_block_size(
+                run.purpose,
+                &run.records,
+                &run.callbacks,
+                node,
+                run.records
+                    .used_values(node)
+                    .available_inner_space_or_constraints_from(inline_definite_space),
+                input.containing_block_constraints,
+                None,
+            )
+        },
+    );
+}
+
+fn apply_root_sizing_directives(run: &FormattingContextRun, input: &LayoutInput) -> LayoutInput {
     match input.participation {
-        ParticipationInParentFormattingContext::BlockLevel => dimension_block_level_root(run, input, parent_block),
-        ParticipationInParentFormattingContext::Float => {
-            let parent = parent_block.expect("a floating run requires an enclosing block formatting context");
-            parent.dimension_float_root(run.box_, input);
-            body_input_with_inner_available_space(run, input)
-        }
+        ParticipationInParentFormattingContext::BlockLevel => dimension_block_level_root(run, input),
+        ParticipationInParentFormattingContext::Float => body_input_with_inner_available_space(run, input),
         ParticipationInParentFormattingContext::AtomicInline => {
-            SizingContext::new(run.state, run.callbacks).dimension_atomic_root(
+            run.sizing().dimension_atomic_root(
                 run.box_,
                 input.available_space,
                 input.containing_block_constraints,
                 run.layout_mode,
             );
-            body_input_with_inner_available_space(run, input)
+            let mut body_input = body_input_with_inner_available_space(run, input);
+            let inline_definite_space = AvailableSpace {
+                inline_size: AvailableSize::definite(run.records.used_values(run.box_).content_inline_size.get()),
+                block_size: AvailableSize::Indefinite,
+            };
+            let flex_self_resolution_space = flex_self_block_size_resolution_space(
+                run.fragments.is_some(),
+                &run.sizing(),
+                run.box_,
+                inline_definite_space,
+                input.containing_block_constraints,
+            );
+            if flex_self_resolution_space.is_none() {
+                eagerly_resolve_atomic_flex_root_auto_block_size(run, input, inline_definite_space);
+            }
+            body_input.sizing.flex_self_block_size_resolution_space = flex_self_resolution_space;
+            body_input
         }
         ParticipationInParentFormattingContext::AbsolutelyPositioned(abspos_inputs) => {
-            AbsposEngine::new(run.state, run.callbacks).dimension_out_of_flow_root(run.box_, abspos_inputs);
+            AbsposEngine::for_run(run).dimension_out_of_flow_root(run.box_, abspos_inputs);
             body_input_with_inner_available_space(run, input)
         }
         ParticipationInParentFormattingContext::Item => {
-            if cfg!(debug_assertions) && run.layout_mode == LayoutMode::Normal && !run.state.is_measurement() {
+            if cfg!(debug_assertions) && run.layout_mode == LayoutMode::Normal && !run.purpose.is_measurement() {
                 debug_assert!(
-                    run.state.used_values(&run.callbacks, run.box_).has_definite_inline_size.get(),
+                    run.records.used_values(run.box_).has_definite_inline_size.get(),
                     "container-internal run root must arrive with a container-assigned inline size"
                 );
             }
@@ -1296,7 +1440,7 @@ fn apply_root_sizing_directives(
         ParticipationInParentFormattingContext::Root => {
             let directives = input.sizing;
             if directives.forced_content_inline_size.is_some() || directives.forced_content_block_size.is_some() {
-                let used = run.state.used_values(&run.callbacks, run.box_);
+                let used = run.records.used_values(run.box_);
                 if let Some(inline_size) = directives.forced_content_inline_size {
                     used.set_content_inline_size(inline_size);
                 }
@@ -1310,19 +1454,12 @@ fn apply_root_sizing_directives(
     }
 }
 
-fn dimension_block_level_root(
-    run: &FormattingContextRun,
-    input: &LayoutInput,
-    parent_block: Option<&BlockFormattingContext>,
-) -> LayoutInput {
+fn dimension_block_level_root(run: &FormattingContextRun, input: &LayoutInput) -> LayoutInput {
     let node = run.box_;
     let available_space = input.available_space;
     let constraints = input.containing_block_constraints;
-    let parent = parent_block.expect("a block-level run requires an enclosing block formatting context");
-    parent.commit_block_level_root_inline_size(node, input);
-    parent.resolve_block_level_root_block_size_before_body(node, input);
-    let sizing = SizingContext::new(run.state, run.callbacks);
-    let style = run.state.style_facts(&run.callbacks, node);
+    let sizing = run.sizing();
+    let style = StyleValues::for_node(&run.callbacks, node);
     let mut body_input = body_input_with_inner_available_space(run, input);
     let mut measured_content_block_size = None;
     if sizing.should_treat_block_size_as_auto(node, available_space, constraints) && !style.min_height().is_auto() {
@@ -1344,34 +1481,81 @@ fn dimension_block_level_root(
     body_input
 }
 
-fn finalize_block_level_root(
-    run: &FormattingContextRun,
-    input: &LayoutInput,
-    parent_block: Option<&BlockFormattingContext>,
-    body_result: &ChildLayoutResult,
-) {
+fn finalize_block_level_root(run: &FormattingContextRun, input: &LayoutInput, body_result: &ChildLayoutResult) {
     let node = run.box_;
-    let facts = run.state.node_facts(&run.callbacks, node);
+    let facts = NodeFacts::new(&run.callbacks, node);
     if facts.is_table_wrapper() {
-        run
-            .state
-            .used_values(&run.callbacks, node)
+        run.records
+            .used_values(node)
             .set_content_inline_size(body_result.automatic_content_inline_size);
     }
-    let style = run.state.style_facts(&run.callbacks, node);
+    let style = StyleValues::for_node(&run.callbacks, node);
     if !style.display().is_table_inside() {
-        let parent = parent_block.expect("a block-level run requires an enclosing block formatting context");
-        let resolution_space = parent.sizing().available_space_for_block_size_resolution(
+        let sizing = run.sizing();
+        let resolution_space = sizing.available_space_for_block_size_resolution(
             node,
             input.available_space,
             input.containing_block_constraints,
         );
-        parent.resolve_used_block_size_if_treated_as_auto(
+        sizing.resolve_used_block_size_if_treated_as_auto(
             node,
             resolution_space,
             input.containing_block_constraints,
             Some(body_result.automatic_content_block_size),
+            || unreachable!("a completed block-level run always supplies its automatic content block size"),
         );
+    }
+}
+
+fn finalize_float_root(run: &FormattingContextRun, input: &LayoutInput, body_result: &ChildLayoutResult) {
+    let node = run.box_;
+    if NodeFacts::new(&run.callbacks, node).is_table_wrapper() {
+        run.records
+            .used_values(node)
+            .set_content_inline_size(body_result.automatic_content_inline_size);
+    }
+    run.sizing().resolve_used_block_size_if_treated_as_auto(
+        node,
+        input.available_space,
+        input.containing_block_constraints,
+        Some(body_result.automatic_content_block_size),
+        || unreachable!("a completed float run always supplies its automatic content block size"),
+    );
+}
+
+fn dimension_root_in_parent_scope(
+    parent_block: Option<&BlockFormattingContext>,
+    child: Node,
+    input: &LayoutInput,
+    child_run_builds_fragments: bool,
+) -> Option<AvailableSpace> {
+    match input.participation {
+        ParticipationInParentFormattingContext::BlockLevel => {
+            let parent = parent_block.expect("a block-level run requires an enclosing block formatting context");
+            parent.commit_block_level_root_inline_size(child, input);
+            let flex_self_resolution_space = flex_self_block_size_resolution_space(
+                child_run_builds_fragments,
+                &parent.sizing(),
+                child,
+                input.available_space,
+                input.containing_block_constraints,
+            );
+            parent.resolve_block_level_root_block_size_before_body(child, input, flex_self_resolution_space.is_some());
+            flex_self_resolution_space
+        }
+        ParticipationInParentFormattingContext::Float => {
+            let parent = parent_block.expect("a floating run requires an enclosing block formatting context");
+            let flex_self_resolution_space = flex_self_block_size_resolution_space(
+                child_run_builds_fragments,
+                &parent.sizing(),
+                child,
+                input.available_space,
+                input.containing_block_constraints,
+            );
+            parent.dimension_float_root(child, input, flex_self_resolution_space.is_some());
+            flex_self_resolution_space
+        }
+        _ => None,
     }
 }
 
@@ -1381,30 +1565,33 @@ fn size_skipped_independent_root(
     child: Node,
     input: &LayoutInput,
 ) {
+    dimension_root_in_parent_scope(parent_block, child, input, false);
     match input.participation {
-        ParticipationInParentFormattingContext::BlockLevel => {
-            let parent = parent_block.expect("a block-level run requires an enclosing block formatting context");
-            parent.commit_block_level_root_inline_size(child, input);
-            parent.resolve_block_level_root_block_size_before_body(child, input);
-        }
         ParticipationInParentFormattingContext::Float => {
             let parent = parent_block.expect("a floating run requires an enclosing block formatting context");
-            parent.dimension_float_root(child, input);
-            parent.finalize_float_root(child, input, None);
+            parent.resolve_used_block_size_if_treated_as_auto(
+                child,
+                input.available_space,
+                input.containing_block_constraints,
+                None,
+            );
         }
         ParticipationInParentFormattingContext::AbsolutelyPositioned(abspos_inputs) => {
-            let engine = AbsposEngine::new(run.state, run.callbacks);
+            let engine = AbsposEngine::for_run(run);
             engine.dimension_out_of_flow_root(child, abspos_inputs);
             engine.finalize_out_of_flow_root_after_inside_layout(child, abspos_inputs, None);
         }
-        ParticipationInParentFormattingContext::AtomicInline | ParticipationInParentFormattingContext::Item | ParticipationInParentFormattingContext::Root => {}
+        ParticipationInParentFormattingContext::BlockLevel
+        | ParticipationInParentFormattingContext::AtomicInline
+        | ParticipationInParentFormattingContext::Item
+        | ParticipationInParentFormattingContext::Root => {}
     }
 }
 
 fn body_input_with_inner_available_space(run: &FormattingContextRun, input: &LayoutInput) -> LayoutInput {
     let inner_available_space = run
-        .state
-        .used_values(&run.callbacks, run.box_)
+        .records
+        .used_values(run.box_)
         .available_inner_space_or_constraints_from(input.available_space);
     let mut body_input = *input;
     body_input.available_space = inner_available_space;
@@ -1412,31 +1599,102 @@ fn body_input_with_inner_available_space(run: &FormattingContextRun, input: &Lay
 }
 
 #[expect(clippy::too_many_arguments)]
-fn run_formatting_context<'pass>(
-    state: &'pass LayoutState,
+fn run_formatting_context(
+    purpose: LayoutPurpose,
+    parent_fragments: Option<&RunFragmentBuilder>,
+    parent_used: &UsedValues,
     box_: Node,
-    parent_grid: Option<&GridFormattingContext<'pass>>,
+    parent_grid: Option<&GridFormattingContext>,
     fc_type: FfiFormattingContextType,
     layout_mode: LayoutMode,
     should_collect_devtools_layout_data: bool,
     callbacks: FfiLayoutFcCallbacks,
     input: LayoutInput,
-    parent_block: Option<&BlockFormattingContext<'pass>>,
+    parent_block: Option<&BlockFormattingContext>,
 ) -> ChildLayoutResult {
+    let root_cells = UsedValuesCellState::capture(parent_used);
+    let cache_attempt = match FcRunCacheAttempt::probe(
+        purpose,
+        box_,
+        parent_grid.is_some(),
+        fc_type,
+        layout_mode,
+        should_collect_devtools_layout_data,
+        &callbacks,
+        &input,
+        &root_cells,
+    ) {
+        Ok(attempt) => attempt,
+        Err(entry) => {
+            let reuses_committed_subtree = entry.can_reuse_committed_subtree();
+            let outputs = if reuses_committed_subtree {
+                entry.outputs_for_reused_subtree()
+            } else {
+                entry.outputs.clone()
+            };
+            return absorb_run_outputs(parent_fragments, parent_used, box_, outputs, reuses_committed_subtree);
+        }
+    };
+    if let Some(parent_fragments) = parent_fragments {
+        // A later fresh run for this root supersedes a hit recorded earlier in the same pass.
+        parent_fragments.clear_reused_subtree_root(box_);
+    }
+    let previous_line_data = cache_attempt.previous_line_data();
+    let outputs = execute_formatting_context_run(
+        purpose,
+        root_cells,
+        box_,
+        parent_grid,
+        fc_type,
+        layout_mode,
+        should_collect_devtools_layout_data,
+        callbacks,
+        input,
+        parent_block,
+        previous_line_data,
+    );
+    cache_attempt.conclude(&callbacks, box_, &outputs);
+    absorb_run_outputs(parent_fragments, parent_used, box_, outputs, false)
+}
+
+#[expect(clippy::too_many_arguments)]
+fn execute_formatting_context_run(
+    purpose: LayoutPurpose,
+    root_cells: UsedValuesCellState,
+    box_: Node,
+    parent_grid: Option<&GridFormattingContext>,
+    fc_type: FfiFormattingContextType,
+    layout_mode: LayoutMode,
+    should_collect_devtools_layout_data: bool,
+    callbacks: FfiLayoutFcCallbacks,
+    input: LayoutInput,
+    parent_block: Option<&BlockFormattingContext>,
+    previous_line_data: Option<std::rc::Rc<LineData>>,
+) -> RunOutputs {
     assert!(!box_.is_invalid());
-    let run = FormattingContextRun::new(
-        state,
+    let root_used = std::rc::Rc::new(root_cells.materialize_record());
+    let run = FormattingContextRun {
+        purpose,
+        records: std::rc::Rc::new(RunRecords::new(callbacks.arena, box_, root_used)),
         box_,
         layout_mode,
         callbacks,
         should_collect_devtools_layout_data,
-        input.sizing.treat_block_axis_percentage_insets_as_auto_beyond_root,
-    );
+        treat_block_axis_percentage_insets_as_auto_beyond_root: input.sizing.treat_block_axis_percentage_insets_as_auto_beyond_root,
+        fragments: (layout_mode == LayoutMode::Normal && !purpose.is_measurement()).then(|| {
+            let root_containing_block = callbacks.containing_block(box_);
+            std::rc::Rc::new(RunFragmentBuilder::new(
+                box_,
+                (!root_containing_block.is_invalid()).then_some(root_containing_block),
+            ))
+        }),
+        previous_line_data,
+    };
     let run = &run;
-    let body_input = apply_root_sizing_directives(run, &input, parent_block);
+    let body_input = apply_root_sizing_directives(run, &input);
 
     let cached_atomic_block_size = if matches!(input.participation, ParticipationInParentFormattingContext::AtomicInline) {
-        SizingContext::new(run.state, run.callbacks).apply_cached_intrinsic_inline_measurement(
+        run.sizing().apply_cached_intrinsic_inline_measurement(
             run.box_,
             input.available_space.inline_size,
             body_input.available_space.block_size,
@@ -1452,15 +1710,26 @@ fn run_formatting_context<'pass>(
             baselines: cached_baselines,
             ..ChildLayoutResult::default()
         }
+    } else if layout_mode == LayoutMode::Normal
+        && !purpose.is_measurement()
+        && matches!(input.participation, ParticipationInParentFormattingContext::AtomicInline)
+        && fc_type == FfiFormattingContextType::Block
+        && callbacks.first_child(box_).is_invalid()
+    {
+        // An empty atomic block context has no body output. Root sizing and finalization still
+        // run through the shared paths around this branch.
+        ChildLayoutResult::default()
     } else {
         let mut context_implementation = create_formatting_context_implementation(run, parent_grid, fc_type);
         let result = match &mut context_implementation {
             FormattingContextImplementation::Block(context) => {
                 context.run(run, body_input);
                 let baselines = context.derived_baselines_of_root_box();
-                store_derived_baselines(run.state.used_values(&run.callbacks, run.box_), baselines);
+                store_derived_baselines(&run.records.used_values(run.box_), baselines);
                 ChildLayoutResult {
                     automatic_content_inline_size: context.automatic_content_inline_size(),
+                    min_content_inline_size_from_max_content_layout: context
+                        .min_content_inline_size_from_max_content_layout(),
                     automatic_content_block_size: context.automatic_content_block_size(),
                     baselines,
                     table_box_in_wrapper_border_box_block_size: context.table_box_in_wrapper_border_box_block_size(),
@@ -1469,7 +1738,7 @@ fn run_formatting_context<'pass>(
             FormattingContextImplementation::Flex(context) => {
                 context.run(run, body_input);
                 let baselines = context.derived_baselines_of_root_box();
-                store_derived_baselines(run.state.used_values(&run.callbacks, run.box_), baselines);
+                store_derived_baselines(&run.records.used_values(run.box_), baselines);
                 ChildLayoutResult {
                     automatic_content_inline_size: context.automatic_content_inline_size(),
                     automatic_content_block_size: context.automatic_content_block_size(),
@@ -1480,7 +1749,7 @@ fn run_formatting_context<'pass>(
             FormattingContextImplementation::Grid(context) => {
                 context.run(run, body_input);
                 let baselines = context.derived_baselines_of_root_box();
-                store_derived_baselines(run.state.used_values(&run.callbacks, run.box_), baselines);
+                store_derived_baselines(&run.records.used_values(run.box_), baselines);
                 ChildLayoutResult {
                     automatic_content_inline_size: context.automatic_content_inline_size(),
                     automatic_content_block_size: context.automatic_content_block_size(),
@@ -1491,7 +1760,7 @@ fn run_formatting_context<'pass>(
             FormattingContextImplementation::Table(context) => {
                 context.run(run, body_input);
                 let baselines = context.derived_baselines_of_root_box();
-                store_derived_baselines(run.state.used_values(&run.callbacks, run.box_), baselines);
+                store_derived_baselines(&run.records.used_values(run.box_), baselines);
                 ChildLayoutResult {
                     automatic_content_inline_size: context.automatic_content_inline_size(),
                     automatic_content_block_size: context.automatic_content_block_size,
@@ -1512,15 +1781,10 @@ fn run_formatting_context<'pass>(
 
     match input.participation {
         ParticipationInParentFormattingContext::BlockLevel => {
-            finalize_block_level_root(run, &input, parent_block, &result);
+            finalize_block_level_root(run, &input, &result);
         }
         ParticipationInParentFormattingContext::Float => {
-            let parent = parent_block.expect("a floating run requires an enclosing block formatting context");
-            parent.finalize_float_root(
-                run.box_,
-                &input,
-                Some((result.automatic_content_inline_size, result.automatic_content_block_size)),
-            );
+            finalize_float_root(run, &input, &result);
         }
         ParticipationInParentFormattingContext::AtomicInline => {
             let automatic_content_block_size_of_completed_body_run = cached_atomic_block_size
@@ -1535,7 +1799,7 @@ fn run_formatting_context<'pass>(
             );
         }
         ParticipationInParentFormattingContext::AbsolutelyPositioned(abspos_inputs) => {
-            AbsposEngine::new(run.state, run.callbacks).finalize_out_of_flow_root_after_inside_layout(
+            AbsposEngine::for_run(run).finalize_out_of_flow_root_after_inside_layout(
                 run.box_,
                 abspos_inputs,
                 Some(result.automatic_content_block_size),
@@ -1543,36 +1807,44 @@ fn run_formatting_context<'pass>(
         }
         ParticipationInParentFormattingContext::Item => {
             if input.sizing.adopt_automatic_content_block_size {
-                let used = run.state.used_values(&run.callbacks, run.box_);
+                let used = run.records.used_values(run.box_);
                 used.set_content_block_size(result.automatic_content_block_size);
             }
         }
         ParticipationInParentFormattingContext::Root => {}
     }
 
-    let registered_abspos_children_could_never_be_laid_out =
-        run.layout_mode != LayoutMode::Normal || run.state.is_measurement();
+    let take_run_fragments = || {
+        run.fragments
+            .as_ref()
+            .map(|fragments| fragments.take_unplaced_root(&run.records, &run.callbacks))
+    };
+
+    let registered_abspos_children_could_never_be_laid_out = run.fragments.is_none();
     if registered_abspos_children_could_never_be_laid_out {
-        return result;
+        return run.outputs(result, take_run_fragments());
     }
-    let implementation = implementation.expect("cached measurement replay only occurs on measurement states");
-    match &implementation {
-        FormattingContextImplementation::Block(_) => {}
-        FormattingContextImplementation::Table(_) => {
-            let box_ = run.box_;
-            register_table_abspos_descendants(run, box_);
+    if let Some(implementation) = implementation {
+        match &implementation {
+            FormattingContextImplementation::Block(_) => {}
+            FormattingContextImplementation::Table(_) => {
+                let box_ = run.box_;
+                register_table_abspos_descendants(run, box_);
+            }
+            FormattingContextImplementation::Flex(context) => {
+                context.parent_did_dimension();
+            }
+            FormattingContextImplementation::Grid(context) => {
+                context.parent_did_dimension();
+            }
+            FormattingContextImplementation::Svg(_) | FormattingContextImplementation::ReplacedWithChildren => {}
+            FormattingContextImplementation::InternalReplaced | FormattingContextImplementation::InternalDummy => {
+                return run.outputs(result, take_run_fragments());
+            }
         }
-        FormattingContextImplementation::Flex(context) => {
-            context.parent_did_dimension();
-        }
-        FormattingContextImplementation::Grid(context) => {
-            context.parent_did_dimension();
-        }
-        FormattingContextImplementation::Svg(_) | FormattingContextImplementation::ReplacedWithChildren => {}
-        FormattingContextImplementation::InternalReplaced | FormattingContextImplementation::InternalDummy => return result,
     }
-    layout_contained_abspos_children(run);
-    result
+    run.records.used_values(run.box_).seal_own_metrics();
+    run.outputs(result, take_run_fragments())
 }
 
 fn finalize_atomic_root_block_size(
@@ -1585,7 +1857,7 @@ fn finalize_atomic_root_block_size(
     let node = run.box_;
     let available_space = input.available_space;
     let constraints = input.containing_block_constraints;
-    let sizing = SizingContext::new(run.state, run.callbacks);
+    let sizing = run.sizing();
     if sizing.box_is_sized_as_replaced_element(node, available_space, constraints) {
         return;
     }
@@ -1597,8 +1869,8 @@ fn finalize_atomic_root_block_size(
             cached_intrinsic_measurement_block_size,
             || {
                 let available_inner_space = run
-                    .state
-                    .used_values(&run.callbacks, node)
+                    .records
+                    .used_values(node)
                     .available_inner_space_or_constraints_from(available_space);
                 match parent_block {
                     Some(parent) => parent.compute_automatic_block_size_for_block_level_element(
@@ -1608,7 +1880,8 @@ fn finalize_atomic_root_block_size(
                         automatic_content_block_size_of_completed_body_run,
                     ),
                     None => independent_root_automatic_block_size(
-                        run.state,
+                        run.purpose,
+                        &run.records,
                         &run.callbacks,
                         node,
                         available_inner_space,
@@ -1623,17 +1896,17 @@ fn finalize_atomic_root_block_size(
     }
 }
 
-pub(crate) fn layout_inside_child<'pass>(
-    run: &FormattingContextRun<'pass>,
-    parent_block: Option<&BlockFormattingContext<'pass>>,
-    parent_grid: Option<&GridFormattingContext<'pass>>,
+pub(crate) fn layout_inside_child(
+    run: &FormattingContextRun,
+    parent_block: Option<&BlockFormattingContext>,
+    parent_grid: Option<&GridFormattingContext>,
     child: Node,
     layout_mode: LayoutMode,
     mut input: LayoutInput,
     force_independent_context_run: bool,
 ) -> ChildLayoutOutcome {
-    let facts = run.state.node_facts(&run.callbacks, child);
-    let used = run.state.used_values(&run.callbacks, child);
+    let facts = NodeFacts::new(&run.callbacks, child);
+    let used = run.records.used_values(child);
     if let Some((padding_top, padding_bottom)) = input.sizing.table_cell_intrinsic_block_padding {
         debug_assert!(facts.is_table_cell());
         debug_assert!(matches!(input.participation, ParticipationInParentFormattingContext::Item));
@@ -1661,7 +1934,7 @@ pub(crate) fn layout_inside_child<'pass>(
     }
 
     let fc_type = formatting_context_type_created_by_box(facts).or_else(|| {
-        force_independent_context_run.then(|| independent_formatting_context_type(run.state, child, &run.callbacks))
+        force_independent_context_run.then(|| independent_formatting_context_type(child, &run.callbacks))
     });
     let Some(fc_type) = fc_type else {
         if force_independent_context_run {
@@ -1671,14 +1944,22 @@ pub(crate) fn layout_inside_child<'pass>(
     };
     input.sizing.treat_block_axis_percentage_insets_as_auto_beyond_root =
         treat_block_axis_percentage_insets_as_auto_beyond_anonymous_child_root(
-            run.state,
+            &run.records,
             &run.callbacks,
             child,
             run.box_,
             run.treat_block_axis_percentage_insets_as_auto_beyond_root,
         );
+    input.sizing.flex_self_block_size_resolution_space = dimension_root_in_parent_scope(
+        parent_block,
+        child,
+        &input,
+        layout_mode == LayoutMode::Normal && !run.purpose.is_measurement(),
+    );
     ChildLayoutOutcome::Created(run_formatting_context(
-        run.state,
+        run.purpose,
+        run.fragments.as_deref(),
+        &used,
         child,
         parent_grid,
         fc_type,
@@ -1690,12 +1971,34 @@ pub(crate) fn layout_inside_child<'pass>(
     ))
 }
 
+fn absorb_run_outputs(
+    parent_fragments: Option<&RunFragmentBuilder>,
+    parent_used: &UsedValues,
+    child: Node,
+    outputs: RunOutputs,
+    reuses_committed_subtree: bool,
+) -> ChildLayoutResult {
+    let RunOutputs {
+        result,
+        root,
+        root_outcome,
+    } = outputs;
+    root_outcome.apply_to_record(parent_used);
+    if let (Some(fragments), Some(root)) = (parent_fragments, root) {
+        debug_assert!(root.node == child, "a child run returned a root for a different box");
+        if reuses_committed_subtree {
+            fragments.note_reused_subtree_root(child);
+        }
+        fragments.hold_unplaced_root(root);
+    }
+    result
+}
+
 fn independent_formatting_context_type(
-    state: &LayoutState,
     box_: Node,
     callbacks: &FfiLayoutFcCallbacks,
 ) -> FfiFormattingContextType {
-    let facts = state.node_facts(callbacks, box_);
+    let facts = NodeFacts::new(callbacks, box_);
     if let Some(fc_type) = formatting_context_type_created_by_box(facts) {
         return fc_type;
     }
@@ -1711,7 +2014,7 @@ fn independent_formatting_context_type(
 }
 
 pub(crate) fn resolve_block_axis_percentage_inset_basis_is_definite(
-    state: &LayoutState,
+    records: &RunRecords,
     callbacks: &FfiLayoutFcCallbacks,
     containing_block: Node,
     formatting_context_root: Node,
@@ -1719,9 +2022,9 @@ pub(crate) fn resolve_block_axis_percentage_inset_basis_is_definite(
 ) -> bool {
     let mut candidate = containing_block;
     while !candidate.is_invalid() {
-        let facts = state.node_facts(callbacks, candidate);
+        let facts = NodeFacts::new(callbacks, candidate);
         if !facts.is_anonymous() || facts.is_table_cell() {
-            return state.used_values(callbacks, candidate).has_definite_block_size();
+            return records.used_values(candidate).has_definite_block_size();
         }
         if candidate == formatting_context_root {
             return !treat_block_axis_percentage_insets_as_auto_beyond_root;
@@ -1732,18 +2035,18 @@ pub(crate) fn resolve_block_axis_percentage_inset_basis_is_definite(
 }
 
 pub(crate) fn treat_block_axis_percentage_insets_as_auto_beyond_anonymous_child_root(
-    state: &LayoutState,
+    records: &RunRecords,
     callbacks: &FfiLayoutFcCallbacks,
     child_root: Node,
     formatting_context_root: Node,
     treat_block_axis_percentage_insets_as_auto_beyond_root: bool,
 ) -> bool {
-    let child_root_facts = state.node_facts(callbacks, child_root);
+    let child_root_facts = NodeFacts::new(callbacks, child_root);
     if !child_root_facts.is_anonymous() || child_root_facts.is_table_cell() {
         return false;
     }
     !resolve_block_axis_percentage_inset_basis_is_definite(
-        state,
+        records,
         callbacks,
         callbacks.containing_block(child_root),
         formatting_context_root,
@@ -1774,21 +2077,34 @@ pub unsafe extern "C" fn rust_layout_run_root_layout(
         let viewport_inline_size = CssPixels::from_raw(viewport_inline_size_raw);
         let viewport_block_size = CssPixels::from_raw(viewport_block_size_raw);
 
-        let state = LayoutState::new(LayoutStatePurpose::Commit);
         let root_constraints = crate::layout::ContainingBlockConstraints {
             percentage_basis_inline_size: Some(viewport_inline_size),
             percentage_basis_block_size: Some(viewport_block_size),
             ..crate::layout::ContainingBlockConstraints::default()
         };
-        let viewport_used = state.create_used_values(&callbacks, root, root_constraints);
+        let entry_records = std::rc::Rc::new(RunRecords::new_unrooted(callbacks.arena, root));
+        let viewport_used = entry_records.create_used_values(&callbacks, root, root_constraints);
+        let entry_fragments = std::rc::Rc::new(RunFragmentBuilder::new_entry_accumulator(root));
+        let entry_run = FormattingContextRun {
+            purpose: LayoutPurpose::Commit,
+            records: entry_records.clone(),
+            box_: root,
+            layout_mode: LayoutMode::Normal,
+            callbacks,
+            should_collect_devtools_layout_data,
+            treat_block_axis_percentage_insets_as_auto_beyond_root: false,
+            fragments: Some(entry_fragments.clone()),
+            previous_line_data: None,
+        };
 
         let mut root_for_layout = root;
+        let mut root_for_layout_used = viewport_used.clone();
         let first_child = callbacks.first_child(root);
-        if !first_child.is_invalid() && state.node_facts(&callbacks, first_child).is_svg_svg_box() {
+        if !first_child.is_invalid() && NodeFacts::new(&callbacks, first_child).is_svg_svg_box() {
             viewport_used.set_content_inline_size(viewport_inline_size);
             viewport_used.set_content_block_size(viewport_block_size);
-            place_child(&state, &callbacks, root, FfiCssPixelPoint::default());
-            state.create_used_values(&callbacks, first_child, root_constraints);
+            place_child(&entry_run, root, FfiCssPixelPoint::default(), None);
+            root_for_layout_used = entry_records.create_used_values(&callbacks, first_child, root_constraints);
             root_for_layout = first_child;
         }
         let input = LayoutInput::new(
@@ -1800,10 +2116,11 @@ pub unsafe extern "C" fn rust_layout_run_root_layout(
             ParticipationInParentFormattingContext::Root,
         )
         .with_forced_sizes(viewport_inline_size, viewport_block_size);
-        let state_ref = &state;
-        let fc_type = independent_formatting_context_type(state_ref, root_for_layout, &callbacks);
+        let fc_type = independent_formatting_context_type(root_for_layout, &callbacks);
         run_formatting_context(
-            state_ref,
+            LayoutPurpose::Commit,
+            Some(&entry_fragments),
+            &root_for_layout_used,
             root_for_layout,
             None,
             fc_type,
@@ -1813,15 +2130,36 @@ pub unsafe extern "C" fn rust_layout_run_root_layout(
             input,
             None,
         );
-        place_child(&state, &callbacks, root_for_layout, FfiCssPixelPoint::default());
-        drain_remaining_abspos_targets(
-            state_ref,
-            callbacks,
+        place_child(&entry_run, root_for_layout, FfiCssPixelPoint::default(), None);
+        drain_and_commit_entry_pass(
+            &entry_records,
+            &entry_fragments,
+            &callbacks,
             should_collect_devtools_layout_data,
-            &[root, root_for_layout],
+            root,
+            sink,
         );
-        state.commit_replacing(root, std::ptr::null_mut(), &callbacks, sink);
+        callbacks.arena().sweep_stale_fc_run_cache_entries();
     });
+}
+
+fn drain_and_commit_entry_pass(
+    entry_records: &std::rc::Rc<RunRecords>,
+    entry_fragments: &std::rc::Rc<RunFragmentBuilder>,
+    callbacks: &FfiLayoutFcCallbacks,
+    should_collect_devtools_layout_data: bool,
+    commit_root: Node,
+    sink: &FfiCommitSink,
+) {
+    drain_abspos_with_placed_containing_blocks(
+        entry_records,
+        *callbacks,
+        should_collect_devtools_layout_data,
+        entry_fragments,
+    );
+    let pass_fragments = entry_fragments.take_completed_pass(entry_records, callbacks);
+    debug_assert!(!pass_fragments.roots.is_empty(), "an entry pass always produces the entry root's fragment");
+    commit_replacing(commit_root, callbacks, sink, &pass_fragments);
 }
 
 /// # Safety
@@ -1831,7 +2169,6 @@ pub unsafe extern "C" fn rust_layout_run_root_layout(
 pub unsafe extern "C" fn rust_layout_compute_subtree_layout(
     root: NodeSlotId,
     viewport: NodeSlotId,
-    paintable_to_replace: *mut c_void,
     viewport_inline_size_raw: i32,
     viewport_block_size_raw: i32,
     callbacks: *const FfiLayoutFcCallbacks,
@@ -1839,7 +2176,6 @@ pub unsafe extern "C" fn rust_layout_compute_subtree_layout(
 ) {
     abort_on_panic(|| {
         assert!(!root.is_invalid());
-        assert!(!paintable_to_replace.is_null());
         assert!(!callbacks.is_null());
         assert!(!sink.is_null());
         // SAFETY: The C++ pass host keeps both callback tables live for this
@@ -1847,10 +2183,22 @@ pub unsafe extern "C" fn rust_layout_compute_subtree_layout(
         let callbacks = unsafe { *callbacks };
         let sink = unsafe { &*sink };
 
-        let state = LayoutState::new(LayoutStatePurpose::Commit);
-        let root_used = state
-            .populate_from_paintable(&callbacks, root, paintable_to_replace)
+        let entry_records = std::rc::Rc::new(RunRecords::new_unrooted(callbacks.arena, root));
+        let root_used = used_values_from_saved_committed_geometry(&callbacks, root)
             .expect("partial relayout root must have committed geometry");
+        entry_records.register(root, root_used.clone());
+        let entry_fragments = std::rc::Rc::new(RunFragmentBuilder::new_entry_accumulator(root));
+        let entry_run = FormattingContextRun {
+            purpose: LayoutPurpose::Commit,
+            records: entry_records.clone(),
+            box_: root,
+            layout_mode: LayoutMode::Normal,
+            callbacks,
+            should_collect_devtools_layout_data: false,
+            treat_block_axis_percentage_insets_as_auto_beyond_root: false,
+            fragments: Some(entry_fragments.clone()),
+            previous_line_data: None,
+        };
         if !viewport.is_invalid() && viewport != root {
             let viewport_inline_size = CssPixels::from_raw(viewport_inline_size_raw);
             let viewport_block_size = CssPixels::from_raw(viewport_block_size_raw);
@@ -1859,10 +2207,10 @@ pub unsafe extern "C" fn rust_layout_compute_subtree_layout(
                 percentage_basis_block_size: Some(viewport_block_size),
                 ..crate::layout::ContainingBlockConstraints::default()
             };
-            let viewport_used = state.create_used_values(&callbacks, viewport, viewport_constraints);
+            let viewport_used = entry_records.create_used_values(&callbacks, viewport, viewport_constraints);
             viewport_used.set_content_inline_size(viewport_inline_size);
             viewport_used.set_content_block_size(viewport_block_size);
-            place_child(&state, &callbacks, viewport, FfiCssPixelPoint::default());
+            place_child(&entry_run, viewport, FfiCssPixelPoint::default(), None);
         }
         let input = LayoutInput::new(
             AvailableSpace {
@@ -1875,13 +2223,42 @@ pub unsafe extern "C" fn rust_layout_compute_subtree_layout(
             ParticipationInParentFormattingContext::Root,
         );
 
-        let state_ref = &state;
-        let facts = state.node_facts(&callbacks, root);
+        let facts = NodeFacts::new(&callbacks, root);
         let fc_type = formatting_context_type_created_by_box(facts)
             .expect("partial relayout root must establish an independent formatting context");
-        run_formatting_context(state_ref, root, None, fc_type, LayoutMode::Normal, false, callbacks, input, None);
-        drain_remaining_abspos_targets(state_ref, callbacks, false, &[viewport, root]);
-        state.commit_replacing(root, paintable_to_replace, &callbacks, sink);
+        run_formatting_context(
+            LayoutPurpose::Commit,
+            Some(&entry_fragments),
+            &root_used,
+            root,
+            None,
+            fc_type,
+            LayoutMode::Normal,
+            false,
+            callbacks,
+            input,
+            None,
+        );
+        entry_fragments.normalize_arrivals_for_placement(root);
+        entry_fragments.build_fragment_for_placed_box(
+            &callbacks,
+            root,
+            None,
+            &root_used,
+            false,
+            None,
+            root_used.content_offset.get(),
+            None,
+        );
+        drain_and_commit_entry_pass(
+            &entry_records,
+            &entry_fragments,
+            &callbacks,
+            false,
+            root,
+            sink,
+        );
+        callbacks.arena().sweep_stale_fc_run_cache_entries();
     });
 }
 
@@ -1891,26 +2268,41 @@ pub unsafe extern "C" fn rust_layout_compute_subtree_layout(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rust_layout_replay_saved_abspos_layout(
     box_: NodeSlotId,
-    paintable_to_replace: *mut c_void,
     callbacks: *const FfiLayoutFcCallbacks,
     sink: *const FfiCommitSink,
 ) {
     abort_on_panic(|| {
         assert!(!box_.is_invalid());
-        assert!(!paintable_to_replace.is_null());
         assert!(!callbacks.is_null());
         assert!(!sink.is_null());
         // SAFETY: The C++ pass host keeps both callback tables live for this
         // synchronous entry.
         let callbacks = unsafe { *callbacks };
         let sink = unsafe { &*sink };
-        let state = LayoutState::new(LayoutStatePurpose::Commit);
-        let state_ref = &state;
         let containing_block = callbacks.containing_block(box_);
         assert!(!containing_block.is_invalid());
-        let run = crate::layout::FormattingContextRun::new(state_ref, containing_block, LayoutMode::Normal, callbacks, false, false);
-        AbsposEngine::new(state_ref, callbacks).replay(&run, box_);
-        drain_remaining_abspos_targets(state_ref, callbacks, false, &[containing_block]);
-        state.commit_replacing(box_, paintable_to_replace, &callbacks, sink);
+        let entry_fragments = std::rc::Rc::new(RunFragmentBuilder::new_entry_accumulator(containing_block));
+        let entry_records = std::rc::Rc::new(RunRecords::new_unrooted(callbacks.arena, containing_block));
+        let run = crate::layout::FormattingContextRun {
+            purpose: LayoutPurpose::Commit,
+            records: entry_records.clone(),
+            box_: containing_block,
+            layout_mode: LayoutMode::Normal,
+            callbacks,
+            should_collect_devtools_layout_data: false,
+            treat_block_axis_percentage_insets_as_auto_beyond_root: false,
+            fragments: Some(entry_fragments.clone()),
+            previous_line_data: None,
+        };
+        AbsposEngine::for_run(&run).replay(&run, box_);
+        drain_and_commit_entry_pass(
+            &entry_records,
+            &entry_fragments,
+            &callbacks,
+            false,
+            box_,
+            sink,
+        );
+        callbacks.arena().sweep_stale_fc_run_cache_entries();
     });
 }

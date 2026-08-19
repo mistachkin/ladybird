@@ -10,6 +10,7 @@
 #include <LibWebView/DownloadPresentation.h>
 #include <LibWebView/FileDownloader.h>
 #include <LibWebView/Omnibox.h>
+#include <LibWebView/SessionStore.h>
 #include <LibWebView/URL.h>
 #include <LibWebView/ViewImplementation.h>
 
@@ -714,6 +715,7 @@ static NSInteger ns_index_for_selected_suggestion(Optional<size_t> selected_sugg
 - (BOOL)locationFieldCursorIsAtEnd;
 - (void)applyOmniboxDisplay:(WebView::Omnibox::Display const&)display;
 - (void)locationFieldSelectionDidChange:(NSNotification*)notification;
+- (BOOL)navigateToLocation:(String)location destinationKind:(WebView::OmniboxDestinationKind)destination_kind;
 - (void)downloadAdded:(WebView::FileDownloader::Download const&)download;
 - (void)downloadUpdated:(WebView::FileDownloader::Download const&)download;
 - (void)downloadRemoved:(u64)download_id;
@@ -822,7 +824,7 @@ private:
             if (self == nil)
                 return;
 
-            [self navigateToLocation:move(input)];
+            [self navigateToLocation:move(input) destinationKind:self->m_omnibox->destination_kind_for_last_commit()];
         };
     }
 
@@ -1105,13 +1107,17 @@ private:
     m_omnibox->cursor_moved([self locationFieldCursorIsAtEnd]);
 }
 
-- (BOOL)navigateToLocation:(String)location
+- (BOOL)navigateToLocation:(String)location destinationKind:(WebView::OmniboxDestinationKind)destination_kind
 {
-    if (auto url = WebView::sanitize_url(location, WebView::Application::settings().search_engine()); url.has_value()) {
-        [[[self tab] web_view] view].set_next_history_visit_transition(WebView::HistoryVisitTransition::Omnibox);
-        [self loadURL:*url];
+    auto& view = [[[self tab] web_view] view];
+    view.set_next_history_visit_transition(WebView::HistoryVisitTransition::Omnibox);
+    if (destination_kind == WebView::OmniboxDestinationKind::Search) {
+        if (auto url = WebView::sanitize_url(location, WebView::Application::settings().search_engine()); url.has_value())
+            view.load(*url);
+        else
+            view.load_navigation_error_page(location);
     } else {
-        [[[self tab] web_view] view].load_navigation_error_page(location);
+        view.load_from_user_input(location);
     }
 
     [self focusWebView];
@@ -1555,6 +1561,7 @@ private:
 {
     auto* delegate = (ApplicationDelegate*)[NSApp delegate];
     [delegate setActiveTab:[self tab]];
+    [delegate reconcileSessionTopology];
 }
 
 - (void)windowDidChangeOcclusionState:(NSNotification*)notification
@@ -1603,6 +1610,17 @@ private:
 - (void)windowWillClose:(NSNotification*)notification
 {
     auto* delegate = (ApplicationDelegate*)[NSApp delegate];
+    [delegate reconcileSessionTopology];
+
+    if (auto session_tab_id = [[[self tab] web_view] view].session_tab_id(); session_tab_id.has_value()) {
+        WebView::SessionStore::TabClosed closed {
+            .tab_id = *session_tab_id,
+            .closed_at = UnixDateTime::now(),
+        };
+        if (auto result = WebView::Application::session_store([self isPrivate]).tab_closed(AK::move(closed)); result.is_error())
+            dbgln("Unable to record the closed tab in the session store: {}", result.error());
+    }
+
     [delegate removeTab:self];
 
     auto request_close = AK::move(m_pending_immediate_close);

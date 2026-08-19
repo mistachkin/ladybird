@@ -47,12 +47,14 @@ JS::ThrowCompletionOr<bool> ordinary_define_own_property_and_preserve_wrapper_if
 PlatformObject::PlatformObject(JS::Realm& realm, MayInterfereWithIndexedPropertyAccess may_interfere_with_indexed_property_access)
     : JS::Object(realm, nullptr, may_interfere_with_indexed_property_access)
 {
+    set_is_platform_object();
     set_requires_slow_add_own_property();
 }
 
 PlatformObject::PlatformObject(JS::Object& prototype, MayInterfereWithIndexedPropertyAccess may_interfere_with_indexed_property_access)
     : JS::Object(ConstructWithPrototypeTag::Tag, prototype, may_interfere_with_indexed_property_access)
 {
+    set_is_platform_object();
     set_requires_slow_add_own_property();
 }
 
@@ -296,7 +298,7 @@ JS::ThrowCompletionOr<bool> PlatformObject::internal_set(JS::PropertyKey const& 
     auto& vm = this->vm();
 
     // 1. If O and Receiver are the same object, then:
-    if (receiver.as_if<JS::Object>() == this) {
+    if (receiver.as_if<JS::Object>() == GC::Ptr<JS::Object> { *this }) {
         // 1. If O implements an interface with an indexed property setter and P is an array index, then:
         if (m_legacy_platform_object_flags->has_indexed_property_setter && property_name.is_number()) {
             // 1. Invoke the indexed property setter on O with P and V.
@@ -530,7 +532,7 @@ JS::ThrowCompletionOr<GC::RootVector<JS::Value>> PlatformObject::internal_own_pr
 
     // 5. For each P of O’s own property keys that is a Symbol, in ascending chronological order of property creation, append P to keys.
     shape().for_each_property_in_insertion_order([&](auto const& property_key, auto const&) {
-        if (property_key.is_symbol())
+        if (property_key.is_symbol() && !property_key.is_private())
             keys.append(property_key.to_value(vm));
     });
 

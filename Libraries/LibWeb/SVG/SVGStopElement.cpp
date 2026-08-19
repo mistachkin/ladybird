@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/CSS/ComputedProperties.h>
+#include <LibWeb/CSS/ComputedValues.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/SVG/AttributeNames.h>
 #include <LibWeb/SVG/SVGStopElement.h>
@@ -21,15 +21,15 @@ SVGStopElement::SVGStopElement(DOM::Document& document, DOM::QualifiedName quali
 
 Gfx::Color SVGStopElement::stop_color()
 {
-    if (auto computed_values = this->computed_values())
-        return computed_values->stop_color();
+    if (auto const* values = style_group<CSS::ComputedValues::SVGResetValues>())
+        return Gfx::Color::from_bgra(values->stop_color);
     return CSS::InitialValues::stop_color();
 }
 
 float SVGStopElement::stop_opacity() const
 {
-    if (auto computed_values = this->computed_values())
-        return computed_values->stop_opacity();
+    if (auto const* values = style_group<CSS::ComputedValues::SVGResetValues>())
+        return values->stop_opacity;
     return 1;
 }
 

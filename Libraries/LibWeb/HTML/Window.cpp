@@ -84,6 +84,7 @@
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
 #include <LibWeb/Infra/CharacterTypes.h>
 #include <LibWeb/Internals/Internals.h>
+#include <LibWeb/Layout/ScrollableOverflow.h>
 #include <LibWeb/Layout/Viewport.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/Painting/Paintable.h>
@@ -276,10 +277,14 @@ public:
 
     JS::Completion invoke(GC::Ref<RequestIdleCallback::IdleDeadline> deadline) { return m_handler(deadline); }
     u32 handle() const { return m_handle; }
+    Optional<i32> timeout_timer_id() const { return m_timeout_timer_id; }
+    void set_timeout_timer_id(i32 timeout_timer_id) { m_timeout_timer_id = timeout_timer_id; }
+    void clear_timeout_timer_id() { m_timeout_timer_id.clear(); }
 
 private:
     IdleCallbackHandler m_handler;
     u32 m_handle { 0 };
+    Optional<i32> m_timeout_timer_id;
 };
 
 GC::Ref<Window> Window::create()
@@ -846,7 +851,8 @@ void Window::start_an_idle_period()
     //    which performs the steps defined in the invoke idle callbacks algorithm with window and getDeadline as parameters.
     queue_global_task(Task::Source::IdleTask, relevant_global_object(*this), GC::create_function(GC::Heap::the(), [this] {
         invoke_idle_callbacks();
-    }));
+    }),
+        Task::Priority::Idle);
 }
 
 // https://w3c.github.io/requestidlecallback/#invoke-idle-callbacks-algorithm
@@ -860,6 +866,10 @@ void Window::invoke_idle_callbacks()
     if (now < event_loop.compute_deadline() && !m_runnable_idle_callbacks.is_empty()) {
         // 1. Pop the top callback from window's list of runnable idle callbacks.
         auto callback = m_runnable_idle_callbacks.take_first();
+        if (callback->timeout_timer_id().has_value()) {
+            clear_timeout(*callback->timeout_timer_id());
+            callback->clear_timeout_timer_id();
+        }
         // 2. Let deadlineArg be a new IdleDeadline whose [get deadline time algorithm] is getDeadline.
         auto deadline_arg = RequestIdleCallback::IdleDeadline::create();
         // 3. Call callback with deadlineArg as its argument. If an uncaught runtime script error occurs, then report the exception.
@@ -871,13 +881,60 @@ void Window::invoke_idle_callbacks()
         if (!m_runnable_idle_callbacks.is_empty()) {
             queue_global_task(Task::Source::IdleTask, relevant_global_object(*this), GC::create_function(GC::Heap::the(), [this] {
                 invoke_idle_callbacks();
-            }));
+            }),
+                Task::Priority::Idle);
         }
     }
 }
 
+// https://w3c.github.io/requestidlecallback/#invoke-idle-callback-timeout-algorithm
+void Window::invoke_idle_callback_timeout(u32 handle)
+{
+    // 1. Let callback be the result of finding the entry in window's list of idle request callbacks or the list of
+    //    runnable idle callbacks that is associated with the value given by the handle argument passed to the algorithm.
+    RefPtr<IdleCallback> callback;
+    auto take_callback = [&](auto& callbacks) {
+        for (size_t index = 0; index < callbacks.size(); ++index) {
+            if (callbacks[index]->handle() == handle) {
+                callback = callbacks.take(index);
+                return;
+            }
+        }
+    };
+    take_callback(m_idle_request_callbacks);
+    if (!callback)
+        take_callback(m_runnable_idle_callbacks);
+
+    // 2. If callback is not undefined:
+    if (!callback)
+        return;
+
+    callback->clear_timeout_timer_id();
+
+    // 2.1. Remove callback from both window's list of idle request callbacks and the list of runnable idle callbacks.
+    // NB: Taking the callback from whichever list contained it above implements this step, since it can only be in one.
+
+    // 2.2. Let now be the current time.
+
+    // 2.3. Let deadlineArg be a new IdleDeadline. Set the get deadline time algorithm associated with deadlineArg to an
+    //      algorithm returning now and set the timeout associated with deadlineArg to true.
+    auto deadline_arg = RequestIdleCallback::IdleDeadline::create(true);
+
+    // 2.4. Invoke callback with « deadlineArg » and "report".
+    auto result = callback->invoke(deadline_arg);
+    if (result.is_error())
+        report_exception(result, principal_realm());
+}
+
 void Window::set_associated_document(DOM::Document& document)
 {
+    if (m_associated_document.ptr() != &document) {
+        // The main-world Window wrapper caches the document attribute's JS
+        // value. Clear it before changing the native association so the next
+        // access wraps the new Document.
+        if (auto wrapper = cached_main_world_wrapper())
+            wrapper->clear_cached_accessor_value("document"_utf16_fly_string);
+    }
     m_associated_document = &document;
 }
 
@@ -891,14 +948,14 @@ void Window::set_current_event(DOM::Event* event)
     m_current_event = event;
 }
 
-BrowsingContext const* Window::browsing_context() const
+GC::Ptr<BrowsingContext const> Window::browsing_context() const
 {
     if (!m_associated_document)
         return nullptr;
     return m_associated_document->browsing_context();
 }
 
-BrowsingContext* Window::browsing_context()
+GC::Ptr<BrowsingContext> Window::browsing_context()
 {
     if (!m_associated_document)
         return nullptr;
@@ -1242,7 +1299,7 @@ GC::Ptr<WindowProxy const> Window::top() const
 GC::Ptr<WindowProxy const> Window::opener() const
 {
     // 1. Let current be this's browsing context.
-    auto const* current = browsing_context();
+    auto current = browsing_context();
 
     // 2. If current is null, then return null.
     if (!current)
@@ -1260,7 +1317,7 @@ GC::Ptr<WindowProxy const> Window::opener() const
 WebIDL::ExceptionOr<void> Window::set_opener(JS::Value value)
 {
     // 1. If the given value is null and this's browsing context is non-null, then set this's browsing context's opener browsing context to null.
-    auto* browsing_context = this->browsing_context();
+    auto browsing_context = this->browsing_context();
     if (value.is_null() && browsing_context)
         browsing_context->set_opener_browsing_context(nullptr);
 
@@ -1741,20 +1798,27 @@ void Window::scroll(ScrollToOptions const& options, GC::Ptr<WebIDL::Promise> pro
 
         VERIFY(document->paintable_box());
         auto scrolling_area = document->paintable_box()->scrollable_overflow_rect()->to_type<float>();
+        auto overflow_directions = Layout::physical_overflow_directions(*document->layout_node());
 
-        // 7. FIXME: For now we always assume overflow direction is rightward
-        // -> If the viewport has rightward overflow direction
-        //    Let x be max(0, min(x, viewport scrolling area width - viewport width)).
-        x = max(0.0f, min(x, scrolling_area.width() - viewport_width));
-        // -> If the viewport has leftward overflow direction
-        //    Let x be min(0, max(x, viewport width - viewport scrolling area width)).
+        // 7. -> If the viewport has rightward overflow direction
+        //       Let x be max(0, min(x, viewport scrolling area width - viewport width)).
+        //    -> If the viewport has leftward overflow direction
+        //       Let x be min(0, max(x, viewport width - viewport scrolling area width)).
+        if (overflow_directions.horizontal_axis_is_positive) {
+            x = max(0.0f, min(x, scrolling_area.width() - viewport_width));
+        } else {
+            x = min(0.0f, max(x, viewport_width - scrolling_area.width()));
+        }
 
-        // 8. FIXME: For now we always assume overflow direction is downward
-        // -> If the viewport has downward overflow direction
-        //    Let y be max(0, min(y, viewport scrolling area height - viewport height)).
-        y = max(0.0f, min(y, scrolling_area.height() - viewport_height));
-        // -> If the viewport has upward overflow direction
-        //    Let y be min(0, max(y, viewport height - viewport scrolling area height)).
+        // 8. -> If the viewport has downward overflow direction
+        //       Let y be max(0, min(y, viewport scrolling area height - viewport height)).
+        //    -> If the viewport has upward overflow direction
+        //       Let y be min(0, max(y, viewport height - viewport scrolling area height)).
+        if (overflow_directions.vertical_axis_is_positive) {
+            y = max(0.0f, min(y, scrolling_area.height() - viewport_height));
+        } else {
+            y = min(0.0f, max(y, viewport_height - scrolling_area.height()));
+        }
     }
 
     // FIXME: 9. Let position be the scroll position the viewport would have by aligning the x-coordinate x of the viewport
@@ -1928,17 +1992,30 @@ u32 Window::request_idle_callback(IdleCallbackHandler callback, IdleRequestOptio
     auto handle = m_idle_callback_identifier;
 
     // 4. Push callback to the end of window's list of idle request callbacks, associated with handle.
-    m_idle_request_callbacks.append(adopt_ref(*new IdleCallback(move(callback), handle)));
+    auto idle_callback = adopt_ref(*new IdleCallback(move(callback), handle));
+    m_idle_request_callbacks.append(idle_callback);
 
     // 5. Return handle and then continue running this algorithm asynchronously.
-    return handle;
 
-    // FIXME: 6. If the timeout property is present in options and has a positive value:
-    // FIXME:    1. Wait for timeout milliseconds.
-    // FIXME:    2. Wait until all invocations of this algorithm, whose timeout added to their posted time occurred before this one's, have completed.
-    // FIXME:    3. Optionally, wait a further user-agent defined length of time.
-    // FIXME:    4. Queue a task on the queue associated with the idle-task task source, which performs the invoke idle callback timeout algorithm, passing handle and window as arguments.
-    (void)options;
+    // 6. If the timeout property is present in options and has a positive value:
+    if (options.timeout.has_value() && *options.timeout > 0) {
+        // 1. Wait for timeout milliseconds.
+        auto timeout = min(*options.timeout, static_cast<u32>(NumericLimits<i32>::max()));
+        auto timeout_timer_id = run_steps_after_a_timeout(static_cast<i32>(timeout), [this, handle] {
+            // FIXME: 2. Wait until all invocations of this algorithm, whose timeout added to their posted time occurred before this one's, have completed.
+            // FIXME: 3. Optionally, wait a further user-agent defined length of time.
+
+            // 4. Queue a task on the queue associated with the idle-task task source, which performs the invoke idle callback timeout algorithm, passing handle and window as arguments.
+            // NB: A timed-out idle task has normal scheduling priority so that higher-priority work cannot keep it from
+            //     running indefinitely. Its task source remains the idle-task task source as required by the specification.
+            queue_global_task(Task::Source::IdleTask, relevant_global_object(*this), GC::create_function(GC::Heap::the(), [this, handle] {
+                invoke_idle_callback_timeout(handle);
+            }));
+        });
+        idle_callback->set_timeout_timer_id(timeout_timer_id);
+    }
+
+    return handle;
 }
 
 // https://w3c.github.io/requestidlecallback/#dom-window-cancelidlecallback
@@ -1949,12 +2026,18 @@ void Window::cancel_idle_callback(u32 handle)
     // 2. Find the entry in either the window's list of idle request callbacks or list of runnable idle callbacks
     //    that is associated with the value handle.
     // 3. If there is such an entry, remove it from both window's list of idle request callbacks and the list of runnable idle callbacks.
-    m_idle_request_callbacks.remove_first_matching([&](auto& callback) {
-        return callback->handle() == handle;
-    });
-    m_runnable_idle_callbacks.remove_first_matching([&](auto& callback) {
-        return callback->handle() == handle;
-    });
+    auto remove_callback = [&](auto& callbacks) {
+        for (size_t index = 0; index < callbacks.size(); ++index) {
+            if (callbacks[index]->handle() != handle)
+                continue;
+            auto callback = callbacks.take(index);
+            if (callback->timeout_timer_id().has_value())
+                clear_timeout(*callback->timeout_timer_id());
+            return;
+        }
+    };
+    remove_callback(m_idle_request_callbacks);
+    remove_callback(m_runnable_idle_callbacks);
 }
 
 // https://w3c.github.io/selection-api/#dom-window-getselection

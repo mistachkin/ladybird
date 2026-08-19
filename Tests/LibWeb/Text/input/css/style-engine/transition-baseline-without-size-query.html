@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<script src="../../include.js"></script>
+<style>
+    #root { --root-state: off }
+    #root.changed { --root-state: on }
+    #middle { --middle-state: off }
+    #target { width: 10px }
+
+    @container style(--root-state: on) {
+        #middle { --middle-state: on }
+    }
+
+    @container style(--middle-state: on) {
+        #target {
+            width: 30px;
+            transition: width 1000s linear;
+        }
+    }
+</style>
+<div id="root">
+    <div id="middle">
+        <div id="target"></div>
+    </div>
+</div>
+<script>
+    test(() => {
+        internals.updateStyle();
+
+        // The animation gives the element an animated overlay while width transitions. It must not
+        // animate width itself: a property covered by an animation uses the animated value in both
+        // the before-change and the after-change style, so no transition could start on it.
+        const animation = target.animate(
+            [{ height: "10px" }, { height: "20px" }],
+            { duration: 1000, fill: "both" });
+        animation.pause();
+        animation.currentTime = 1000;
+
+        internals.resetStyleInvalidationCounters();
+        root.className = "changed";
+        internals.updateStyle();
+
+        const counters = internals.getStyleInvalidationCounters();
+        const transition = target.getAnimations().find(animation => animation instanceof CSSTransition);
+        animation.cancel();
+        transition.currentTime = 500000;
+        println(`feedback used provisional passes: ${counters.provisionalStylePasses > 1}`);
+        println(`one transition started: ${transition !== undefined}`);
+        println(`transition midpoint width: ${getComputedStyle(target).width}`);
+    });
+</script>

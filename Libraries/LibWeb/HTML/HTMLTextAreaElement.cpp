@@ -10,7 +10,6 @@
 #include <AK/Utf16View.h>
 #include <LibGC/Heap.h>
 #include <LibWeb/CSS/CSSStyleProperties.h>
-#include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/Invalidation/FormControlInvalidator.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/StyleValues/DisplayStyleValue.h>
@@ -25,7 +24,7 @@
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
 #include <LibWeb/Infra/Strings.h>
-#include <LibWeb/Layout/TextAreaBox.h>
+#include <LibWeb/Layout/BlockContainer.h>
 #include <LibWeb/Namespace.h>
 #include <LibWeb/Selection/Selection.h>
 #include <LibWeb/UIEvents/InputEvent.h>
@@ -40,6 +39,17 @@ HTMLTextAreaElement::HTMLTextAreaElement(DOM::Document& document, DOM::Qualified
 }
 
 HTMLTextAreaElement::~HTMLTextAreaElement() = default;
+
+// `:user-valid` and `:user-invalid` turn on the first time the user has interacted with the
+// control, which no attribute and no value says. The style engine is told what the element now
+// holds rather than asking.
+void HTMLTextAreaElement::set_user_validity(bool flag)
+{
+    if (m_user_validity == flag)
+        return;
+    m_user_validity = flag;
+    CSS::Invalidation::invalidate_style_after_validity_change(*this);
+}
 
 void HTMLTextAreaElement::visit_edges(Cell::Visitor& visitor)
 {
@@ -185,6 +195,8 @@ void HTMLTextAreaElement::set_value(Utf16View value)
 
             set_the_selection_range(m_text_node->length(), m_text_node->length());
         }
+
+        CSS::Invalidation::invalidate_style_after_placeholder_shown_change(*this);
     }
 }
 
@@ -435,10 +447,11 @@ void HTMLTextAreaElement::children_changed(ChildrenChangedMetadata const& metada
         if (m_text_node)
             m_text_node->set_data(m_raw_value);
         update_placeholder_visibility();
+        CSS::Invalidation::invalidate_style_after_placeholder_shown_change(*this);
     }
 }
 
-void HTMLTextAreaElement::form_associated_element_attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const&, Optional<Utf16String> const& value, Optional<Utf16FlyString> const&)
+void HTMLTextAreaElement::form_associated_element_attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const&)
 {
     if (name == HTML::AttributeNames::placeholder) {
         if (m_placeholder_text_node)
@@ -446,6 +459,11 @@ void HTMLTextAreaElement::form_associated_element_attribute_changed(Utf16FlyStri
         update_placeholder_visibility();
     } else if (name == HTML::AttributeNames::maxlength) {
         handle_maxlength_attribute();
+    } else if (first_is_one_of(name, HTML::AttributeNames::rows, HTML::AttributeNames::cols)) {
+        // rows and cols feed the element's default preferred size, which reaches layout
+        // only through the replaced-content facts; nothing else schedules a relayout.
+        if (old_value != value)
+            set_needs_layout_update(DOM::SetNeedsLayoutReason::DefaultPreferredSizeAttributeChange);
     }
 
     // AD-HOC: A change to any of these attributes can change whether the element satisfies its constraints, and
@@ -515,9 +533,9 @@ Optional<Utf16String> HTMLTextAreaElement::placeholder_value() const
     return get_attribute_value(HTML::AttributeNames::placeholder);
 }
 
-RefPtr<Layout::Node> HTMLTextAreaElement::create_layout_node(NonnullRefPtr<CSS::ComputedValues const> style)
+RefPtr<Layout::Node> HTMLTextAreaElement::create_layout_node(CSS::LayoutStyle style)
 {
-    return make_ref_counted<Layout::TextAreaBox>(document(), *this, style);
+    return make_ref_counted<Layout::BlockContainer>(document(), *this, style, Layout::RustFFI::NodeKind::TextAreaBox);
 }
 
 }

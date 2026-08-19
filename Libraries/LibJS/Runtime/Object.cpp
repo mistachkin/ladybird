@@ -40,68 +40,87 @@ static auto& intrinsic_accessor_map()
     return *intrinsics;
 }
 
-// Heap-allocated named property storage layout:
+// Heap-allocated property storage layout:
 //   [u32 capacity] [u32 padding] [Value 0] [Value 1] ...
-//   m_named_properties points to Value 0.
-// For small property counts (<=INLINE_NAMED_PROPERTY_CAPACITY), storage is inline in the Object.
-static constexpr u32 HEAP_STORAGE_HEADER_SIZE = sizeof(Value);
+// The accessors below are the only code that depends on this allocation layout.
+class HeapValueStorage {
+public:
+    static constexpr size_t header_size = sizeof(Value);
 
-static Value* allocate_heap_named_storage(u32 capacity)
-{
-    VERIFY(capacity > Object::INLINE_NAMED_PROPERTY_CAPACITY);
-    auto allocation_size = HEAP_STORAGE_HEADER_SIZE + capacity * sizeof(Value);
-    auto* raw = static_cast<u8*>(kmalloc(HeapPartition::JSObjectStorage, allocation_size));
-    VERIFY(raw);
-    *reinterpret_cast<u32*>(raw) = capacity;
-    return reinterpret_cast<Value*>(raw + HEAP_STORAGE_HEADER_SIZE);
-}
+    static Value* allocate(u32 capacity)
+    {
+        auto* raw = static_cast<u8*>(kmalloc(HeapPartition::JSObjectStorage, allocation_size(capacity)));
+        VERIFY(raw);
+        *reinterpret_cast<u32*>(raw) = capacity;
+        *reinterpret_cast<u32*>(raw + sizeof(u32)) = 0;
+        return reinterpret_cast<Value*>(raw + header_size);
+    }
 
-static void free_heap_named_storage(Value* storage)
-{
-    auto* raw = reinterpret_cast<u8*>(storage) - HEAP_STORAGE_HEADER_SIZE;
-    kfree(raw);
-}
+    static Value* reallocate(Value* storage, u32 capacity)
+    {
+        auto* raw = static_cast<u8*>(krealloc(HeapPartition::JSObjectStorage, allocation_start(storage), allocation_size(capacity)));
+        VERIFY(raw);
+        *reinterpret_cast<u32*>(raw) = capacity;
+        return reinterpret_cast<Value*>(raw + header_size);
+    }
 
-static u32 heap_named_storage_capacity(Value* storage)
-{
-    return *reinterpret_cast<u32*>(reinterpret_cast<u8*>(storage) - HEAP_STORAGE_HEADER_SIZE);
-}
+    static void deallocate(Value* storage)
+    {
+        if (storage)
+            kfree(allocation_start(storage));
+    }
+
+    static u32 capacity(Value const* storage)
+    {
+        return *reinterpret_cast<u32 const*>(allocation_start(storage));
+    }
+
+    static size_t allocation_size(u32 capacity)
+    {
+        return header_size + capacity * sizeof(Value);
+    }
+
+private:
+    static u8* allocation_start(Value* storage)
+    {
+        return reinterpret_cast<u8*>(storage) - header_size;
+    }
+
+    static u8 const* allocation_start(Value const* storage)
+    {
+        return reinterpret_cast<u8 const*>(storage) - header_size;
+    }
+};
 
 size_t Object::named_storage_external_memory_size() const
 {
     if (named_storage_is_inline())
         return 0;
-    return HEAP_STORAGE_HEADER_SIZE + heap_named_storage_capacity(m_named_properties) * sizeof(Value);
+    return HeapValueStorage::allocation_size(HeapValueStorage::capacity(m_named_properties.data()));
 }
 
 void Object::ensure_named_storage_capacity(u32 needed)
 {
     bool is_inline = named_storage_is_inline();
-    u32 old_capacity = is_inline ? INLINE_NAMED_PROPERTY_CAPACITY : heap_named_storage_capacity(m_named_properties);
+    u32 old_capacity = is_inline ? INLINE_NAMED_PROPERTY_CAPACITY : HeapValueStorage::capacity(m_named_properties.data());
     if (needed <= old_capacity)
         return;
     u32 new_capacity = max(needed, old_capacity * 2);
     if (is_inline) {
-        auto* new_storage = allocate_heap_named_storage(new_capacity);
+        auto* new_storage = HeapValueStorage::allocate(new_capacity);
         memcpy(new_storage, m_inline_named_storage, INLINE_NAMED_PROPERTY_CAPACITY * sizeof(Value));
         for (u32 i = INLINE_NAMED_PROPERTY_CAPACITY; i < new_capacity; ++i)
             new_storage[i] = Value();
         m_named_properties = new_storage;
     } else {
-        auto* raw = static_cast<u8*>(krealloc(
-            HeapPartition::JSObjectStorage,
-            reinterpret_cast<u8*>(m_named_properties) - HEAP_STORAGE_HEADER_SIZE,
-            HEAP_STORAGE_HEADER_SIZE + new_capacity * sizeof(Value)));
-        VERIFY(raw);
-        *reinterpret_cast<u32*>(raw) = new_capacity;
-        m_named_properties = reinterpret_cast<Value*>(raw + HEAP_STORAGE_HEADER_SIZE);
+        m_named_properties = HeapValueStorage::reallocate(m_named_properties.data(), new_capacity);
         for (u32 i = old_capacity; i < new_capacity; ++i)
             m_named_properties[i] = Value();
     }
 }
 
 // 10.1.12 OrdinaryObjectCreate ( proto [ , additionalInternalSlotsList ] ), https://tc39.es/ecma262/#sec-ordinaryobjectcreate
-GC::Ref<Object> Object::create(Realm& realm, Object* prototype)
+GC::Ref<Object> Object::create(Realm& realm, GC::Ptr<Object> prototype)
 {
     if (!prototype)
         return realm.create<Object>(realm.intrinsics().empty_object_shape());
@@ -110,7 +129,7 @@ GC::Ref<Object> Object::create(Realm& realm, Object* prototype)
     return realm.create<Object>(ConstructWithPrototypeTag::Tag, *prototype);
 }
 
-GC::Ref<Object> Object::create_prototype(Realm& realm, Object* prototype)
+GC::Ref<Object> Object::create_prototype(Realm& realm, GC::Ptr<Object> prototype)
 {
     auto shape = realm.heap().allocate<Shape>(realm);
     if (prototype)
@@ -138,13 +157,13 @@ Object::Object(ConstructWithoutPrototypeTag, Realm& realm, MayInterfereWithIndex
     m_shape = heap().allocate<Shape>(realm);
 }
 
-Object::Object(Realm& realm, Object* prototype, MayInterfereWithIndexedPropertyAccess may_interfere_with_indexed_property_access)
+Object::Object(Realm& realm, GC::Ptr<Object> prototype, MayInterfereWithIndexedPropertyAccess may_interfere_with_indexed_property_access)
 {
     if (may_interfere_with_indexed_property_access == MayInterfereWithIndexedPropertyAccess::Yes)
         set_may_interfere_with_indexed_property_access();
     m_shape = realm.intrinsics().empty_object_shape();
     VERIFY(m_shape);
-    if (prototype != nullptr)
+    if (prototype)
         set_prototype(prototype);
 }
 
@@ -172,7 +191,7 @@ Object::~Object()
     if (has_intrinsic_accessors())
         intrinsic_accessor_map().remove(this);
     if (!named_storage_is_inline())
-        free_heap_named_storage(m_named_properties);
+        HeapValueStorage::deallocate(m_named_properties.data());
 }
 
 void Object::initialize(Realm& realm)
@@ -205,7 +224,7 @@ ThrowCompletionOr<Value> Object::get(PropertyKey const& property_key) const
 }
 
 // 7.3.2 Get ( O, P ), https://tc39.es/ecma262/#sec-get-o-p
-ThrowCompletionOr<Value> Object::get(PropertyKey const& property_key, Bytecode::PropertyLookupCache& cache) const
+ThrowCompletionOr<Value> Object::get(PropertyKey const& property_key, Bytecode::StaticPropertyLookupCache& cache) const
 {
     // 1. Return ? O.[[Get]](P, O).
     return TRY(Value(this).get(vm(), property_key, cache));
@@ -1045,24 +1064,29 @@ ThrowCompletionOr<Value> Object::internal_get(PropertyKey const& property_key, V
         auto* parent = TRY(internal_get_prototype_of());
 
         // b. If parent is null, return undefined.
-        if (!parent)
+        if (!parent) {
+            if (cacheable_metadata && cacheable_metadata->property_absence_is_cacheable)
+                cacheable_metadata->type = CacheableGetPropertyMetadata::Type::GetMissingProperty;
             return js_undefined();
+        }
 
         // c. Return ? parent.[[Get]](P, Receiver).
         // AD-HOC: Avoid a native stack overflow when walking a pathologically-deep prototype chain.
         if (vm.did_reach_stack_space_limit()) [[unlikely]]
             return vm.throw_completion<InternalError>(ErrorType::CallStackSizeExceeded);
+        if (cacheable_metadata && !parent->is_cacheable_for_property_absence())
+            cacheable_metadata->property_absence_is_cacheable = false;
         return parent->internal_get(property_key, receiver, cacheable_metadata, PropertyLookupPhase::PrototypeChain);
     }
 
-    auto update_inline_cache = [&] {
+    auto update_inline_cache = [&](u32 property_offset) {
         // Non-standard: If the caller has requested cacheable metadata and the property is an own property, fill it in.
-        if (!cacheable_metadata || !descriptor->property_offset.has_value())
+        if (!cacheable_metadata)
             return;
         if (phase == PropertyLookupPhase::OwnProperty) {
             *cacheable_metadata = CacheableGetPropertyMetadata {
                 .type = CacheableGetPropertyMetadata::Type::GetOwnProperty,
-                .property_offset = descriptor->property_offset.value(),
+                .property_offset = property_offset,
                 .prototype = nullptr,
             };
         } else if (phase == PropertyLookupPhase::PrototypeChain) {
@@ -1070,7 +1094,7 @@ ThrowCompletionOr<Value> Object::internal_get(PropertyKey const& property_key, V
             VERIFY(shape().prototype_chain_validity()->is_valid());
             *cacheable_metadata = CacheableGetPropertyMetadata {
                 .type = CacheableGetPropertyMetadata::Type::GetPropertyInPrototypeChain,
-                .property_offset = descriptor->property_offset.value(),
+                .property_offset = property_offset,
                 .prototype = this,
             };
         }
@@ -1078,7 +1102,8 @@ ThrowCompletionOr<Value> Object::internal_get(PropertyKey const& property_key, V
 
     // 3. If IsDataDescriptor(desc) is true, return desc.[[Value]].
     if (descriptor->is_data_descriptor()) {
-        update_inline_cache();
+        if (descriptor->property_offset.has_value())
+            update_inline_cache(*descriptor->property_offset);
         return *descriptor->value;
     }
 
@@ -1092,10 +1117,39 @@ ThrowCompletionOr<Value> Object::internal_get(PropertyKey const& property_key, V
     if (!getter)
         return js_undefined();
 
-    update_inline_cache();
+    GC::Ptr<Accessor> accessor;
+    bool receiver_uses_holder_cache = false;
+    if (descriptor->property_offset.has_value()) {
+        auto value = get_direct(*descriptor->property_offset);
+        if (value.is_accessor()) {
+            accessor = &value.as_accessor();
+            receiver_uses_holder_cache = receiver.is_object()
+                && (&receiver.as_object() == this || receiver.as_object().prototype() == this);
+            if (auto* cached_value_key = accessor->cached_value_key(); cached_value_key && receiver_uses_holder_cache) {
+                if (auto cached_value = get_engine_private_property(GC::Ref { *cached_value_key }); cached_value.has_value()) {
+                    VERIFY(cached_value->property_offset.has_value());
+                    update_inline_cache(*cached_value->property_offset);
+                    return cached_value->value;
+                }
+            }
+        }
+
+        update_inline_cache(*descriptor->property_offset);
+    }
 
     // 7. Return ? Call(getter, Receiver).
-    return TRY(call(vm, *getter, receiver));
+    auto result = TRY(call(vm, *getter, receiver));
+
+    if (accessor && receiver_uses_holder_cache) {
+        if (auto* cached_value_key = accessor->cached_value_key()) {
+            auto property = storage_get(property_key);
+            if (property.has_value() && property->value.is_accessor() && &property->value.as_accessor() == accessor.ptr()) {
+                const_cast<Object*>(this)->set_engine_private_property(GC::Ref { *cached_value_key }, result);
+            }
+        }
+    }
+
+    return result;
 }
 
 // 10.1.9 [[Set]] ( P, V, Receiver ), https://tc39.es/ecma262/#sec-ordinary-object-internal-methods-and-internal-slots-set-p-v-receiver
@@ -1296,7 +1350,7 @@ ThrowCompletionOr<GC::RootVector<Value>> Object::internal_own_property_keys() co
 
     // 4. For each own property key P of O such that Type(P) is Symbol, in ascending chronological order of property creation, do
     shape().for_each_property_in_insertion_order([&](auto const& property_key, auto const&) {
-        if (property_key.is_symbol()) {
+        if (property_key.is_symbol() && !property_key.is_private()) {
             // a. Add P as the last element of keys.
             keys.append(property_key.to_value(vm));
         }
@@ -1449,19 +1503,19 @@ void Object::storage_delete(PropertyKey const& property_key)
         memmove(&m_named_properties[metadata->offset], &m_named_properties[metadata->offset + 1], remaining * sizeof(Value));
 }
 
-void Object::set_prototype(Object* new_prototype)
+void Object::set_prototype(GC::Ptr<Object> new_prototype)
 {
-    if (prototype() == new_prototype)
+    if (prototype() == new_prototype.ptr())
         return;
-    m_shape = shape().create_prototype_transition(new_prototype);
+    m_shape = shape().create_prototype_transition(new_prototype.ptr());
 }
 
 void Object::define_native_accessor(Realm& realm, PropertyKey const& property_key, NativeFunctionPointer getter, NativeFunctionPointer setter, PropertyAttributes attribute)
 {
-    FunctionObject* getter_function = nullptr;
+    GC::Ptr<FunctionObject> getter_function;
     if (getter)
         getter_function = NativeFunction::create(realm, move(getter), 0, property_key, &realm, "get"sv);
-    FunctionObject* setter_function = nullptr;
+    GC::Ptr<FunctionObject> setter_function;
     if (setter)
         setter_function = NativeFunction::create(realm, move(setter), 1, property_key, &realm, "set"sv);
     define_direct_accessor(property_key, getter_function, setter_function, attribute);
@@ -1469,19 +1523,19 @@ void Object::define_native_accessor(Realm& realm, PropertyKey const& property_ke
 
 void Object::define_native_accessor(Realm& realm, PropertyKey const& property_key, Function<ThrowCompletionOr<Value>(VM&)> getter, Function<ThrowCompletionOr<Value>(VM&)> setter, PropertyAttributes attribute)
 {
-    FunctionObject* getter_function = nullptr;
+    GC::Ptr<FunctionObject> getter_function;
     if (getter)
         getter_function = NativeFunction::create(realm, move(getter), 0, property_key, &realm, "get"sv);
-    FunctionObject* setter_function = nullptr;
+    GC::Ptr<FunctionObject> setter_function;
     if (setter)
         setter_function = NativeFunction::create(realm, move(setter), 1, property_key, &realm, "set"sv);
     define_direct_accessor(property_key, getter_function, setter_function, attribute);
 }
 
-void Object::define_direct_accessor(PropertyKey const& property_key, FunctionObject* getter, FunctionObject* setter, PropertyAttributes attributes)
+void Object::define_direct_accessor(PropertyKey const& property_key, GC::Ptr<FunctionObject> getter, GC::Ptr<FunctionObject> setter, PropertyAttributes attributes)
 {
     auto existing_property = storage_get(property_key).value_or({}).value;
-    auto* accessor = existing_property.is_accessor() ? &existing_property.as_accessor() : nullptr;
+    GC::Ptr<Accessor> accessor = existing_property.is_accessor() ? &existing_property.as_accessor() : nullptr;
     if (!accessor) {
         accessor = Accessor::create(vm(), getter, setter);
         define_direct_property(property_key, accessor, attributes);
@@ -1491,6 +1545,50 @@ void Object::define_direct_accessor(PropertyKey const& property_key, FunctionObj
         if (setter)
             accessor->set_setter(setter);
     }
+}
+
+Optional<ValueAndAttributes> Object::get_engine_private_property(GC::Ref<Symbol> key) const
+{
+    VERIFY(key->is_private());
+    return storage_get(PropertyKey { key });
+}
+
+void Object::set_engine_private_property(GC::Ref<Symbol> key, Value value)
+{
+    VERIFY(key->is_private());
+    (void)storage_set(PropertyKey { key }, { value, {} });
+}
+
+void Object::delete_engine_private_property(GC::Ref<Symbol> key)
+{
+    VERIFY(key->is_private());
+    auto property_key = PropertyKey { key };
+    if (storage_has(property_key))
+        storage_delete(property_key);
+}
+
+void Object::define_direct_cached_accessor(PropertyKey const& property_key, GC::Ptr<FunctionObject> getter, GC::Ptr<FunctionObject> setter, PropertyAttributes attributes)
+{
+    clear_cached_accessor_value(property_key);
+    define_direct_accessor(property_key, getter, setter, attributes);
+
+    auto property = storage_get(property_key);
+    VERIFY(property.has_value());
+    VERIFY(property->value.is_accessor());
+    auto& accessor = property->value.as_accessor();
+    if (!accessor.cached_value_key())
+        accessor.set_cached_value_key(Symbol::create_private(vm()));
+}
+
+void Object::clear_cached_accessor_value(PropertyKey const& property_key)
+{
+    auto property = storage_get(property_key);
+    if (!property.has_value() || !property->value.is_accessor())
+        return;
+    auto* cached_value_key = property->value.as_accessor().cached_value_key();
+    if (!cached_value_key)
+        return;
+    delete_engine_private_property(GC::Ref { *cached_value_key });
 }
 
 void Object::define_intrinsic_accessor(PropertyKey const& property_key, PropertyAttributes attributes, IntrinsicAccessor accessor)
@@ -1686,7 +1784,7 @@ void Object::visit_edges(Cell::Visitor& visitor)
     Base::visit_edges(visitor);
     visitor.visit(m_shape);
     if (auto count = shape().property_count())
-        visitor.visit(Span<Value> { m_named_properties, count });
+        visitor.visit(Span<Value> { m_named_properties.data(), count });
 
     switch (m_indexed_storage_kind) {
     case IndexedStorageKind::None:
@@ -1771,7 +1869,7 @@ static constexpr size_t SPARSE_ARRAY_HOLE_THRESHOLD = 200;
 GenericIndexedPropertyStorage* Object::indexed_dictionary() const
 {
     VERIFY(m_indexed_storage_kind == IndexedStorageKind::Dictionary);
-    return reinterpret_cast<GenericIndexedPropertyStorage*>(m_indexed_elements);
+    return m_indexed_elements.as<GenericIndexedPropertyStorage>();
 }
 
 u32 Object::indexed_elements_capacity() const
@@ -1779,8 +1877,7 @@ u32 Object::indexed_elements_capacity() const
     if (!m_indexed_elements)
         return 0;
     VERIFY(m_indexed_storage_kind == IndexedStorageKind::Packed || m_indexed_storage_kind == IndexedStorageKind::Holey);
-    // Capacity is stored as a u32 at (m_indexed_elements - sizeof(u64))
-    return *reinterpret_cast<u32 const*>(reinterpret_cast<u8 const*>(m_indexed_elements) - sizeof(u64));
+    return HeapValueStorage::capacity(m_indexed_elements.data());
 }
 
 size_t Object::indexed_storage_external_memory_size() const
@@ -1790,7 +1887,7 @@ size_t Object::indexed_storage_external_memory_size() const
         return 0;
     case IndexedStorageKind::Packed:
     case IndexedStorageKind::Holey:
-        return sizeof(u64) + indexed_elements_capacity() * sizeof(Value);
+        return HeapValueStorage::allocation_size(indexed_elements_capacity());
     case IndexedStorageKind::Dictionary:
         return sizeof(GenericIndexedPropertyStorage) + indexed_dictionary()->external_memory_size();
     }
@@ -1799,13 +1896,7 @@ size_t Object::indexed_storage_external_memory_size() const
 
 static Value* allocate_indexed_elements(u32 capacity)
 {
-    // Layout: [u32 capacity] [u32 padding] [Value 0] [Value 1] ...
-    auto allocation_size = sizeof(u64) + capacity * sizeof(Value);
-    auto* raw = static_cast<u8*>(kmalloc(HeapPartition::JSObjectStorage, allocation_size));
-    VERIFY(raw);
-    *reinterpret_cast<u32*>(raw) = capacity;
-    *reinterpret_cast<u32*>(raw + sizeof(u32)) = 0; // padding
-    auto* elements = reinterpret_cast<Value*>(raw + sizeof(u64));
+    auto* elements = HeapValueStorage::allocate(capacity);
     for (u32 i = 0; i < capacity; ++i)
         new (&elements[i]) Value(js_special_empty_value());
     return elements;
@@ -1813,10 +1904,7 @@ static Value* allocate_indexed_elements(u32 capacity)
 
 static void deallocate_indexed_elements(Value* elements)
 {
-    if (!elements)
-        return;
-    auto* raw = reinterpret_cast<u8*>(elements) - sizeof(u64);
-    kfree(raw);
+    HeapValueStorage::deallocate(elements);
 }
 
 void Object::free_indexed_elements()
@@ -1824,7 +1912,7 @@ void Object::free_indexed_elements()
     if (m_indexed_storage_kind == IndexedStorageKind::Dictionary) {
         delete indexed_dictionary();
     } else {
-        deallocate_indexed_elements(m_indexed_elements);
+        deallocate_indexed_elements(m_indexed_elements.data());
     }
     m_indexed_elements = nullptr;
     m_indexed_storage_kind = IndexedStorageKind::None;
@@ -1851,7 +1939,7 @@ void Object::grow_indexed_elements(u32 needed_capacity)
         u32 copy_count = min(old_capacity, needed_capacity);
         for (u32 i = 0; i < copy_count; ++i)
             new_elements[i] = m_indexed_elements[i];
-        deallocate_indexed_elements(m_indexed_elements);
+        deallocate_indexed_elements(m_indexed_elements.data());
     }
 
     m_indexed_elements = new_elements;
@@ -1869,7 +1957,7 @@ void Object::transition_to_dictionary()
             if (!value.is_special_empty_value())
                 dict->put(i, value, default_attributes);
         }
-        deallocate_indexed_elements(m_indexed_elements);
+        deallocate_indexed_elements(m_indexed_elements.data());
     }
 
     // Set the array_like_size on the dictionary
@@ -2083,7 +2171,7 @@ ValueAndAttributes Object::indexed_take_first()
     auto first = available_elements > 0 ? m_indexed_elements[0] : js_special_empty_value();
 
     if (available_elements > 1)
-        memmove(m_indexed_elements, m_indexed_elements + 1, (available_elements - 1) * sizeof(Value));
+        memmove(m_indexed_elements.data(), m_indexed_elements.data() + 1, (available_elements - 1) * sizeof(Value));
 
     m_indexed_array_like_size--;
     if (available_elements > 0)
@@ -2185,7 +2273,7 @@ void Object::set_indexed_property_elements(Vector<Value>&& values)
 ReadonlySpan<Value> Object::indexed_packed_elements_span() const
 {
     VERIFY(m_indexed_storage_kind == IndexedStorageKind::Packed);
-    return { m_indexed_elements, m_indexed_array_like_size };
+    return { m_indexed_elements.data(), m_indexed_array_like_size };
 }
 
 void Object::convert_to_prototype_if_needed()

@@ -9,11 +9,14 @@ use crate::layout::AbsposLayoutInputs;
 use crate::layout::AvailableSize;
 use crate::layout::CssPixels;
 use crate::layout::FfiReplacedContentFacts;
+use crate::layout::UsedValues;
 use crate::layout::node_data::{FfiStylePayloads, MAX_NODE_SLOT_COUNT, NodeData, NodeFlag, NodeSlotId};
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 use std::thread;
 
 pub(crate) const SLOTS_PER_CHUNK: usize = 256;
@@ -21,6 +24,7 @@ pub(crate) const SLOTS_PER_CHUNK: usize = 256;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct IntrinsicSizeCacheKey {
     pub(crate) measured_at_inline_size: Option<CssPixels>,
+    pub(crate) measured_at_block_size: Option<CssPixels>,
     pub(crate) percentage_basis_inline_size: Option<CssPixels>,
     pub(crate) percentage_basis_block_size: Option<CssPixels>,
     pub(crate) quirks_mode_percentage_basis_block_size: Option<CssPixels>,
@@ -39,6 +43,7 @@ impl Hash for IntrinsicSizeCacheKey {
         }
 
         hash_optional(self.measured_at_inline_size, state);
+        hash_optional(self.measured_at_block_size, state);
         hash_optional(self.percentage_basis_inline_size, state);
         hash_optional(self.percentage_basis_block_size, state);
         hash_optional(self.quirks_mode_percentage_basis_block_size, state);
@@ -56,6 +61,7 @@ pub(crate) enum IntrinsicSizeCacheKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct IntrinsicInlineSizeMeasurement {
     pub(crate) automatic_content_inline_size: CssPixels,
+    pub(crate) min_content_inline_size_from_max_content_layout: Option<CssPixels>,
     pub(crate) available_block_size: AvailableSize,
     pub(crate) content_inline_size: CssPixels,
     pub(crate) content_block_size: CssPixels,
@@ -132,6 +138,12 @@ struct SavedAbsposLayoutInputsSlot {
 }
 
 #[derive(Default)]
+struct SavedCommittedGeometrySlot {
+    generation: u8,
+    geometry: Option<Box<crate::layout::FfiPaintableGeometry>>,
+}
+
+#[derive(Default)]
 pub(crate) struct TextContent {
     pub(crate) text: Vec<u16>,
     pub(crate) untransformed_text_is_ascii_whitespace: bool,
@@ -171,6 +183,12 @@ struct TextChunkCacheEntry {
 struct TextChunkCacheSlot {
     generation: u8,
     entry: Option<Box<TextChunkCacheEntry>>,
+}
+
+#[derive(Default)]
+struct RunRecordSlot {
+    nonce: u64, // 0 = vacant
+    record: Option<Rc<UsedValues>>,
 }
 
 // NodeData is sized to one cache line; the aligned chunk keeps every densely-strided slot
@@ -214,10 +232,14 @@ pub(crate) struct LayoutNodeArena {
     live_count: u32,
     intrinsic_size_caches: RefCell<Vec<IntrinsicSizeCacheSlot>>,
     saved_abspos_layout_inputs: RefCell<Vec<SavedAbsposLayoutInputsSlot>>,
+    saved_committed_geometries: RefCell<Vec<SavedCommittedGeometrySlot>>,
     text_contents: Vec<TextContentSlot>,
     text_chunk_caches: RefCell<Vec<TextChunkCacheSlot>>,
     replaced_content_facts: Vec<ReplacedContentFactsSlot>,
     raw_table_column_spans: HashMap<NodeSlotId, u32>,
+    run_used_records: RefCell<Vec<RunRecordSlot>>,
+    next_run_nonce: Cell<u64>,
+    fc_run_cache_store: crate::layout::FcRunCacheArenaStore,
     owner_thread: thread::ThreadId,
 }
 
@@ -232,12 +254,38 @@ impl LayoutNodeArena {
             live_count: 0,
             intrinsic_size_caches: RefCell::new(Vec::new()),
             saved_abspos_layout_inputs: RefCell::new(Vec::new()),
+            saved_committed_geometries: RefCell::new(Vec::new()),
             text_contents: Vec::new(),
             text_chunk_caches: RefCell::new(Vec::new()),
             replaced_content_facts: Vec::new(),
             raw_table_column_spans: HashMap::new(),
+            run_used_records: RefCell::new(Vec::new()),
+            next_run_nonce: Cell::new(1),
+            fc_run_cache_store: crate::layout::FcRunCacheArenaStore::default(),
             owner_thread: thread::current().id(),
         }
+    }
+
+    pub(crate) fn fc_run_cache_store(&self) -> &crate::layout::FcRunCacheArenaStore {
+        &self.fc_run_cache_store
+    }
+
+    /// Drops entries whose slot or epoch no longer matches.
+    /// Runs at the end of every full pass so invalidated entries whose box
+    /// never probes again do not accumulate for the document's lifetime.
+    pub(crate) fn sweep_stale_fc_run_cache_entries(&self) {
+        self.fc_run_cache_store.retain_entries(|slot, validity| {
+            let Some(metadata) = self.slot_metadata.get(slot as usize) else {
+                return false;
+            };
+            if !metadata.occupied || metadata.generation != validity.slot_generation {
+                return false;
+            }
+            let id = NodeSlotId::new(slot, metadata.generation);
+            // SAFETY: The slot is occupied at the matching generation, so the
+            // pointer addresses a live NodeData.
+            unsafe { (*self.data(id)).fragment_cache_epoch == validity.fragment_cache_epoch }
+        });
     }
 
     fn assert_owner_thread(&self) {
@@ -267,6 +315,9 @@ impl LayoutNodeArena {
                 self.chunks.push(chunk);
             }
             self.slot_metadata.push(SlotMetadata::default());
+            // Grown with the slot space up front: nearly every slot gets a run
+            // record each layout pass, so register() never has to resize.
+            self.run_used_records.get_mut().push(RunRecordSlot::default());
             self.next_index = self
                 .next_index
                 .checked_add(1)
@@ -322,6 +373,9 @@ impl LayoutNodeArena {
         if let Some(slot) = self.saved_abspos_layout_inputs.get_mut().get_mut(index as usize) {
             *slot = SavedAbsposLayoutInputsSlot::default();
         }
+        if let Some(slot) = self.saved_committed_geometries.get_mut().get_mut(index as usize) {
+            *slot = SavedCommittedGeometrySlot::default();
+        }
         if let Some(slot) = self.text_contents.get_mut(index as usize) {
             *slot = TextContentSlot::default();
         }
@@ -331,8 +385,27 @@ impl LayoutNodeArena {
         if let Some(slot) = self.replaced_content_facts.get_mut(index as usize) {
             *slot = ReplacedContentFactsSlot::default();
         }
+        // free() never interleaves with a layout pass (C++ is blocked on the
+        // synchronous FFI entry), so a live record here means a run leaked.
+        if let Some(slot) = self.run_used_records.get_mut().get_mut(index as usize) {
+            debug_assert!(
+                slot.record.is_none(),
+                "layout node arena freed a slot with a live run record"
+            );
+            *slot = RunRecordSlot::default();
+        }
+        self.fc_run_cache_store.remove_entry(index);
         self.raw_table_column_spans.remove(&id);
-        *self.data_mut(index) = NodeData::default();
+        let data = self.data_mut(index);
+        debug_assert!(
+            data.parent.is_invalid()
+                && data.first_child.is_invalid()
+                && data.last_child.is_invalid()
+                && data.previous_sibling.is_invalid()
+                && data.next_sibling.is_invalid(),
+            "layout node arena freed a slot that is still linked into a tree"
+        );
+        *data = NodeData::default();
 
         self.live_count = self
             .live_count
@@ -658,18 +731,85 @@ impl LayoutNodeArena {
         }
     }
 
+    pub(crate) fn saved_committed_geometry(
+        &self,
+        data: *const NodeData,
+    ) -> Option<crate::layout::FfiPaintableGeometry> {
+        let (index, metadata) = self.slot_for_data(data);
+        let slots = self.saved_committed_geometries.borrow();
+        let geometry = slots
+            .get(index as usize)
+            .filter(|slot| slot.generation == metadata.generation)
+            .and_then(|slot| slot.geometry.as_deref().copied());
+
+        // SAFETY: slot_for_data() established that data points to a live slot
+        // in this arena.
+        let flags = unsafe { (&raw const (*data).flags).read() };
+        assert_eq!(
+            flags & NodeFlag::HasSavedCommittedGeometry as u32 != 0,
+            geometry.is_some(),
+            "saved committed geometry presence flag disagrees with the arena side table"
+        );
+        geometry
+    }
+
+    pub(crate) fn set_saved_committed_geometry(
+        &self,
+        data: *mut NodeData,
+        geometry: crate::layout::FfiPaintableGeometry,
+    ) {
+        let (index, metadata) = self.slot_for_data(data);
+        let mut slots = self.saved_committed_geometries.borrow_mut();
+        if slots.len() <= index as usize {
+            slots.resize_with(index as usize + 1, SavedCommittedGeometrySlot::default);
+        }
+        let slot = &mut slots[index as usize];
+        if slot.generation != metadata.generation {
+            *slot = SavedCommittedGeometrySlot {
+                generation: metadata.generation,
+                geometry: Some(Box::new(geometry)),
+            };
+        } else if let Some(saved_geometry) = &mut slot.geometry {
+            **saved_geometry = geometry;
+        } else {
+            slot.geometry = Some(Box::new(geometry));
+        }
+        drop(slots);
+
+        // SAFETY: slot_for_data() established that data points to a live slot
+        // in this arena, and layout/tree building serialize mutation on the
+        // arena's owner thread.
+        unsafe {
+            let flags = &raw mut (*data).flags;
+            flags.write(flags.read() | NodeFlag::HasSavedCommittedGeometry as u32);
+        }
+    }
+
     pub(crate) fn set_text_content(
         &mut self,
         id: NodeSlotId,
         text: Vec<u16>,
         untransformed_text_is_ascii_whitespace: bool,
         may_require_bidi_processing: bool,
-    ) {
+    ) -> bool {
         self.assert_owner_thread();
         self.data(id);
         let index = id.slot_index() as usize;
         if self.text_contents.len() <= index {
             self.text_contents.resize_with(index + 1, TextContentSlot::default);
+        }
+        let previous = &self.text_contents[index];
+        let changed = previous.generation != id.generation()
+            || match &previous.content {
+                Some(content) => {
+                    content.text != text
+                        || content.untransformed_text_is_ascii_whitespace != untransformed_text_is_ascii_whitespace
+                        || content.may_require_bidi_processing != may_require_bidi_processing
+                }
+                None => true,
+            };
+        if !changed {
+            return false;
         }
         self.text_contents[index] = TextContentSlot {
             generation: id.generation(),
@@ -682,9 +822,10 @@ impl LayoutNodeArena {
         if let Some(slot) = self.text_chunk_caches.get_mut().get_mut(index) {
             *slot = TextChunkCacheSlot::default();
         }
+        true
     }
 
-    pub(crate) fn set_replaced_content_facts(&mut self, id: NodeSlotId, facts: FfiReplacedContentFacts) {
+    pub(crate) fn set_replaced_content_facts(&mut self, id: NodeSlotId, facts: FfiReplacedContentFacts) -> bool {
         self.assert_owner_thread();
         self.data(id);
         let index = id.slot_index() as usize;
@@ -692,10 +833,13 @@ impl LayoutNodeArena {
             self.replaced_content_facts
                 .resize_with(index + 1, ReplacedContentFactsSlot::default);
         }
+        let previous = &self.replaced_content_facts[index];
+        let changed = previous.generation != id.generation() || previous.facts != Some(facts);
         self.replaced_content_facts[index] = ReplacedContentFactsSlot {
             generation: id.generation(),
             facts: Some(facts),
         };
+        changed
     }
 
     pub(crate) fn replaced_content_facts(&self, id: NodeSlotId) -> Option<FfiReplacedContentFacts> {
@@ -706,13 +850,13 @@ impl LayoutNodeArena {
             .and_then(|slot| slot.facts)
     }
 
-    pub(crate) fn set_raw_table_column_span(&mut self, id: NodeSlotId, value: u32) {
+    pub(crate) fn set_raw_table_column_span(&mut self, id: NodeSlotId, value: u32) -> u32 {
         self.assert_owner_thread();
         self.data(id);
         if value == 1 {
-            self.raw_table_column_spans.remove(&id);
+            self.raw_table_column_spans.remove(&id).unwrap_or(1)
         } else {
-            self.raw_table_column_spans.insert(id, value);
+            self.raw_table_column_spans.insert(id, value).unwrap_or(1)
         }
     }
 
@@ -791,6 +935,207 @@ impl LayoutNodeArena {
         unsafe { std::slice::from_raw_parts(entry.chunks.as_ptr(), entry.chunks.len()) }
     }
 
+    pub(crate) fn allocate_run_nonce(&self) -> u64 {
+        let nonce = self.next_run_nonce.get();
+        self.next_run_nonce
+            .set(nonce.checked_add(1).expect("layout run nonce space exhausted"));
+        nonce
+    }
+
+    pub(crate) fn run_record(&self, slot_index: u32, run_nonce: u64) -> Option<Rc<UsedValues>> {
+        let records = self.run_used_records.borrow();
+        let slot = records.get(slot_index as usize)?;
+        if slot.nonce != run_nonce {
+            return None;
+        }
+        slot.record.clone()
+    }
+
+    pub(crate) fn replace_run_record(
+        &self,
+        slot_index: u32,
+        run_nonce: u64,
+        record: Rc<UsedValues>,
+    ) -> Option<(u64, Rc<UsedValues>)> {
+        let mut records = self.run_used_records.borrow_mut();
+        let slot = records
+            .get_mut(slot_index as usize)
+            .expect("registered layout run record slot must exist");
+        let previous = std::mem::replace(
+            slot,
+            RunRecordSlot {
+                nonce: run_nonce,
+                record: Some(record),
+            },
+        );
+        previous.record.map(|record| (previous.nonce, record))
+    }
+
+    pub(crate) fn restore_run_record(&self, slot_index: u32, run_nonce: u64, previous: Option<(u64, Rc<UsedValues>)>) {
+        let mut records = self.run_used_records.borrow_mut();
+        let slot = records
+            .get_mut(slot_index as usize)
+            .expect("restored layout run record slot must exist");
+        debug_assert_eq!(
+            slot.nonce, run_nonce,
+            "layout run records were not restored in LIFO order"
+        );
+        *slot = match previous {
+            Some((nonce, record)) => RunRecordSlot {
+                nonce,
+                record: Some(record),
+            },
+            None => RunRecordSlot::default(),
+        };
+    }
+
+    // OPTIMIZATION: The edit invalidates line data at its direct parent and every formatting
+    // ancestor. Preserve the structural proof along the same unbounded path as the fragment
+    // epoch bumps so each affected inline context can reuse its unchanged line prefix.
+    pub(crate) fn note_inline_layout_damage_at_and_above(&self, mut box_: NodeSlotId) {
+        while !box_.is_invalid() {
+            let data = self.data(box_);
+            self.fc_run_cache_store.note_inline_layout_damage(box_);
+            // SAFETY: data() validated that box_ names a live slot, and the layout tree is stable
+            // for the duration of this synchronous topology update.
+            box_ = unsafe { (&raw const (*data).parent).read() };
+        }
+    }
+
+    pub(crate) fn insert_child(&self, parent: NodeSlotId, child: NodeSlotId, before: NodeSlotId) {
+        self.assert_owner_thread();
+        assert_ne!(parent, child, "a layout node cannot become its own child");
+        let parent_data = self.data(parent);
+        let child_data = self.data(child);
+
+        // SAFETY (for every raw access below): data() validated that the slot IDs name live
+        // nodes, and layout tree mutation is serialized on the arena's owner thread.
+        unsafe {
+            let child_parent = (&raw const (*child_data).parent).read();
+            let child_previous_sibling = (&raw const (*child_data).previous_sibling).read();
+            let child_next_sibling = (&raw const (*child_data).next_sibling).read();
+            assert!(
+                child_parent.is_invalid(),
+                "inserted layout node is still linked to a parent"
+            );
+            assert!(
+                child_previous_sibling.is_invalid(),
+                "inserted layout node is still linked to a previous sibling"
+            );
+            assert!(
+                child_next_sibling.is_invalid(),
+                "inserted layout node is still linked to a next sibling"
+            );
+            debug_assert_eq!(
+                (&raw const (*parent_data).first_child).read().is_invalid(),
+                (&raw const (*parent_data).last_child).read().is_invalid(),
+                "layout node child list endpoints disagree"
+            );
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            let mut ancestor = parent;
+            while !ancestor.is_invalid() {
+                assert_ne!(ancestor, child, "layout node insertion would create a cycle");
+                // SAFETY: data() validated that ancestor names a live slot, and parent links
+                // only name live slots.
+                ancestor = unsafe { (&raw const (*self.data(ancestor)).parent).read() };
+            }
+        }
+
+        let before_data = if before.is_invalid() {
+            std::ptr::null_mut()
+        } else {
+            assert_ne!(before, child, "a layout node cannot be inserted before itself");
+            self.data(before)
+        };
+        let previous = if before_data.is_null() {
+            // SAFETY: parent_data addresses a live node validated above.
+            unsafe { (&raw const (*parent_data).last_child).read() }
+        } else {
+            // SAFETY: data() validated that before names a live node.
+            unsafe {
+                let before_parent = (&raw const (*before_data).parent).read();
+                assert_eq!(
+                    before_parent, parent,
+                    "insertion reference is not a child of the parent"
+                );
+                (&raw const (*before_data).previous_sibling).read()
+            }
+        };
+
+        // SAFETY: Every written slot was validated live above (previous comes from a validated
+        // sibling or child-list link), and mutation is serialized on the owner thread.
+        unsafe {
+            (&raw mut (*child_data).parent).write(parent);
+            (&raw mut (*child_data).previous_sibling).write(previous);
+            (&raw mut (*child_data).next_sibling).write(before);
+            if previous.is_invalid() {
+                (&raw mut (*parent_data).first_child).write(child);
+            } else {
+                (&raw mut (*self.data(previous)).next_sibling).write(child);
+            }
+            if before_data.is_null() {
+                (&raw mut (*parent_data).last_child).write(child);
+            } else {
+                (&raw mut (*before_data).previous_sibling).write(child);
+            }
+        }
+
+        self.note_inline_layout_damage_at_and_above(parent);
+    }
+
+    pub(crate) fn remove_child(&self, parent: NodeSlotId, child: NodeSlotId) {
+        self.assert_owner_thread();
+        let parent_data = self.data(parent);
+        let child_data = self.data(child);
+
+        // SAFETY (for every raw access below): data() validated that the slot IDs name live
+        // nodes, sibling and child-list links only name live slots, and layout tree mutation
+        // is serialized on the arena's owner thread.
+        unsafe {
+            let child_parent = (&raw const (*child_data).parent).read();
+            assert_eq!(child_parent, parent, "removed layout node is not a child of the parent");
+            let previous = (&raw const (*child_data).previous_sibling).read();
+            let next = (&raw const (*child_data).next_sibling).read();
+
+            if previous.is_invalid() {
+                let first_child = (&raw const (*parent_data).first_child).read();
+                assert_eq!(first_child, child, "layout node child list lost its first child");
+                (&raw mut (*parent_data).first_child).write(next);
+            } else {
+                let previous_data = self.data(previous);
+                let previous_next_sibling = (&raw const (*previous_data).next_sibling).read();
+                assert_eq!(
+                    previous_next_sibling, child,
+                    "layout node sibling chain is inconsistent"
+                );
+                (&raw mut (*previous_data).next_sibling).write(next);
+            }
+
+            if next.is_invalid() {
+                let last_child = (&raw const (*parent_data).last_child).read();
+                assert_eq!(last_child, child, "layout node child list lost its last child");
+                (&raw mut (*parent_data).last_child).write(previous);
+            } else {
+                let next_data = self.data(next);
+                let next_previous_sibling = (&raw const (*next_data).previous_sibling).read();
+                assert_eq!(
+                    next_previous_sibling, child,
+                    "layout node sibling chain is inconsistent"
+                );
+                (&raw mut (*next_data).previous_sibling).write(previous);
+            }
+
+            (&raw mut (*child_data).parent).write(NodeSlotId::INVALID);
+            (&raw mut (*child_data).previous_sibling).write(NodeSlotId::INVALID);
+            (&raw mut (*child_data).next_sibling).write(NodeSlotId::INVALID);
+        }
+
+        self.note_inline_layout_damage_at_and_above(parent);
+    }
+
     pub(crate) unsafe fn from_handle<'a>(arena: *mut c_void) -> &'a Self {
         assert!(!arena.is_null(), "layout node arena handle is null");
         // SAFETY: Layout passes borrow the document's arena synchronously,
@@ -866,6 +1211,66 @@ pub unsafe extern "C" fn layout_arena_free(arena: *mut c_void, id: NodeSlotId, g
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn layout_fc_run_cache_epochs_enabled() -> bool {
+    crate::layout::fc_run_cache_mode_from_environment() != crate::layout::FcRunCacheMode::Disabled
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn layout_arena_fc_run_cache_hit_count(arena: *mut c_void) -> u64 {
+    abort_on_panic(|| {
+        assert!(!arena.is_null(), "layout node arena handle is null");
+        // SAFETY: The C++ wrapper keeps the arena alive for this call and
+        // serializes all access on the document thread.
+        unsafe { &*arena.cast::<LayoutNodeArena>() }
+            .fc_run_cache_store()
+            .hit_count()
+    })
+}
+
+/// # Safety
+///
+/// The arena must remain valid for the duration of the call, and `id` must
+/// name a live node in this arena.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn layout_arena_node_data(arena: *mut c_void, id: NodeSlotId) -> *mut NodeData {
+    abort_on_panic(|| {
+        // SAFETY: The C++ caller keeps the arena alive for this synchronous call.
+        unsafe { LayoutNodeArena::from_handle(arena) }.data(id)
+    })
+}
+
+/// # Safety
+///
+/// The arena must remain valid for the duration of the call, and `parent`,
+/// `child`, and a valid `before` must name live nodes in this arena.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn layout_arena_insert_child(
+    arena: *mut c_void,
+    parent: NodeSlotId,
+    child: NodeSlotId,
+    before: NodeSlotId,
+) {
+    abort_on_panic(|| {
+        // SAFETY: The C++ wrapper keeps the arena alive for this call and
+        // serializes all access on the document thread.
+        unsafe { LayoutNodeArena::from_handle(arena) }.insert_child(parent, child, before);
+    });
+}
+
+/// # Safety
+///
+/// The arena must remain valid for the duration of the call, and `parent` and
+/// `child` must name live nodes in this arena.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn layout_arena_remove_child(arena: *mut c_void, parent: NodeSlotId, child: NodeSlotId) {
+    abort_on_panic(|| {
+        // SAFETY: The C++ wrapper keeps the arena alive for this call and
+        // serializes all access on the document thread.
+        unsafe { LayoutNodeArena::from_handle(arena) }.remove_child(parent, child);
+    });
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn layout_arena_set_text_content(
     arena: *mut c_void,
     id: NodeSlotId,
@@ -874,7 +1279,7 @@ pub unsafe extern "C" fn layout_arena_set_text_content(
     length_in_code_units: usize,
     untransformed_text_is_ascii_whitespace: bool,
     may_require_bidi_processing: bool,
-) {
+) -> bool {
     abort_on_panic(|| {
         assert!(!arena.is_null(), "layout node arena handle is null");
         let text = if length_in_code_units == 0 {
@@ -899,8 +1304,8 @@ pub unsafe extern "C" fn layout_arena_set_text_content(
             text,
             untransformed_text_is_ascii_whitespace,
             may_require_bidi_processing,
-        );
-    });
+        )
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -908,13 +1313,13 @@ pub unsafe extern "C" fn layout_arena_set_replaced_content_facts(
     arena: *mut c_void,
     id: NodeSlotId,
     facts: FfiReplacedContentFacts,
-) {
+) -> bool {
     abort_on_panic(|| {
         assert!(!arena.is_null(), "layout node arena handle is null");
         // SAFETY: The C++ wrapper keeps the arena alive for this call and
         // serializes all access on the document thread.
-        unsafe { &mut *arena.cast::<LayoutNodeArena>() }.set_replaced_content_facts(id, facts);
-    });
+        unsafe { &mut *arena.cast::<LayoutNodeArena>() }.set_replaced_content_facts(id, facts)
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -922,13 +1327,13 @@ pub unsafe extern "C" fn layout_arena_set_raw_table_column_span(
     arena: *mut c_void,
     id: NodeSlotId,
     raw_column_span: u32,
-) {
+) -> u32 {
     abort_on_panic(|| {
         assert!(!arena.is_null(), "layout node arena handle is null");
         // SAFETY: The C++ wrapper keeps the arena alive for this call and
         // serializes all access on the document thread.
-        unsafe { &mut *arena.cast::<LayoutNodeArena>() }.set_raw_table_column_span(id, raw_column_span);
-    });
+        unsafe { &mut *arena.cast::<LayoutNodeArena>() }.set_raw_table_column_span(id, raw_column_span)
+    })
 }
 
 #[cfg(test)]
@@ -954,8 +1359,8 @@ mod tests {
         // SAFETY: The first allocation is still live, and the comparison above
         // confirms that its pointer still addresses the arena slot.
         unsafe {
-            (*first_data).initial_quote_nesting_level = 42;
-            assert_eq!((*arena.data(first.slot)).initial_quote_nesting_level, 42);
+            (*first_data).table_column_span = 42;
+            assert_eq!((*arena.data(first.slot)).table_column_span, 42);
         }
         arena.free(first.slot, first.generation);
         for allocation in allocations {
@@ -1008,6 +1413,7 @@ mod tests {
         let value = CssPixels::from_raw(128);
         let inline_measurement = IntrinsicInlineSizeMeasurement {
             automatic_content_inline_size: CssPixels::from_raw(192),
+            min_content_inline_size_from_max_content_layout: Some(CssPixels::from_raw(96)),
             available_block_size: AvailableSize::MaxContent,
             content_inline_size: CssPixels::from_raw(192),
             content_block_size: CssPixels::from_raw(256),

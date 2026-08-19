@@ -67,6 +67,13 @@ void AbstractImageStyleValue::load_any_resources(Layout::NodeWithStyle const& la
     load_any_resources(const_cast<DOM::Document&>(layout_node.document()));
 }
 
+Optional<Painting::ImagePaint> AbstractImageStyleValue::image_paint(Painting::ImagePaintRequest const&, ResolvedImage const& resolved) const
+{
+    return resolved.visit(
+        [](Empty const&) -> Optional<Painting::ImagePaint> { return OptionalNone {}; },
+        [](auto const& gradient) -> Optional<Painting::ImagePaint> { return Painting::ImagePaint { gradient }; });
+}
+
 ColorStopListElement ColorStopListElement::absolutized(ComputationContext const& context) const
 {
     auto absolutize_if_nonnull = [&context](RefPtr<StyleValue const> const& input) -> RefPtr<StyleValue const> {
@@ -83,31 +90,6 @@ ColorStopListElement ColorStopListElement::absolutized(ComputationContext const&
             .second_position = absolutize_if_nonnull(color_stop.second_position),
         },
     };
-}
-
-void serialize_color_stop_list(StringBuilder& builder, ReadonlySpan<ColorStopListElement> color_stop_list, SerializationMode mode)
-{
-    bool first = true;
-    for (auto const& element : color_stop_list) {
-        if (!first)
-            builder.append(", "sv);
-
-        if (element.transition_hint) {
-            element.transition_hint->serialize(builder, mode);
-            builder.append(", "sv);
-        }
-
-        element.color_stop.color->serialize(builder, mode);
-        if (element.color_stop.position) {
-            builder.append(' ');
-            element.color_stop.position->serialize(builder, mode);
-        }
-        if (element.color_stop.second_position) {
-            builder.append(' ');
-            element.color_stop.second_position->serialize(builder, mode);
-        }
-        first = false;
-    }
 }
 
 }

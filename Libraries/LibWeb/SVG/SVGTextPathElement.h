@@ -6,7 +6,6 @@
 
 #pragma once
 
-#include <LibWeb/CSS/StyleValues/NumberStyleValue.h>
 #include <LibWeb/SVG/AttributeParser.h>
 #include <LibWeb/SVG/SVGGeometryElement.h>
 #include <LibWeb/SVG/SVGTextContentElement.h>
@@ -22,14 +21,14 @@ class SVGTextPathElement
     GC_DECLARE_ALLOCATOR(SVGTextPathElement);
 
 public:
-    virtual RefPtr<Layout::Node> create_layout_node(NonnullRefPtr<CSS::ComputedValues const>) override;
+    virtual RefPtr<Layout::Node> create_layout_node(CSS::LayoutStyle) override;
 
     GC::Ptr<SVGGeometryElement const> path_or_shape() const;
 
     float start_offset_for_path_length(float path_length) const;
 
     // https://w3c.github.io/svgwg/svg2-draft/text.html#__svg__SVGTextPathElement__startOffset
-    REFLECT_ANIMATED_LENGTH_ATTRIBUTE_WITH_GETTER(startOffset, start_offset, Horizontal, CSS::NumberStyleValue::create(0));
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE_WITH_GETTER(startOffset, start_offset, Horizontal, SVGLengthValue::number(0));
 
 protected:
     SVGTextPathElement(DOM::Document&, DOM::QualifiedName);

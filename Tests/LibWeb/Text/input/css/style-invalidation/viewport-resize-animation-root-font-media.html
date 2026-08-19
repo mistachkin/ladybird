@@ -13,7 +13,7 @@
         child.internals.updateStyle();
     }
 
-    asyncTest(async done => {
+    promiseTest(async () => {
         const iframe = document.createElement("iframe");
         iframe.style.border = "0";
         iframe.style.width = "300px";
@@ -60,13 +60,9 @@
 
         child.internals.resetStyleInvalidationCounters();
         await resizeIframe(iframe, child, 500);
-        const resizedCounters = child.internals.getStyleInvalidationCounters();
         println(`resized animated left: ${child.getComputedStyle(target).left}`);
-        println(`resized full invalidations: ${resizedCounters.fullStyleInvalidations}`);
 
         await resizeIframe(iframe, child, 300);
         println(`resized back animated left: ${child.getComputedStyle(target).left}`);
-
-        done();
     });
 </script>

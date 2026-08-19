@@ -59,7 +59,8 @@ public:
 
     EventResult handle_drag_and_drop_event(DragEvent::Type, CSSPixelPoint, CSSPixelPoint screen_position, unsigned button, unsigned buttons, unsigned modifiers, Vector<HTML::SelectedFile> files);
     EventResult handle_pinch_event(CSSPixelPoint, unsigned modifiers, double scale_delta);
-    EventResult handle_paste(Utf16View plain_text, Optional<Utf16View> html);
+    [[nodiscard]] EventResult perform_paste_action();
+    EventResult perform_paste_action(NonnullRefPtr<HTML::DragDataStore> const&);
     void handle_sdl_input_events();
 
     void process_auto_scroll();
@@ -91,7 +92,7 @@ private:
 
     [[nodiscard]] EventResult perform_copy_action();
     [[nodiscard]] EventResult perform_cut_action();
-    [[nodiscard]] EventResult perform_paste_action();
+    EventResult insert_pasted_content(Utf16View plain_text, Optional<Utf16View> html);
 
     EventResult focus_next_element();
     EventResult focus_previous_element();
@@ -121,7 +122,7 @@ private:
     void run_mousedown_default_actions(DOM::Document&, CSSPixelPoint visual_viewport_position, CSSPixelPoint viewport_position, unsigned button, unsigned modifiers, int click_count);
     void run_activation_behavior(GC::Ref<DOM::Node>, unsigned button, unsigned modifiers);
 
-    void maybe_show_context_menu(GC::Ref<DOM::Node>, MouseEventCoordinates const&, CSSPixelPoint screen_position, CSSPixelPoint viewport_position, unsigned buttons, unsigned modifiers);
+    void maybe_show_context_menu(GC::Ref<DOM::Node>, Painting::Paintable&, MouseEventCoordinates const&, CSSPixelPoint screen_position, CSSPixelPoint viewport_position, unsigned buttons, unsigned modifiers);
     bool maybe_request_paste_for_middle_click(DOM::Document&, CSSPixelPoint visual_viewport_position);
 
     Optional<Painting::CaretPosition> prepare_mouse_selection(DOM::Document&, CSSPixelPoint visual_viewport_position, CSSPixelPoint viewport_position);

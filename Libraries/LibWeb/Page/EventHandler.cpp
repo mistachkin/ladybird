@@ -31,6 +31,7 @@
 #include <LibWeb/HTML/Focus.h>
 #include <LibWeb/HTML/FormAssociatedElement.h>
 #include <LibWeb/HTML/HTMLAnchorElement.h>
+#include <LibWeb/HTML/HTMLAreaElement.h>
 #include <LibWeb/HTML/HTMLButtonElement.h>
 #include <LibWeb/HTML/HTMLDialogElement.h>
 #include <LibWeb/HTML/HTMLHtmlElement.h>
@@ -319,7 +320,7 @@ EventResult EventHandler::handle_mousedown(CSSPixelPoint visual_viewport_positio
         return EventResult::Dropped;
     }
 
-    auto pointer_events = paintable->computed_values().pointer_events();
+    auto pointer_events = paintable->layout_node().pointer_events();
     // FIXME: Handle other values for pointer-events.
     VERIFY(pointer_events != CSS::PointerEvents::None);
 
@@ -371,7 +372,7 @@ EventResult EventHandler::handle_mousedown(CSSPixelPoint visual_viewport_positio
     //     matching other engines. The page can still suppress the native context menu by cancelling the
     //     contextmenu event itself.
     if (is_context_menu_trigger && dispatch_result != PointerEventDispatchResult::SwallowedByChromeWidget)
-        maybe_show_context_menu(*node, coordinates, screen_position, viewport_position, buttons, modifiers);
+        maybe_show_context_menu(*node, *paintable, coordinates, screen_position, viewport_position, buttons, modifiers);
 
     if (dispatch_result != PointerEventDispatchResult::RunDefaultActions)
         return EventResult::Cancelled;
@@ -506,7 +507,7 @@ EventResult EventHandler::handle_mousemove(CSSPixelPoint visual_viewport_positio
             return *dispath_result;
         }
 
-        auto pointer_events = paintable->computed_values().pointer_events();
+        auto pointer_events = paintable->layout_node().pointer_events();
         // FIXME: Handle other values for pointer-events.
         VERIFY(pointer_events != CSS::PointerEvents::None);
 
@@ -625,7 +626,7 @@ EventResult EventHandler::handle_mouseup(CSSPixelPoint visual_viewport_position,
         return EventResult::Dropped;
     }
 
-    auto pointer_events = paintable->computed_values().pointer_events();
+    auto pointer_events = paintable->layout_node().pointer_events();
     if (pointer_events == CSS::PointerEvents::None)
         return EventResult::Cancelled;
 
@@ -1372,17 +1373,9 @@ EventResult EventHandler::handle_keydown(UIEvents::KeyCode key, u32 modifiers, u
         return EventResult::Handled;
     case UIEvents::KeyCode::Key_Left:
     case UIEvents::KeyCode::Key_Right:
-#if defined(AK_OS_MACOS)
-        if (modifiers_without_keypad && modifiers_without_keypad != UIEvents::KeyModifier::Mod_Super)
-#else
-        if (modifiers_without_keypad && modifiers_without_keypad != UIEvents::KeyModifier::Mod_Alt)
-#endif
+        if (modifiers_without_keypad)
             break;
-        if (modifiers_without_keypad) {
-            document->page().traverse_the_history_by_delta(key == UIEvents::KeyCode::Key_Left ? -1 : 1);
-        } else {
-            scroll_by_for_key_input(key == UIEvents::KeyCode::Key_Left ? -arrow_key_scroll_distance : arrow_key_scroll_distance, 0);
-        }
+        scroll_by_for_key_input(key == UIEvents::KeyCode::Key_Left ? -arrow_key_scroll_distance : arrow_key_scroll_distance, 0);
         return EventResult::Handled;
     case UIEvents::KeyCode::Key_PageUp:
     case UIEvents::KeyCode::Key_PageDown:
@@ -1693,8 +1686,8 @@ EventResult EventHandler::perform_paste_action()
     if (!document || !document->is_fully_active())
         return EventResult::Dropped;
 
-    // NB: The system clipboard lives in the UI process, so retrieve its contents first and fire the paste event once
-    //     they arrive.
+    // NB: The system clipboard lives in the UI process. So, retrieve its contents first — and run the rest of the paste
+    //     action once the contents arrive.
     document->page().request_clipboard_entries(GC::create_function(document->heap(), [document = GC::Ref { *document }](Vector<Clipboard::SystemClipboardItem> items) {
         auto data_store = HTML::DragDataStore::create();
         if (!items.is_empty()) {
@@ -1717,35 +1710,58 @@ EventResult EventHandler::perform_paste_action()
                 });
             }
         }
-        data_store->set_mode(HTML::DragDataStore::Mode::ReadOnly);
-        auto data_transfer = HTML::DataTransfer::create(data_store);
-
-        // 2. Fire a clipboard event named paste.
-        bool event_was_not_canceled = fire_clipboard_event(*document, HTML::EventNames::paste, data_transfer);
-        data_store->set_mode(HTML::DragDataStore::Mode::Protected);
-
-        // 3. If the event was not canceled, then: if there is a selection or cursor in an editable context where
-        //    pasting is enabled, insert the most suitable content found on the clipboard, if any, into the context.
-        if (event_was_not_canceled) {
-            Optional<Utf16View> html;
-            Utf16View plain_text;
-            for (auto const& item : data_store->item_list()) {
-                if (item.kind != HTML::DragDataStoreItem::Kind::Text)
-                    continue;
-                if (item.type_string == u"text/html"sv)
-                    html = item.data;
-                else if (item.type_string == u"text/plain"sv)
-                    plain_text = item.data;
-            }
-            if (auto navigable = document->navigable(); html.has_value() || !plain_text.is_empty())
-                navigable->event_handler().handle_paste(plain_text, html);
-        }
+        if (auto navigable = document->navigable())
+            navigable->event_handler().perform_paste_action(data_store);
     }));
 
     return EventResult::Handled;
 }
 
-EventResult EventHandler::handle_paste(Utf16View plain_text, Optional<Utf16View> html)
+// https://w3c.github.io/clipboard-apis/#the-paste-action
+// This is the paste action from the point where the content to paste is already in hand, either because async retrieval
+// of the system clipboard's contents above finished, or because the paste arrived through LocalNavigable::paste() —
+// which the UI process hands the content to paste directly.
+EventResult EventHandler::perform_paste_action(NonnullRefPtr<HTML::DragDataStore> const& data_store)
+{
+    auto document = m_navigable->active_document();
+    if (!document || !document->is_fully_active())
+        return EventResult::Dropped;
+
+    data_store->set_mode(HTML::DragDataStore::Mode::ReadOnly);
+    auto data_transfer = HTML::DataTransfer::create(data_store);
+
+    // 2. Fire a clipboard event named paste.
+    bool event_was_not_canceled = fire_clipboard_event(*document, HTML::EventNames::paste, data_transfer);
+    data_store->set_mode(HTML::DragDataStore::Mode::Protected);
+
+    // 3. If the event was not canceled, then: if there is a selection or cursor in an editable context where
+    //    pasting is enabled, insert the most suitable content found on the clipboard, if any, into the context.
+    auto result = EventResult::Handled;
+    if (event_was_not_canceled) {
+        Optional<Utf16View> html;
+        Utf16View plain_text;
+        for (auto const& item : data_store->item_list()) {
+            if (item.kind != HTML::DragDataStoreItem::Kind::Text)
+                continue;
+            if (item.type_string == u"text/html"sv)
+                html = item.data;
+            else if (item.type_string == u"text/plain"sv)
+                plain_text = item.data;
+        }
+        if (html.has_value() || !plain_text.is_empty())
+            result = insert_pasted_content(plain_text, html);
+    }
+
+    // The trigger starting a paste can finish before the paste action does — so any input-method state pushed to the UI
+    // when the trigger finishes carries the state from before the paste. Notify the client here — where every paste
+    // completes — so it can push fresh state. This also covers a canceled paste event — since the page's paste handler
+    // may itself have edited the document.
+    document->page().client().page_did_complete_paste_action();
+
+    return result;
+}
+
+EventResult EventHandler::insert_pasted_content(Utf16View plain_text, Optional<Utf16View> html)
 {
     auto active_document = m_navigable->active_document();
     if (!active_document)
@@ -2160,7 +2176,7 @@ void EventHandler::run_mousedown_default_actions(DOM::Document& document, CSSPix
         for (GC::Ptr<DOM::Node const> node = hit->dom_node(); node; node = node->parent_or_shadow_host_node()) {
             if (node->is_editable_or_editing_host() || is<HTML::FormAssociatedTextControlElement>(*node))
                 return;
-            if (auto const* anchor = as_if<HTML::HTMLAnchorElement>(*node); anchor && anchor->has_attribute(HTML::AttributeNames::href))
+            if (auto const* element = as_if<DOM::Element>(*node); element && element->creates_a_hyperlink())
                 return;
         }
 
@@ -2404,7 +2420,7 @@ void EventHandler::finish_selection_from_preserved_mousedown(DOM::Document& docu
 
 void EventHandler::run_activation_behavior(GC::Ref<DOM::Node> node, unsigned button, unsigned modifiers)
 {
-    if (GC::Ptr<HTML::HTMLAnchorElement const> link = node->enclosing_link_element()) {
+    if (auto const* link = node->enclosing_link_element()) {
         GC::Ref<DOM::Document> document = *m_navigable->active_document();
         auto href = link->href();
 
@@ -2419,7 +2435,7 @@ void EventHandler::run_activation_behavior(GC::Ref<DOM::Node> node, unsigned but
 }
 
 // https://w3c.github.io/uievents/#maybe-show-context-menu
-void EventHandler::maybe_show_context_menu(GC::Ref<DOM::Node> node, MouseEventCoordinates const& coordinates, CSSPixelPoint screen_position, CSSPixelPoint viewport_position, unsigned buttons, unsigned modifiers)
+void EventHandler::maybe_show_context_menu(GC::Ref<DOM::Node> node, Painting::Paintable& paintable, MouseEventCoordinates const& coordinates, CSSPixelPoint screen_position, CSSPixelPoint viewport_position, unsigned buttons, unsigned modifiers)
 {
     // AD-HOC: Allow the user to bypass custom context menus by holding shift, like Firefox.
     if ((modifiers & UIEvents::Mod_Shift) == 0) {
@@ -2446,7 +2462,7 @@ void EventHandler::maybe_show_context_menu(GC::Ref<DOM::Node> node, MouseEventCo
     document->update_layout(DOM::UpdateLayoutReason::EventHandlerShowContextMenu);
 
     auto top_level_viewport_position = m_navigable->to_top_level_position(viewport_position);
-    if (GC::Ptr<HTML::HTMLAnchorElement const> link = node->enclosing_link_element()) {
+    if (auto const* link = node->enclosing_link_element()) {
         auto href = link->href();
         auto url = document->encoding_parse_url(href);
         if (url.has_value())
@@ -2461,6 +2477,13 @@ void EventHandler::maybe_show_context_menu(GC::Ref<DOM::Node> node, MouseEventCo
                 break;
             VERIFY(shadow_root->host() != nullptr);
             context_menu_node = *shadow_root->host();
+        }
+
+        // AD-HOC: Area elements are never rendered, so use the image over which the context menu was requested
+        //         instead. This keeps the image context menu available over image maps.
+        if (is<HTML::HTMLAreaElement>(*context_menu_node)) {
+            if (auto* image_element = as_if<HTML::HTMLImageElement>(paintable.dom_node().ptr()))
+                context_menu_node = *image_element;
         }
 
         if (is<HTML::HTMLImageElement>(*context_menu_node)) {
@@ -2564,7 +2587,7 @@ bool EventHandler::maybe_request_paste_for_middle_click(DOM::Document& document,
 }
 
 // https://drafts.csswg.org/css-ui/#propdef-user-select
-static void set_user_selection(GC::Ptr<DOM::Node> anchor_node, size_t anchor_offset, GC::Ptr<DOM::Node> focus_node, size_t focus_offset, Selection::Selection* selection, CSS::UserSelect user_select)
+static void set_user_selection(GC::Ptr<DOM::Node> anchor_node, size_t anchor_offset, GC::Ptr<DOM::Node> focus_node, size_t focus_offset, GC::Ptr<Selection::Selection> selection, CSS::UserSelect user_select)
 {
     auto move_focus_before_node = [&](GC::Ref<DOM::Node> node) -> bool {
         if (!node->parent())
@@ -2963,7 +2986,7 @@ void EventHandler::apply_mouse_selection(CSSPixelPoint visual_viewport_position)
 
     // Selection driven through an input events target (a text control or editing host) is constrained to that
     // target's scope, so the selection keeps tracking the mouse after it leaves the target.
-    DOM::Node const* constraint_scope = nullptr;
+    GC::Ptr<DOM::Node const> constraint_scope;
     if (m_mouse_selection_target)
         constraint_scope = m_mouse_selection_target->mouse_selection_scope();
 
@@ -3074,12 +3097,12 @@ void EventHandler::apply_mouse_selection(CSSPixelPoint visual_viewport_position)
     }
 }
 
-static void set_node_and_ancestors_being_activated(DOM::Node*, bool);
+static void set_node_and_ancestors_being_activated(GC::Ptr<DOM::Node>, bool);
 
 void EventHandler::clear_mousedown_tracking()
 {
     if (m_mousedown_target)
-        set_node_and_ancestors_being_activated(m_mousedown_target, false);
+        set_node_and_ancestors_being_activated(m_mousedown_target.ptr(), false);
 
     m_mousedown_target = nullptr;
     m_mousedown_visual_viewport_position = {};
@@ -3117,9 +3140,9 @@ static void light_dismiss_activities(UIEvents::PointerEvent const& event, GC::Re
     HTML::HTMLDialogElement::light_dismiss_open_dialogs(event, target);
 }
 
-static void set_node_and_ancestors_being_activated(DOM::Node* node, bool activated)
+static void set_node_and_ancestors_being_activated(GC::Ptr<DOM::Node> node, bool activated)
 {
-    for (auto* ancestor = node; ancestor; ancestor = ancestor->parent()) {
+    for (auto ancestor = node; ancestor; ancestor = ancestor->parent()) {
         if (auto* element = as_if<DOM::Element>(*ancestor))
             element->set_being_activated(activated);
     }
@@ -3169,7 +3192,7 @@ EventHandler::PointerEventDispatchResult EventHandler::dispatch_a_pointer_event_
         if (type == PointerEventType::PointerDown)
             set_node_and_ancestors_being_activated(node, true);
         else if (m_mousedown_target)
-            set_node_and_ancestors_being_activated(m_mousedown_target, false);
+            set_node_and_ancestors_being_activated(m_mousedown_target.ptr(), false);
     }
 
     update_hovered_chrome_widget(chrome_widget);
@@ -3259,7 +3282,7 @@ void EventHandler::track_the_effective_position_of_the_legacy_mouse_pointer(GC::
         page.set_is_in_tooltip_area(false);
     }
 
-    HTML::HTMLAnchorElement const* hovered_link_element = nullptr;
+    HTML::HTMLHyperlinkElementUtils const* hovered_link_element = nullptr;
     if (target)
         hovered_link_element = target->enclosing_link_element();
     if (hovered_link_element) {
@@ -3379,22 +3402,22 @@ static constexpr Gfx::Cursor css_to_gfx_cursor(CSS::CursorPredefined css_cursor)
     }
 }
 
-static Gfx::Cursor resolve_cursor(Layout::NodeWithStyle const& layout_node, ReadonlySpan<CSS::CursorData> cursor_data, Gfx::StandardCursor auto_cursor)
+static Gfx::Cursor resolve_cursor(Layout::NodeWithStyle const& layout_node, ReadonlySpan<CSS::ComputedValuesFFI::ComputedCursor> cursor_data, ReadonlySpan<RefPtr<CSS::CursorStyleValue const>> cursor_style_values, Gfx::StandardCursor auto_cursor)
 {
-    for (auto const& cursor : cursor_data) {
-        auto result = cursor.visit(
-            [auto_cursor](CSS::CursorPredefined css_cursor) -> Optional<Gfx::Cursor> {
-                if (css_cursor == CSS::CursorPredefined::Auto)
-                    return auto_cursor;
-                return css_to_gfx_cursor(css_cursor);
-            },
-            [&layout_node](NonnullRefPtr<CSS::CursorStyleValue const> const& cursor_style_value) -> Optional<Gfx::Cursor> {
-                if (auto image_cursor = cursor_style_value->make_image_cursor(layout_node); image_cursor.has_value())
-                    return image_cursor.release_value();
-                return {};
-            });
-        if (result.has_value())
-            return result.release_value();
+    for (size_t index = 0; index < cursor_data.size(); ++index) {
+        auto const& cursor = cursor_data[index];
+        if (!cursor.is_cursor_value) {
+            auto predefined = static_cast<CSS::CursorPredefined>(cursor.predefined);
+            if (predefined == CSS::CursorPredefined::Auto)
+                return auto_cursor;
+            return css_to_gfx_cursor(predefined);
+        }
+        auto cursor_style_value = index < cursor_style_values.size() ? cursor_style_values[index] : nullptr;
+        if (!cursor_style_value)
+            cursor_style_value = CSS::ComputedValues::InheritedUIValues::cursor_style_value(cursor);
+        VERIFY(cursor_style_value);
+        if (auto image_cursor = cursor_style_value->make_image_cursor(layout_node); image_cursor.has_value())
+            return image_cursor.release_value();
     }
 
     // We should never get here
@@ -3413,9 +3436,12 @@ void EventHandler::update_cursor(RefPtr<Painting::Paintable> paintable, GC::Ptr<
 
         if (paintable) {
             auto* host_layout_node = host_element ? host_element->layout_node() : nullptr;
-            auto const* cursor_data = &paintable->computed_values().cursor();
+            auto cursor_data = paintable->layout_node().cursor();
+            auto cursor_style_values = paintable->layout_node().cursor_style_values();
             if (hit_text_fragment && host_layout_node)
-                cursor_data = &as<Layout::NodeWithStyle>(*host_layout_node).computed_values().cursor();
+                cursor_data = as<Layout::NodeWithStyle>(*host_layout_node).cursor();
+            if (hit_text_fragment && host_layout_node)
+                cursor_style_values = as<Layout::NodeWithStyle>(*host_layout_node).cursor_style_values();
 
             auto* host_node_with_style = host_layout_node ? as_if<Layout::NodeWithStyle>(*host_layout_node) : nullptr;
             auto is_selectable_text_fragment = hit_text_fragment
@@ -3424,11 +3450,19 @@ void EventHandler::update_cursor(RefPtr<Painting::Paintable> paintable, GC::Ptr<
 
             if (is_selectable_text_fragment || host_element->is_editable_or_editing_host()) {
                 if (host_node_with_style)
-                    return resolve_cursor(*host_node_with_style, *cursor_data, Gfx::StandardCursor::IBeam);
-                return resolve_cursor(*paintable->layout_node().parent(), *cursor_data, Gfx::StandardCursor::IBeam);
+                    return resolve_cursor(*host_node_with_style, cursor_data, cursor_style_values, Gfx::StandardCursor::IBeam);
+                return resolve_cursor(*paintable->layout_node().parent(), cursor_data, cursor_style_values, Gfx::StandardCursor::IBeam);
             }
             if (host_element && host_element->is_element() && host_node_with_style)
-                return resolve_cursor(*host_node_with_style, *cursor_data, Gfx::StandardCursor::Arrow);
+                return resolve_cursor(*host_node_with_style, cursor_data, cursor_style_values, Gfx::StandardCursor::Arrow);
+
+            // AD-HOC: Area elements are never rendered, so they have no layout node of their own to resolve a cursor
+            //         from. Resolve the cursor from the area's computed values instead, falling back to the layout
+            //         node of the image that renders the area's image map for image cursors.
+            if (auto const* area_element = as_if<HTML::HTMLAreaElement>(host_element.ptr())) {
+                if (auto area_computed_values = area_element->computed_style(); area_computed_values)
+                    return resolve_cursor(paintable->layout_node(), area_computed_values->cursor(), {}, Gfx::StandardCursor::Arrow);
+            }
         }
 
         return Gfx::StandardCursor::Arrow;

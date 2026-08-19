@@ -115,6 +115,24 @@ void HTMLLinkElement::removed_from(IsSubtreeRoot is_subtree_root, Node* old_ance
     }
 }
 
+void HTMLLinkElement::moved_from(IsSubtreeRoot is_subtree_root, GC::Ptr<Node> old_ancestor)
+{
+    Base::moved_from(is_subtree_root, old_ancestor);
+
+    if (!m_loaded_style_sheet)
+        return;
+
+    auto const& owning_roots = m_loaded_style_sheet->owning_documents_or_shadow_roots();
+    VERIFY(owning_roots.size() == 1);
+    auto& owning_root = **owning_roots.begin();
+    auto& source = [&owning_root] -> CSS::StyleSheetList& {
+        if (auto* shadow_root = as_if<DOM::ShadowRoot>(owning_root))
+            return shadow_root->style_sheets();
+        return as<DOM::Document>(owning_root).style_sheets();
+    }();
+    source.move_sheet(*m_loaded_style_sheet, document_or_shadow_root_style_sheets());
+}
+
 // https://html.spec.whatwg.org/multipage/semantics.html#dom-link-rellist
 GC::Ref<DOM::DOMTokenList> HTMLLinkElement::rel_list()
 {
@@ -347,11 +365,11 @@ GC::Ref<HTMLLinkElement::LinkProcessingOptions> HTMLLinkElement::create_link_opt
 
         // cryptographic nonce metadata
         //     the current value of el's [[CryptographicNonce]] internal slot
-        m_cryptographic_nonce,
+        nonce(),
 
         // fetch priority
         //     the state of el's fetchpriority content attribute
-        Fetch::Infrastructure::request_priority_from_string(get_attribute_value_view(HTML::AttributeNames::fetchpriority).value_or({})).value_or(Fetch::Infrastructure::Request::Priority::Auto));
+        Fetch::Infrastructure::request_priority_from_string(attribute(HTML::AttributeNames::fetchpriority).value_or({})).value_or(Fetch::Infrastructure::Request::Priority::Auto));
 
     // 3. If el has an href attribute, then set options's href to the value of el's href attribute.
     if (auto maybe_href = get_attribute(AttributeNames::href); maybe_href.has_value())
@@ -546,7 +564,7 @@ void HTMLLinkElement::fetch_and_process_linked_preload_resource()
     auto options = create_link_options();
 
     // 3. Let destination be the result of translating the keyword representing the state of el's as attribute.
-    auto destination = translate_a_preload_destination(get_attribute_value_view(HTML::AttributeNames::as).value_or({}));
+    auto destination = translate_a_preload_destination(attribute(HTML::AttributeNames::as).value_or({}));
 
     // 4. If destination is null, then return.
     if (destination.has<Empty>())

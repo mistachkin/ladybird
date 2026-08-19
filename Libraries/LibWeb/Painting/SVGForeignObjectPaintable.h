@@ -6,9 +6,8 @@
 
 #pragma once
 
-#include <LibWeb/Layout/SVGForeignObjectBox.h>
+#include <LibWeb/Layout/BlockContainer.h>
 #include <LibWeb/Painting/PaintableWithLines.h>
-#include <LibWeb/Painting/SVGGraphicsPaintable.h>
 #include <LibWeb/Painting/SVGMaskable.h>
 
 namespace Web::Painting {
@@ -16,12 +15,10 @@ namespace Web::Painting {
 class SVGForeignObjectPaintable final : public PaintableWithLines
     , public SVGMaskable {
 public:
-    static NonnullRefPtr<SVGForeignObjectPaintable> create(Layout::SVGForeignObjectBox const&);
+    static NonnullRefPtr<SVGForeignObjectPaintable> create(Layout::BlockContainer const&);
     virtual StringView class_name() const override { return "SVGForeignObjectPaintable"sv; }
 
     virtual void paint(DisplayListRecordingContext&, PaintPhase) const override;
-
-    Layout::SVGForeignObjectBox const& layout_box() const;
 
     virtual GC::Ptr<DOM::Node const> dom_node_of_svg() const override { return dom_node(); }
     virtual Optional<CSSPixelRect> get_mask_area() const override { return get_svg_mask_area(); }
@@ -30,13 +27,14 @@ public:
     virtual Optional<CSSPixelRect> get_clip_area() const override { return get_svg_clip_area(); }
     virtual Optional<DisplayListResource> calculate_clip(DisplayListRecordingContext& context, CSSPixelRect const& clip_area) const override { return calculate_svg_clip_display_list(context, clip_area); }
 
-    void set_computed_transforms(SVGGraphicsPaintable::ComputedTransforms computed_transforms) { m_computed_transforms = computed_transforms; }
-    SVGGraphicsPaintable::ComputedTransforms const& computed_transforms() const { return m_computed_transforms; }
-
 protected:
-    SVGForeignObjectPaintable(Layout::SVGForeignObjectBox const&);
+    SVGForeignObjectPaintable(Layout::BlockContainer const&);
 
-    SVGGraphicsPaintable::ComputedTransforms m_computed_transforms;
+private:
+    virtual bool is_svg_foreign_object_paintable() const override { return true; }
 };
+
+template<>
+inline bool Paintable::fast_is<SVGForeignObjectPaintable>() const { return is_svg_foreign_object_paintable(); }
 
 }

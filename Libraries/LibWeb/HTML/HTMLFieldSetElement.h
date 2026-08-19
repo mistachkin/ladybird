@@ -42,9 +42,7 @@ public:
 
     virtual Optional<ARIA::Role> default_role() const override { return ARIA::Role::group; }
 
-    virtual RefPtr<Layout::Node> create_layout_node(NonnullRefPtr<CSS::ComputedValues const>) override;
-    Layout::FieldSetBox* layout_node();
-    Layout::FieldSetBox const* layout_node() const;
+    virtual RefPtr<Layout::Node> create_layout_node(CSS::LayoutStyle) override;
 
 private:
     HTMLFieldSetElement(DOM::Document&, DOM::QualifiedName);

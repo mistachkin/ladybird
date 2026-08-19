@@ -31,9 +31,6 @@ public:
 
     virtual ~HTMLVideoElement() override;
 
-    Layout::VideoBox* layout_node();
-    Layout::VideoBox const* layout_node() const;
-
     void set_intrinsic_video_dimensions(Optional<Gfx::Size<u32>>);
     u32 video_width() const;
     u32 video_height() const;
@@ -74,7 +71,7 @@ private:
 
     virtual bool is_html_video_element() const override { return true; }
 
-    virtual RefPtr<Layout::Node> create_layout_node(NonnullRefPtr<CSS::ComputedValues const>) override;
+    virtual RefPtr<Layout::Node> create_layout_node(CSS::LayoutStyle) override;
 
     WebIDL::ExceptionOr<void> determine_element_poster_frame(Optional<Utf16String> const& poster);
 

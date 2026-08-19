@@ -4,19 +4,19 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Layout/ReplacedBox.h>
+#include <LibWeb/Layout/Box.h>
 #include <LibWeb/Painting/DisplayList.h>
 #include <LibWeb/Painting/DisplayListRecorder.h>
 #include <LibWeb/Painting/SVGSVGPaintable.h>
 
 namespace Web::Painting {
 
-NonnullRefPtr<SVGSVGPaintable> SVGSVGPaintable::create(Layout::SVGSVGBox const& layout_box)
+NonnullRefPtr<SVGSVGPaintable> SVGSVGPaintable::create(Layout::Box const& layout_box)
 {
     return adopt_ref(*new SVGSVGPaintable(layout_box));
 }
 
-SVGSVGPaintable::SVGSVGPaintable(Layout::SVGSVGBox const& layout_box)
+SVGSVGPaintable::SVGSVGPaintable(Layout::Box const& layout_box)
     : Paintable(layout_box)
 {
 }
@@ -34,7 +34,7 @@ static void record_foreign_object_descendant_hit_test_items(DisplayListRecording
 
 void SVGSVGPaintable::paint_svg_box(DisplayListRecordingContext& context, Paintable const& svg_box, PaintPhase phase)
 {
-    context.display_list_recorder().set_accumulated_visual_context(svg_box.accumulated_visual_context_index());
+    context.display_list_recorder().set_accumulated_visual_context(context.accumulated_visual_context_index_of(svg_box));
 
     // For elements with SVG filters, emit a transparent FillRect to trigger filter application.
     // This ensures content-generating filters (feFlood, feImage) work even with empty source.
@@ -43,32 +43,15 @@ void SVGSVGPaintable::paint_svg_box(DisplayListRecordingContext& context, Painta
         context.display_list_recorder().fill_rect_transparent(device_rect);
     }
 
-    // Collect masks (SVG <mask>, SVG <clipPath>).
-    Vector<MaskLayerDisplayList> masks;
+    bool any_svg_mask_layer_area_is_empty = register_mask_display_lists(context, svg_box, MaskLayerSet::SvgOnly);
 
-    bool skip_painting = false;
-
-    for (auto const& mask_layer : svg_box.mask_layer_presence(MaskLayerSet::SvgOnly)) {
-        if (mask_layer.area.is_empty()) {
-            skip_painting = true;
-            continue;
-        }
-        auto mask_display_list = mask_layer.origin == MaskLayerOrigin::SvgMask
-            ? svg_box.calculate_mask(context, mask_layer.area)
-            : svg_box.calculate_clip(context, mask_layer.area);
-        if (mask_display_list.has_value())
-            masks.append({ mask_layer.origin, mask_display_list.release_value() });
-    }
-
-    register_mask_display_lists(context, svg_box, masks);
-
-    if (!skip_painting) {
+    if (!any_svg_mask_layer_area_is_empty) {
         svg_box.record_hit_test_items(context, phase);
         if (svg_box.layout_node().is_svg_foreign_object_box())
             record_foreign_object_descendant_hit_test_items(context, svg_box);
         if (!svg_box.is_svg_paintable()
             && !svg_box.is_svg_svg_paintable()
-            && is<Layout::ReplacedBox>(svg_box.layout_node()))
+            && svg_box.layout_node().is_replaced_box())
             svg_box.paint(context, PaintPhase::Background);
         svg_box.paint(context, PaintPhase::Foreground);
         paint_descendants(context, svg_box, phase);

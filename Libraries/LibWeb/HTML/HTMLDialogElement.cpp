@@ -466,7 +466,7 @@ void HTMLDialogElement::run_dialog_setup_steps()
 void HTMLDialogElement::run_dialog_cleanup_steps()
 {
     // 1. Remove subject from subject's node document's open dialogs list.
-    document().open_dialogs_list().remove_first_matching([this](auto other) { return other == this; });
+    document().open_dialogs_list().remove_first_matching([this](auto other) { return other.ptr() == this; });
 
     // 2. If subject's close watcher is not null, then:
     if (m_close_watcher) {
@@ -512,7 +512,7 @@ void HTMLDialogElement::set_is_modal(bool is_modal)
     if (m_is_modal == is_modal)
         return;
     m_is_modal = is_modal;
-    CSS::Invalidation::invalidate_style_after_modal_state_change(*this);
+    CSS::Invalidation::invalidate_style_after_modal_state_change(*this, is_modal);
 }
 
 // https://html.spec.whatwg.org/multipage/interactive-elements.html#the-dialog-element:is-valid-command-steps
@@ -632,7 +632,7 @@ void HTMLDialogElement::light_dismiss_open_dialogs(UIEvents::PointerEvent const&
 
         // 6. If topmostDialog's computed closed-by state is not Any, then return.
         // FIXME: This should use the "computed closed-by state" algorithm.
-        auto closedby = topmost_dialog->get_attribute_value_view(AttributeNames::closedby);
+        auto closedby = topmost_dialog->attribute(AttributeNames::closedby);
         if (!closedby.has_value() || !closedby.value().equals_ignoring_ascii_case(u"any"sv))
             return;
 
@@ -671,7 +671,7 @@ void HTMLDialogElement::attribute_changed(Utf16FlyString const& local_name, Opti
     if (local_name != u"open"sv)
         return;
 
-    CSS::Invalidation::invalidate_style_after_open_state_change(*this);
+    CSS::Invalidation::invalidate_style_after_open_state_change(*this, value.has_value());
 
     // 3. If value is null and oldValue is not null, then run the dialog cleanup steps given element.
     if (!value.has_value() && old_value.has_value())

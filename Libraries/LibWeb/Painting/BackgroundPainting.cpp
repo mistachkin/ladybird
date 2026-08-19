@@ -21,6 +21,7 @@
 #include <LibWeb/Painting/DisplayList.h>
 #include <LibWeb/Painting/DisplayListRecorder.h>
 #include <LibWeb/Painting/DisplayListRecordingContext.h>
+#include <LibWeb/Painting/ImagePaint.h>
 #include <LibWeb/Painting/InlinePaintable.h>
 #include <LibWeb/Painting/PaintableWithLines.h>
 
@@ -159,10 +160,10 @@ void paint_background(DisplayListRecordingContext& context, Paintable const& pai
         DevicePixels right { 0 };
     } clip_shrink;
 
-    auto border_top = paintable_box.computed_values().border_top();
-    auto border_bottom = paintable_box.computed_values().border_bottom();
-    auto border_left = paintable_box.computed_values().border_left();
-    auto border_right = paintable_box.computed_values().border_right();
+    auto border_top = paintable_box.layout_node().border_top();
+    auto border_bottom = paintable_box.layout_node().border_bottom();
+    auto border_left = paintable_box.layout_node().border_left();
+    auto border_right = paintable_box.layout_node().border_right();
 
     if (border_top.color.alpha() == 255 && border_bottom.color.alpha() == 255
         && border_left.color.alpha() == 255 && border_right.color.alpha() == 255) {
@@ -171,6 +172,8 @@ void paint_background(DisplayListRecordingContext& context, Paintable const& pai
         clip_shrink.left = context.rounded_device_pixels(border_left.width);
         clip_shrink.right = context.rounded_device_pixels(border_right.width);
     }
+
+    bool painted_mask_layer = false;
 
     // Note: Background layers are ordered front-to-back, so we paint them in reverse
     for (auto& layer : resolved_background.layers.in_reverse()) {
@@ -192,14 +195,39 @@ void paint_background(DisplayListRecordingContext& context, Paintable const& pai
             }
         }
 
-        auto const& image = *layer.background_image;
-        auto image_rect = layer.image_rect;
-        auto background_positioning_area = layer.background_positioning_area;
-
         auto original_context = display_list_recorder.accumulated_visual_context();
         ScopeGuard restore_context = [&] {
             display_list_recorder.set_accumulated_visual_context(original_context);
         };
+
+        auto compositing_and_blending_operator = mix_blend_mode_to_compositing_and_blending_operator(layer.blend_mode);
+        // https://drafts.fxtf.org/css-masking-1/#the-mask-composite
+        // If there is no further mask layer, the compositing operator must be ignored.
+        if (layer.mask_composite.has_value()) {
+            if (painted_mask_layer)
+                compositing_and_blending_operator = *layer.mask_composite;
+            painted_mask_layer = true;
+        }
+        bool applied_blend_layer = false;
+        ScopeGuard restore_blend_layer = [&] {
+            if (applied_blend_layer)
+                display_list_recorder.restore();
+        };
+        auto apply_blend_layer = [&] {
+            if (compositing_and_blending_operator == Gfx::CompositingAndBlendingOperator::Normal)
+                return;
+            display_list_recorder.apply_effects(compositing_and_blending_operator);
+            applied_blend_layer = true;
+        };
+
+        if (!layer.background_image) {
+            apply_blend_layer();
+            continue;
+        }
+
+        auto const& image = *layer.background_image;
+        auto image_rect = layer.image_rect;
+        auto background_positioning_area = layer.background_positioning_area;
 
         switch (layer.attachment) {
         case CSS::BackgroundAttachment::Fixed:
@@ -294,7 +322,7 @@ void paint_background(DisplayListRecordingContext& context, Paintable const& pai
         CSSPixels initial_image_x = image_rect.x();
         CSSPixels image_y = image_rect.y();
 
-        image.resolve_for_size(paintable_box.layout_node(), image_rect.size());
+        auto const& resolved_image = paintable_box.resolved_image_for_size(image, image_rect.size());
 
         auto for_each_image_device_rect = [&](auto callback) {
             while (image_y < css_clip_rect.bottom()) {
@@ -305,7 +333,6 @@ void paint_background(DisplayListRecordingContext& context, Paintable const& pai
                     image_rect.set_x(image_x);
                     auto image_device_rect = context.rounded_device_rect(image_rect);
                     // If the image's dimensions were rounded to zero then they need to be restored to avoid a crash.
-                    // There's no need to check that !image_rect.is_empty() because empty images are discarded in resolve_background_layers.
                     if (image_device_rect.width() == 0)
                         image_device_rect.set_width(1);
                     if (image_device_rect.height() == 0)
@@ -322,15 +349,6 @@ void paint_background(DisplayListRecordingContext& context, Paintable const& pai
             }
         };
 
-        Gfx::CompositingAndBlendingOperator compositing_and_blending_operator = mix_blend_mode_to_compositing_and_blending_operator(layer.blend_mode);
-        bool applied_blend_layer = false;
-        auto apply_blend_layer = [&] {
-            if (compositing_and_blending_operator == Gfx::CompositingAndBlendingOperator::Normal)
-                return;
-            display_list_recorder.apply_effects(compositing_and_blending_operator);
-            applied_blend_layer = true;
-        };
-
         // Past this (super-large) tile count, the non-image branch below covers the area with a single repeating
         // pattern whose command count is independent of the tile count. Otherwise, recording one painting command per
         // tile for a super-large tile count can produce enough commands that we overflow the display list and crash.
@@ -342,7 +360,7 @@ void paint_background(DisplayListRecordingContext& context, Paintable const& pai
         auto const& document = paintable_box.layout_node().document();
         // An SVG used as an image resolves `prefers-color-scheme` from the used `color-scheme` of
         // the element referencing it.
-        auto const color_scheme = paintable_box.computed_values().color_scheme();
+        auto const color_scheme = paintable_box.layout_node().color_scheme();
         if (auto color = image.color_if_single_pixel_bitmap(document); color.has_value()) {
             apply_blend_layer();
             // OPTIMIZATION: If the image is a single pixel, we can just fill the whole area with it.
@@ -361,14 +379,13 @@ void paint_background(DisplayListRecordingContext& context, Paintable const& pai
             // of a repeated background, so the painter has the opportunity to optimize the painting of repeated images.
             auto dest_rect = context.rounded_device_rect(image_rect);
             // If the image's dimensions were rounded to zero then they need to be restored to avoid a crash.
-            // There's no need to check that !image_rect.is_empty() because empty images are discarded in resolve_background_layers.
             if (dest_rect.width() == 0)
                 dest_rect.set_width(1);
             if (dest_rect.height() == 0)
                 dest_rect.set_height(1);
 
             auto const& image_style_value = static_cast<CSS::ImageStyleValue const&>(image);
-            if (auto display_list = image_style_value.record_display_list(context, document, dest_rect, color_scheme); display_list.has_value()) {
+            if (auto display_list = image_style_value.record_display_list(display_list_recorder.resource_storage(), document, dest_rect, color_scheme); display_list.has_value()) {
                 apply_blend_layer();
                 auto dest_int_rect = dest_rect.to_type<int>();
                 auto scaling_mode = to_gfx_scaling_mode(image_rendering, dest_int_rect.size(), dest_int_rect.size());
@@ -405,7 +422,9 @@ void paint_background(DisplayListRecordingContext& context, Paintable const& pai
             auto tile_display_list = DisplayList::create(visual_context_tree);
             DisplayListRecorder tile_recorder(*tile_display_list, visual_context_tree, display_list_recorder.resource_storage());
             auto tile_context = context.clone(tile_recorder);
-            image.paint(tile_context, document, tile_device_rect, image_rendering, color_scheme);
+            auto tile_request = image_paint_request_for_recording(tile_context, document, tile_device_rect.to_type<int>().to_type<float>(), image_rendering, color_scheme);
+            if (auto image_paint = image.image_paint(tile_request, resolved_image); image_paint.has_value())
+                record_image_paint(tile_context, *image_paint, tile_request.dest_rect, image_rendering);
 
             // A pattern repeats along both axes. On any non-repeating axis, constrain the coverage to a single tile.
             auto coverage = clip_rect;
@@ -427,18 +446,17 @@ void paint_background(DisplayListRecordingContext& context, Paintable const& pai
             path.close();
             display_list_recorder.fill_path({
                 .path = move(path),
-                .paint_style_or_color = PaintStyle { PatternPaintStyle { { *tile_display_list, move(visual_context_tree) }, tile_device_rect.to_type<int>().to_type<float>(), {} } },
+                .paint_style_or_color = PaintStyle { PatternPaintStyle { { *tile_display_list, move(visual_context_tree) }, tile_device_rect.to_type<int>().to_type<float>() } },
                 .winding_rule = Gfx::WindingRule::Nonzero,
             });
         } else {
             apply_blend_layer();
-            for_each_image_device_rect([&](auto const& image_device_rect) {
-                image.paint(context, document, image_device_rect, image_rendering, color_scheme);
+            auto request = image_paint_request_for_recording(context, document, {}, image_rendering, color_scheme);
+            for_each_image_device_rect([&](DevicePixelRect const& image_device_rect) {
+                request.dest_rect = image_device_rect.to_type<int>().to_type<float>();
+                if (auto image_paint = image.image_paint(request, resolved_image); image_paint.has_value())
+                    record_image_paint(context, *image_paint, request.dest_rect, image_rendering);
             });
-        }
-
-        if (applied_blend_layer) {
-            display_list_recorder.restore();
         }
     }
 
@@ -454,7 +472,15 @@ void paint_background(DisplayListRecordingContext& context, Paintable const& pai
     }
 }
 
-ResolvedBackground resolve_background_layers(Vector<CSS::BackgroundLayerData> const& layers, Paintable const& paintable_box, Color background_color, CSS::BackgroundBox background_color_clip, CSSPixelRect const& border_rect, BorderRadiiData const& border_radii)
+enum class LayerType : u8 {
+    Background,
+    Mask,
+};
+
+// https://drafts.fxtf.org/css-masking-1/#the-mask-image
+static ResolvedBackground resolve_layers(Vector<CSS::BackgroundLayerData> const& layers,
+    Paintable const& paintable_box, Color background_color, CSS::BackgroundBox background_color_clip,
+    CSSPixelRect const& border_rect, BorderRadiiData const& border_radii, LayerType layer_type)
 {
     BackgroundBox border_box {
         border_rect,
@@ -464,12 +490,29 @@ ResolvedBackground resolve_background_layers(Vector<CSS::BackgroundLayerData> co
     auto color_box = get_box(background_color_clip, border_box, paintable_box);
 
     Vector<ResolvedBackgroundLayerData> resolved_layers;
+    // A value of none counts as a transparent black image layer.
+    // A mask reference that is an empty image (zero width or zero height), that fails to download, is not a reference
+    // to an mask element, is non-existent, or that cannot be displayed (e.g. because it is not in a supported image
+    // format) still counts as an image layer of transparent black.
     for (auto const& layer : layers) {
-        if (!layer.background_image)
-            continue;
+        auto mask_composite = layer_type == LayerType::Mask
+            ? mask_composite_to_compositing_and_blending_operator(layer.mask_composite)
+            : Optional<Gfx::CompositingAndBlendingOperator> {};
+        auto append_transparent_mask_layer = [&] {
+            if (layer_type != LayerType::Mask)
+                return;
+            ResolvedBackgroundLayerData transparent_mask_layer {};
+            transparent_mask_layer.clip = layer.clip;
+            transparent_mask_layer.blend_mode = layer.blend_mode;
+            transparent_mask_layer.mask_composite = mask_composite;
+            resolved_layers.append(move(transparent_mask_layer));
+        };
+
         auto const& document = paintable_box.layout_node().document();
-        if (!layer.background_image->is_paintable(document))
+        if (!layer.background_image || !layer.background_image->is_paintable(document)) {
+            append_transparent_mask_layer();
             continue;
+        }
 
         auto background_positioning_area = get_box(layer.origin, border_box, paintable_box).rect;
 
@@ -500,8 +543,10 @@ ResolvedBackground resolve_background_layers(Vector<CSS::BackgroundLayerData> co
             background_positioning_area.size());
 
         // If the image has no size, there's nothing to paint.
-        if (concrete_image_size.is_empty())
+        if (concrete_image_size.is_empty()) {
+            append_transparent_mask_layer();
             continue;
+        }
 
         // Size
         CSSPixelRect image_rect;
@@ -526,8 +571,10 @@ ResolvedBackground resolve_background_layers(Vector<CSS::BackgroundLayerData> co
         }
 
         // If after sizing we have a 0px image, we're done. Attempting to paint this would be an infinite loop.
-        if (image_rect.is_empty())
+        if (image_rect.is_empty()) {
+            append_transparent_mask_layer();
             continue;
+        }
 
         // If background-repeat is round for one (or both) dimensions, there is a second step.
         // The UA must scale the image in that dimension (or both dimensions) so that it fits a
@@ -565,8 +612,10 @@ ResolvedBackground resolve_background_layers(Vector<CSS::BackgroundLayerData> co
         }
 
         // If after round adjustments we have a 0px image, we're done.
-        if (image_rect.is_empty())
+        if (image_rect.is_empty()) {
+            append_transparent_mask_layer();
             continue;
+        }
 
         CSSPixels space_x = background_positioning_area.width() - image_rect.width();
         CSSPixels space_y = background_positioning_area.height() - image_rect.height();
@@ -574,7 +623,7 @@ ResolvedBackground resolve_background_layers(Vector<CSS::BackgroundLayerData> co
         CSSPixels position_x = layer.position_x.to_px(space_x);
         CSSPixels position_y = layer.position_y.to_px(space_y);
 
-        resolved_layers.append({ .background_image = *layer.background_image,
+        resolved_layers.append({ .background_image = layer.background_image,
             .attachment = layer.attachment,
             .clip = layer.clip,
             .position_x = position_x,
@@ -583,7 +632,8 @@ ResolvedBackground resolve_background_layers(Vector<CSS::BackgroundLayerData> co
             .image_rect = image_rect,
             .repeat_x = layer.repeat_x,
             .repeat_y = layer.repeat_y,
-            .blend_mode = layer.blend_mode });
+            .blend_mode = layer.blend_mode,
+            .mask_composite = mask_composite });
     }
 
     return ResolvedBackground {
@@ -593,6 +643,21 @@ ResolvedBackground resolve_background_layers(Vector<CSS::BackgroundLayerData> co
         .background_rect = border_rect,
         .color = background_color
     };
+}
+
+ResolvedBackground resolve_background_layers(Vector<CSS::BackgroundLayerData> const& layers,
+    Paintable const& paintable_box, Color background_color, CSS::BackgroundBox background_color_clip,
+    CSSPixelRect const& border_rect, BorderRadiiData const& border_radii)
+{
+    return resolve_layers(layers, paintable_box, background_color, background_color_clip, border_rect, border_radii,
+        LayerType::Background);
+}
+
+ResolvedBackground resolve_mask_layers(Vector<CSS::BackgroundLayerData> const& layers, Paintable const& paintable_box,
+    CSSPixelRect const& border_rect)
+{
+    return resolve_layers(layers, paintable_box, Color::Transparent, CSS::BackgroundBox::BorderBox, border_rect, {},
+        LayerType::Mask);
 }
 
 }

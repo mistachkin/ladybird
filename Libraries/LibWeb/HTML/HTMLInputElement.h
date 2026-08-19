@@ -72,7 +72,7 @@ class WEB_API HTMLInputElement final
 public:
     virtual ~HTMLInputElement() override;
 
-    virtual RefPtr<Layout::Node> create_layout_node(NonnullRefPtr<CSS::ComputedValues const>) override;
+    virtual RefPtr<Layout::Node> create_layout_node(CSS::LayoutStyle) override;
     virtual void set_being_activated(bool) override;
 
     enum class TypeAttributeState {
@@ -101,10 +101,12 @@ public:
     virtual void set_dirty_value_flag(bool flag) override { m_dirty_value = flag; }
 
     bool user_validity() const { return m_user_validity; }
-    void set_user_validity(bool flag) { m_user_validity = flag; }
+    void set_user_validity(bool);
 
     void commit_pending_changes();
     bool has_uncommitted_changes() { return m_has_uncommitted_changes; }
+
+    void ensure_user_agent_shadow_tree(Badge<Internals::Internals>) { create_shadow_tree_if_needed(); }
 
     Utf16String placeholder() const;
     Optional<Utf16String> placeholder_value() const;
@@ -281,6 +283,7 @@ private:
 
     void type_attribute_changed(TypeAttributeState old_state, TypeAttributeState new_state);
     virtual void computed_properties_changed() override;
+    virtual void prepare_for_style_computation() override { create_shadow_tree_if_needed(); }
 
     virtual bool is_presentational_hint(Utf16FlyString const&) const override;
     virtual void apply_presentational_hints(Vector<CSS::StyleProperty>&) const override;

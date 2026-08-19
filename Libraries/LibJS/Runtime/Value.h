@@ -161,7 +161,7 @@ public:
     template<DerivedFrom<Object> T>
     [[nodiscard]] ALWAYS_INLINE bool is() const
     {
-        return as_if<T>() != nullptr;
+        return !!as_if<T>();
     }
 
     template<DerivedFrom<Object> T>
@@ -442,10 +442,10 @@ public:
     bool to_boolean() const;
 
     ThrowCompletionOr<Value> get(VM&, PropertyKey const&) const;
-    ThrowCompletionOr<Value> get(VM&, PropertyKey const&, Bytecode::PropertyLookupCache&) const;
+    ThrowCompletionOr<Value> get(VM&, PropertyKey const&, Bytecode::StaticPropertyLookupCache&) const;
 
     ThrowCompletionOr<GC::Ptr<FunctionObject>> get_method(VM&, PropertyKey const&) const;
-    ThrowCompletionOr<GC::Ptr<FunctionObject>> get_method(VM&, PropertyKey const&, Bytecode::PropertyLookupCache&) const;
+    ThrowCompletionOr<GC::Ptr<FunctionObject>> get_method(VM&, PropertyKey const&, Bytecode::StaticPropertyLookupCache&) const;
 
     [[nodiscard]] Utf16String to_utf16_string_without_side_effects() const;
 

@@ -5,17 +5,13 @@
  */
 
 #include <LibGfx/Matrix4x4.h>
-#include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/DOM/Document.h>
+#include <LibWeb/Layout/Box.h>
 #include <LibWeb/Layout/Node.h>
-#include <LibWeb/Layout/SVGPatternBox.h>
-#include <LibWeb/Layout/SVGSVGBox.h>
-#include <LibWeb/Painting/DisplayList.h>
-#include <LibWeb/Painting/DisplayListRecorder.h>
 #include <LibWeb/Painting/DisplayListRecordingContext.h>
 #include <LibWeb/Painting/PaintStyle.h>
+#include <LibWeb/Painting/PrerecordedNestedDisplayLists.h>
 #include <LibWeb/Painting/SVGGraphicsPaintable.h>
-#include <LibWeb/Painting/StackingContext.h>
 #include <LibWeb/SVG/AttributeNames.h>
 #include <LibWeb/SVG/AttributeParser.h>
 #include <LibWeb/SVG/FragmentIdentifier.h>
@@ -88,7 +84,7 @@ GC::Ptr<SVGPatternElement const> SVGPatternElement::linked_pattern(GC::RootHashT
     if (!element)
         return {};
 
-    if (element == this)
+    if (element == GC::Ref { *this })
         return {};
     auto* pattern = as_if<SVGPatternElement>(*element);
     if (!pattern)
@@ -230,27 +226,28 @@ NumberPercentage SVGPatternElement::pattern_height_impl(GC::RootHashTable<SVGPat
     return NumberPercentage::create_number(0);
 }
 
-Optional<Painting::PaintStyle> SVGPatternElement::to_gfx_paint_style(SVGPaintContext const& paint_context, DisplayListRecordingContext& recording_context, Layout::Node const& target_layout_node) const
+RefPtr<Painting::Paintable const> SVGPatternElement::resolve_pattern_paintable(Layout::Node const& target_layout_node) const
 {
     auto content_element = pattern_content_element();
     if (!content_element)
-        return {};
+        return nullptr;
 
-    Layout::SVGPatternBox const* pattern_box = nullptr;
-    target_layout_node.for_each_child_of_type<Layout::SVGPatternBox>([&](auto const& candidate) {
-        if (&candidate.dom_node() == content_element.ptr()) {
+    Layout::Box const* pattern_box = nullptr;
+    target_layout_node.for_each_child_of_type<Layout::Box>([&](auto const& candidate) {
+        if (candidate.is_svg_pattern_box() && candidate.dom_node() == content_element.ptr()) {
             pattern_box = &candidate;
             return IterationDecision::Break;
         }
         return IterationDecision::Continue;
     });
     if (!pattern_box)
-        return {};
+        return nullptr;
 
-    auto pattern_paintable = pattern_box->paintable_box();
-    if (!pattern_paintable)
-        return {};
+    return pattern_box->paintable_box();
+}
 
+Optional<Painting::PaintStyle> SVGPatternElement::record_pattern_paint_style(SVGPaintContext const& paint_context, DisplayListRecordingContext& recording_context, Painting::Paintable const& pattern_paintable, Gfx::FloatSize content_scale) const
+{
     float tile_x = 0;
     float tile_y = 0;
     float tile_width = 0;
@@ -280,33 +277,40 @@ Optional<Painting::PaintStyle> SVGPatternElement::to_gfx_paint_style(SVGPaintCon
     if (tile_rect.is_empty())
         return {};
 
-    auto const* svg_node = target_layout_node.first_ancestor_of_type<Layout::SVGSVGBox>();
-    if (!svg_node || !svg_node->paintable_box())
-        return {};
-    auto svg_element_rect = svg_node->paintable_box()->absolute_rect();
-    auto svg_offset = recording_context.rounded_device_point(svg_element_rect.location()).to_type<int>().to_type<float>();
-    tile_rect.translate_by(svg_offset);
+    if (!(content_scale.width() > 0 && content_scale.height() > 0))
+        content_scale = { 1, 1 };
 
-    auto content_origin = paint_context.paint_transform.map(Gfx::FloatPoint { 0, 0 }) + svg_offset;
-    auto visual_context_tree = Painting::AccumulatedVisualContextTree::create_with_content_offset(-Gfx::IntPoint(content_origin.to_type<int>()));
-    auto display_list = Painting::DisplayList::create(visual_context_tree);
-    Painting::DisplayListRecorder display_list_recorder(*display_list, visual_context_tree, recording_context.display_list_recorder().resource_storage());
-    auto paint_context_copy = recording_context.clone(display_list_recorder);
-
-    Gfx::AffineTransform target_svg_transform;
-    auto paintable = target_layout_node.paintable();
-    if (auto const* svg_graphics_paintable = as_if<Painting::SVGGraphicsPaintable>(paintable.ptr()))
-        target_svg_transform = svg_graphics_paintable->computed_transforms().svg_transform();
-    paint_context_copy.set_svg_transform(target_svg_transform);
-
-    Painting::StackingContext::paint_svg(paint_context_copy, *pattern_paintable, Painting::PaintPhase::Foreground);
+    // Pattern content records in the pattern's own units scaled by the device pixel ratio; the
+    // nested tree root maps it into the tile surface, including the objectBoundingBox content
+    // scaling when patternContentUnits asks for it. A pattern viewBox maps content into
+    // tile-local coordinates through the pattern's viewport transform node instead, and per
+    // https://svgwg.org/svg2-draft/pservers.html#PatternElementViewBoxAttribute it overrides
+    // patternContentUnits — so the root then only applies the surface resolution scale.
+    auto device_scale = static_cast<float>(recording_context.device_pixels_per_css_pixel());
+    auto recorded_to_surface = Gfx::AffineTransform {}.scale({ content_scale.width(), content_scale.height() });
+    if (!view_box().has_value()) {
+        auto content_to_tile_transform = Gfx::AffineTransform {};
+        if (pattern_content_units() == SVGUnits::ObjectBoundingBox) {
+            auto const& bounding_box = paint_context.path_bounding_box;
+            content_to_tile_transform = Gfx::AffineTransform {}
+                                            .translate({ bounding_box.x() * device_scale, bounding_box.y() * device_scale })
+                                            .scale({ bounding_box.width(), bounding_box.height() });
+        }
+        recorded_to_surface = recorded_to_surface
+                                  .translate(-tile_rect.location())
+                                  .multiply(content_to_tile_transform);
+    }
+    Painting::TransformData tile_content_transform { recorded_to_surface.to_matrix(), {} };
+    auto tile_display_list = Painting::record_nested_svg_display_list(recording_context, pattern_paintable, tile_content_transform, Painting::IncludeRootElementTransform::No, false);
 
     Optional<Gfx::AffineTransform> user_space_pattern_transform;
-    auto const& css_transformations = computed_values()->transformations();
-    if (!css_transformations.is_empty()) {
+    auto style = computed_style();
+    VERIFY(style);
+    if (style->has_transformations()) {
         auto matrix = Gfx::FloatMatrix4x4::identity();
-        for (auto const& css_transform : css_transformations)
-            matrix = matrix * css_transform->to_matrix(*pattern_paintable);
+        style->for_each_transformation([&](auto const& css_transform) {
+            matrix = matrix * css_transform.to_matrix(pattern_paintable);
+        });
 
         user_space_pattern_transform = extract_2d_affine_transform(matrix);
     } else {
@@ -325,7 +329,7 @@ Optional<Painting::PaintStyle> SVGPatternElement::to_gfx_paint_style(SVGPaintCon
         }
     }
 
-    return Painting::PaintStyle { Painting::PatternPaintStyle { { *display_list, move(visual_context_tree) }, tile_rect, device_pattern_transform } };
+    return Painting::PaintStyle { Painting::PatternPaintStyle { move(tile_display_list), tile_rect, content_scale, device_pattern_transform } };
 }
 
 // Reflected length accessors are generated by SVGElement's reflection macro.

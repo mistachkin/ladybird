@@ -16,7 +16,6 @@
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/SharedResourceRequest.h>
 #include <LibWeb/Layout/Box.h>
-#include <LibWeb/Layout/SVGGraphicsBox.h>
 #include <LibWeb/Namespace.h>
 #include <LibWeb/SVG/AttributeNames.h>
 #include <LibWeb/SVG/FragmentIdentifier.h>
@@ -170,12 +169,7 @@ void SVGUseElement::attribute_changed(Utf16FlyString const& name, Optional<Utf16
 {
     Base::attribute_changed(name, old_value, value, namespace_);
 
-    // https://svgwg.org/svg2-draft/struct.html#UseLayout
-    if (name == SVG::AttributeNames::x) {
-        m_x = AttributeParser::parse_number_percentage(value.value_or({}));
-    } else if (name == SVG::AttributeNames::y) {
-        m_y = AttributeParser::parse_number_percentage(value.value_or({}));
-    } else if (name == SVG::AttributeNames::href || name == SVG::AttributeNames::xlink_href) {
+    if (name == SVG::AttributeNames::href || name == SVG::AttributeNames::xlink_href) {
         // When the ‘href’ attribute is set (or, in the absence of an ‘href’ attribute, an ‘xlink:href’ attribute), the user agent must process the URL.
         process_the_url(value);
     }
@@ -212,22 +206,25 @@ bool SVGUseElement::is_referenced_element_same_document() const
     return m_href->equals(document().url(), URL::ExcludeFragment::Yes);
 }
 
-Gfx::AffineTransform SVGUseElement::element_transform() const
+Gfx::AffineTransform SVGUseElement::additional_element_transform() const
 {
     CSSPixelSize viewport_size;
     if (auto* svg_svg_element = first_flat_tree_ancestor_of_type<SVGSVGElement>()) {
         if (auto view_box = svg_svg_element->active_view_box(); view_box.has_value())
             viewport_size = { CSSPixels::nearest_value_for(view_box->width), CSSPixels::nearest_value_for(view_box->height) };
         else if (auto svg_svg_layout_node = svg_svg_element->unsafe_layout_node())
-            viewport_size = { svg_svg_layout_node->computed_values().width().to_px(0), svg_svg_layout_node->computed_values().height().to_px(0) };
+            viewport_size = { svg_svg_layout_node->width().to_px(0), svg_svg_layout_node->height().to_px(0) };
     }
 
-    auto x = m_x.value_or(NumberPercentage::create_number(0)).resolve_relative_to(viewport_size.width().to_float());
-    auto y = m_y.value_or(NumberPercentage::create_number(0)).resolve_relative_to(viewport_size.height().to_float());
+    auto computed_values = this->computed_style();
+    VERIFY(computed_values);
+
+    auto x = computed_values->x().to_px(viewport_size.width()).to_float();
+    auto y = computed_values->y().to_px(viewport_size.height()).to_float();
 
     // The x and y properties define an additional transformation (translate(x,y), where x and y represent the computed value of the corresponding property)
     // to be applied to the ‘use’ element, after any transformations specified with other properties
-    return Base::element_transform().translate(x, y);
+    return Gfx::AffineTransform {}.translate(x, y);
 }
 
 void SVGUseElement::svg_element_changed(SVGElement& svg_element)
@@ -238,7 +235,7 @@ void SVGUseElement::svg_element_changed(SVGElement& svg_element)
     }
 
     // NOTE: We need to check the ancestor because attribute_changed of a child doesn't call children_changed on the parent(s)
-    if (to_clone == &svg_element || to_clone->is_ancestor_of(svg_element)) {
+    if (to_clone == GC::Ref { svg_element } || to_clone->is_ancestor_of(svg_element)) {
         clone_element_tree_as_our_shadow_tree(to_clone);
     }
 }
@@ -250,7 +247,7 @@ void SVGUseElement::svg_element_changed_before_document_complete(SVGElement& svg
         return;
 
     // NOTE: We need to check the ancestor because attribute_changed of a child doesn't call children_changed on the parent(s)
-    if (to_clone == &svg_element || to_clone->is_ancestor_of(svg_element))
+    if (to_clone == GC::Ref { svg_element } || to_clone->is_ancestor_of(svg_element))
         m_needs_document_complete_reclone = true;
 }
 
@@ -312,7 +309,7 @@ void SVGUseElement::fetch_the_document(URL::URL const& url)
 }
 
 // https://svgwg.org/svg2-draft/struct.html#UseShadowTree
-void SVGUseElement::clone_element_tree_as_our_shadow_tree(Element* to_clone)
+void SVGUseElement::clone_element_tree_as_our_shadow_tree(GC::Ptr<Element> to_clone)
 {
     shadow_root()->remove_all_children();
 
@@ -398,9 +395,9 @@ GC::Ptr<SVGElement> SVGUseElement::instance_root() const
     return const_cast<DOM::ShadowRoot&>(*shadow_root()).first_child_of_type<SVGElement>();
 }
 
-RefPtr<Layout::Node> SVGUseElement::create_layout_node(NonnullRefPtr<CSS::ComputedValues const> style)
+RefPtr<Layout::Node> SVGUseElement::create_layout_node(CSS::LayoutStyle style)
 {
-    return make_ref_counted<Layout::SVGGraphicsBox>(document(), *this, style);
+    return make_ref_counted<Layout::Box>(document(), *this, style, Layout::RustFFI::NodeKind::SVGGraphicsBox);
 }
 
 }

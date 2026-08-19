@@ -13,7 +13,7 @@
 #include <LibWeb/HTML/HTMLMediaElement.h>
 #include <LibWeb/HTML/HTMLVideoElement.h>
 #include <LibWeb/HTML/VideoTrackList.h>
-#include <LibWeb/Layout/VideoBox.h>
+#include <LibWeb/Layout/Box.h>
 #include <LibWeb/Painting/BorderRadiusCornerClipper.h>
 #include <LibWeb/Painting/DisplayListRecorder.h>
 #include <LibWeb/Painting/ReplacedElementCommon.h>
@@ -26,12 +26,12 @@ static CSSPixelSize to_css_pixel_size(Gfx::IntSize size)
     return CSSPixelSize { CSSPixels(size.width()), CSSPixels(size.height()) };
 }
 
-NonnullRefPtr<VideoPaintable> VideoPaintable::create(Layout::VideoBox const& layout_box)
+NonnullRefPtr<VideoPaintable> VideoPaintable::create(Layout::Box const& layout_box)
 {
     return adopt_ref(*new VideoPaintable(layout_box));
 }
 
-VideoPaintable::VideoPaintable(Layout::VideoBox const& layout_box)
+VideoPaintable::VideoPaintable(Layout::Box const& layout_box)
     : Paintable(layout_box)
 {
 }
@@ -59,10 +59,10 @@ void VideoPaintable::paint(DisplayListRecordingContext& context, PaintPhase phas
 
     auto paint_bitmap = [&](auto const& bitmap) {
         auto frame = Gfx::DecodedImageFrame { bitmap };
-        auto dst_rect = get_replaced_box_painting_area(*this, context, computed_values().object_fit(), to_css_pixel_size(bitmap.size()));
+        auto dst_rect = get_replaced_box_painting_area(*this, context, layout_node().object_fit(), to_css_pixel_size(bitmap.size()));
         if (dst_rect.is_empty())
             return;
-        auto scaling_mode = to_gfx_scaling_mode(computed_values().image_rendering(), frame.size(), dst_rect.size());
+        auto scaling_mode = to_gfx_scaling_mode(layout_node().image_rendering(), frame.size(), dst_rect.size());
         context.display_list_recorder().draw_scaled_decoded_image_frame(dst_rect, move(frame), scaling_mode);
     };
 
@@ -72,10 +72,10 @@ void VideoPaintable::paint(DisplayListRecordingContext& context, PaintPhase phas
             return;
         auto src_size = video_element.natural_media_size()->to_type<int>();
 
-        auto dst_rect = get_replaced_box_painting_area(*this, context, computed_values().object_fit(), to_css_pixel_size(src_size));
+        auto dst_rect = get_replaced_box_painting_area(*this, context, layout_node().object_fit(), to_css_pixel_size(src_size));
         if (dst_rect.is_empty())
             return;
-        auto scaling_mode = to_gfx_scaling_mode(computed_values().image_rendering(), src_size, dst_rect.size());
+        auto scaling_mode = to_gfx_scaling_mode(layout_node().image_rendering(), src_size, dst_rect.size());
         auto video_sink_id = video_element.video_sink_resource_id().value();
         context.display_list_recorder().draw_video_frame(dst_rect, video_sink_id, *sink_handle, scaling_mode);
     };

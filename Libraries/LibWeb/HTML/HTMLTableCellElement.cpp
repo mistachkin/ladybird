@@ -5,8 +5,9 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/CSS/ComputedProperties.h>
+#include <LibWeb/CSS/ComputedValues.h>
 #include <LibWeb/CSS/Parser/Parser.h>
+#include <LibWeb/CSS/PropertyID.h>
 #include <LibWeb/CSS/StyleValues/ColorStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ImageStyleValue.h>
 #include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
@@ -101,9 +102,25 @@ void HTMLTableCellElement::apply_presentational_hints(Vector<CSS::StyleProperty>
     if (!border)
         return;
     auto apply_border_style = [&](CSS::PropertyID style_property, CSS::PropertyID width_property, CSS::PropertyID color_property) {
+        auto const& border_values = *table_element->style_group<CSS::ComputedValues::BorderValues>();
+        auto const* color = [&] {
+            switch (color_property) {
+            case CSS::PropertyID::BorderLeftColor:
+                return static_cast<CSS::StyleValueFFI::StyleValueData const*>(border_values.border_left_color_style_value.pointer);
+            case CSS::PropertyID::BorderTopColor:
+                return static_cast<CSS::StyleValueFFI::StyleValueData const*>(border_values.border_top_color_style_value.pointer);
+            case CSS::PropertyID::BorderRightColor:
+                return static_cast<CSS::StyleValueFFI::StyleValueData const*>(border_values.border_right_color_style_value.pointer);
+            case CSS::PropertyID::BorderBottomColor:
+                return static_cast<CSS::StyleValueFFI::StyleValueData const*>(border_values.border_bottom_color_style_value.pointer);
+            default:
+                VERIFY_NOT_REACHED();
+            }
+        }();
+        VERIFY(color);
         properties.append({ .property_id = style_property, .value = CSS::KeywordStyleValue::create(CSS::Keyword::Inset) });
         properties.append({ .property_id = width_property, .value = CSS::LengthStyleValue::create(CSS::Length::make_px(1)) });
-        properties.append({ .property_id = color_property, .value = table_element->computed_values()->computed_style_value(color_property).release_nonnull() });
+        properties.append({ .property_id = color_property, .value = CSS::StyleValue::adopt_rust_style_value_data(CSS::StyleValueFFI::rust_style_value_retain(color)) });
     };
     apply_border_style(CSS::PropertyID::BorderLeftStyle, CSS::PropertyID::BorderLeftWidth, CSS::PropertyID::BorderLeftColor);
     apply_border_style(CSS::PropertyID::BorderTopStyle, CSS::PropertyID::BorderTopWidth, CSS::PropertyID::BorderTopColor);
@@ -194,7 +211,7 @@ WebIDL::Long HTMLTableCellElement::cell_index() const
 
     auto rows = parent->cells()->collect_matching_elements();
     for (size_t i = 0; i < rows.size(); ++i) {
-        if (rows[i] == this)
+        if (rows[i].ptr() == this)
             return i;
     }
     return -1;

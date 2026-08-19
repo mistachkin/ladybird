@@ -8,9 +8,9 @@
  */
 
 #include <LibWeb/CSS/CSSStyleProperties.h>
-#include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/Invalidation/ElementStateInvalidator.h>
 #include <LibWeb/CSS/Invalidation/FormControlInvalidator.h>
+#include <LibWeb/CSS/PropertyID.h>
 #include <LibWeb/CSS/StyleValues/DisplayStyleValue.h>
 #include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
 #include <LibWeb/DOM/Document.h>
@@ -46,6 +46,17 @@ HTMLSelectElement::HTMLSelectElement(DOM::Document& document, DOM::QualifiedName
 }
 
 HTMLSelectElement::~HTMLSelectElement() = default;
+
+// `:user-valid` and `:user-invalid` turn on the first time the user has interacted with the
+// control, which no attribute and no value says. The style engine is told what the element now
+// holds rather than asking.
+void HTMLSelectElement::set_user_validity(bool flag)
+{
+    if (m_user_validity == flag)
+        return;
+    m_user_validity = flag;
+    CSS::Invalidation::invalidate_style_after_validity_change(*this);
+}
 
 void HTMLSelectElement::visit_edges(Cell::Visitor& visitor)
 {
@@ -113,7 +124,7 @@ GC::Ptr<HTMLOptionsCollection> const& HTMLSelectElement::options() const
     if (!m_options) {
         m_options = HTMLOptionsCollection::create(const_cast<HTMLSelectElement&>(*this), [this](DOM::Element const& element) {
             auto const* maybe_option = as_if<HTML::HTMLOptionElement>(element);
-            return maybe_option && maybe_option->nearest_select_element() == this;
+            return maybe_option && maybe_option->nearest_select_element().ptr() == this;
         });
     }
     return m_options;
@@ -188,7 +199,7 @@ GC::Ref<DOM::HTMLCollection> HTMLSelectElement::selected_options()
     if (!m_selected_options) {
         m_selected_options = DOM::HTMLCollection::create(*this, DOM::HTMLCollection::Scope::Descendants, [this](Element const& element) {
             auto const* maybe_option = as_if<HTML::HTMLOptionElement>(element);
-            if (maybe_option && maybe_option->nearest_select_element() == this) {
+            if (maybe_option && maybe_option->nearest_select_element().ptr() == this) {
                 return maybe_option->selected();
             }
             return false;
@@ -495,7 +506,7 @@ void HTMLSelectElement::set_is_open(bool open)
         return;
 
     m_is_open = open;
-    CSS::Invalidation::invalidate_style_after_select_open_state_change(*this);
+    CSS::Invalidation::invalidate_style_after_select_open_state_change(*this, open);
 }
 
 bool HTMLSelectElement::has_activation_behavior() const
@@ -664,7 +675,9 @@ void HTMLSelectElement::computed_properties_changed()
 {
     // Hide chevron icon when appearance is none
     if (m_chevron_icon_element) {
-        auto appearance = computed_values()->appearance();
+        auto style = computed_style();
+        VERIFY(style);
+        auto appearance = style->appearance();
         if (appearance == CSS::Appearance::None) {
             MUST(m_chevron_icon_element->style()->set_property(CSS::PropertyID::Display, "none"_utf16));
             MUST(m_inner_text_element->style()->set_property(CSS::PropertyID::MarginInlineEnd, "0"_utf16));

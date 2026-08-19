@@ -30,9 +30,11 @@
 #include <LibWeb/Fetch/Infrastructure/HTTP/Requests.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/HTML/ActivateTab.h>
+#include <LibWeb/HTML/ApplyHistoryStep.h>
 #include <LibWeb/HTML/CrossProcessId.h>
 #include <LibWeb/HTML/FileFilter.h>
 #include <LibWeb/HTML/HistoryHandlingBehavior.h>
+#include <LibWeb/HTML/HistoryOperation.h>
 #include <LibWeb/HTML/ReplicatedNavigableState.h>
 #include <LibWeb/HTML/SameDocumentNavigationEntry.h>
 #include <LibWeb/HTML/Scripting/ScriptRegistry.h>
@@ -131,16 +133,13 @@ private:
     virtual void did_request_new_process_for_child_frame_navigation(u64 page_id, Web::HTML::CrossProcessId frame_id, URL::URL url, Web::HTML::DocumentResource document_resource, Web::Bindings::NavigationHistoryBehavior history_handling, Optional<Web::HTML::NavigationSourceSnapshot> source_snapshot) override;
     virtual void did_create_child_frame(u64 page_id, Web::HTML::CrossProcessId parent_frame_id, Web::HTML::CrossProcessId frame_id, Web::HTML::ReplicatedNavigableState replicated_state) override;
     virtual void did_update_child_frame_viewport(u64 page_id, Web::HTML::CrossProcessId frame_id, Web::DevicePixelRect viewport_rect, double device_pixel_ratio) override;
-    virtual void did_commit_child_frame_navigation(u64 page_id, Web::HTML::CrossProcessId frame_id, Web::HTML::ReplicatedNavigableState replicated_state) override;
-    virtual void did_change_top_level_active_document(u64 page_id, Web::HTML::ReplicatedNavigableState replicated_state) override;
     virtual void did_destroy_child_frame(u64 page_id, Web::HTML::CrossProcessId frame_id) override;
-    virtual void did_start_webdriver_navigation(u64 page_id, URL::URL url) override;
+    virtual void did_start_webdriver_navigation(u64 page_id) override;
     virtual void did_finish_loading(u64 page_id, Optional<Utf16String>, URL::URL) override;
     virtual void did_request_refresh(u64 page_id) override;
     virtual void did_request_cursor_change(u64 page_id, Gfx::Cursor) override;
     virtual void did_change_title(u64 page_id, Utf16String) override;
     virtual void did_update_editing_history_state(u64 page_id, bool can_undo, bool can_redo) override;
-    virtual void did_change_url(u64 page_id, URL::URL) override;
     virtual void did_request_tooltip_override(u64 page_id, Gfx::IntPoint, ByteString) override;
     virtual void did_stop_tooltip_override(u64 page_id) override;
     virtual void did_enter_tooltip_area(u64 page_id, ByteString) override;
@@ -149,8 +148,9 @@ private:
     virtual void did_unhover_link(u64 page_id) override;
     virtual void did_click_link(u64 page_id, URL::URL, ByteString, unsigned) override;
     virtual void did_middle_click_link(u64 page_id, URL::URL, ByteString, unsigned) override;
-    virtual void did_start_loading(u64 page_id, Optional<Utf16String>, URL::URL, Web::HTML::DocumentResource, bool, Web::Bindings::NavigationHistoryBehavior) override;
-    virtual void did_cancel_loading(u64 page_id, Optional<Utf16String>, URL::URL) override;
+    virtual void did_request_external_url(u64 page_id, URL::URL, URL::Origin, bool has_transient_activation) override;
+    virtual void did_start_loading(u64 page_id, Optional<Utf16String>, URL::URL, bool) override;
+    virtual void did_cancel_loading(u64 page_id, Optional<Utf16String>) override;
     virtual Messages::WebContentClient::DidStartDownloadWithoutRequestResponse did_start_download_without_request(u64 page_id, URL::URL, ByteString suggested_filename, Optional<u64> total_size) override;
     virtual Messages::WebContentClient::DidStartDownloadResponse did_start_download(u64 page_id, URL::URL, ByteString suggested_filename, Optional<u64> total_size, int request_server_client_id, u64 request_server_request_id, ByteBuffer initial_data) override;
     virtual void did_receive_download_data(u64 page_id, u64 download_id, ByteBuffer data) override;
@@ -220,14 +220,9 @@ private:
     virtual void did_request_activate_tab(u64 page_id) override;
     virtual void did_close_browsing_context(u64 page_id) override;
     virtual void did_change_needs_beforeunload_check(u64 page_id, bool needs_beforeunload_check) override;
-    virtual void did_request_traverse_the_history_by_delta(u64 page_id, i32 delta, Web::HistoryTraversalPrecheck) override;
-    virtual void did_request_history_traversal_target_by_delta(u64 page_id, u64 request_id, i32 delta) override;
-    virtual void did_request_traverse_the_history_to_step(u64 page_id, i32 step, Web::HistoryTraversalPrecheck) override;
-    virtual void did_request_navigation_api_traversal_target(u64 page_id, u64 request_id, Web::HTML::CrossProcessId navigable_id, Utf16String navigation_api_key) override;
     virtual void did_request_webdriver_history_traversal(u64 page_id, u64 request_id, i32 delta) override;
     virtual Messages::WebContentClient::DidRequestWebdriverLoadUrlFromUiResponse did_request_webdriver_load_url_from_ui(u64 page_id, URL::URL url) override;
     virtual Messages::WebContentClient::DidRequestWebdriverTraverseHistoryFromUiResponse did_request_webdriver_traverse_history_from_ui(u64 page_id, i32 delta) override;
-    virtual Messages::WebContentClient::DidRequestWebdriverMarkWebContentSessionHistoryStaleResponse did_request_webdriver_mark_web_content_session_history_stale(u64 page_id) override;
     virtual Messages::WebContentClient::DidRequestWebdriverSessionHistoryResponse did_request_webdriver_session_history(u64 page_id) override;
     virtual void did_request_webdriver_navigation_completion(u64 page_id, u64 request_id, Optional<u64> page_load_timeout) override;
     virtual void did_update_resource_count(u64 page_id, i32 count_waiting) override;
@@ -264,26 +259,26 @@ private:
     virtual void did_create_top_level_traversable(u64 page_id, Web::HTML::CrossProcessId navigable_id, Web::HTML::SessionHistoryEntryDescriptor initial_history_entry) override;
     virtual void did_update_session_history_entry_navigation_api_state(u64 page_id, Web::HTML::CrossProcessId navigable_id, Utf16String navigation_api_key, Web::HTML::StorageSerializationRecord navigation_api_state) override;
     virtual void did_update_session_history_entry_scroll_restoration_mode(u64 page_id, Web::HTML::CrossProcessId navigable_id, Utf16String navigation_api_key, Web::HTML::ScrollRestorationMode scroll_restoration_mode) override;
-    virtual void did_update_session_history_entry_scroll_position_data(u64 page_id, Web::HTML::CrossProcessId navigable_id, Utf16String navigation_api_key, Web::HTML::SessionHistoryEntryScrollPositionData scroll_position_data) override;
     virtual void did_update_session_history_entry_document_state_navigable_target_name(u64 page_id, Web::HTML::CrossProcessId navigable_id, Utf16String navigation_api_key, Utf16String navigable_target_name) override;
     virtual void did_set_session_history_entry_document_state_reload_pending(u64 page_id, Web::HTML::CrossProcessId navigable_id, Utf16String navigation_api_key, bool reload_pending) override;
-    virtual void did_append_nested_history(u64 page_id, Web::HTML::CrossProcessId parent_navigable_id, Web::HTML::SessionHistoryNestedHistoryDescriptor nested_history) override;
-    virtual void did_remove_nested_history(u64 page_id, Web::HTML::CrossProcessId parent_navigable_id, Web::HTML::CrossProcessId child_navigable_id) override;
-    virtual void did_request_finalize_same_document_navigation(u64 page_id, u64 operation_id, Web::HTML::CrossProcessId navigable_id, Web::HTML::SameDocumentNavigationEntry target_entry, bool replaces_current_entry, Web::HTML::HistoryHandlingBehavior history_handling, Web::HTML::UserNavigationInvolvement user_involvement) override;
-    virtual void did_finalize_cross_document_navigation(u64 page_id, Web::HTML::CrossProcessId navigable_id, Web::HTML::SessionHistoryEntryDescriptor history_entry, Optional<Utf16String> entry_to_replace_navigation_api_key) override;
-    virtual void did_set_current_session_history_step(u64 page_id, i32 current_session_history_step) override;
     virtual Messages::WebContentClient::DidRequestUiProcessSessionHistoryForTestingResponse did_request_ui_process_session_history_for_testing(u64 page_id) override;
     virtual Messages::WebContentClient::DidRequestSiteIsolationProcessTreeForTestingResponse did_request_site_isolation_process_tree_for_testing(u64 page_id) override;
-    virtual Messages::WebContentClient::DidUpdateSessionHistoryAndRequestUiProcessSessionHistoryForTestingResponse did_update_session_history_and_request_ui_process_session_history_for_testing(u64 page_id, Vector<Web::HTML::SessionHistoryEntryDescriptor>, Vector<i32>, size_t current_used_step_index) override;
-    virtual void did_set_top_level_session_history(u64 page_id, bool accepted, Vector<Web::HTML::SessionHistoryEntryDescriptor>, Vector<i32> used_steps, size_t current_used_step_index) override;
-    virtual void did_traverse_the_history_to_step(u64 page_id, i32 step, bool step_was_available, Web::HTML::HistoryStepResult) override;
-    virtual void did_check_if_traverse_history_step_is_canceled(
-        u64 page_id, u64 request_id, i32 step, Web::HTML::HistoryStepResult) override;
-    virtual void did_reset_session_history_for_testing(u64 page_id) override;
+    virtual void request_history_operation(u64 page_id, u64 initiation_id, Web::HistoryOperationParameters) override;
+    virtual void history_operation_ready(u64 page_id, u64 operation_id, Web::HistoryOperationReadyResult) override;
+    virtual void history_step_unload_cancelation_result(u64 page_id, u64 operation_id, Web::HTML::HistoryStepResult result) override;
+    virtual void changing_navigable_history_job_ready(u64 page_id, u64 operation_id, Web::HTML::CrossProcessId navigable_id, Web::HTML::ChangingNavigableHistoryStepJobDisposition disposition) override;
+    virtual void changing_navigable_continuation_applied(u64 page_id, u64 operation_id, Web::HTML::CrossProcessId navigable_id, Optional<Web::HTML::ReplicatedNavigableState> activated_navigable_state, Optional<Web::HTML::SessionHistoryEntryPersistedState> previous_entry_persisted_state) override;
+    virtual void nonchanging_navigable_history_state_updated(u64 page_id, u64 operation_id, Web::HTML::CrossProcessId navigable_id) override;
+    virtual void did_reset_session_history_for_testing(u64 page_id, Web::HTML::SessionHistoryEntryDescriptor) override;
+    virtual Messages::WebContentClient::DidRequestCaptureSessionHistorySnapshotForTestingResponse did_request_capture_session_history_snapshot_for_testing(u64 page_id) override;
+    virtual Messages::WebContentClient::DidRequestRestoreSessionHistorySnapshotForTestingResponse did_request_restore_session_history_snapshot_for_testing(u64 page_id) override;
+    virtual Messages::WebContentClient::DidRequestRegisterSessionStoreTabForTestingResponse did_request_register_session_store_tab_for_testing(u64 page_id) override;
+    virtual Messages::WebContentClient::DidRequestSessionStoreTabStateForTestingResponse did_request_session_store_tab_state_for_testing(u64 page_id) override;
     virtual Messages::WebContentClient::StartWorkerAgentResponse start_worker_agent(u64 page_id, Web::HTML::WorkerAgentStartRequest request) override;
     virtual void close_worker_agent(u64 page_id, Web::HTML::WorkerAgentId agent_id, Web::HTML::WorkerAgentOwnerToken owner_token) override;
 
     Optional<ViewImplementation&> view_for_page_id(u64, SourceLocation = SourceLocation::current());
+    Optional<ViewImplementation&> owning_view_for_page_id(u64);
 
     void remember_compositor_context(Web::Compositor::CompositorContextId, Optional<u64> page_id);
     bool is_renderer_owned_download(u64 page_id, u64 download_id) const;

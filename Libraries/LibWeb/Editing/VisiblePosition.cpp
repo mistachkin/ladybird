@@ -101,7 +101,7 @@ static bool has_rendered_text_after(DOM::Text const& text, size_t offset)
 
 static bool is_rendered_atomic_inline(DOM::Node const& node)
 {
-    auto const* layout_node = node.layout_node();
+    auto const* layout_node = node.unsafe_layout_node();
     return layout_node && layout_node->is_atomic_inline();
 }
 
@@ -159,7 +159,7 @@ static AdjacentContent scan_adjacent_content(Web::Selection::CaretLocation const
         }
     }
 
-    while (node && node != &block && block.is_inclusive_ancestor_of(*node)) {
+    while (node && node.ptr() != &block && block.is_inclusive_ancestor_of(*node)) {
         if (is<HTML::HTMLBRElement>(*node)) {
             // INTEROP: A br at the outer edge of its containing block is a caret placeholder, not an internal
             //          paragraph boundary. Blink and WebKit therefore treat the position before a trailing br as the
@@ -223,7 +223,7 @@ bool VisiblePosition::is_end_of_containing_block() const
 bool VisiblePosition::is_before_or_after_containing_block() const
 {
     auto block = block_node_of_node(m_deep_equivalent.node);
-    if (!block || m_deep_equivalent.node.ptr() != block)
+    if (!block || m_deep_equivalent.node.ptr() != block.ptr())
         return false;
 
     // INTEROP: Blink and WebKit Positions retain whether a block-owned offset is anchored before or after an atomic

@@ -81,19 +81,14 @@ public:
     void set_preferred_motion(Web::CSS::PreferredMotion);
     virtual void set_has_focus(bool) override;
     void set_window_handle(Utf16String);
-    void did_start_webdriver_navigation(URL::URL const&);
+    void did_start_webdriver_navigation();
     struct WebDriverHistoryTraversalResult {
         bool accepted { false };
-        bool will_replace_web_content_process { false };
-        bool will_change_top_level_entry { false };
     };
-    void did_resolve_session_history_traversal_target(u64 request_id, Optional<i32> target_step);
-    void did_complete_finalize_same_document_navigation(u64 operation_id, bool committed, int entry_step, int target_step, u64 script_history_length, u64 script_history_index);
     void request_webdriver_history_traversal(int delta, Function<void(WebDriverHistoryTraversalResult)>);
-    void did_complete_webdriver_history_traversal(u64 request_id, bool accepted, bool will_replace_web_content_process, bool will_change_top_level_entry);
+    void did_complete_webdriver_history_traversal(u64 request_id, bool accepted);
     Web::WebDriver::Response request_webdriver_load_url_from_ui(URL::URL const&);
     Web::WebDriver::Response request_webdriver_traverse_history_from_ui(int delta);
-    Web::WebDriver::Response request_webdriver_mark_web_content_session_history_stale();
     Web::WebDriver::Response request_webdriver_session_history();
     void set_is_scripting_enabled(bool);
     void set_window_position(Web::DevicePixelPoint);
@@ -169,7 +164,6 @@ private:
     virtual void request_new_process_for_child_frame_navigation(Web::HTML::CrossProcessId frame_id, URL::URL const&, Web::HTML::DocumentResource, Web::Bindings::NavigationHistoryBehavior, Optional<Web::HTML::NavigationSourceSnapshot> const&) override;
     virtual void page_did_create_child_frame(Web::HTML::CrossProcessId parent_frame_id, Web::HTML::CrossProcessId frame_id, Web::HTML::ReplicatedNavigableState const&) override;
     virtual void page_did_update_child_frame_viewport(Web::HTML::CrossProcessId frame_id, Web::CSSPixelRect) override;
-    virtual void page_did_commit_child_frame_navigation(Web::HTML::CrossProcessId frame_id, Web::HTML::ReplicatedNavigableState const&) override;
     virtual void page_did_destroy_child_frame(Web::HTML::CrossProcessId frame_id) override;
     virtual Optional<Web::Compositor::CompositorContextId> compositor_context_id_for_remote_child_frame(Web::HTML::CrossProcessId) const override;
     virtual String dump_site_isolation_process_tree_for_testing() override;
@@ -183,7 +177,6 @@ private:
     virtual void page_did_request_cursor_change(Gfx::Cursor const&) override;
     virtual void page_did_change_title(Utf16String const&) override;
     virtual void page_did_update_editing_history_state(bool can_undo, bool can_redo) override;
-    virtual void page_did_change_url(URL::URL const&) override;
     virtual void page_did_request_refresh() override;
     virtual void page_did_request_resize_window(Gfx::IntSize) override;
     virtual void page_did_request_reposition_window(Gfx::IntPoint) override;
@@ -200,11 +193,12 @@ private:
     virtual void page_did_unhover_link() override;
     virtual void page_did_click_link(URL::URL const&, ByteString const& target, unsigned modifiers) override;
     virtual void page_did_middle_click_link(URL::URL const&, ByteString const& target, unsigned modifiers) override;
+    virtual void page_did_request_external_url(URL::URL const&, URL::Origin const& initiator_origin, bool has_transient_activation) override;
     virtual void page_did_request_context_menu(Web::CSSPixelPoint, Web::ContextMenuForInputEventsTarget) override;
     virtual void page_did_request_link_context_menu(Web::CSSPixelPoint, URL::URL const&, ByteString const& target, unsigned modifiers) override;
     virtual void page_did_request_image_context_menu(Web::CSSPixelPoint, URL::URL const&, ByteString const& target, unsigned modifiers, Optional<Gfx::Bitmap const*>) override;
     virtual void page_did_request_media_context_menu(Web::CSSPixelPoint, ByteString const& target, unsigned modifiers, Web::Page::MediaContextMenu const&) override;
-    virtual void page_did_start_loading(Optional<Utf16String> const&, URL::URL const&, Web::HTML::DocumentResource, bool, Web::Bindings::NavigationHistoryBehavior) override;
+    virtual void page_did_start_loading(Optional<Utf16String> const&, URL::URL const&, bool) override;
     virtual void page_did_cancel_loading(Optional<Utf16String> const&, URL::URL const&) override;
     virtual void page_did_create_new_document(Web::DOM::Document&) override;
     virtual void page_did_change_active_document_in_top_level_browsing_context(Web::DOM::Document&) override;
@@ -256,20 +250,14 @@ private:
     virtual void page_did_change_needs_beforeunload_check(bool needs_beforeunload_check) override;
     virtual void page_did_update_session_history_entry_navigation_api_state(Web::HTML::CrossProcessId navigable_id, Utf16String const& navigation_api_key, Web::HTML::StorageSerializationRecord const& navigation_api_state) override;
     virtual void page_did_update_session_history_entry_scroll_restoration_mode(Web::HTML::CrossProcessId navigable_id, Utf16String const& navigation_api_key, Web::HTML::ScrollRestorationMode scroll_restoration_mode) override;
-    virtual void page_did_update_session_history_entry_scroll_position_data(Web::HTML::CrossProcessId navigable_id, Utf16String const& navigation_api_key, Web::HTML::SessionHistoryEntryScrollPositionData const& scroll_position_data) override;
     virtual void page_did_update_session_history_entry_document_state_navigable_target_name(Web::HTML::CrossProcessId navigable_id, Utf16String const& navigation_api_key, Utf16String const& navigable_target_name) override;
     virtual void page_did_set_session_history_entry_document_state_reload_pending(Web::HTML::CrossProcessId navigable_id, Utf16String const& navigation_api_key, bool reload_pending) override;
-    virtual void page_did_append_nested_history(Web::HTML::CrossProcessId parent_navigable_id, Web::HTML::SessionHistoryNestedHistoryDescriptor const& nested_history) override;
-    virtual void page_did_remove_nested_history(Web::HTML::CrossProcessId parent_navigable_id, Web::HTML::CrossProcessId child_navigable_id) override;
-    virtual void page_did_request_finalize_same_document_navigation(u64 operation_id, Web::HTML::CrossProcessId navigable_id, Web::HTML::SameDocumentNavigationEntry const& target_entry, bool replaces_current_entry, Web::HTML::HistoryHandlingBehavior history_handling, Web::HTML::UserNavigationInvolvement user_involvement) override;
-    virtual void page_did_finalize_cross_document_navigation(Web::HTML::CrossProcessId navigable_id, Web::HTML::SessionHistoryEntryDescriptor const& history_entry, Optional<Utf16String> const& entry_to_replace_navigation_api_key) override;
-    virtual void page_did_set_current_session_history_step(int current_session_history_step) override;
+    virtual void page_did_request_history_operation(u64 initiation_id, Web::HistoryOperationParameters) override;
     virtual String page_did_request_ui_process_session_history_for_testing() override;
-    virtual String page_did_update_session_history_and_request_ui_process_session_history_for_testing(Vector<Web::HTML::SessionHistoryEntryDescriptor> const&, Vector<i32> const& used_steps, size_t current_used_step_index) override;
-    virtual void page_did_request_traverse_the_history_by_delta(int delta, Web::HistoryTraversalPrecheck) override;
-    virtual void page_did_request_history_traversal_target_by_delta(int delta, GC::Ref<GC::Function<void(Optional<int>)>> on_complete) override;
-    virtual void page_did_request_traverse_the_history_to_step(int step, Web::HistoryTraversalPrecheck) override;
-    virtual void page_did_request_navigation_api_traversal_target(Web::HTML::CrossProcessId navigable_id, Utf16String const& navigation_api_key, GC::Ref<GC::Function<void(Optional<int>)>> on_complete) override;
+    virtual bool page_did_request_capture_session_history_snapshot_for_testing() override;
+    virtual bool page_did_request_restore_session_history_snapshot_for_testing() override;
+    virtual bool page_did_request_register_session_store_tab_for_testing() override;
+    virtual String page_did_request_session_store_tab_state_for_testing() override;
     virtual void request_file(Web::FileRequest) override;
     virtual void page_did_request_color_picker(Color current_color) override;
     virtual void page_did_request_file_picker(Web::HTML::FileFilter const& accepted_file_types, Web::HTML::AllowMultipleFiles) override;
@@ -288,6 +276,7 @@ private:
     virtual void page_did_insert_clipboard_item(Web::Clipboard::SystemClipboardItem const&, StringView presentation_style) override;
     virtual void page_did_request_clipboard_entries(u64 request_id) override;
     virtual void page_did_request_primary_paste() override;
+    virtual void page_did_complete_paste_action() override;
     virtual void page_did_update_primary_selection(Utf16String const&) override;
     virtual void page_did_change_audio_play_state(Web::HTML::AudioPlayState) override;
     virtual void page_did_change_screen_wake_lock_state(Web::ScreenWakeLockState) override;
@@ -341,9 +330,6 @@ private:
     HashMap<u64, Function<void(Web::WebDriver::Response)>> m_pending_webdriver_navigation_completion_requests;
     u64 m_next_webdriver_history_traversal_request_id { 0 };
     HashMap<u64, Function<void(WebDriverHistoryTraversalResult)>> m_pending_webdriver_history_traversal_requests;
-    u64 m_next_session_history_traversal_target_request_id { 0 };
-    HashMap<u64, GC::Ref<GC::Function<void(Optional<int>)>>> m_pending_session_history_traversal_target_requests;
-
     RefPtr<WebDriverConnection> m_webdriver;
     RefPtr<WebUIConnection> m_web_ui;
 

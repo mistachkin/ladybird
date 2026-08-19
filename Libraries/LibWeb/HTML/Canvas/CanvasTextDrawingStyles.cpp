@@ -6,9 +6,10 @@
  */
 
 #include "CanvasTextDrawingStyles.h"
-#include <LibWeb/CSS/ComputedProperties.h>
+#include <LibWeb/CSS/ComputedValues.h>
 #include <LibWeb/CSS/FontComputer.h>
 #include <LibWeb/CSS/Parser/Parser.h>
+#include <LibWeb/CSS/PropertyID.h>
 #include <LibWeb/CSS/StyleComputer.h>
 #include <LibWeb/CSS/StyleValues/FontStyleStyleValue.h>
 #include <LibWeb/CSS/StyleValues/LengthStyleValue.h>
@@ -101,7 +102,7 @@ void CanvasTextDrawingStyles<CanvasType>::set_font(Utf16View font)
 
         if (canvas_element.navigable() && canvas_element.is_connected()) {
             // NOTE: Since we can't set a math depth directly here we always use the inherited value for the computed value
-            computed_math_depth = canvas_element.computed_values()->math_depth();
+            computed_math_depth = canvas_element.template style_group<CSS::ComputedValues::FontValues>()->math_depth;
 
             // NOTE: The canvas itself is considered the inheritance parent
             inheritance_parent = canvas_element;

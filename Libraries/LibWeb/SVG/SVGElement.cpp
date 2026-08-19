@@ -6,15 +6,19 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/CSS/ComputedProperties.h>
+#include <LibWeb/CSS/PropertyID.h>
 #include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
+#include <LibWeb/CSS/StyleValues/NumberStyleValue.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/ShadowRoot.h>
+#include <LibWeb/Layout/Node.h>
 #include <LibWeb/Painting/SVGSVGPaintable.h>
+#include <LibWeb/SVG/AttributeParser.h>
 #include <LibWeb/SVG/SVGAnimatedLength.h>
 #include <LibWeb/SVG/SVGDescElement.h>
 #include <LibWeb/SVG/SVGElement.h>
 #include <LibWeb/SVG/SVGForeignObjectElement.h>
+#include <LibWeb/SVG/SVGGraphicsElement.h>
 #include <LibWeb/SVG/SVGSVGElement.h>
 #include <LibWeb/SVG/SVGSymbolElement.h>
 #include <LibWeb/SVG/SVGTitleElement.h>
@@ -28,6 +32,11 @@ GC_DEFINE_ALLOCATOR(SVGElement);
 SVGElement::SVGElement(DOM::Document& document, DOM::QualifiedName qualified_name)
     : Element(document, move(qualified_name))
 {
+}
+
+RefPtr<Layout::Node> SVGElement::create_layout_node(CSS::LayoutStyle)
+{
+    return nullptr;
 }
 
 struct NamedPropertyID {
@@ -105,6 +114,7 @@ static ReadonlySpan<NamedPropertyID> attribute_style_properties()
         NamedPropertyID(CSS::PropertyID::TextDecoration),
         NamedPropertyID(CSS::PropertyID::TextRendering),
         NamedPropertyID(CSS::PropertyID::TextOverflow),
+        NamedPropertyID(CSS::PropertyID::Transform),
         NamedPropertyID(CSS::PropertyID::Transform, "gradientTransform"_utf16_fly_string, { SVG::TagNames::linearGradient, SVG::TagNames::radialGradient }),
         NamedPropertyID(CSS::PropertyID::Transform, "patternTransform"_utf16_fly_string, { SVG::TagNames::pattern }),
         NamedPropertyID(CSS::PropertyID::TransformOrigin),
@@ -122,6 +132,13 @@ static ReadonlySpan<NamedPropertyID> attribute_style_properties()
 
 static Optional<CSS::PropertyID> property_id_for_presentational_attribute(Utf16FlyString const& name, Utf16FlyString const& tag_name)
 {
+    // https://svgwg.org/svg2-draft/styling.html#PresentationAttributes
+    // The pattern and gradient elements take patternTransform and gradientTransform instead of the
+    // plain transform presentation attribute.
+    if (name == "transform"_utf16_fly_string
+        && (tag_name == TagNames::pattern || tag_name == TagNames::linearGradient || tag_name == TagNames::radialGradient))
+        return {};
+
     for (auto const& property : attribute_style_properties()) {
         if (!property.name.equals_ignoring_ascii_case(name))
             continue;
@@ -149,12 +166,35 @@ void SVGElement::apply_presentational_hints(Vector<CSS::StyleProperty>& properti
     CSS::Parser::ParsingParams parsing_context { document(), CSS::Parser::ParsingMode::SVGPresentationAttribute };
     for_each_attribute([&](Utf16FlyString const& name, Utf16View const& value) {
         if (auto property_id = property_id_for_presentational_attribute(name, local_name()); property_id.has_value()) {
-            auto style_value = [&] {
+            auto style_value = [&]() -> RefPtr<CSS::StyleValue const> {
                 // NB: <path>'s `d` presentational attribute is a special case - the attribute and the CSS properties
                 //     syntaxes differ with the attribute being a raw path string but the CSS property only accepting a
                 //     path() function. To account for this we wrap the attribute value in a path function before parsing.
                 if (property_id == CSS::PropertyID::D)
                     return parse_css_value(parsing_context, Utf16String::formatted("path({})", CSS::serialize_a_string(value)), property_id.value());
+
+                // NB: The transform, gradientTransform, and patternTransform attributes use the SVG
+                //     transform-list grammar (optional commas, unitless values, three-argument
+                //     rotate), which the CSS transform property doesn't accept - so parse the SVG
+                //     grammar and re-express the resulting matrix as a single-function transform
+                //     list, the shape the CSS parser produces for the transform property.
+                if (property_id == CSS::PropertyID::Transform) {
+                    auto transform_list = AttributeParser::parse_transform(Utf16String::from_utf16(value));
+                    if (!transform_list.has_value())
+                        return {};
+                    auto matrix = transform_from_transform_list(*transform_list);
+                    CSS::StyleValueVector matrix_parameters {
+                        CSS::NumberStyleValue::create(matrix.a()),
+                        CSS::NumberStyleValue::create(matrix.b()),
+                        CSS::NumberStyleValue::create(matrix.c()),
+                        CSS::NumberStyleValue::create(matrix.d()),
+                        CSS::NumberStyleValue::create(matrix.e()),
+                        CSS::NumberStyleValue::create(matrix.f()),
+                    };
+                    return CSS::StyleValueList::create(
+                        CSS::StyleValueVector { CSS::TransformationStyleValue::create(CSS::PropertyID::Transform, CSS::TransformFunction::Matrix, move(matrix_parameters)) },
+                        CSS::StyleValueList::Separator::Space);
+                }
 
                 return parse_css_value(parsing_context, value, property_id.value());
             }();
@@ -206,7 +246,6 @@ Optional<ARIA::Role> SVGElement::default_role() const
 void SVGElement::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
-    HTMLOrSVGOrMathMLElement::visit_edges(visitor);
     visitor.visit(m_class_name_animated_string);
     visitor.visit(m_reflected_attribute_cache);
 }
@@ -400,7 +439,7 @@ Gfx::Size<double> SVGElement::viewport_size_for_percentage_resolution()
     return viewport_size_from_layout(*viewport_element);
 }
 
-GC::Ref<SVGAnimatedLength> SVGElement::svg_animated_length_for_attribute(Utf16FlyString const& attribute_name, SVGLength::Directionality directionality, NonnullRefPtr<CSS::StyleValue const>&& default_value)
+GC::Ref<SVGAnimatedLength> SVGElement::svg_animated_length_for_attribute(Utf16FlyString const& attribute_name, SVGLength::Directionality directionality, SVGLengthValue default_value)
 {
     if (auto cached = m_reflected_attribute_cache.get(attribute_name); cached.has_value())
         return as<SVGAnimatedLength>(*cached.value());

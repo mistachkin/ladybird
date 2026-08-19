@@ -40,43 +40,41 @@
 #include <LibWeb/HTML/HTMLTemplateElement.h>
 #include <LibWeb/HTML/ImageRequest.h>
 #include <LibWeb/HTML/LocalTraversableNavigable.h>
+#include <LibWeb/HTML/NavigableContainer.h>
+#include <LibWeb/HTML/Navigation.h>
+#include <LibWeb/HTML/NavigationHistoryEntry.h>
 #include <LibWeb/HTML/SessionHistoryEntry.h>
+#include <LibWeb/HTML/Window.h>
 #include <LibWeb/Layout/BlockContainer.h>
-#include <LibWeb/Layout/InlineNode.h>
 #include <LibWeb/Layout/LayoutRustBridge.h>
-#include <LibWeb/Layout/NavigableContainerViewport.h>
 #include <LibWeb/Layout/Node.h>
-#include <LibWeb/Layout/SVGBox.h>
 #include <LibWeb/Layout/TextNode.h>
 #include <LibWeb/Layout/Viewport.h>
 #include <LibWeb/Namespace.h>
 #include <LibWeb/Painting/InlinePaintable.h>
 #include <LibWeb/Painting/PaintableWithLines.h>
+#include <LibWeb/Painting/SVGGraphicsPaintable.h>
+#include <LibWeb/Painting/SVGSVGPaintable.h>
 #include <LibWeb/SVG/SVGDecodedImageData.h>
 
 namespace Web {
 
-static void dump_session_history_entry(StringBuilder& builder, HTML::SessionHistoryEntry const& session_history_entry, int indent_levels)
+static void dump_session_history_entry(StringBuilder& builder, HTML::SessionHistoryEntry const& session_history_entry)
 {
-    dump_indent(builder, indent_levels);
     builder.appendff("step=({}) url=({})", session_history_entry.step().get<int>(), session_history_entry.url());
     if (session_history_entry.scroll_position_data().viewport_scroll_position.has_value()) {
         auto const& viewport_scroll_position = *session_history_entry.scroll_position_data().viewport_scroll_position;
         builder.appendff(" viewport-scroll=({}, {})", viewport_scroll_position.x(), viewport_scroll_position.y());
     }
     builder.append('\n');
-    for (auto const& nested_history : session_history_entry.document_state()->nested_histories()) {
-        for (auto const& nested_she : nested_history.entries) {
-            dump_session_history_entry(builder, *nested_she, indent_levels + 1);
-        }
-    }
 }
 
 void dump_tree(HTML::LocalTraversableNavigable& traversable)
 {
     StringBuilder builder;
-    for (auto const& she : traversable.session_history_entries()) {
-        dump_session_history_entry(builder, *she, 0);
+    if (auto window = traversable.active_window()) {
+        for (auto const& entry : window->navigation()->entries())
+            dump_session_history_entry(builder, entry->session_history_entry());
     }
     dbgln("{}", builder.string_view());
 }
@@ -259,7 +257,7 @@ void dump_tree(StringBuilder& builder, Layout::Node const& layout_node, bool sho
         dump_box_model();
     } else {
         auto& box = as<Layout::Box>(layout_node);
-        StringView color_on = is<Layout::SVGBox>(box) ? svg_box_color_on : box_color_on;
+        StringView color_on = box.is_svg_box() ? svg_box_color_on : box_color_on;
 
         builder.appendff("{}{}{} <{}{}{}{}> ",
             color_on,
@@ -282,7 +280,7 @@ void dump_tree(StringBuilder& builder, Layout::Node const& layout_node, bool sho
             builder.appendff(" {}inline-table{}", inline_color_on, color_off);
         if (box.display().is_flex_inside()) {
             StringView direction;
-            switch (box.computed_values().flex_direction()) {
+            switch (box.flex_direction()) {
             case CSS::FlexDirection::Column:
                 direction = "column"sv;
                 break;
@@ -317,6 +315,13 @@ void dump_tree(StringBuilder& builder, Layout::Node const& layout_node, bool sho
 
         dump_box_model();
 
+        // SVG content geometry below is in this viewport's user units; the transform shown here is
+        // what maps it into the viewport's content box.
+        if (auto const* box_paintable = box.paintable_box().ptr()) {
+            if (auto viewport_transform = box_paintable->svg_viewport_transform(); viewport_transform.has_value())
+                builder.appendff(" viewport-transform={}", *viewport_transform);
+        }
+
         if (auto formatting_context_type = Layout::formatting_context_type_created_by_box(box); formatting_context_type.has_value()) {
             switch (formatting_context_type.value()) {
             case Layout::RustFFI::FfiFormattingContextType::Block:
@@ -333,9 +338,8 @@ void dump_tree(StringBuilder& builder, Layout::Node const& layout_node, bool sho
 
         builder.appendff(" children: {}", box.children_are_inline() ? "inline" : "not-inline");
 
-        if (is<Layout::NavigableContainerViewport>(box)) {
-            auto const& frame_box = static_cast<Layout::NavigableContainerViewport const&>(box);
-            if (auto const* document = frame_box.dom_node().content_document_without_origin_check()) {
+        if (box.kind() == Layout::RustFFI::NodeKind::NavigableContainerViewport) {
+            if (auto const* document = as<HTML::NavigableContainer>(*box.dom_node()).content_document_without_origin_check()) {
                 builder.appendff(" (url: {})", document->url());
                 builder.append("\n"sv);
                 if (auto const* nested_layout_root = document->layout_node()) {
@@ -369,6 +373,13 @@ void dump_tree(StringBuilder& builder, Layout::Node const& layout_node, bool sho
 
     auto dump_fragment = [&](auto& fragment, size_t fragment_index) {
         builder.append_repeated("  "sv, indent);
+        if (!fragment.has_layout_node()) {
+            builder.appendff("  {}frag {}{} with detached layout node\n",
+                fragment_color_on,
+                fragment_index,
+                color_off);
+            return;
+        }
         builder.appendff("  {}frag {}{} from {} ",
             fragment_color_on,
             fragment_index,
@@ -391,7 +402,7 @@ void dump_tree(StringBuilder& builder, Layout::Node const& layout_node, bool sho
         auto paintable_with_lines = block_container->paintable_with_lines();
         for (auto const& fragment : paintable_with_lines->fragments()) {
             // Fragments inside inline boxes are dumped under their box's layout node below.
-            if (fragment.layout_node().nearest_fragmented_inline_ancestor())
+            if (fragment.has_layout_node() && fragment.layout_node().nearest_fragmented_inline_ancestor())
                 continue;
             dump_fragment(fragment, fragment_index++);
         }
@@ -406,19 +417,19 @@ void dump_tree(StringBuilder& builder, Layout::Node const& layout_node, bool sho
                 fragment_index_within_piece = 0;
             }
             // Fragments of nested inline boxes are dumped under their own box.
-            if (fragment.layout_node().nearest_fragmented_inline_ancestor() != &layout_node)
+            if (fragment.has_layout_node() && fragment.layout_node().nearest_fragmented_inline_ancestor() != &layout_node)
                 return;
             dump_fragment(fragment, fragment_index_within_piece++);
         });
     }
 
-    if (show_computed_properties && layout_node.dom_node() && layout_node.dom_node()->is_element() && as<DOM::Element>(layout_node.dom_node())->computed_values()) {
+    if (show_computed_properties && layout_node.dom_node() && layout_node.dom_node()->is_element() && as<DOM::Element>(layout_node.dom_node())->computed_style()) {
         struct NameAndValue {
             Utf16FlyString name;
             String value;
         };
         Vector<NameAndValue> properties;
-        auto computed_values = as<DOM::Element>(*layout_node.dom_node()).computed_values();
+        auto computed_values = as<DOM::Element>(*layout_node.dom_node()).computed_style();
         for (auto i = to_underlying(CSS::first_longhand_property_id); i <= to_underlying(CSS::last_longhand_property_id); ++i) {
             auto property_id = static_cast<CSS::PropertyID>(i);
             auto value = computed_values->computed_style_value(property_id);

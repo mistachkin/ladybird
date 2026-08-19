@@ -25,12 +25,6 @@
 #include <LibWeb/CSS/Size.h>
 #include <LibWeb/CSS/StyleValues/AnchorStyleValue.h>
 #include <LibWeb/CSS/StyleValues/CalculatedStyleValue.h>
-#include <LibWeb/CSS/StyleValues/FlexStyleValue.h>
-#include <LibWeb/CSS/StyleValues/FunctionStyleValue.h>
-#include <LibWeb/CSS/StyleValues/GridTrackSizeListStyleValue.h>
-#include <LibWeb/CSS/StyleValues/IntegerStyleValue.h>
-#include <LibWeb/CSS/StyleValues/LengthStyleValue.h>
-#include <LibWeb/CSS/StyleValues/PercentageStyleValue.h>
 #include <LibWeb/CSS/ValueType.h>
 #include <LibWeb/DOM/AbstractElement.h>
 #include <LibWeb/DOM/Document.h>
@@ -42,21 +36,11 @@
 #include <LibWeb/HTML/HTMLElement.h>
 #include <LibWeb/Layout/Box.h>
 #include <LibWeb/Layout/DominantBaseline.h>
-#include <LibWeb/Layout/FieldSetBox.h>
 #include <LibWeb/Layout/FlexLayoutData.h>
 #include <LibWeb/Layout/GridLayoutData.h>
-#include <LibWeb/Layout/InlineNode.h>
 #include <LibWeb/Layout/LayoutRustBridge.h>
 #include <LibWeb/Layout/Node.h>
 #include <LibWeb/Layout/NodeArena.h>
-#include <LibWeb/Layout/SVGClipBox.h>
-#include <LibWeb/Layout/SVGGeometryBox.h>
-#include <LibWeb/Layout/SVGImageBox.h>
-#include <LibWeb/Layout/SVGMaskBox.h>
-#include <LibWeb/Layout/SVGPatternBox.h>
-#include <LibWeb/Layout/SVGSVGBox.h>
-#include <LibWeb/Layout/SVGTextBox.h>
-#include <LibWeb/Layout/SVGTextPathBox.h>
 #include <LibWeb/Layout/TextNode.h>
 #include <LibWeb/Layout/Viewport.h>
 #include <LibWeb/Painting/PaintableWithLines.h>
@@ -65,9 +49,14 @@
 #include <LibWeb/Painting/SVGPathPaintable.h>
 #include <LibWeb/Painting/SVGSVGPaintable.h>
 #include <LibWeb/SVG/SVGClipPathElement.h>
+#include <LibWeb/SVG/SVGGeometryElement.h>
+#include <LibWeb/SVG/SVGImageElement.h>
 #include <LibWeb/SVG/SVGMaskElement.h>
+#include <LibWeb/SVG/SVGPatternElement.h>
 #include <LibWeb/SVG/SVGSVGElement.h>
 #include <LibWeb/SVG/SVGTextElement.h>
+#include <LibWeb/SVG/SVGTextPathElement.h>
+#include <LibWeb/SVG/SVGTextPositioningElement.h>
 
 namespace Web::Layout {
 
@@ -84,25 +73,23 @@ static_assert(to_underlying(CSS::StyleGroupIndex::SizingValues) == RustFFI::STYL
 static_assert(to_underlying(CSS::StyleGroupIndex::SurroundValues) == RustFFI::STYLE_GROUP_INDEX_SURROUND);
 static_assert(to_underlying(CSS::StyleGroupIndex::BoxValues) == RustFFI::STYLE_GROUP_INDEX_BOX);
 
-static CSS::GridTrackSizeList build_used_grid_track_list(RustFFI::FfiUsedGridTrackList const& list)
+static Painting::UsedGridTrackList build_used_grid_track_list(RustFFI::FfiUsedGridTrackList const& list)
 {
-    auto result = list.is_subgrid ? CSS::GridTrackSizeList::make_subgrid() : CSS::GridTrackSizeList::make_none();
     VERIFY(list.is_subgrid ? list.track_count == 0 : list.track_count + 1 == list.line_count);
 
+    Painting::UsedGridTrackList result;
+    result.is_subgrid = list.is_subgrid;
+    result.lines.ensure_capacity(list.line_count);
+    result.track_sizes.ensure_capacity(list.track_count);
     for (size_t line_index = 0; line_index < list.line_count; ++line_index) {
         CSS::GridLineNames line_names;
         auto const& line = list.lines[line_index];
         for (size_t name_index = 0; name_index < line.name_count; ++name_index)
             line_names.append(Utf16FlyString::from_raw(line.names[name_index]));
-        if (list.is_subgrid || !line_names.is_empty())
-            result.append(move(line_names));
+        result.lines.unchecked_append(move(line_names));
 
-        if (line_index < list.track_count) {
-            auto size = CSSPixels::from_raw(list.track_sizes[line_index]);
-            result.append(CSS::ExplicitGridTrack {
-                CSS::GridSize { CSS::LengthStyleValue::create(CSS::Length::make_px(size)) },
-            });
-        }
+        if (line_index < list.track_count)
+            result.track_sizes.unchecked_append(CSSPixels::from_raw(list.track_sizes[line_index]));
     }
     return result;
 }
@@ -164,11 +151,10 @@ static OwnPtr<FlexLayoutData> build_flex_layout_data(RustFFI::FfiFlexLayoutData 
         for (size_t item_index = 0; item_index < ffi_line.item_count; ++item_index) {
             auto const& ffi_item = ffi_line.items[item_index];
             auto const& item_box = *static_cast<Box const*>(ffi_item.node);
-            auto const& values = item_box.computed_values();
-            auto const& flex_basis = values.flex_basis();
-            auto const& main_size = main_axis_is_horizontal ? values.width() : values.height();
-            auto const& main_min_size = main_axis_is_horizontal ? values.min_width() : values.min_height();
-            auto const& main_max_size = main_axis_is_horizontal ? values.max_width() : values.max_height();
+            auto flex_basis = item_box.flex_basis();
+            auto const& main_size = main_axis_is_horizontal ? item_box.width() : item_box.height();
+            auto const& main_min_size = main_axis_is_horizontal ? item_box.min_width() : item_box.min_height();
+            auto const& main_max_size = main_axis_is_horizontal ? item_box.max_width() : item_box.max_height();
 
             FlexLayoutItem item;
             if (auto* dom_node = item_box.dom_node())
@@ -288,6 +274,31 @@ static OwnPtr<GridLayoutData> build_grid_layout_data(RustFFI::FfiGridLayoutData 
     return data;
 }
 
+static CSS::BorderData from_ffi_border_data(RustFFI::FfiBorderData const&);
+
+static OwnPtr<Painting::CollapsedTableBorders> build_collapsed_table_borders(RustFFI::FfiCollapsedTableBorders const& ffi_borders)
+{
+    auto borders = make<Painting::CollapsedTableBorders>();
+    borders->row_offsets.ensure_capacity(ffi_borders.row_count + 1);
+    for (size_t i = 0; i <= ffi_borders.row_count; ++i)
+        borders->row_offsets.unchecked_append(CSSPixels::from_raw(ffi_borders.row_offsets[i]));
+    borders->column_offsets.ensure_capacity(ffi_borders.column_count + 1);
+    for (size_t i = 0; i <= ffi_borders.column_count; ++i)
+        borders->column_offsets.unchecked_append(CSSPixels::from_raw(ffi_borders.column_offsets[i]));
+    auto build_edges = [](Vector<Painting::CollapsedBorderEdge>& edges, RustFFI::FfiCollapsedBorderEdge const* ffi_edges, size_t count) {
+        edges.ensure_capacity(count);
+        for (size_t i = 0; i < count; ++i) {
+            edges.unchecked_append({
+                .border = from_ffi_border_data(ffi_edges[i].border_data),
+                .source_order = ffi_edges[i].source_order,
+            });
+        }
+    };
+    build_edges(borders->horizontal_edges, ffi_borders.horizontal_edges, (ffi_borders.row_count + 1) * ffi_borders.column_count);
+    build_edges(borders->vertical_edges, ffi_borders.vertical_edges, (ffi_borders.column_count + 1) * ffi_borders.row_count);
+    return borders;
+}
+
 static RustFFI::FfiAffineTransform to_ffi_affine_transform(Gfx::AffineTransform const& transform)
 {
     return {
@@ -343,7 +354,7 @@ static RustFFI::FfiSvgElementFacts build_svg_element_facts(NodeWithStyle const& 
     Gfx::AffineTransform element_transform;
     float visible_stroke_width = 0;
     if (auto const* graphics_element = as_if<SVG::SVGGraphicsElement>(*dom_node)) {
-        element_transform = graphics_element->element_transform();
+        element_transform = node.used_svg_element_transform();
         visible_stroke_width = graphics_element->visible_stroke_width();
     }
 
@@ -351,20 +362,17 @@ static RustFFI::FfiSvgElementFacts build_svg_element_facts(NodeWithStyle const& 
     SVG::SVGUnits pattern_units {};
     SVG::NumberPercentage pattern_width = SVG::NumberPercentage::create_number(0);
     SVG::NumberPercentage pattern_height = SVG::NumberPercentage::create_number(0);
-    if (auto const* mask_box = as_if<SVGMaskBox>(node))
-        content_units = mask_box->dom_node().mask_content_units();
-    else if (auto const* clip_box = as_if<SVGClipBox>(node))
-        content_units = clip_box->dom_node().clip_path_units();
-    else if (auto const* pattern_box = as_if<SVGPatternBox>(node)) {
-        content_units = pattern_box->dom_node().pattern_content_units();
-        pattern_units = pattern_box->dom_node().pattern_units();
-        pattern_width = pattern_box->dom_node().pattern_width();
-        pattern_height = pattern_box->dom_node().pattern_height();
+    if (node.is_svg_mask_box())
+        content_units = as<SVG::SVGMaskElement>(*node.dom_node()).mask_content_units();
+    else if (node.is_svg_clip_box())
+        content_units = as<SVG::SVGClipPathElement>(*node.dom_node()).clip_path_units();
+    else if (node.is_svg_pattern_box()) {
+        auto const& pattern_element = as<SVG::SVGPatternElement>(*node.dom_node());
+        content_units = pattern_element.pattern_content_units();
+        pattern_units = pattern_element.pattern_units();
+        pattern_width = pattern_element.pattern_width();
+        pattern_height = pattern_element.pattern_height();
     }
-
-    bool has_own_view_box = false;
-    if (auto const* svg_element = as_if<SVG::SVGSVGElement>(*dom_node))
-        has_own_view_box = svg_element->view_box().has_value();
 
     return {
         .is_document_element = node.document().document_element() == dom_node,
@@ -372,7 +380,6 @@ static RustFFI::FfiSvgElementFacts build_svg_element_facts(NodeWithStyle const& 
         .is_fit_to_view_box = is<SVG::SVGFitToViewBox>(*dom_node),
         .has_active_view_box = active_view_box.has_value(),
         .active_view_box = active_view_box.has_value() ? to_ffi_svg_view_box(*active_view_box) : RustFFI::FfiSvgViewBox {},
-        .has_own_view_box = has_own_view_box,
         .preserve_aspect_ratio_align = static_cast<u8>(to_underlying(preserve_aspect_ratio.align)),
         .preserve_aspect_ratio_meet_or_slice = static_cast<u8>(to_underlying(preserve_aspect_ratio.meet_or_slice)),
         .element_transform = to_ffi_affine_transform(element_transform),
@@ -404,10 +411,10 @@ static Utf16String rendered_svg_text_contents(SVG::SVGTextContentElement const& 
 }
 
 // The advance of the text run rendered by the given box; that is, of its direct child text content.
-static float svg_text_run_advance(SVGTextBox const& text_box)
+static float svg_text_run_advance(Box const& text_box)
 {
     // FIXME: Use per-code-point fonts.
-    return text_box.first_available_font().width(text_box.dom_node().text_contents());
+    return text_box.first_available_font().width(static_cast<SVG::SVGTextContentElement const&>(*text_box.dom_node()).text_contents());
 }
 
 // https://svgwg.org/svg2-draft/text.html#TermTextChunk
@@ -415,11 +422,11 @@ static float svg_text_run_advance(SVGTextBox const& text_box)
 // https://svgwg.org/svg2-draft/text.html#TextElementXAttribute
 // NB: The initial value of 'x' and 'y' is "0 for 'text'; (none) for 'tspan'". So, a <text> element always positions its
 //     first character absolutely, and so always starts a chunk.
-static bool svg_text_box_starts_text_chunk(SVGTextBox const& text_box)
+static bool svg_text_box_starts_text_chunk(Box const& text_box)
 {
-    if (is<SVG::SVGTextElement>(text_box.dom_node()))
+    if (is<SVG::SVGTextElement>(*text_box.dom_node()))
         return true;
-    auto text_positioning = text_box.dom_node().text_positioning();
+    auto text_positioning = as<SVG::SVGTextPositioningElement>(*text_box.dom_node()).text_positioning();
     return !text_positioning.x.is_empty() || !text_positioning.y.is_empty();
 }
 
@@ -431,32 +438,32 @@ struct SvgTextChunkMeasurement {
 // Measures the total advance of the text chunk that starts at the given box, and determines the 'text-anchor' value
 // that applies to the chunk. The chunk extends in document order through the subtree of the containing <text> element
 // until the next box that starts a chunk of its own.
-static SvgTextChunkMeasurement measure_svg_text_chunk(SVGTextBox const& chunk_start_box)
+static SvgTextChunkMeasurement measure_svg_text_chunk(Box const& chunk_start_box)
 {
     auto const* subtree_root = &chunk_start_box;
-    for (auto const* ancestor = chunk_start_box.parent(); ancestor && is<SVGTextBox>(*ancestor); ancestor = ancestor->parent())
-        subtree_root = static_cast<SVGTextBox const*>(ancestor);
+    for (auto const* ancestor = chunk_start_box.parent(); ancestor && ancestor->kind() == RustFFI::NodeKind::SVGTextBox; ancestor = ancestor->parent())
+        subtree_root = static_cast<Box const*>(ancestor);
 
     SvgTextChunkMeasurement measurement;
     bool found_chunk_start = false;
     bool found_first_rendered_text = false;
     subtree_root->for_each_in_inclusive_subtree([&](Node const& node) {
         // AD-HOC: Text on a path is laid out independently; see compute_path_for_svg_text_path().
-        if (is<SVGTextPathBox>(node))
+        if (node.kind() == RustFFI::NodeKind::SVGTextPathBox)
             return TraversalDecision::SkipChildrenAndContinue;
-        auto const* text_box = as_if<SVGTextBox>(node);
-        if (!text_box)
+        if (node.kind() != RustFFI::NodeKind::SVGTextBox)
             return TraversalDecision::Continue;
+        auto const* text_box = static_cast<Box const*>(&node);
         if (text_box == &chunk_start_box)
             found_chunk_start = true;
         else if (found_chunk_start && svg_text_box_starts_text_chunk(*text_box))
             return TraversalDecision::Break;
-        if (found_chunk_start && !text_box->dom_node().text_contents().is_empty()) {
+        if (found_chunk_start && !static_cast<SVG::SVGTextContentElement const&>(*text_box->dom_node()).text_contents().is_empty()) {
             if (!found_first_rendered_text) {
                 // https://svgwg.org/svg2-draft/text.html#TextLayoutAlgorithm
                 // Adjust shift based on the value of 'text-anchor' and 'direction' of the element the character at index i.
                 // FIXME: Take text direction into account.
-                measurement.anchor = text_box->computed_values().text_anchor();
+                measurement.anchor = text_box->text_anchor();
                 found_first_rendered_text = true;
             }
             measurement.advance += svg_text_run_advance(*text_box);
@@ -466,15 +473,15 @@ static SvgTextChunkMeasurement measure_svg_text_chunk(SVGTextBox const& chunk_st
     return measurement;
 }
 
-static Gfx::Path compute_path_for_svg_text(SVGTextBox const& text_box, Gfx::FloatPoint current_text_position)
+static Gfx::Path compute_path_for_svg_text(Box const& text_box, Gfx::FloatPoint current_text_position)
 {
-    auto& text_element = text_box.dom_node();
+    auto const& text_element = static_cast<SVG::SVGTextContentElement const&>(*text_box.dom_node());
     // FIXME: Use per-code-point fonts.
     auto& font = text_box.first_available_font();
     auto text_contents = text_element.text_contents();
 
     auto text_offset = current_text_position;
-    auto baseline_metric = resolve_dominant_baseline_metric(text_box.computed_values());
+    auto baseline_metric = resolve_dominant_baseline_metric(text_box);
     text_offset.translate_by(0, dominant_baseline_offset(baseline_metric, font.pixel_metrics()));
 
     Gfx::Path path;
@@ -483,9 +490,9 @@ static Gfx::Path compute_path_for_svg_text(SVGTextBox const& text_box, Gfx::Floa
     return path;
 }
 
-static Gfx::Path compute_path_for_svg_text_path(SVGTextPathBox const& text_path_box, CSSPixelSize viewport_size)
+static Gfx::Path compute_path_for_svg_text_path(Box const& text_path_box, CSSPixelSize viewport_size)
 {
-    auto& text_path_element = static_cast<SVG::SVGTextPathElement const&>(text_path_box.dom_node());
+    auto const& text_path_element = as<SVG::SVGTextPathElement>(*text_path_box.dom_node());
     auto path_or_shape = text_path_element.path_or_shape();
     if (!path_or_shape)
         return {};
@@ -517,7 +524,7 @@ static Gfx::Path compute_path_for_svg_text_path(SVGTextPathBox const& text_path_
 
 static RustFFI::FfiSvgPathResult compute_svg_path(NodeWithStyle const& node, RustFFI::FfiSvgPathRequest const& request)
 {
-    auto const& graphics_box = as<SVGGraphicsBox>(node);
+    auto const& graphics_box = as<Box>(node);
     CSSPixelSize viewport_size {
         CSSPixels::from_raw(request.viewport_width),
         CSSPixels::from_raw(request.viewport_height),
@@ -528,10 +535,11 @@ static RustFFI::FfiSvgPathResult compute_svg_path(NodeWithStyle const& node, Rus
     };
 
     Gfx::Path path;
-    if (auto const* geometry_box = as_if<SVGGeometryBox>(graphics_box)) {
-        path = const_cast<SVGGeometryBox&>(*geometry_box).dom_node().get_path(viewport_size);
-    } else if (auto const* text_box = as_if<SVGTextBox>(graphics_box)) {
-        auto const& text_element = text_box->dom_node();
+    if (graphics_box.is_svg_geometry_box()) {
+        path = as<SVG::SVGGeometryElement>(const_cast<DOM::Node&>(*graphics_box.dom_node())).get_path(viewport_size);
+    } else if (graphics_box.kind() == RustFFI::NodeKind::SVGTextBox) {
+        auto const* text_box = &graphics_box;
+        auto const& text_element = as<SVG::SVGTextPositioningElement>(*text_box->dom_node());
         // https://svgwg.org/svg2-draft/text.html#TextElementXAttribute
         // the starting X (Y) coordinate for rendering the glyphs corresponding to the given character is the X (Y) coordinate
         // of the resulting current text position from the most recently rendered glyph for the current 'text' element.
@@ -573,8 +581,8 @@ static RustFFI::FfiSvgPathResult compute_svg_path(NodeWithStyle const& node, Rus
         // width for horizontal text or height for vertical text).
         // FIXME: Take writing mode and text direction into account.
         text_position.translate_by(svg_text_run_advance(*text_box), 0);
-    } else if (auto const* text_path_box = as_if<SVGTextPathBox>(graphics_box)) {
-        path = compute_path_for_svg_text_path(*text_path_box, viewport_size);
+    } else if (graphics_box.kind() == RustFFI::NodeKind::SVGTextPathBox) {
+        path = compute_path_for_svg_text_path(graphics_box, viewport_size);
     }
 
     auto bounding_box = path.bounding_box();
@@ -672,7 +680,7 @@ void LayoutRustBridge::run_root_layout(Box& viewport, CSSPixels viewport_inline_
     VERIFY(!m_line_commit_context);
 }
 
-void LayoutRustBridge::compute_subtree_layout(Box& root, Painting::Paintable& paintable_to_replace)
+void LayoutRustBridge::compute_subtree_layout(Box& root)
 {
     VERIFY(!m_commit_root);
     m_commit_root = &root;
@@ -689,7 +697,6 @@ void LayoutRustBridge::compute_subtree_layout(Box& root, Painting::Paintable& pa
         RustFFI::rust_layout_compute_subtree_layout(
             Node::slot_id(&root),
             Node::slot_id(&root.root()),
-            &paintable_to_replace,
             viewport_rect.width().raw_value(),
             viewport_rect.height().raw_value(),
             &callbacks,
@@ -698,7 +705,7 @@ void LayoutRustBridge::compute_subtree_layout(Box& root, Painting::Paintable& pa
     VERIFY(!m_line_commit_context);
 }
 
-void LayoutRustBridge::replay_saved_abspos_layout(Box& box, Painting::Paintable& paintable_to_replace)
+void LayoutRustBridge::replay_saved_abspos_layout(Box& box)
 {
     VERIFY(!m_commit_root);
     m_commit_root = &box;
@@ -711,7 +718,7 @@ void LayoutRustBridge::replay_saved_abspos_layout(Box& box, Painting::Paintable&
     auto sink = commit_sink();
     {
         ActiveLayoutPassScope active_pass;
-        RustFFI::rust_layout_replay_saved_abspos_layout(Node::slot_id(&box), &paintable_to_replace, &callbacks, &sink);
+        RustFFI::rust_layout_replay_saved_abspos_layout(Node::slot_id(&box), &callbacks, &sink);
     }
     VERIFY(!m_line_commit_context);
 }
@@ -727,31 +734,25 @@ struct LayoutRustBridge::LineCommitContext {
     Vector<Painting::InlineBoxPiece> pieces;
 };
 
-static CSS::BorderData from_ffi_border_data(RustFFI::FfiBorderData const&);
-
-static Painting::Paintable::BorderDataWithElementKind from_ffi_border_data_with_element_kind(RustFFI::FfiBorderDataWithElementKind const& border)
-{
-    return {
-        .border_data = from_ffi_border_data(border.border_data),
-        .element_kind = static_cast<Painting::Paintable::ConflictingElementKind>(border.element_kind),
-    };
-}
-
 RustFFI::FfiCommitSink LayoutRustBridge::commit_sink()
 {
     return {
         .context = this,
-        .begin_commit = [](void* context, void* root_pointer, void* paintable_to_replace_pointer) {
+        .begin_commit = [](void* context, void* root_pointer) {
             auto& bridge = *static_cast<LayoutRustBridge*>(context);
             auto& root = *static_cast<Box*>(root_pointer);
             VERIFY(!bridge.m_replaced_paintable);
             VERIFY(!bridge.m_commit_parent_paintable);
             VERIFY(!bridge.m_commit_insert_before_paintable);
+            VERIFY(bridge.m_reused_paintables.is_empty());
 
-            if (paintable_to_replace_pointer) {
-                bridge.m_replaced_paintable = *static_cast<Painting::Paintable*>(paintable_to_replace_pointer);
-            } else if (!root.is_viewport()) {
+            if (!root.is_viewport()) {
                 bridge.m_replaced_paintable = root.paintable();
+                if (!bridge.m_replaced_paintable && root.dom_node()) {
+                    // A rebuilt box has no paintable yet; the previous one stays referenced by
+                    // the DOM node (and alive in the paint tree) until this commit replaces it.
+                    bridge.m_replaced_paintable = root.dom_node()->unsafe_paintable();
+                }
             }
 
             if (bridge.m_replaced_paintable) {
@@ -769,10 +770,17 @@ RustFFI::FfiCommitSink LayoutRustBridge::commit_sink()
             }; },
         .finish_commit = [](void* context) {
             auto& bridge = *static_cast<LayoutRustBridge*>(context);
+            for (auto& reused : bridge.m_reused_paintables) {
+                auto new_absolute_position = reused.paintable->absolute_position();
+                if (new_absolute_position != reused.old_absolute_position)
+                    reused.paintable->translate_reused_subtree_absolute_geometry(new_absolute_position - reused.old_absolute_position);
+            }
+            bridge.m_reused_paintables.clear();
             bridge.m_commit_insert_before_paintable = nullptr;
             bridge.m_commit_parent_paintable = nullptr;
             bridge.m_replaced_paintable = nullptr; },
-        .prepare_node = [](void*, void* node_pointer, bool has_used_values) -> void* {
+        .prepare_node = [](void* context, void* node_pointer, bool has_used_values, bool reuses_committed_subtree) -> void* {
+            auto& bridge = *static_cast<LayoutRustBridge*>(context);
             auto& node = *static_cast<Node*>(node_pointer);
 
             RefPtr<Painting::Paintable> paintable;
@@ -780,10 +788,17 @@ RustFFI::FfiCommitSink LayoutRustBridge::commit_sink()
                 // Inline boxes that never went through inline layout (so they have no used values) still
                 // need a paintable so DOM geometry queries have something to answer from.
                 paintable = node.paintable();
-                if (paintable)
+                if (reuses_committed_subtree) {
+                    VERIFY(paintable);
+                    bridge.m_reused_paintables.append({ *paintable, paintable->absolute_position() });
+                    if (paintable->parent())
+                        paintable->remove();
+                    paintable->set_containing_block(nullptr);
+                } else if (paintable) {
                     paintable->reset_for_relayout();
-                else
+                } else {
                     paintable = node.create_paintable();
+                }
                 node.set_paintable(paintable);
             } else if (node.paintable_ptr()) {
                 // A paintable surviving from a previous layout on a node this pass did not lay out is
@@ -794,6 +809,7 @@ RustFFI::FfiCommitSink LayoutRustBridge::commit_sink()
         },
         .set_box_metrics = [](void*, void* paintable_pointer, RustFFI::FfiCommittedBoxMetrics metrics) {
             auto& paintable = *static_cast<Painting::Paintable*>(paintable_pointer);
+            paintable.set_layout_fragment_identity(metrics.fragment_identity);
             auto& box_model = paintable.box_model();
             box_model.inset = {
                 CSSPixels::from_raw(metrics.inset_top),
@@ -819,27 +835,21 @@ RustFFI::FfiCommitSink LayoutRustBridge::commit_sink()
                 CSSPixels::from_raw(metrics.margin_bottom),
                 CSSPixels::from_raw(metrics.margin_left),
             };
-            paintable.set_content_size(
+            CSSPixelSize content_size {
                 CSSPixels::from_raw(metrics.content_inline_size),
-                CSSPixels::from_raw(metrics.content_block_size));
+                CSSPixels::from_raw(metrics.content_block_size)
+            };
+            if (metrics.reuses_committed_subtree)
+                VERIFY(paintable.content_size() == content_size);
+            else
+                paintable.set_content_size(content_size);
             paintable.set_offset({
                 CSSPixels::from_raw(metrics.content_offset.x),
                 CSSPixels::from_raw(metrics.content_offset.y),
             });
             if (metrics.has_containing_line_box_index)
-                paintable.set_containing_line_box_index(metrics.containing_line_box_index); },
-        .set_override_borders = [](void*, void* paintable_pointer, RustFFI::FfiBordersData borders) { static_cast<Painting::Paintable*>(paintable_pointer)->set_override_borders_data({
-                                                                                                          .top = from_ffi_border_data_with_element_kind(borders.top),
-                                                                                                          .right = from_ffi_border_data_with_element_kind(borders.right),
-                                                                                                          .bottom = from_ffi_border_data_with_element_kind(borders.bottom),
-                                                                                                          .left = from_ffi_border_data_with_element_kind(borders.left),
-                                                                                                      }); },
-        .set_table_cell_coordinates = [](void*, void* paintable_pointer, RustFFI::FfiTableCellCoordinates coordinates) { static_cast<Painting::Paintable*>(paintable_pointer)->set_table_cell_coordinates({
-                                                                                                                             .row_index = coordinates.row_index,
-                                                                                                                             .column_index = coordinates.column_index,
-                                                                                                                             .row_span = coordinates.row_span,
-                                                                                                                             .column_span = coordinates.column_span,
-                                                                                                                         }); },
+                paintable.set_containing_line_box_index(metrics.containing_line_box_index);
+            paintable.set_uses_collapsing_borders_model(metrics.uses_collapsing_borders_model); },
         .begin_line_data = [](void* context, void* paintable_pointer) {
             auto& bridge = *static_cast<LayoutRustBridge*>(context);
             VERIFY(!bridge.m_line_commit_context);
@@ -857,6 +867,7 @@ RustFFI::FfiCommitSink LayoutRustBridge::commit_sink()
                     CSSPixels::from_raw(record.rect.width),
                     CSSPixels::from_raw(record.rect.height),
                 },
+                .baseline = CSSPixels::from_raw(record.baseline),
                 .fragment_count = record.committed_fragment_count,
             }); },
         .emit_fragment = [](void* context, RustFFI::FfiCommittedFragment fragment) {
@@ -891,6 +902,7 @@ RustFFI::FfiCommitSink LayoutRustBridge::commit_sink()
                 .length_in_code_units = fragment.length_in_code_units,
                 .glyph_run = move(glyph_run),
                 .baseline = CSSPixels::from_raw(fragment.baseline),
+                .accumulated_vertical_shift = CSSPixels::from_raw(fragment.accumulated_vertical_shift),
                 .writing_mode = static_cast<CSS::WritingMode>(fragment.writing_mode),
                 .has_trailing_whitespace = fragment.has_trailing_whitespace,
             }); },
@@ -901,12 +913,15 @@ RustFFI::FfiCommitSink LayoutRustBridge::commit_sink()
                 .node = *static_cast<Node const*>(piece.node),
                 .first_fragment_index = piece.first_fragment_index,
                 .fragment_count = piece.fragment_count,
+                .line_index = piece.line_index,
                 .border_box_rect = {
                     CSSPixels::from_raw(piece.border_box_rect.x),
                     CSSPixels::from_raw(piece.border_box_rect.y),
                     CSSPixels::from_raw(piece.border_box_rect.width),
                     CSSPixels::from_raw(piece.border_box_rect.height),
                 },
+                .baseline = CSSPixels::from_raw(piece.baseline),
+                .accumulated_vertical_shift = CSSPixels::from_raw(piece.accumulated_vertical_shift),
                 .present_edges = piece.present_edges,
                 .is_geometry_only_placeholder = piece.is_geometry_only_placeholder,
             }); },
@@ -922,18 +937,9 @@ RustFFI::FfiCommitSink LayoutRustBridge::commit_sink()
             // consumers read out of bounds.
             for (auto const& piece : line_context->paintable.inline_box_pieces())
                 VERIFY(piece.first_fragment_index + piece.fragment_count <= line_context->paintable.fragments().size()); },
-        .set_computed_svg_transforms = [](void*, void* paintable_pointer, RustFFI::FfiSvgComputedTransforms transforms) {
-            Painting::SVGGraphicsPaintable::ComputedTransforms converted {
-                from_ffi_affine_transform(transforms.viewbox_transform),
-                from_ffi_affine_transform(transforms.svg_transform),
-            };
+        .set_svg_viewport_transform = [](void*, void* paintable_pointer, RustFFI::FfiAffineTransform transform) {
             auto& paintable = *static_cast<Painting::Paintable*>(paintable_pointer);
-            if (auto* svg_graphics_paintable = as_if<Painting::SVGGraphicsPaintable>(paintable))
-                svg_graphics_paintable->set_computed_transforms(converted);
-            if (auto* svg_foreign_object_paintable = as_if<Painting::SVGForeignObjectPaintable>(paintable))
-                svg_foreign_object_paintable->set_computed_transforms(converted);
-            if (auto* svg_svg_paintable = as_if<Painting::SVGSVGPaintable>(paintable))
-                svg_svg_paintable->set_computed_transforms(converted); },
+            paintable.set_svg_viewport_transform(from_ffi_affine_transform(transform)); },
         .set_svg_viewport_size = [](void*, void* paintable_pointer, RustFFI::FfiCssPixelSize viewport_size) {
             auto& paintable = *static_cast<Painting::Paintable*>(paintable_pointer);
             if (auto* svg_svg_paintable = as_if<Painting::SVGSVGPaintable>(paintable)) {
@@ -942,13 +948,15 @@ RustFFI::FfiCommitSink LayoutRustBridge::commit_sink()
                     CSSPixels::from_raw(viewport_size.height),
                 });
             } },
-        .set_computed_svg_path = [](void*, void* paintable_pointer, void* path_pointer) {
+        .set_computed_svg_path = [](void*, void* paintable_pointer, void* path_pointer, u64 path_identity) {
             VERIFY(path_pointer);
             auto& paintable = *static_cast<Painting::Paintable*>(paintable_pointer);
-            // The path stays owned by the Rust layout state; only its contents move out.
-            auto* path = static_cast<Gfx::Path*>(path_pointer);
+            // The path stays owned by the Rust fragment tree, which may emit it again on a
+            // later commit; the identity is process-unique per path allocation, so a match
+            // means the preserved copy is already this exact path and the copy can be skipped.
+            auto const* path = static_cast<Gfx::Path const*>(path_pointer);
             if (auto* svg_path_paintable = as_if<Painting::SVGPathPaintable>(paintable))
-                svg_path_paintable->set_computed_path(move(*path)); },
+                svg_path_paintable->set_computed_path_if_identity_changed(*path, path_identity); },
         .set_grid_layout_data = [](void*, void* paintable_pointer, RustFFI::FfiGridLayoutData const* data) {
             VERIFY(data);
             static_cast<Painting::Paintable*>(paintable_pointer)->set_grid_layout_data(build_grid_layout_data(*data)); },
@@ -959,8 +967,11 @@ RustFFI::FfiCommitSink LayoutRustBridge::commit_sink()
             VERIFY(columns);
             VERIFY(rows);
             auto& paintable = *static_cast<Painting::Paintable*>(paintable_pointer);
-            paintable.set_used_values_for_grid_template_columns(CSS::GridTrackSizeListStyleValue::create(build_used_grid_track_list(*columns)));
-            paintable.set_used_values_for_grid_template_rows(CSS::GridTrackSizeListStyleValue::create(build_used_grid_track_list(*rows))); },
+            paintable.set_used_values_for_grid_template_columns(build_used_grid_track_list(*columns));
+            paintable.set_used_values_for_grid_template_rows(build_used_grid_track_list(*rows)); },
+        .set_collapsed_table_borders = [](void*, void* paintable_pointer, RustFFI::FfiCollapsedTableBorders const* borders) {
+            VERIFY(borders);
+            static_cast<Painting::Paintable*>(paintable_pointer)->set_collapsed_table_borders(build_collapsed_table_borders(*borders)); },
         .finish_node = [](void*, void* node_pointer, void* paintable_pointer, void* parent_paintable_pointer, void* insert_before_paintable_pointer) {
             auto& node = *static_cast<Node*>(node_pointer);
             auto* paintable = static_cast<Painting::Paintable*>(paintable_pointer);
@@ -1014,41 +1025,6 @@ static Optional<DOM::AbstractElement> abstract_element_for_abspos_box(Box const&
     return {};
 }
 
-static bool style_value_contains_anchor(CSS::StyleValue const& value)
-{
-    if (value.is_anchor())
-        return true;
-    if (value.is_calculated())
-        return value.as_calculated().contains_anchor_function();
-    return false;
-}
-
-bool box_inset_properties_contain_anchor_functions(Box const& box)
-{
-    auto abstract_element = abstract_element_for_abspos_box(box);
-    if (!abstract_element.has_value())
-        return false;
-
-    auto const* computed = abstract_element->computed_values();
-    if (!computed)
-        return false;
-    // Anchor functions in insets only survive to used-value time inside calculated values, so
-    // when no inset is calculated (the common case), skip reconstructing the style values.
-    auto const& inset = computed->inset();
-    if (!inset.top().is_calculated() && !inset.right().is_calculated() && !inset.bottom().is_calculated() && !inset.left().is_calculated())
-        return false;
-
-    auto top = computed->computed_style_value(CSS::PropertyID::Top);
-    auto right = computed->computed_style_value(CSS::PropertyID::Right);
-    auto bottom = computed->computed_style_value(CSS::PropertyID::Bottom);
-    auto left = computed->computed_style_value(CSS::PropertyID::Left);
-    VERIFY(top && right && bottom && left);
-    return style_value_contains_anchor(*top)
-        || style_value_contains_anchor(*right)
-        || style_value_contains_anchor(*bottom)
-        || style_value_contains_anchor(*left);
-}
-
 bool can_replay_saved_abspos_layout_inputs_after_style_change(Box const& box)
 {
     if (!box.containing_block())
@@ -1057,7 +1033,7 @@ bool can_replay_saved_abspos_layout_inputs_after_style_change(Box const& box)
     if (box.saved_abspos_cb_derives_from_own_computed_values())
         return false;
 
-    auto const& inset = box.computed_values().inset();
+    auto inset = box.inset();
     bool uses_static_position = (inset.left().is_auto() && inset.right().is_auto())
         || (inset.top().is_auto() && inset.bottom().is_auto());
     if (uses_static_position && box.saved_abspos_alignment_derives_from_own_computed_values())
@@ -1068,12 +1044,6 @@ bool can_replay_saved_abspos_layout_inputs_after_style_change(Box const& box)
 
 RustFFI::FfiLayoutFcCallbacks LayoutRustBridge::formatting_context_callbacks()
 {
-    static_assert(to_underlying(Painting::Paintable::ConflictingElementKind::Cell) == 0);
-    static_assert(to_underlying(Painting::Paintable::ConflictingElementKind::Row) == 1);
-    static_assert(to_underlying(Painting::Paintable::ConflictingElementKind::RowGroup) == 2);
-    static_assert(to_underlying(Painting::Paintable::ConflictingElementKind::Column) == 3);
-    static_assert(to_underlying(Painting::Paintable::ConflictingElementKind::ColumnGroup) == 4);
-    static_assert(to_underlying(Painting::Paintable::ConflictingElementKind::Table) == 5);
     static_assert(to_underlying(FlexLayoutGrowthState::Growing) == 0);
     static_assert(to_underlying(FlexLayoutGrowthState::Shrinking) == 1);
     static_assert(to_underlying(FlexLayoutClampState::Unclamped) == 0);
@@ -1118,13 +1088,6 @@ RustFFI::FfiLayoutFcCallbacks LayoutRustBridge::formatting_context_callbacks()
         .arena = m_commit_root->arena_handle(),
         .initial_containing_block_inline_size = m_commit_root->document().viewport_rect().width().raw_value(),
         .document_in_quirks_mode = m_commit_root->document().in_quirks_mode(),
-        .static_position_containing_block = [](void*, void* node) { return Node::slot_id(static_cast<Box const*>(node)->static_position_containing_block()); },
-        .needs_inset_resolution = [](void*, void* node) {
-            auto const& styled_node = *static_cast<NodeWithStyleAndBoxModelMetrics const*>(node);
-            if (styled_node.computed_values().position() == CSS::Positioning::Relative)
-                return true;
-            auto const* box = as_if<Box>(styled_node);
-            return box && box_inset_properties_contain_anchor_functions(*box); },
         .report_unexpected_fragmented_inline = [](void*, void* node) {
             auto const& box = *static_cast<Box const*>(node);
             dbgln("FIXME: InlineFormattingContext::dimension_box_on_line got unexpected box in inline context:");
@@ -1133,71 +1096,13 @@ RustFFI::FfiLayoutFcCallbacks LayoutRustBridge::formatting_context_callbacks()
             auto const* node_with_style = as_if<NodeWithStyle>(*static_cast<Node const*>(node));
             VERIFY(node_with_style);
             return build_svg_element_facts(*node_with_style); },
-        .read_paintable_geometry = [](void*, void* node, void* paintable_pointer, RustFFI::FfiPaintableGeometry* out) {
-            VERIFY(out);
-            VERIFY(paintable_pointer);
-            auto const* paintable = static_cast<Painting::Paintable const*>(paintable_pointer);
-            auto const& box_model = paintable->box_model();
-            *out = {
-                .content_inline_size = paintable->content_width().raw_value(),
-                .content_block_size = paintable->content_height().raw_value(),
-                .content_offset = {
-                    .x = paintable->offset().x().raw_value(),
-                    .y = paintable->offset().y().raw_value(),
-                },
-                .svg_viewport_size = {},
-                .margin_left = box_model.margin.left.raw_value(),
-                .margin_right = box_model.margin.right.raw_value(),
-                .margin_top = box_model.margin.top.raw_value(),
-                .margin_bottom = box_model.margin.bottom.raw_value(),
-                .border_left = box_model.border.left.raw_value(),
-                .border_right = box_model.border.right.raw_value(),
-                .border_top = box_model.border.top.raw_value(),
-                .border_bottom = box_model.border.bottom.raw_value(),
-                .padding_left = box_model.padding.left.raw_value(),
-                .padding_right = box_model.padding.right.raw_value(),
-                .padding_top = box_model.padding.top.raw_value(),
-                .padding_bottom = box_model.padding.bottom.raw_value(),
-                .inset_left = box_model.inset.left.raw_value(),
-                .inset_right = box_model.inset.right.raw_value(),
-                .inset_top = box_model.inset.top.raw_value(),
-                .inset_bottom = box_model.inset.bottom.raw_value(),
-            };
-
-            // NB: We check the node type rather than the paintable type to mirror the rust-side logic.
-            if (is<SVGSVGBox>(*static_cast<Node const*>(node))) {
-                auto const* svg_svg_paintable = as_if<Painting::SVGSVGPaintable>(paintable);
-                VERIFY(svg_svg_paintable);
-                out->svg_viewport_size = {
-                    .width = svg_svg_paintable->svg_viewport_size().width().raw_value(),
-                    .height = svg_svg_paintable->svg_viewport_size().height().raw_value(),
-                };
-            }
-            return true; },
-        .read_paintable_svg_transforms = [](void*, void* node, RustFFI::FfiSvgComputedTransforms* out) {
-            VERIFY(out);
-            auto const* paintable = static_cast<Node const*>(node)->paintable_ptr();
-            Painting::SVGGraphicsPaintable::ComputedTransforms const* transforms = nullptr;
-            if (auto const* svg_graphics_paintable = as_if<Painting::SVGGraphicsPaintable>(paintable))
-                transforms = &svg_graphics_paintable->computed_transforms();
-            if (auto const* svg_foreign_object_paintable = as_if<Painting::SVGForeignObjectPaintable>(paintable))
-                transforms = &svg_foreign_object_paintable->computed_transforms();
-            if (auto const* svg_svg_paintable = as_if<Painting::SVGSVGPaintable>(paintable))
-                transforms = &svg_svg_paintable->computed_transforms();
-            if (!transforms)
-                return false;
-            *out = {
-                .viewbox_transform = to_ffi_affine_transform(transforms->svg_to_viewbox_transform()),
-                .svg_transform = to_ffi_affine_transform(transforms->svg_transform()),
-            };
-            return true; },
         .compute_svg_path = [](void*, void* node, RustFFI::FfiSvgPathRequest request) {
             auto const* node_with_style = as_if<NodeWithStyle>(*static_cast<Node const*>(node));
             VERIFY(node_with_style);
             return compute_svg_path(*node_with_style, request); },
         .svg_image_bounding_box = [](void*, void* node, i32 viewport_width, i32 viewport_height) {
-            auto const& image_box = as<SVGImageBox>(*static_cast<Node const*>(node));
-            auto bounding_box = image_box.dom_node().bounding_box({
+            auto const& image_element = as<SVG::SVGImageElement>(*static_cast<Node const*>(node)->dom_node());
+            auto bounding_box = image_element.bounding_box({
                 CSSPixels::from_raw(viewport_width),
                 CSSPixels::from_raw(viewport_height),
             });

@@ -6,7 +6,7 @@
 
 #include <LibCore/ArgsParser.h>
 #include <LibURL/InternalURLs.h>
-#include <LibWebView/HistoryStore.h>
+#include <LibWebView/SessionStore.h>
 #include <LibWebView/URL.h>
 #include <UI/Qt/Application.h>
 #include <UI/Qt/ChromeStyle.h>
@@ -16,7 +16,12 @@
 #include <UI/Qt/StringUtils.h>
 #include <UI/Qt/WebContentView.h>
 
+#if defined(AK_OS_LINUX)
+#    include <UI/Qt/ExternalURLHandler.h>
+#endif
+
 #if defined(AK_OS_MACOS)
+#    include <UI/AppKit/Utilities/ExternalURLHandler.h>
 #    include <UI/Qt/MacWindow.h>
 #endif
 
@@ -120,8 +125,7 @@ public:
             auto const& open_event = *static_cast<QFileOpenEvent const*>(event);
             auto const qurl = open_event.url();
             if (!qurl.isEmpty()) {
-                if (auto url = WebView::sanitize_url(ak_byte_string_from_qbytearray(qurl.toEncoded())); url.has_value())
-                    application.on_open_file(url.release_value());
+                application.on_open_file(ak_url_from_qurl(qurl));
                 break;
             }
 
@@ -154,9 +158,9 @@ public:
         if (!m_reopen_recently_closed_tab_action)
             return;
 
-        auto recently_closed_entry = Application::history_store(WebView::IsPrivate::No).most_recently_closed_entry();
         m_reopen_recently_closed_tab_action->setText("&Reopen Recently Closed Tab");
-        m_reopen_recently_closed_tab_action->setEnabled(recently_closed_entry.has_value());
+        auto* active_window = Application::the().active_window_if_any();
+        m_reopen_recently_closed_tab_action->setEnabled(WebView::Application::session_store(active_window ? active_window->is_private() : WebView::IsPrivate::No).has_closed_units());
     }
 
 #endif
@@ -389,8 +393,12 @@ Core::EventLoop& Application::create_platform_event_loop()
 
     auto& event_loop = WebView::Application::create_platform_event_loop();
 
-    if (!browser_options().headless_mode.has_value())
+    if (!browser_options().headless_mode.has_value()) {
+#if defined(AK_OS_LINUX)
+        Ladybird::initialize_external_url_handler(event_loop);
+#endif
         static_cast<EventLoopImplementationQt&>(event_loop.impl()).set_main_loop();
+    }
 
     return event_loop;
 }
@@ -503,8 +511,10 @@ void Application::open_new_window(WebView::IsPrivate is_private)
 void Application::restart_private_browsing_session()
 {
     for (auto* widget : QApplication::topLevelWidgets()) {
-        if (auto* window = as_if<BrowserWindow>(widget); window && window->is_private() == WebView::IsPrivate::Yes)
-            window->close();
+        if (auto* window = as_if<BrowserWindow>(widget); window && window->is_private() == WebView::IsPrivate::Yes) {
+            if (!window->close())
+                return;
+        }
     }
 
     WebView::Application::the().reset_private_browsing_session();
@@ -524,20 +534,55 @@ void Application::focus_location_editor()
 
 void Application::reopen_recently_closed_tab()
 {
-    auto recently_closed_entry = Application::history_store(WebView::IsPrivate::No).pop_most_recently_closed_entry();
-    if (recently_closed_entry.has_value()) {
-        if (recently_closed_entry->was_window) {
-            auto& window = new_window(recently_closed_entry->urls);
-            window.activate_tab(static_cast<int>(recently_closed_entry->active_tab_index));
-        } else if (!recently_closed_entry->urls.is_empty()) {
-            if (!m_active_window || m_active_window->is_private() == WebView::IsPrivate::Yes) {
-                new_window({ recently_closed_entry->urls[0] });
-            } else {
-                // FIXME: Reopen the tab in its previous location.
-                m_active_window->new_tab_from_url(recently_closed_entry->urls[0], Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::end());
-            }
+    auto is_private = m_active_window ? m_active_window->is_private() : WebView::IsPrivate::No;
+    auto closed_unit = WebView::Application::session_store(is_private).take_most_recently_closed();
+    if (closed_unit.is_error()) {
+        dbgln("Unable to reopen the most recently closed session unit: {}", closed_unit.error());
+        return;
+    }
+    if (!closed_unit.value().has_value())
+        return;
+
+    auto unit = closed_unit.value().release_value();
+
+    auto* window = m_active_window;
+    bool restoring_to_source_window = false;
+    if (!unit.was_window && unit.source_window_id.has_value()) {
+        for (auto* widget : QApplication::topLevelWidgets()) {
+            auto* candidate = as_if<BrowserWindow>(widget);
+            if (!candidate || candidate->is_private() != is_private || candidate->session_window_id() != unit.source_window_id)
+                continue;
+            window = candidate;
+            restoring_to_source_window = true;
+            break;
         }
     }
+    if (unit.was_window || !window)
+        window = &new_window({}, configuration_for_new_window(), BrowserWindow::IsPopupWindow::No, is_private);
+
+    Optional<int> next_insertion_index;
+    if (restoring_to_source_window && unit.source_tab_index.has_value())
+        next_insertion_index = static_cast<int>(clamp(*unit.source_tab_index, 0, static_cast<i64>(window->tab_count())));
+
+    Optional<int> tab_index_to_activate;
+    i64 restored_tab_index = 0;
+    for (auto& closed_tab : unit.tabs) {
+        auto location = next_insertion_index.has_value() ? BrowserWindow::TabLocation::at_index(*next_insertion_index) : BrowserWindow::TabLocation::end();
+        auto& tab = window->create_new_tab(Web::HTML::ActivateTab::No, location);
+        if (next_insertion_index.has_value())
+            ++*next_insertion_index;
+
+        if (restored_tab_index == unit.active_tab_index)
+            tab_index_to_activate = window->tab_index(&tab);
+
+        if (!closed_tab.history.has_value() || tab.view().restore_session_history_from_snapshot(closed_tab.history.release_value()).is_error())
+            tab.navigate(closed_tab.active_url);
+        ++restored_tab_index;
+    }
+
+    if (tab_index_to_activate.has_value())
+        window->activate_tab(*tab_index_to_activate);
+
     update_reopen_recently_closed_actions();
 }
 
@@ -558,11 +603,15 @@ void Application::quit()
     if (!confirm_stop_active_downloads(active_window_if_any()))
         return;
 
+    WebView::Application::session_store(WebView::IsPrivate::No).application_quitting();
+
     QApplication::closeAllWindows();
 
     for (auto* widget : QApplication::topLevelWidgets()) {
-        if (as_if<BrowserWindow>(widget) && widget->isVisible())
+        if (as_if<BrowserWindow>(widget) && widget->isVisible()) {
+            WebView::Application::session_store(WebView::IsPrivate::No).application_quit_aborted();
             return;
+        }
     }
 
     QApplication::quit();
@@ -734,6 +783,11 @@ void Application::display_download_confirmation_dialog(StringView download_name,
 
 void Application::display_error_dialog(StringView error_message) const
 {
+    if (browser_options().headless_mode.has_value()) {
+        WebView::Application::display_error_dialog(error_message);
+        return;
+    }
+
     QMessageBox::warning(active_tab(), "Ladybird", qstring_from_ak_string(error_message));
 }
 
@@ -757,6 +811,23 @@ void Application::show_download_in_folder(WebView::FileDownloader::Download cons
     }
 
     QDesktopServices::openUrl(QUrl::fromLocalFile(qstring_from_ak_string(path.release_value())));
+}
+
+void Application::resolve_external_url_handler(URL::URL const& url, WebView::ExternalURLHandlerCallback callback) const
+{
+    if (browser_options().headless_mode.has_value()) {
+        WebView::Application::resolve_external_url_handler(url, move(callback));
+        return;
+    }
+
+#if defined(AK_OS_LINUX)
+    Ladybird::resolve_external_url_handler(url, ak_string_from_qstring(QGuiApplication::desktopFileName()), move(callback));
+#elif defined(AK_OS_MACOS)
+    Ladybird::resolve_external_url_handler(url, move(callback));
+#else
+    (void)url;
+    callback(nullptr);
+#endif
 }
 
 static QClipboard::Mode clipboard_mode(QClipboard const& clipboard, Application::ClipboardType type)

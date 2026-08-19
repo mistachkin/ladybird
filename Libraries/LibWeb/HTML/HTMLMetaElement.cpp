@@ -7,6 +7,9 @@
 
 #include <AK/GenericLexer.h>
 #include <LibGC/Heap.h>
+#include <LibWeb/Bindings/HTMLMetaElement.h>
+#include <LibWeb/Bindings/Intrinsics.h>
+#include <LibWeb/CSS/Invalidation/LanguageInvalidator.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/PropertyID.h>
 #include <LibWeb/CSS/StyleValues/ColorSchemeStyleValue.h>
@@ -34,7 +37,7 @@ HTMLMetaElement::~HTMLMetaElement() = default;
 
 Optional<HTMLMetaElement::HttpEquivAttributeState> HTMLMetaElement::http_equiv_state() const
 {
-    auto value = get_attribute_value_view(HTML::AttributeNames::http_equiv).value_or({});
+    auto value = attribute(HTML::AttributeNames::http_equiv).value_or({});
 
 #define __ENUMERATE_HTML_META_HTTP_EQUIV_ATTRIBUTE(keyword, state) \
     if (value.equals_ignoring_ascii_case(keyword##sv))             \
@@ -47,7 +50,7 @@ Optional<HTMLMetaElement::HttpEquivAttributeState> HTMLMetaElement::http_equiv_s
 
 void HTMLMetaElement::update_metadata(Optional<Utf16String> const& old_name)
 {
-    if (auto name = get_attribute_value_view(AttributeNames::name); name.has_value()) {
+    if (auto name = attribute(AttributeNames::name); name.has_value()) {
         if (name->equals_ignoring_ascii_case(u"theme-color"sv)) {
             document().obtain_theme_color();
         } else if (name->equals_ignoring_ascii_case(u"color-scheme"sv)) {
@@ -134,7 +137,7 @@ void HTMLMetaElement::inserted()
             if (!has_attribute(AttributeNames::content))
                 break;
 
-            auto input = get_attribute_value_view(AttributeNames::content).value_or({});
+            auto input = attribute(AttributeNames::content).value_or({});
             if (input.is_empty())
                 break;
 
@@ -160,7 +163,7 @@ void HTMLMetaElement::inserted()
                 break;
 
             // 2. If the element's content attribute contains a U+002C COMMA character (,), then return.
-            auto content = get_attribute_value_view(AttributeNames::content).value_or({});
+            auto content = attribute(AttributeNames::content).value_or({});
             if (content.contains(u","sv))
                 break;
 
@@ -186,7 +189,7 @@ void HTMLMetaElement::inserted()
 
             // 9. Set the pragma-set default language to candidate.
             document().set_pragma_set_default_language(Utf16String::from_utf16(candidate));
-            document().document_element()->invalidate_lang_value();
+            CSS::Invalidation::invalidate_style_after_language_change(*document().document_element());
             break;
         }
         case HttpEquivAttributeState::ContentSecurityPolicy: {
@@ -197,7 +200,7 @@ void HTMLMetaElement::inserted()
                 break;
 
             // 2. If the meta element has no content attribute, or if that attribute's value is the empty string, then return.
-            auto input = get_attribute_value_view(AttributeNames::content).value_or({});
+            auto input = attribute(AttributeNames::content).value_or({});
             if (input.is_empty())
                 break;
 

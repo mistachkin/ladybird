@@ -7,12 +7,14 @@
 #include "SVGFEImageElement.h"
 #include <LibCore/Timer.h>
 #include <LibGfx/DecodedImageFrame.h>
+#include <LibWeb/Bindings/SVGFEImageElement.h>
+#include <LibWeb/CSS/ComputedValues.h>
+#include <LibWeb/CSS/StyleComputer.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/HTML/DecodedImageData.h>
 #include <LibWeb/HTML/PotentialCORSRequest.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/SharedResourceRequest.h>
-#include <LibWeb/Layout/SVGImageBox.h>
 #include <LibWeb/Namespace.h>
 
 namespace Web::SVG {
@@ -62,8 +64,9 @@ void SVGFEImageElement::process_href(Optional<Utf16String> const& href)
     m_resource_request = HTML::SharedResourceRequest::get_or_create(document(), *m_href);
     m_resource_request->add_callbacks(
         [this, resource_request = GC::Root { m_resource_request }] {
-            set_needs_style_update(true);
-            set_needs_layout_update(DOM::SetNeedsLayoutReason::SVGImageFilterFetch);
+            document().style_computer().style_engine().record_element_style_input_change(style_node_id());
+            document().set_needs_accumulated_visual_contexts_update(true);
+            document().set_needs_repaint(Badge<SVGFEImageElement> {});
         },
         nullptr);
 
@@ -93,20 +96,19 @@ Optional<Gfx::IntRect> SVGFEImageElement::content_rect() const
     auto bitmap = current_image_frame();
     if (!bitmap.has_value())
         return {};
-    // NB: Called during painting.
-    auto layout_node = this->unsafe_layout_node();
-    if (!layout_node)
+    auto computed_style = this->computed_style();
+    if (!computed_style)
         return {};
-    auto width = layout_node->computed_values().width().to_px(0);
+    auto width = computed_style->width().to_px(0);
     if (width == 0)
         width = bitmap->width();
 
-    auto height = layout_node->computed_values().height().to_px(0);
+    auto height = computed_style->height().to_px(0);
     if (height == 0)
         height = bitmap->height();
 
-    auto x = layout_node->computed_values().x().to_px(0);
-    auto y = layout_node->computed_values().y().to_px(0);
+    auto x = computed_style->x().to_px(0);
+    auto y = computed_style->y().to_px(0);
     return Gfx::enclosing_int_rect({ x, y, width, height });
 }
 

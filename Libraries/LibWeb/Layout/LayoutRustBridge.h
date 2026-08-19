@@ -10,6 +10,7 @@
 #include <AK/OwnPtr.h>
 #include <AK/RefPtr.h>
 #include <AK/Variant.h>
+#include <AK/Vector.h>
 #include <LibWeb/CSS/Enums.h>
 #include <LibWeb/CSS/PercentageOr.h>
 #include <LibWeb/Export.h>
@@ -33,24 +34,28 @@ public:
     ~LayoutRustBridge();
 
     void run_root_layout(Box& viewport, CSSPixels viewport_inline_size, CSSPixels viewport_block_size, bool should_collect_devtools_layout_data);
-    void compute_subtree_layout(Box&, Painting::Paintable& paintable_to_replace);
-    void replay_saved_abspos_layout(Box&, Painting::Paintable& paintable_to_replace);
+    void compute_subtree_layout(Box&);
+    void replay_saved_abspos_layout(Box&);
 
 private:
     [[nodiscard]] RustFFI::FfiLayoutFcCallbacks formatting_context_callbacks();
     [[nodiscard]] RustFFI::FfiCommitSink commit_sink();
 
     struct LineCommitContext;
+    struct ReusedPaintable {
+        NonnullRefPtr<Painting::Paintable> paintable;
+        CSSPixelPoint old_absolute_position;
+    };
     Box const* m_commit_root { nullptr };
     OwnPtr<LineCommitContext> m_line_commit_context;
     RefPtr<Painting::Paintable> m_replaced_paintable;
     RefPtr<Painting::Paintable> m_commit_parent_paintable;
     RefPtr<Painting::Paintable> m_commit_insert_before_paintable;
+    Vector<ReusedPaintable> m_reused_paintables;
 };
 
 [[nodiscard]] Optional<RustFFI::FfiFormattingContextType> formatting_context_type_created_by_box(Box const&);
 [[nodiscard]] StringView formatting_context_type_name(RustFFI::FfiFormattingContextType);
-[[nodiscard]] bool box_inset_properties_contain_anchor_functions(Box const&);
 [[nodiscard]] bool can_replay_saved_abspos_layout_inputs_after_style_change(Box const&);
 
 // True while a synchronous Rust layout pass (including its commit) is on the

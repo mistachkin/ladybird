@@ -5,7 +5,7 @@
  */
 
 #include <AK/Utf16StringBuilder.h>
-#include <LibWeb/CSS/ComputedProperties.h>
+#include <LibWeb/CSS/ComputedValues.h>
 #include <LibWeb/CSS/CustomPropertyData.h>
 #include <LibWeb/DOM/AbstractElement.h>
 #include <LibWeb/DOM/Document.h>
@@ -92,14 +92,14 @@ Layout::NodeWithStyle* AbstractElement::unsafe_layout_node()
 GC::Ptr<Element const> AbstractElement::parent_element() const
 {
     if (m_pseudo_element.has_value())
-        return m_element;
+        return m_element.ptr();
     return m_element->parent_element();
 }
 
 Element* AbstractElement::flat_tree_parent_element() const
 {
     if (m_pseudo_element.has_value())
-        return m_element;
+        return m_element.ptr();
     return m_element->flat_tree_parent_element();
 }
 
@@ -154,9 +154,19 @@ bool AbstractElement::is_before(AbstractElement const& other) const
     return this_node && other_node && this_node->is_before(*other_node);
 }
 
-CSS::ComputedValues const* AbstractElement::computed_values() const
+CSS::ComputedStyleRecordView AbstractElement::computed_style() const
 {
-    return m_element->computed_values(m_pseudo_element);
+    return m_element->computed_style(m_pseudo_element);
+}
+
+CSS::StyleRecordID AbstractElement::style_record_identity() const
+{
+    return m_element->style_record_identity(m_pseudo_element);
+}
+
+void const* AbstractElement::style_record_payloads() const
+{
+    return m_element->style_record_payloads(m_pseudo_element);
 }
 
 GC::Ptr<CSS::CSSStyleProperties const> AbstractElement::inline_style() const

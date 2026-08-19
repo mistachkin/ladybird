@@ -1,5 +1,6 @@
 set(SOURCES
     Application.cpp
+    ApplyHistoryStep.cpp
     Attribute.cpp
     Autocomplete.cpp
     AutocompleteMuxer.cpp
@@ -19,6 +20,7 @@ set(SOURCES
     DownloadPresentation.cpp
     DownloadSegmentation.cpp
     DownloadStore.cpp
+    ExternalURLHandler.cpp
     FileDownloader.cpp
     Geolocation.cpp
     HeadlessWebView.cpp
@@ -39,6 +41,9 @@ set(SOURCES
     Profile.cpp
     SearchEngine.cpp
     SessionHistory.cpp
+    SessionHistorySnapshotStorage.cpp
+    SessionHistoryTraversalQueue.cpp
+    SessionStore.cpp
     Settings.cpp
     SiteIsolation.cpp
     SiteIsolationManager.cpp

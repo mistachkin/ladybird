@@ -130,7 +130,7 @@ static Optional<ScrollOffsetData> compute_scroll_offset_data(Variant<GC::Ptr<DOM
         return {};
 
     auto const& scrollable_overflow_rect = paintable_box->scrollable_overflow_rect().value();
-    auto const& computed_axis = computed_scroll_axis(axis, paintable_box->computed_values().writing_mode(), paintable_box->computed_values().direction());
+    auto const& computed_axis = computed_scroll_axis(axis, paintable_box->layout_node().writing_mode(), paintable_box->layout_node().direction());
 
     // FIXME: Scroll offset is currently incorrect as it is always relative to the top left of the scrollable overflow
     //        rect when it should instead be relative to the scroll origin.
@@ -223,7 +223,7 @@ Variant<GC::Ptr<DOM::Element const>, GC::Ptr<DOM::Document>> ScrollTimeline::get
 
     // https://drafts.csswg.org/scroll-animations-1/#scroll-notation
     // References to the root element propagate to the document viewport (which functions as its scroll container).
-    if (source && source == source->document().document_element())
+    if (source && source.ptr() == source->document().document_element())
         return source->owner_document();
 
     return source;

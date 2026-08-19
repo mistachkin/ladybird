@@ -7,7 +7,6 @@
 #pragma once
 
 #include <LibGC/Ptr.h>
-#include <LibWeb/CSS/StyleValues/NumberStyleValue.h>
 #include <LibWeb/DOM/DocumentLoadEventDelayer.h>
 #include <LibWeb/HTML/DecodedImageData.h>
 #include <LibWeb/Layout/ImageProvider.h>
@@ -35,16 +34,16 @@ public:
     //         https://github.com/w3c/svgwg/issues/1153
 
     // https://w3c.github.io/svgwg/svg2-draft/embedded.html#__svg__SVGImageElement__x
-    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(x, Horizontal, CSS::NumberStyleValue::create(0));
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(x, Horizontal, SVGLengthValue::number(0));
 
     // https://w3c.github.io/svgwg/svg2-draft/embedded.html#__svg__SVGImageElement__y
-    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(y, Vertical, CSS::NumberStyleValue::create(0));
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(y, Vertical, SVGLengthValue::number(0));
 
     // https://w3c.github.io/svgwg/svg2-draft/embedded.html#__svg__SVGImageElement__width
-    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(width, Horizontal, CSS::NumberStyleValue::create(0));
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(width, Horizontal, SVGLengthValue::number(0));
 
     // https://w3c.github.io/svgwg/svg2-draft/embedded.html#__svg__SVGImageElement__height
-    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(height, Vertical, CSS::NumberStyleValue::create(0));
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(height, Vertical, SVGLengthValue::number(0));
 
     Gfx::FloatRect bounding_box(CSSPixelSize viewport_size) const;
 
@@ -64,13 +63,8 @@ private:
 
     virtual bool is_svg_image_element() const override { return true; }
 
-    virtual RefPtr<Layout::Node> create_layout_node(NonnullRefPtr<CSS::ComputedValues const>) override;
+    virtual RefPtr<Layout::Node> create_layout_node(CSS::LayoutStyle) override;
     virtual void decoded_image_data_did_update() override { set_needs_repaint(); }
-
-    Optional<NumberPercentage> m_x;
-    Optional<NumberPercentage> m_y;
-    Optional<NumberPercentage> m_width;
-    Optional<NumberPercentage> m_height;
 
     Optional<URL::URL> m_href;
 

@@ -2247,10 +2247,26 @@ handler GetById(
         call_slow_path(get_by_id);
     };
 
+    let invoke_accessor = || @cold {
+        guard call_interp(asm_try_inline_get_by_id_accessor) == 0 else {
+            call_slow_path(get_by_id_cached_accessor);
+        };
+        let inline_vm = current_vm();
+        exec_ctx = inline_vm.running_execution_context;
+        assert_nonzero(exec_ctx);
+        values = exec_ctx.slots;
+        let inline_executable = exec_ctx.executable;
+        assert_nonzero(inline_executable);
+        pb = inline_executable.bytecode_data;
+        pc = 0;
+        goto_handler(pc);
+    };
+
     guard let Value<Object>(object) = load(base) else try_cache;
     let shape = object.shape;
     guard let property_cache = load_property_lookup_cache(cache) else try_cache;
     guard property_cache.shape == shape else try_cache;
+    guard property_cache.entry_type != PROPERTY_LOOKUP_CACHE_ENTRY_TYPE_GET_MISSING_PROPERTY else try_cache;
     let cached_prototype = property_cache.prototype;
 
     # FIXME: Restore a value-producing if once SSA destruction can coalesce its
@@ -2265,7 +2281,7 @@ handler GetById(
 
     guard property_cache.shape_dictionary_generation == shape.dictionary_generation else try_cache;
     let value = holder.named_properties[property_cache.property_offset];
-    guard value is not Value<Accessor> else try_cache;
+    guard value is not Value<Accessor> else invoke_accessor;
     store(dst, value);
     dispatch_next;
 }
@@ -2816,7 +2832,10 @@ handler Call(
         exec_ctx = native_frame;
         values = exec_ctx.slots;
         let raw_native_function: RawNativeFunction = alias(function);
-        let native_function = raw_native_function.native_function;
+        let native_function_index = raw_native_function.native_function_index;
+        let native_function_entry = &native_running_vm.native_function_table[native_function_index];
+        assert_lt_unsigned(native_function_entry.type, NATIVE_FUNCTION_TYPE_COUNT);
+        let native_function = native_function_entry.function;
         # FIXME: Bind native_payload directly once the allocator can keep the
         #        ABI-pinned result live alongside the native result variant.
         let [native_return, variant] = call_raw_native(native_function);

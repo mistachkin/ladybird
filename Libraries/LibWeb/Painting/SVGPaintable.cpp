@@ -5,29 +5,27 @@
  */
 
 #include <LibGfx/BoundingBox.h>
-#include <LibWeb/Layout/ImageBox.h>
-#include <LibWeb/Layout/SVGSVGBox.h>
 #include <LibWeb/Painting/DisplayListRecorder.h>
 #include <LibWeb/Painting/SVGPaintable.h>
 #include <LibWeb/SVG/SVGMaskElement.h>
 
 namespace Web::Painting {
 
-SVGPaintable::SVGPaintable(Layout::SVGBox const& layout_box)
+SVGPaintable::SVGPaintable(Layout::Box const& layout_box)
     : Paintable(layout_box)
 {
 }
 
-Layout::SVGBox const& SVGPaintable::layout_box() const
+Layout::Box const& SVGPaintable::layout_box() const
 {
-    return static_cast<Layout::SVGBox const&>(layout_node());
+    return static_cast<Layout::Box const&>(layout_node());
 }
 
 // https://drafts.csswg.org/css-masking-1/#ClipPathElement
 bool SVGPaintable::contributes_to_clip_path() const
 {
     // If a child element is made invisible by display or visibility it does not contribute to the clipping path.
-    return computed_values().visibility() == CSS::Visibility::Visible && !display().is_none();
+    return layout_node().visibility() == CSS::Visibility::Visible && !display().is_none();
 }
 
 // https://drafts.csswg.org/css-masking-1/#ClipPathElement
@@ -46,7 +44,8 @@ Optional<CSSPixelRect> SVGPaintable::clip_path_geometry_bounds(Gfx::AffineTransf
         if (!svg_paintable)
             return IterationDecision::Continue;
 
-        auto child_bounds = svg_paintable->clip_path_geometry_bounds(additional_transform);
+        auto child_transform = Gfx::AffineTransform { additional_transform }.multiply(child.layout_node().used_svg_element_transform());
+        auto child_bounds = svg_paintable->clip_path_geometry_bounds(child_transform);
         if (!child_bounds.has_value())
             return IterationDecision::Continue;
 
@@ -62,20 +61,18 @@ Optional<CSSPixelRect> SVGPaintable::clip_path_geometry_bounds(Gfx::AffineTransf
 
 CSSPixelRect SVGPaintable::compute_absolute_rect() const
 {
-    if (auto* svg_svg_box = layout_box().first_ancestor_of_type<Layout::SVGSVGBox>()) {
-        CSSPixelRect rect { offset(), content_size() };
-        for (Layout::Box const* ancestor = svg_svg_box; ancestor; ancestor = ancestor->containing_block()) {
-            if (auto paintable_box = ancestor->paintable_box())
-                rect.translate_by(paintable_box->offset());
-        }
-        return rect;
+    // SVG content geometry lives in the user space of the nearest ancestor viewport, and layout
+    // places every box viewport-relative already, so no ancestor offsets accumulate.
+    for (auto const* ancestor = layout_box().parent(); ancestor; ancestor = ancestor->parent()) {
+        if (ancestor->is_svg_svg_box())
+            return { offset(), content_size() };
     }
     return Paintable::compute_absolute_rect();
 }
 
 Gfx::ShouldAntiAlias SVGPaintable::should_anti_alias() const
 {
-    auto shape_rendering = computed_values().shape_rendering();
+    auto shape_rendering = layout_node().shape_rendering();
     if (first_is_one_of(shape_rendering, CSS::ShapeRendering::Optimizespeed, CSS::ShapeRendering::Crispedges))
         return Gfx::ShouldAntiAlias::No;
     return Gfx::ShouldAntiAlias::Yes;

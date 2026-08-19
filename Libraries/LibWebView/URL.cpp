@@ -7,6 +7,8 @@
  */
 
 #include <AK/CharacterTypes.h>
+#include <AK/IPv4Address.h>
+#include <AK/IPv6Address.h>
 #include <AK/String.h>
 #include <AK/StringBuilder.h>
 #include <LibFileSystem/FileSystem.h>
@@ -14,71 +16,186 @@
 #include <LibURL/PublicSuffixData.h>
 #include <LibWebView/Application.h>
 #include <LibWebView/Autocomplete.h>
+#include <LibWebView/ExternalURLHandler.h>
 #include <LibWebView/URL.h>
 
 namespace WebView {
 
-Optional<URL::URL> sanitize_url(StringView location, Optional<SearchEngine> const& search_engine, AppendTLD append_tld)
+bool is_url_handled_internally(URL::URL const& url)
 {
-    auto search_url_or_error = [&]() -> Optional<URL::URL> {
-        if (!search_engine.has_value())
-            return {};
+    return url.scheme().is_one_of("about"sv, "blob"sv, "data"sv, "file"sv, "http"sv, "https"sv, "resource"sv);
+}
 
-        return URL::Parser::basic_parse(search_engine->format_search_query_for_navigation(location));
-    };
+static bool has_valid_explicit_port(StringView input)
+{
+    auto authority_end = input.find_any_of("/?#"sv).value_or(input.length());
+    auto authority = input.substring_view(0, authority_end);
 
+    Optional<size_t> port_separator;
+    if (authority.starts_with('[')) {
+        auto closing_bracket = authority.find(']');
+        if (!closing_bracket.has_value() || *closing_bracket + 1 >= authority.length() || authority[*closing_bracket + 1] != ':')
+            return false;
+        port_separator = *closing_bracket + 1;
+    } else {
+        port_separator = authority.find_last(':');
+        if (!port_separator.has_value())
+            return false;
+    }
+
+    auto port = authority.substring_view(*port_separator + 1);
+    if (port.is_empty())
+        return false;
+    for (auto byte : port.bytes()) {
+        if (!is_ascii_digit(byte))
+            return false;
+    }
+
+    auto url = URL::Parser::basic_parse(MUST(String::formatted("https://{}", input)));
+    return url.has_value() && url->scheme() == "https"sv;
+}
+
+// AD-HOC: When guessing the scheme for schemeless input, we prefer "https" — except for hosts that can't generally
+//         obtain publicly-trusted TLS certs, and whose traffic never leaves the machine: loopback addresses and
+//         localhost names (which the Secure Contexts spec treats as "potentially trustworthy", even over plain http),
+//         as well as the unspecified addresses 0.0.0.0 and [::] (which reach loopback in practice), and private-use and
+//         link-local addresses. Gecko and Blink likewise exempt all of those hosts from their HTTPS-upgrade machinery.
+static bool should_guess_http_scheme_for_host(URL::Host const& host)
+{
+    if (host.is_loopback_or_localhost())
+        return true;
+
+    // NOTE: For hosts produced by the URL parser, to_u32() is the URL spec's IPv4 number — with the first octet in the
+    //       most-significant byte.
+    if (host.has<IPv4Address>()) {
+        u32 const value = host.get<IPv4Address>().to_u32();
+        return (value >> 24) == 0x00    // 0.0.0.0/8: "this network" (RFC 791).
+            || (value >> 24) == 0x0a    // 10.0.0.0/8: private use (RFC 1918).
+            || (value >> 20) == 0xac1   // 172.16.0.0/12: private use (RFC 1918).
+            || (value >> 16) == 0xc0a8  // 192.168.0.0/16: private use (RFC 1918).
+            || (value >> 16) == 0xa9fe; // 169.254.0.0/16: link-local (RFC 3927).
+    }
+
+    if (host.has<IPv6Address>()) {
+        auto const& address = host.get<IPv6Address>();
+        return address.is_zero()                // [::]: the unspecified address.
+            || (address[0] & 0xfe00) == 0xfc00  // fc00::/7: unique local (RFC 4193).
+            || (address[0] & 0xffc0) == 0xfe80; // fe80::/10: link-local (RFC 4291).
+    }
+
+    return false;
+}
+
+ClassifiedUserInput classify_user_input(StringView location, AppendTLD append_tld)
+{
     location = location.trim_whitespace();
 
     if (FileSystem::exists(location)) {
         auto path = FileSystem::real_path(location);
         if (!path.is_error())
-            return URL::create_with_file_scheme(path.value());
-        return search_url_or_error();
+            return { UserInputClassification::InternalURL, URL::create_with_file_scheme(path.value()) };
+        return {};
     }
 
     bool https_scheme_was_guessed = false;
+    bool input_has_explicit_port = false;
+    ByteString schemeless_location;
 
     auto url = URL::create_with_url_or_path(location);
+    // These known schemes do not use an authority, so recognize them before
+    // testing whether the text could instead be a host and port.
+    auto has_known_external_scheme = url.has_value() && url->scheme().is_one_of("geo"sv, "mailto"sv, "sms"sv, "tel"sv);
 
-    if (!url.has_value() || url->scheme() == "localhost"sv) {
+    if (url.has_value() && is_url_handled_internally(*url)) {
+        // Continue below to apply the existing domain and public suffix checks.
+    } else if (url.has_value() && ExternalURLRequestPolicy::is_denied_scheme(url->scheme())) {
+        return {};
+    } else if (has_known_external_scheme) {
+        return { UserInputClassification::ExternalURL, move(url) };
+    } else if (has_valid_explicit_port(location)) {
+        schemeless_location = location;
         url = URL::create_with_url_or_path(ByteString::formatted("https://{}", location));
         if (!url.has_value())
-            return search_url_or_error();
+            return {};
+
+        https_scheme_was_guessed = true;
+        input_has_explicit_port = true;
+    } else if (url.has_value()) {
+        return { UserInputClassification::ExternalURL, move(url) };
+    } else {
+        schemeless_location = location;
+
+        // AD-HOC: A bare IPv6 address can't be a URL host until it's wrapped in square brackets. Wrap it here, so that
+        //         e.g., "::1" becomes a navigation — instead of falling through to a search. Chromium's omnibox
+        //         likewise classifies bare IPv6 addresses as navigations.
+        if (auto ipv6_address = IPv6Address::from_string(location); ipv6_address.has_value())
+            schemeless_location = ByteString::formatted("[{}]", MUST(ipv6_address->to_string()));
+
+        url = URL::create_with_url_or_path(ByteString::formatted("https://{}", schemeless_location));
+        if (!url.has_value())
+            return {};
 
         https_scheme_was_guessed = true;
     }
 
-    // FIXME: Add support for other schemes, e.g. "mailto:". Firefox and Chrome open mailto: locations.
-    static constexpr Array SUPPORTED_SCHEMES { "about"sv, "data"sv, "file"sv, "http"sv, "https"sv, "resource"sv };
-    if (!any_of(SUPPORTED_SCHEMES, [&](StringView const& scheme) { return scheme == url->scheme(); }))
-        return search_url_or_error();
+    if (!is_url_handled_internally(*url))
+        return {};
 
     if (auto const& host = url->host(); host.has_value() && host->is_domain()) {
         auto const& domain = host->get<String>();
 
         if (domain.contains('"'))
-            return search_url_or_error();
+            return {};
 
         // https://datatracker.ietf.org/doc/html/rfc2606
         static constexpr Array RESERVED_TLDS { ".test"sv, ".example"sv, ".invalid"sv, ".localhost"sv };
-        if (any_of(RESERVED_TLDS, [&](StringView const& tld) { return domain.byte_count() > tld.length() && domain.ends_with_bytes(tld); }))
-            return url;
+        bool has_reserved_tld = any_of(RESERVED_TLDS, [&](StringView const& tld) { return domain.byte_count() > tld.length() && domain.ends_with_bytes(tld); });
 
-        auto public_suffix = URL::PublicSuffixData::find_matching_public_suffix(domain, URL::PublicSuffixData::IncludeStarRule::No);
-        if (!public_suffix.has_value() || *public_suffix == domain) {
-            if (append_tld == AppendTLD::Yes)
-                url->set_host(MUST(String::formatted("{}.com", domain)));
-            else if (https_scheme_was_guessed && domain != "localhost"sv)
-                return search_url_or_error();
+        if (!has_reserved_tld) {
+            auto public_suffix = URL::PublicSuffixData::find_matching_public_suffix(domain, URL::PublicSuffixData::IncludeStarRule::No);
+            if (!public_suffix.has_value() || *public_suffix == domain) {
+                if (append_tld == AppendTLD::Yes)
+                    url->set_host(MUST(String::formatted("{}.com", domain)));
+                else if (https_scheme_was_guessed && !host->is_loopback_or_localhost() && !input_has_explicit_port)
+                    return {};
+            }
         }
     }
 
-    return url;
+    // AD-HOC: We guessed "https" above without knowing the host. Now that the host is known, guess "http" instead where
+    //         https can't reasonably work. Reparsing the input keeps intact a port that's default for one scheme but
+    //         not the other. An AppendTLD::Yes rewrite above never produces a host for which this branch is taken — so,
+    //         the rewrite can't be lost by reparsing.
+    if (https_scheme_was_guessed && url->host().has_value() && should_guess_http_scheme_for_host(*url->host()))
+        url = URL::create_with_url_or_path(ByteString::formatted("http://{}", schemeless_location));
+
+    return { UserInputClassification::InternalURL, move(url) };
+}
+
+Optional<URL::URL> sanitize_url(StringView location, Optional<SearchEngine> const& search_engine, AppendTLD append_tld)
+{
+    location = location.trim_whitespace();
+
+    auto classified_input = classify_user_input(location, append_tld);
+    if (classified_input.classification == UserInputClassification::InternalURL)
+        return classified_input.url;
+
+    if (!search_engine.has_value())
+        return {};
+
+    return URL::Parser::basic_parse(search_engine->format_search_query_for_navigation(location));
 }
 
 bool location_looks_like_url(StringView location, AppendTLD append_tld)
 {
-    return sanitize_url(location, {}, append_tld).has_value();
+    switch (classify_user_input(location, append_tld).classification) {
+    case UserInputClassification::InternalURL:
+    case UserInputClassification::ExternalURL:
+        return true;
+    case UserInputClassification::Search:
+        return false;
+    }
+    VERIFY_NOT_REACHED();
 }
 
 Optional<URL::URL> url_from_text(StringView text)
@@ -96,9 +213,9 @@ Optional<URL::URL> url_from_text(StringView text)
 bool autocomplete_urls_match(StringView left, StringView right)
 {
     auto parse_destination = [](StringView value) {
-        auto url = URL::Parser::basic_parse(value);
-        if (url.has_value() && url->scheme().is_one_of("about"sv, "data"sv, "file"sv, "http"sv, "https"sv, "resource"sv))
-            return url;
+        auto classified_input = classify_user_input(value);
+        if (classified_input.url.has_value())
+            return classified_input.url;
         return URL::Parser::basic_parse(MUST(String::formatted("https://{}", value)));
     };
 

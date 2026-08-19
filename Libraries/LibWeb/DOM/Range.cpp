@@ -92,25 +92,39 @@ void Range::visit_edges(GC::Cell::Visitor& visitor)
 
 void Range::set_associated_selection(Badge<Selection::Selection>, GC::Ptr<Selection::Selection> selection)
 {
+    auto had_selection = m_associated_selection != nullptr;
     m_associated_selection = selection;
-    update_associated_selection();
+    if (m_associated_selection) {
+        update_associated_selection();
+    } else if (had_selection) {
+        // The range this selection painted through is no longer its range; take the highlight back.
+        auto& document = m_start_container->document();
+        if (auto viewport = document.unsafe_paintable()) {
+            viewport->reset_selection_states();
+            viewport->set_needs_repaint();
+        }
+
+        // https://w3c.github.io/selection-api/#selectionchange-event
+        // When the selection is dissociated with its range, the user agent must schedule a selectionchange event on
+        // document. Association with a new range schedules it through that range's update.
+        schedule_a_selectionchange_event(document, document);
+    }
 }
 
 void Range::update_associated_selection()
 {
+    // A range no selection paints through must not touch the viewport's selection states:
+    // mutating a free-standing range would wipe the highlight the real selection owns.
+    if (!m_associated_selection)
+        return;
+
     auto& document = m_start_container->document();
 
     // NB: Called during selection update after range change.
     if (auto viewport = document.unsafe_paintable()) {
-        if (m_associated_selection)
-            viewport->recompute_selection_states(*this);
-        else
-            viewport->reset_selection_states();
+        viewport->recompute_selection_states(*this);
         viewport->set_needs_repaint();
     }
-
-    if (!m_associated_selection)
-        return;
 
     document.reset_cursor_blink_cycle();
     document.set_cursor_position_needs_repaint();
@@ -892,10 +906,10 @@ WebIDL::ExceptionOr<void> Range::insert(GC::Ref<Node> node)
 WebIDL::ExceptionOr<void> Range::surround_contents(GC::Ref<Node> new_parent)
 {
     // 1. If a non-Text node is partially contained in this, then throw an "InvalidStateError" DOMException.
-    Node* start_non_text_node = start_container();
+    GC::Ptr<Node> start_non_text_node = start_container();
     if (is<Text>(*start_non_text_node))
         start_non_text_node = start_non_text_node->parent_node();
-    Node* end_non_text_node = end_container();
+    GC::Ptr<Node> end_non_text_node = end_container();
     if (is<Text>(*end_non_text_node))
         end_non_text_node = end_non_text_node->parent_node();
     if (start_non_text_node != end_non_text_node)
@@ -1109,10 +1123,10 @@ WebIDL::ExceptionOr<void> Range::delete_contents()
 
     // 4. Let nodesToRemove be a list of all the nodes that are contained in this, in tree order, omitting any node
     //    whose parent is also contained in this.
-    GC::RootVector<Node*> nodes_to_remove;
-    for (GC::Ptr<Node> node = start_container(); node != end_container()->next_sibling(); node = node->next_in_pre_order()) {
+    GC::RootVector<GC::Ref<Node>> nodes_to_remove;
+    for (GC::Ptr<Node> node = start_container(); node.ptr() != end_container()->next_sibling(); node = node->next_in_pre_order()) {
         if (contains_node(*node) && (!node->parent_node() || !contains_node(*node->parent_node())))
-            nodes_to_remove.append(node);
+            nodes_to_remove.append(node.as_nonnull());
     }
 
     // 5. Let newNode and newOffset be null.
@@ -1202,7 +1216,7 @@ GC::Ref<Geometry::DOMRectList> Range::get_client_rects()
         if (!end_node)
             return Geometry::DOMRectList::create({});
     }
-    for (GC::Ptr<Node> node = start_node; node && node != end_node->next_in_pre_order(); node = node->next_in_pre_order()) {
+    for (GC::Ptr<Node> node = start_node; node && node.ptr() != end_node->next_in_pre_order(); node = node->next_in_pre_order()) {
         auto selection_state = Painting::Paintable::SelectionState::Full;
         if (node == start_node && node == end_node) {
             if (m_start_offset == m_end_offset)

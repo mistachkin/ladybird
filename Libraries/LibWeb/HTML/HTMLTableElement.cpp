@@ -5,8 +5,9 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/Parser/Parser.h>
+#include <LibWeb/CSS/PropertyID.h>
+#include <LibWeb/CSS/StyleComputer.h>
 #include <LibWeb/CSS/StyleValues/ColorStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ImageStyleValue.h>
 #include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
@@ -108,16 +109,14 @@ void HTMLTableElement::apply_presentational_hints(Vector<CSS::StyleProperty>& pr
             auto border = parse_border(value);
             if (!border)
                 return;
-            auto apply_border_style = [&](CSS::PropertyID style_property, CSS::PropertyID width_property, CSS::PropertyID color_property) {
-                auto legacy_line_style = CSS::KeywordStyleValue::create(CSS::Keyword::Outset);
-                properties.append({ .property_id = style_property, .value = legacy_line_style });
+            auto apply_border_style = [&](CSS::PropertyID style_property, CSS::PropertyID width_property) {
+                properties.append({ .property_id = style_property, .value = CSS::KeywordStyleValue::create(CSS::Keyword::Outset) });
                 properties.append({ .property_id = width_property, .value = CSS::LengthStyleValue::create(CSS::Length::make_px(border)) });
-                properties.append({ .property_id = color_property, .value = CSS::ColorStyleValue::create_from_color(Color(128, 128, 128), CSS::ColorSyntax::Legacy) });
             };
-            apply_border_style(CSS::PropertyID::BorderLeftStyle, CSS::PropertyID::BorderLeftWidth, CSS::PropertyID::BorderLeftColor);
-            apply_border_style(CSS::PropertyID::BorderTopStyle, CSS::PropertyID::BorderTopWidth, CSS::PropertyID::BorderTopColor);
-            apply_border_style(CSS::PropertyID::BorderRightStyle, CSS::PropertyID::BorderRightWidth, CSS::PropertyID::BorderRightColor);
-            apply_border_style(CSS::PropertyID::BorderBottomStyle, CSS::PropertyID::BorderBottomWidth, CSS::PropertyID::BorderBottomColor);
+            apply_border_style(CSS::PropertyID::BorderLeftStyle, CSS::PropertyID::BorderLeftWidth);
+            apply_border_style(CSS::PropertyID::BorderTopStyle, CSS::PropertyID::BorderTopWidth);
+            apply_border_style(CSS::PropertyID::BorderRightStyle, CSS::PropertyID::BorderRightWidth);
+            apply_border_style(CSS::PropertyID::BorderBottomStyle, CSS::PropertyID::BorderBottomWidth);
         }
         if (name == HTML::AttributeNames::bordercolor) {
             // https://html.spec.whatwg.org/multipage/rendering.html#tables-2:attr-table-bordercolor
@@ -150,7 +149,7 @@ void HTMLTableElement::attribute_changed(Utf16FlyString const& name, Optional<Ut
         //       When it changes, we need new style for the cells.
         if (old_cellpadding != m_cellpadding) {
             for_each_in_subtree_of_type<HTMLTableCellElement>([&](auto& cell) {
-                cell.set_needs_style_update(true);
+                cell.document().style_computer().style_engine().record_element_style_input_change(cell.style_node_id());
                 return TraversalDecision::Continue;
             });
         }
@@ -406,7 +405,7 @@ GC::Ref<DOM::HTMLCollection> HTMLTableElement::rows()
             if (!is<HTMLTableRowElement>(element)) {
                 return false;
             }
-            if (element.parent_element() == table_node)
+            if (element.parent_element().ptr() == table_node)
                 return true;
 
             if (element.parent_element() && element.parent_element()->local_name().is_one_of(TagNames::thead, TagNames::tbody, TagNames::tfoot) && element.parent()->parent() == table_node)
@@ -490,7 +489,7 @@ WebIDL::ExceptionOr<void> HTMLTableElement::delete_row(WebIDL::Long index)
 
 unsigned int HTMLTableElement::border() const
 {
-    return parse_border(get_attribute_value_view(HTML::AttributeNames::border).value_or({}));
+    return parse_border(attribute(HTML::AttributeNames::border).value_or({}));
 }
 
 Optional<u32> HTMLTableElement::cellpadding() const

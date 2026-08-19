@@ -49,6 +49,7 @@ PaintableFragment::PaintableFragment(PaintableWithLines const& paintable_with_li
     , m_length_in_code_units(fields.length_in_code_units)
     , m_glyph_run(move(fields.glyph_run))
     , m_baseline(fields.baseline)
+    , m_accumulated_vertical_shift(fields.accumulated_vertical_shift)
     , m_writing_mode(fields.writing_mode)
 {
     auto const* text_node = as_if<Layout::TextNode>(layout_node());
@@ -353,7 +354,7 @@ Optional<PaintableFragment::SelectionOffsets> PaintableFragment::selection_range
     auto const* text_control = as_if<HTML::FormAssociatedTextControlElement>(layout_node().document().focused_area().ptr());
     if (!text_control)
         return {};
-    if (layout_node().dom_node() != text_control->form_associated_element_to_text_node())
+    if (GC::Ptr { layout_node().dom_node() } != text_control->form_associated_element_to_text_node())
         return {};
 
     auto selection_start = text_control->selection_start();

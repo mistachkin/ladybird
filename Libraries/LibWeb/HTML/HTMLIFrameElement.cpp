@@ -6,13 +6,15 @@
  */
 
 #include <LibGC/Heap.h>
-#include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/Invalidation/EmbeddedContentInvalidator.h>
+#include <LibWeb/CSS/PropertyID.h>
+#include <LibWeb/CSS/StyleComputer.h>
 #include <LibWeb/CSS/StyleValues/DisplayStyleValue.h>
 #include <LibWeb/CSS/StyleValues/LengthStyleValue.h>
 #include <LibWeb/DOM/DOMTokenList.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Event.h>
+#include <LibWeb/Fetch/Infrastructure/FetchTimingInfo.h>
 #include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/HTMLIFrameElement.h>
 #include <LibWeb/HTML/LocalNavigable.h>
@@ -21,7 +23,8 @@
 #include <LibWeb/HTML/Parser/HTMLParser.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
-#include <LibWeb/Layout/NavigableContainerViewport.h>
+#include <LibWeb/Infra/SerializedURL.h>
+#include <LibWeb/Layout/Box.h>
 #include <LibWeb/ResourceTiming/PerformanceResourceTiming.h>
 #include <LibWeb/TrustedTypes/RequireTrustedTypesForDirective.h>
 #include <LibWeb/TrustedTypes/TrustedTypePolicy.h>
@@ -37,9 +40,9 @@ HTMLIFrameElement::HTMLIFrameElement(DOM::Document& document, DOM::QualifiedName
 
 HTMLIFrameElement::~HTMLIFrameElement() = default;
 
-RefPtr<Layout::Node> HTMLIFrameElement::create_layout_node(NonnullRefPtr<CSS::ComputedValues const> style)
+RefPtr<Layout::Node> HTMLIFrameElement::create_layout_node(CSS::LayoutStyle style)
 {
-    return make_ref_counted<Layout::NavigableContainerViewport>(document(), *this, style);
+    return make_ref_counted<Layout::Box>(document(), *this, style, Layout::RustFFI::NodeKind::NavigableContainerViewport);
 }
 
 void HTMLIFrameElement::attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_)
@@ -82,8 +85,10 @@ void HTMLIFrameElement::attribute_changed(Utf16FlyString const& name, Optional<U
 
     if (name == HTML::AttributeNames::marginwidth || name == HTML::AttributeNames::marginheight) {
         if (auto* document = this->content_document_without_origin_check()) {
-            if (auto* body_element = document->body())
-                const_cast<HTMLElement*>(body_element)->set_needs_style_update(true);
+            if (auto* body_element = document->body()) {
+                auto& mutable_body_element = const_cast<HTMLElement&>(*body_element);
+                mutable_body_element.document().style_computer().style_engine().record_element_style_input_change(mutable_body_element.style_node_id());
+            }
         }
     }
 }
@@ -166,7 +171,7 @@ void HTMLIFrameElement::process_the_iframe_attributes(InitialInsertion initial_i
     }
 
     // 4. Let referrerPolicy be the current state of element's referrerpolicy content attribute.
-    auto referrer_policy = ReferrerPolicy::from_string(get_attribute_value_view(HTML::AttributeNames::referrerpolicy).value_or({})).value_or(ReferrerPolicy::ReferrerPolicy::EmptyString);
+    auto referrer_policy = ReferrerPolicy::from_string(attribute(HTML::AttributeNames::referrerpolicy).value_or({})).value_or(ReferrerPolicy::ReferrerPolicy::EmptyString);
 
     // 5. Set element's current navigation was lazy loaded boolean to false.
     set_current_navigation_was_lazy_loaded(false);
@@ -233,6 +238,33 @@ void run_iframe_load_event_steps(HTMLIFrameElement& element)
     if (element.pending_resource_start_time().has_value()) {
         // 1. Assert: element's pending resource-timing URL is not null.
         VERIFY(element.pending_resource_timing_url().has_value());
+
+        // 2. Let global be element's node document's relevant global object.
+        auto& global = relevant_global_object(element.document());
+
+        // 3. Let fallbackTimingInfo be a new fetch timing info whose start time is element's pending resource-timing
+        //    start time and whose response end time is the current high resolution time given global.
+        auto fallback_timing_info = Fetch::Infrastructure::FetchTimingInfo::create();
+        fallback_timing_info->set_start_time(element.pending_resource_start_time().value());
+        fallback_timing_info->set_end_time(HighResolutionTime::current_high_resolution_time(global));
+
+        // 4. Mark resource timing given fallbackTimingInfo, the result of parsing element's pending resource-timing
+        //    URL, "iframe", global, the empty string, a new response body info, and 0.
+        // FIXME: Our URL is already parsed, how are we supposed to parse it?
+        ResourceTiming::PerformanceResourceTiming::mark_resource_timing(
+            fallback_timing_info,
+            utf16_string_from_url_ascii(element.pending_resource_timing_url()->to_string()),
+            "iframe"_utf16_fly_string,
+            global,
+            Optional<Fetch::Infrastructure::Response::CacheState> {},
+            Fetch::Infrastructure::Response::BodyInfo {},
+            0);
+
+        // 5. Set element's pending resource-timing start time to null.
+        element.set_pending_resource_start_time({});
+
+        // 6. Set element's pending resource-timing URL to null.
+        element.set_pending_resource_timing_url({});
     }
 
     // 5. Fire an event named load at element.
@@ -336,7 +368,7 @@ ReferrerPolicy::ReferrerPolicy determine_iframe_element_referrer_policy(GC::Ptr<
     // 1. If embedder is an iframe element, then return embedder's referrerpolicy attribute's state's corresponding
     //    keyword.
     if (auto* iframe = as_if<HTMLIFrameElement>(embedder.ptr())) {
-        return ReferrerPolicy::from_string(iframe->get_attribute_value_view(HTML::AttributeNames::referrerpolicy).value_or({})).value_or(ReferrerPolicy::ReferrerPolicy::EmptyString);
+        return ReferrerPolicy::from_string(iframe->attribute(HTML::AttributeNames::referrerpolicy).value_or({})).value_or(ReferrerPolicy::ReferrerPolicy::EmptyString);
     }
 
     // 2. Return the empty string.

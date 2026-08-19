@@ -9,6 +9,8 @@
 #include <LibJS/Runtime/ExternalMemory.h>
 #include <LibUnicode/Segmenter.h>
 #include <LibWeb/CSS/Invalidation/LanguageInvalidator.h>
+#include <LibWeb/CSS/PseudoClass.h>
+#include <LibWeb/CSS/StyleEngineInput.h>
 #include <LibWeb/DOM/CharacterData.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/MutationType.h>
@@ -20,6 +22,28 @@
 #include <LibWeb/Selection/Selection.h>
 
 namespace Web::DOM {
+
+CharacterData::RareData::~RareData() = default;
+
+OwnPtr<Node::RareData> CharacterData::create_rare_data() const
+{
+    return make<RareData>();
+}
+
+CharacterData::RareData& CharacterData::ensure_character_data_rare_data() const
+{
+    return static_cast<RareData&>(ensure_rare_data());
+}
+
+CharacterData::RareData* CharacterData::character_data_rare_data()
+{
+    return static_cast<RareData*>(rare_data());
+}
+
+CharacterData::RareData const* CharacterData::character_data_rare_data() const
+{
+    return static_cast<RareData const*>(rare_data());
+}
 
 GC_DEFINE_ALLOCATOR(CharacterData);
 
@@ -110,36 +134,36 @@ WebIDL::ExceptionOr<void> CharacterData::replace_data(size_t offset, size_t coun
     // 8. For each live range whose start node is node and start offset is greater than offset but less than or equal to
     //    offset plus count, set its start offset to offset.
     for (auto* range : Range::live_ranges()) {
-        if (range == selection_range_to_preserve)
+        if (range == selection_range_to_preserve.ptr())
             continue;
-        if (range->start_container() == this && range->start_offset() > offset && range->start_offset() <= (offset + count))
+        if (range->start_container().ptr() == this && range->start_offset() > offset && range->start_offset() <= (offset + count))
             range->set_start_offset(offset);
     }
 
     // 9. For each live range whose end node is node and end offset is greater than offset but less than or equal to
     //    offset plus count, set its end offset to offset.
     for (auto* range : Range::live_ranges()) {
-        if (range == selection_range_to_preserve)
+        if (range == selection_range_to_preserve.ptr())
             continue;
-        if (range->end_container() == this && range->end_offset() > offset && range->end_offset() <= (offset + count))
+        if (range->end_container().ptr() == this && range->end_offset() > offset && range->end_offset() <= (offset + count))
             range->set_end_offset(offset);
     }
 
     // 10. For each live range whose start node is node and start offset is greater than offset plus count, increase its
     //     start offset by data’s length and decrease it by count.
     for (auto* range : Range::live_ranges()) {
-        if (range == selection_range_to_preserve)
+        if (range == selection_range_to_preserve.ptr())
             continue;
-        if (range->start_container() == this && range->start_offset() > (offset + count))
+        if (range->start_container().ptr() == this && range->start_offset() > (offset + count))
             range->set_start_offset(range->start_offset() + data.length_in_code_units() - count);
     }
 
     // 11. For each live range whose end node is node and end offset is greater than offset plus count, increase its end
     //     offset by data’s length and decrease it by count.
     for (auto* range : Range::live_ranges()) {
-        if (range == selection_range_to_preserve)
+        if (range == selection_range_to_preserve.ptr())
             continue;
-        if (range->end_container() == this && range->end_offset() > (offset + count))
+        if (range->end_container().ptr() == this && range->end_offset() > (offset + count))
             range->set_end_offset(range->end_offset() + data.length_in_code_units() - count);
     }
 
@@ -152,6 +176,13 @@ WebIDL::ExceptionOr<void> CharacterData::replace_data(size_t offset, size_t coun
     // OPTIMIZATION: If the characters are the same, we can skip the remainder of this function.
     if (m_data == old_data)
         return {};
+
+    // A text node holding nothing leaves its parent `:empty`, so data arriving in it or leaving it
+    // moves the parent's emptiness without any node being created or destroyed.
+    if (is<Text>(*this) && old_data.is_empty() != m_data.is_empty()) {
+        if (auto* parent = as_if<Element>(parent_node()))
+            CSS::record_element_emptiness_changed(*parent, *this, !old_data.is_empty(), !m_data.is_empty());
+    }
 
     // NB: Called during DOM text mutation, layout is stale.
     if (is<Text>(*this)) {
@@ -173,15 +204,20 @@ WebIDL::ExceptionOr<void> CharacterData::replace_data(size_t offset, size_t coun
 
     document().bump_character_data_version();
 
-    if (m_grapheme_segmenter)
-        m_grapheme_segmenter->set_segmented_text(m_data);
-    // The line segmenter may be the ASCII fast-path variant, which only accepts a subset of inputs; let the
-    // lazy getter re-pick the implementation against the new data.
-    m_line_segmenter = nullptr;
-    if (m_word_segmenter)
-        m_word_segmenter->set_segmented_text(m_data);
+    if (auto* rare_data = character_data_rare_data()) {
+        if (rare_data->grapheme_segmenter)
+            rare_data->grapheme_segmenter->set_segmented_text(m_data);
+        // The line segmenter may be the ASCII fast-path variant, which only accepts a subset of inputs; let the
+        // lazy getter re-pick the implementation against the new data.
+        rare_data->line_segmenter = nullptr;
+        if (rare_data->word_segmenter)
+            rare_data->word_segmenter->set_segmented_text(m_data);
+    }
 
-    CSS::Invalidation::invalidate_style_after_text_directionality_change(*this);
+    if (is<Text>(*this)) {
+        if (auto parent = parent_element())
+            CSS::Invalidation::invalidate_style_after_text_change_under(*parent);
+    }
 
     return {};
 }
@@ -209,36 +245,39 @@ WebIDL::ExceptionOr<void> CharacterData::delete_data(size_t offset, size_t count
 
 Unicode::Segmenter& CharacterData::grapheme_segmenter() const
 {
-    if (!m_grapheme_segmenter) {
-        m_grapheme_segmenter = document().grapheme_segmenter().clone();
-        m_grapheme_segmenter->set_segmented_text(m_data);
+    auto& segmenter = ensure_character_data_rare_data().grapheme_segmenter;
+    if (!segmenter) {
+        segmenter = document().grapheme_segmenter().clone();
+        segmenter->set_segmented_text(m_data);
     }
 
-    return *m_grapheme_segmenter;
+    return *segmenter;
 }
 
 Unicode::Segmenter& CharacterData::line_segmenter() const
 {
-    if (!m_line_segmenter) {
+    auto& segmenter = ensure_character_data_rare_data().line_segmenter;
+    if (!segmenter) {
         if (auto ascii = Unicode::Segmenter::try_create_for_ascii_line(m_data.utf16_view())) {
-            m_line_segmenter = ascii.release_nonnull();
+            segmenter = ascii.release_nonnull();
         } else {
-            m_line_segmenter = document().line_segmenter().clone();
-            m_line_segmenter->set_segmented_text(m_data);
+            segmenter = document().line_segmenter().clone();
+            segmenter->set_segmented_text(m_data);
         }
     }
 
-    return *m_line_segmenter;
+    return *segmenter;
 }
 
 Unicode::Segmenter& CharacterData::word_segmenter() const
 {
-    if (!m_word_segmenter) {
-        m_word_segmenter = document().word_segmenter().clone();
-        m_word_segmenter->set_segmented_text(m_data);
+    auto& segmenter = ensure_character_data_rare_data().word_segmenter;
+    if (!segmenter) {
+        segmenter = document().word_segmenter().clone();
+        segmenter->set_segmented_text(m_data);
     }
 
-    return *m_word_segmenter;
+    return *segmenter;
 }
 
 }

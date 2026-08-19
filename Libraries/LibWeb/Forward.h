@@ -14,11 +14,12 @@
 #include <LibIPC/Forward.h>
 #include <LibJS/Forward.h>
 #include <LibWeb/Bindings/Forward.h>
+#include <LibWeb/CSS/StyleEngineIdentifiers.h>
+#include <LibWeb/CSS/StyleRecordID.h>
 #include <LibWeb/Export.h>
 
 namespace Web {
 
-struct AsyncScrollOperation;
 class AutoScrollHandler;
 class CSSPixels;
 class DisplayListRecordingContext;
@@ -36,6 +37,9 @@ class XMLDocumentBuilder;
 
 enum class InvalidateDisplayList;
 enum class TraversalDecision;
+
+struct AsyncScrollOperation;
+struct InitiatorSourceSnapshot;
 
 AK_TYPEDEF_DISTINCT_NUMERIC_GENERAL(i64, UniqueNodeID, Comparison, Increment, CastToUnderlying);
 
@@ -263,8 +267,10 @@ class ColorInterpolationMethodStyleValue;
 class ColorMixStyleValue;
 class ColorSchemeStyleValue;
 class ColorStyleValue;
-class ComputedProperties;
+class ComputedStyleWorkingSet;
 class ComputedValues;
+class ComputedStyleRecordView;
+class LayoutStyle;
 class ConicGradientStyleValue;
 class ContainerQuery;
 class ContentStyleValue;
@@ -371,7 +377,6 @@ class HueRotateFilterStyleValue;
 class ImageSetStyleValue;
 class ImageStyleValue;
 class IntegerStyleValue;
-class InvalidationSet;
 class KeywordStyleValue;
 class Length;
 class LengthBox;
@@ -445,6 +450,7 @@ class VisualViewport;
 enum class FeatureComparison : u8;
 enum class FontFeatureValueType : u8;
 enum class Keyword : u16;
+enum class LayoutTreeRebuildRoot : u8;
 enum class MediaFeatureID : u8;
 enum class PropertyID : u16;
 enum class SizeFeatureID : u8;
@@ -527,8 +533,6 @@ using StyleValueTuple = Vector<ValueComparingRefPtr<StyleValue const>>;
 }
 
 namespace Web::CSS::Invalidation {
-
-class StyleInvalidator;
 
 }
 
@@ -794,6 +798,7 @@ class HTMLHeadElement;
 class HTMLHeadingElement;
 class HTMLHRElement;
 class HTMLHtmlElement;
+class HTMLHyperlinkElementUtils;
 class HTMLIFrameElement;
 class HTMLImageElement;
 class HTMLInputElement;
@@ -1004,31 +1009,16 @@ class IntersectionObserverEntry;
 
 namespace Web::Layout {
 
-class AudioBox;
 class BlockContainer;
+class ImageProvider;
 class Box;
-class ButtonBox;
-class CheckBox;
-class FieldSetBox;
-class ImageBox;
-class InlineNode;
-class Label;
-class LegendBox;
-class ListItemBox;
-class ListItemMarkerBox;
 class LayoutRustBridge;
 class Node;
 class NodeArena;
 class NodeWithStyle;
-class NodeWithStyleAndBoxModelMetrics;
-class RadioButton;
-class ReplacedBox;
-class SVGSVGBox;
-class TableWrapper;
 class TextNode;
 class TextOffsetMapping;
 class LayoutTreeBuilderAccess;
-class VideoBox;
 class Viewport;
 
 }
@@ -1337,6 +1327,12 @@ class Memory;
 class Module;
 class Table;
 class WebAssemblyModule;
+
+namespace Detail {
+
+class WebAssemblyCache;
+
+}
 
 }
 

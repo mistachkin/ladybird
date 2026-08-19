@@ -156,7 +156,7 @@ Optional<Vector<Utf16String>> WebGLRenderingContextBase::get_supported_extension
     return webgl_extensions;
 }
 
-JS::Object* WebGLRenderingContextBase::get_extension(JS::Realm& caller_realm, Utf16String const& name)
+GC::Ptr<JS::Object> WebGLRenderingContextBase::get_extension(JS::Realm& caller_realm, Utf16String const& name)
 {
     // Returns an object if, and only if, name is an ASCII case-insensitive match [HTML] for one of the names returned
     // from getSupportedExtensions; otherwise, returns null. The object returned from getExtension contains any constants
@@ -181,7 +181,7 @@ JS::Object* WebGLRenderingContextBase::get_extension(JS::Realm& caller_realm, Ut
     auto& wrapper_world = Bindings::host_defined_wrapper_world(caller_realm);
     if (auto maybe_empty_extension_cache = m_enabled_empty_extensions.get(name_string); maybe_empty_extension_cache.has_value()) {
         if (auto extension = maybe_empty_extension_cache.value()->get(wrapper_world))
-            return extension.ptr();
+            return extension;
     }
 
     // If we pass the check above this will always return a value
@@ -205,7 +205,7 @@ JS::Object* WebGLRenderingContextBase::get_extension(JS::Realm& caller_realm, Ut
 
     auto extension = extension_info.factory(*this);
     m_enabled_extensions.set(move(name_string), extension);
-    return Bindings::wrap(Bindings::host_defined_wrapper_world(caller_realm), caller_realm, extension).ptr();
+    return Bindings::wrap(Bindings::host_defined_wrapper_world(caller_realm), caller_realm, extension);
 }
 
 void WebGLRenderingContextBase::enable_compressed_texture_format(WebIDL::UnsignedLong format)
@@ -230,6 +230,15 @@ bool WebGLRenderingContextBase::extension_enabled(StringView extension) const
 ReadonlySpan<WebIDL::UnsignedLong> WebGLRenderingContextBase::enabled_compressed_texture_formats() const
 {
     return m_enabled_compressed_texture_formats;
+}
+
+ErrorOr<ReadonlyBytes> WebGLRenderingContextBase::texture_data_for_2d_upload(ReadonlyBytes bytes, GLsizei width, GLsizei height, GLenum format, GLenum type) const
+{
+    if (!is_valid_2d_pixel_unpack_state(width, m_unpack_state))
+        return Error::from_errno(EINVAL);
+    if (auto size = required_2d_texture_data_size(width, height, format, type, m_unpack_state); size.has_value() && *size <= bytes.size())
+        return bytes.slice(0, *size);
+    return bytes;
 }
 
 Optional<WebGLRenderingContextBase::TexImageSourceFrame> WebGLRenderingContextBase::read_texture_image_source(TexImageSource const& source, WebIDL::UnsignedLong format, WebIDL::UnsignedLong type)
@@ -375,6 +384,7 @@ void WebGLRenderingContextBase::restore_context_after_compositor_reconnect()
 void WebGLRenderingContextBase::reset_context_state_after_loss()
 {
     ++m_context_generation;
+    m_unpack_state = {};
     m_unpack_flip_y = false;
     m_unpack_premultiply_alpha = false;
     m_unpack_colorspace_conversion = BROWSER_DEFAULT_WEBGL;

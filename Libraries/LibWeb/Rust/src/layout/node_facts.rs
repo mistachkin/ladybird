@@ -113,7 +113,6 @@ pub(crate) fn kind_is_box(kind: NodeKind) -> bool {
             | NodeKind::InlineNode
             | NodeKind::Node
             | NodeKind::NodeWithStyle
-            | NodeKind::NodeWithStyleAndBoxModelMetrics
             | NodeKind::GeneratedTextNode
             | NodeKind::TextNode
             | NodeKind::TextSliceNode
@@ -152,7 +151,7 @@ pub(crate) fn kind_is_replaced_box(kind: NodeKind) -> bool {
     )
 }
 
-fn kind_is_svg_box(kind: NodeKind) -> bool {
+pub(crate) fn kind_is_svg_box(kind: NodeKind) -> bool {
     matches!(
         kind,
         NodeKind::SVGBox
@@ -174,12 +173,16 @@ fn kind_is_svg_box(kind: NodeKind) -> bool {
 /// Nothing is materialized per node, so every answer is as live as its source.
 #[derive(Clone, Copy)]
 pub(crate) struct NodeFacts<'pass> {
-    state: &'pass LayoutState,
     callbacks: &'pass FfiLayoutFcCallbacks,
     node: Node,
 }
 
 impl<'pass> NodeFacts<'pass> {
+    #[inline]
+    pub(crate) fn new(callbacks: &'pass FfiLayoutFcCallbacks, node: Node) -> Self {
+        Self { callbacks, node }
+    }
+
     fn data(&self) -> &'pass NodeData {
         self.callbacks.node_data(self.node)
     }
@@ -190,7 +193,7 @@ impl<'pass> NodeFacts<'pass> {
     }
 
     fn style(&self) -> StyleValues<'pass> {
-        self.state.style_facts(self.callbacks, self.node)
+        StyleValues::for_node(self.callbacks, self.node)
     }
 
     fn computed_values_view_if_styled(&self) -> Option<ComputedValuesView<'pass>> {
@@ -624,7 +627,7 @@ impl<'pass> NodeFacts<'pass> {
         if self.data().style.is_null() {
             return crate::layout::FfiDisplay::block();
         }
-        self.state.style_facts(self.callbacks, self.node).display()
+        self.style().display()
     }
 
     pub(crate) fn is_svg_box(&self) -> bool {

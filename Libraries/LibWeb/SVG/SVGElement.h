@@ -33,6 +33,8 @@ class WEB_API SVGElement
 public:
     virtual bool requires_svg_container() const override { return true; }
 
+    virtual RefPtr<Layout::Node> create_layout_node(CSS::LayoutStyle) override;
+
     GC::Ref<SVGAnimatedString> class_name();
     GC::Ptr<SVGSVGElement> owner_svg_element();
     GC::Ptr<SVGElement> viewport_element();
@@ -42,7 +44,7 @@ public:
 
     Gfx::Size<double> viewport_size_for_percentage_resolution();
 
-    GC::Ref<SVGAnimatedLength> svg_animated_length_for_attribute(Utf16FlyString const&, SVGLength::Directionality, NonnullRefPtr<CSS::StyleValue const>&& default_value);
+    GC::Ref<SVGAnimatedLength> svg_animated_length_for_attribute(Utf16FlyString const&, SVGLength::Directionality, SVGLengthValue default_value);
 
     virtual bool is_presentational_hint(Utf16FlyString const&) const final override;
     virtual void apply_presentational_hints(Vector<CSS::StyleProperty>&) const final override;

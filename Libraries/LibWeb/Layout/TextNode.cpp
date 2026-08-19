@@ -26,20 +26,23 @@ namespace Web::Layout {
 TextNode::TextNode(DOM::Document& document, DOM::Text& text)
     : Node(document, &text)
 {
+    set_node_kind(RustFFI::NodeKind::TextNode);
     enroll_for_arena_text_content_sync();
     update_produces_line_box_fragment_when_empty_flag();
 }
 
-TextNode::TextNode(DOM::Document& document, DOM::Text& text, AttachToDOMNode attach_to_dom_node)
+TextNode::TextNode(DOM::Document& document, DOM::Text& text, AttachToDOMNode attach_to_dom_node, RustFFI::NodeKind kind)
     : Node(document, &text, attach_to_dom_node)
 {
+    set_node_kind(kind);
     enroll_for_arena_text_content_sync();
     update_produces_line_box_fragment_when_empty_flag();
 }
 
-TextNode::TextNode(DOM::Document& document)
+TextNode::TextNode(DOM::Document& document, RustFFI::NodeKind kind)
     : Node(document, nullptr)
 {
+    set_node_kind(kind);
     enroll_for_arena_text_content_sync();
 }
 
@@ -67,7 +70,7 @@ bool TextNode::update_produces_line_box_fragment_when_empty_flag()
 
 TextNode::~TextNode() = default;
 
-DOM::Element const* TextNode::parent_element_for_text_transform() const
+GC::Ptr<DOM::Element const> TextNode::parent_element_for_text_transform() const
 {
     return dom_node().parent_element();
 }
@@ -78,14 +81,14 @@ bool TextNode::is_password_input() const
 }
 
 GeneratedTextNode::GeneratedTextNode(DOM::Document& document, Utf16String text)
-    : TextNode(document)
+    : TextNode(document, RustFFI::NodeKind::GeneratedTextNode)
     , m_text(move(text))
 {
 }
 
 GeneratedTextNode::~GeneratedTextNode() = default;
 
-DOM::Element const* GeneratedTextNode::parent_element_for_text_transform() const
+GC::Ptr<DOM::Element const> GeneratedTextNode::parent_element_for_text_transform() const
 {
     if (is_generated_for_pseudo_element())
         return pseudo_element_generator();
@@ -95,7 +98,7 @@ DOM::Element const* GeneratedTextNode::parent_element_for_text_transform() const
 }
 
 TextSliceNode::TextSliceNode(DOM::Document& document, DOM::Text& text, AttachToDOMNode attach_to_dom_node, size_t dom_start_offset, size_t dom_length)
-    : TextNode(document, text, attach_to_dom_node)
+    : TextNode(document, text, attach_to_dom_node, RustFFI::NodeKind::TextSliceNode)
     , m_dom_start_offset(dom_start_offset)
     , m_dom_length_in_code_units(dom_length)
 {
@@ -371,7 +374,7 @@ static Utf16String apply_text_transform(Utf16String const& string, CSS::TextTran
 
 TextNode::TextForRenderingCacheKey TextNode::create_text_for_rendering_cache_key() const
 {
-    auto text_transform = parent()->computed_values().text_transform();
+    auto text_transform = parent()->text_transform();
     Optional<Utf16String> lang;
     if (first_is_one_of(text_transform, CSS::TextTransform::Uppercase, CSS::TextTransform::Lowercase, CSS::TextTransform::Capitalize)) {
         if (auto parent_element = parent_element_for_text_transform())
@@ -380,7 +383,7 @@ TextNode::TextForRenderingCacheKey TextNode::create_text_for_rendering_cache_key
 
     return {
         .text_transform = text_transform,
-        .white_space_collapse = parent()->computed_values().white_space_collapse(),
+        .white_space_collapse = parent()->white_space_collapse(),
         .lang = move(lang),
         .is_password_input = is_password_input(),
         .dom_start_offset = dom_start_offset(),
@@ -424,14 +427,14 @@ void TextNode::enroll_for_arena_text_content_sync() const
     node_arena().enroll_text_node_for_content_sync(*this);
 }
 
-void TextNode::sync_text_content_to_arena() const
+bool TextNode::sync_text_content_to_arena() const
 {
     ensure_text_dependent_cache();
     m_enrolled_for_arena_text_content_sync = false;
     if (m_arena_text_content_in_sync)
-        return;
+        return false;
     auto view = m_text_dependent_cache->text_for_rendering.utf16_view();
-    RustFFI::layout_arena_set_text_content(
+    bool arena_text_content_changed = RustFFI::layout_arena_set_text_content(
         arena_handle(),
         slot_id(this),
         view.has_ascii_storage() ? reinterpret_cast<u8 const*>(view.ascii_span().data()) : nullptr,
@@ -440,6 +443,7 @@ void TextNode::sync_text_content_to_arena() const
         text().is_ascii_whitespace(),
         Unicode::may_require_bidi_processing(view));
     m_arena_text_content_in_sync = true;
+    return arena_text_content_changed;
 }
 
 Utf16String TextNode::compute_text_for_rendering(TextForRenderingCacheKey const& cache_key) const

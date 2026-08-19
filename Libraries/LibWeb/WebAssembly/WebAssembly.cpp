@@ -29,6 +29,7 @@
 #include <LibThreading/ThreadPool.h>
 #include <LibURL/Parser.h>
 #include <LibWasm/AbstractMachine/Validator.h>
+#include <LibWeb/Bindings/HostDefined.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/Bindings/Wrappable.h>
@@ -61,22 +62,31 @@ static GC::Ref<WebIDL::Promise> compile_potential_webassembly_response(JS::Realm
 
 namespace Detail {
 
-static HashMap<GC::Ptr<JS::Object>, NonnullRefPtr<WebAssemblyCache>>& caches()
+// HostResizeArrayBuffer and HostGrowSharedArrayBuffer have to find the WebAssembly.Memory that owns a given buffer,
+// which the spec phrases as a scan over every Memory object cache. This registry exists only to serve those scans: it
+// owns nothing and takes no part in garbage collection.
+static Vector<WebAssemblyCache*>& live_caches()
 {
-    static NeverDestroyed<HashMap<GC::Ptr<JS::Object>, NonnullRefPtr<WebAssemblyCache>>> caches;
+    static NeverDestroyed<Vector<WebAssemblyCache*>> caches;
     return *caches;
 }
 
-NonnullRefPtr<WebAssemblyCache> get_cache(JS::Object& global_object)
+WebAssemblyCache::WebAssemblyCache()
 {
-    return caches().ensure(global_object, [] {
-        return make_ref_counted<WebAssemblyCache>();
-    });
+    live_caches().append(this);
+}
+
+WebAssemblyCache::~WebAssemblyCache()
+{
+    live_caches().remove_first_matching([this](auto* cache) { return cache == this; });
 }
 
 NonnullRefPtr<WebAssemblyCache> get_cache(JS::Realm& realm)
 {
-    return get_cache(realm.global_object());
+    auto& host_defined = static_cast<Bindings::HostDefined&>(*realm.host_defined());
+    if (!host_defined.wasm_cache)
+        host_defined.wasm_cache = make_ref_counted<WebAssemblyCache>();
+    return *host_defined.wasm_cache;
 }
 
 void WebAssemblyCache::visit_edges(JS::Cell::Visitor& visitor)
@@ -94,21 +104,6 @@ void WebAssemblyCache::visit_edges(JS::Cell::Visitor& visitor)
     } });
 }
 
-}
-
-void visit_edges(JS::Object& object, JS::Cell::Visitor& visitor)
-{
-    auto& global_object = HTML::relevant_global_object(object);
-    if (auto maybe_cache = Detail::caches().get(global_object); maybe_cache.has_value()) {
-        auto& cache = *maybe_cache.release_value();
-        cache.visit_edges(visitor);
-    }
-}
-
-void finalize(JS::Object& object)
-{
-    auto& global_object = HTML::relevant_global_object(object);
-    Detail::caches().remove(global_object);
 }
 
 // https://webassembly.github.io/spec/js-api/#error-objects
@@ -252,12 +247,12 @@ namespace Detail {
         _temporary_result.release_value();                                                                                                              \
     })
 
-Wasm::HostFunction create_host_function(JS::Realm& realm, JS::FunctionObject& function, Wasm::FunctionType const& type, ByteString const& name)
+Wasm::HostFunction create_host_function(JS::Realm& realm, JS::FunctionObject& function, Wasm::FunctionType const& type, size_t function_index)
 {
     return Wasm::HostFunction {
         [&realm, &function, &type](auto&, auto arguments) -> Wasm::Result {
             auto& vm = realm.vm();
-            GC::RootVector<JS::Value> argument_values;
+            GC::RootVector<JS::Value, Wasm::ArgumentsStaticSize> argument_values;
             size_t index = 0;
             for (auto& entry : arguments) {
                 argument_values.append(to_js_value(realm, entry, type.parameters()[index]));
@@ -266,10 +261,10 @@ Wasm::HostFunction create_host_function(JS::Realm& realm, JS::FunctionObject& fu
 
             auto result = TRY_OR_RETURN_TRAP(JS::call(vm, function, JS::js_undefined(), argument_values.span()));
             if (type.results().is_empty())
-                return Wasm::Result { Vector<Wasm::Value> {} };
+                return Wasm::Result { Vector<Wasm::Value, Wasm::ResultsStaticSize> {} };
 
             if (type.results().size() == 1)
-                return Wasm::Result { Vector<Wasm::Value> { TRY_OR_RETURN_TRAP(to_webassembly_value(realm, result, type.results().first())) } };
+                return Wasm::Result { Vector<Wasm::Value, Wasm::ResultsStaticSize> { TRY_OR_RETURN_TRAP(to_webassembly_value(realm, result, type.results().first())) } };
 
             auto method = TRY_OR_RETURN_TRAP(result.get_method(vm, vm.names.iterator));
             if (!method)
@@ -280,7 +275,7 @@ Wasm::HostFunction create_host_function(JS::Realm& realm, JS::FunctionObject& fu
             if (values.size() != type.results().size())
                 return Wasm::Trap::from_external_object(vm.throw_completion<JS::TypeError>(Utf16String::formatted("Invalid number of return values for multi-value wasm return of {} objects", type.results().size())));
 
-            Vector<Wasm::Value> wasm_values;
+            Vector<Wasm::Value, Wasm::ResultsStaticSize> wasm_values;
             TRY_OR_RETURN_OOM_TRAP(vm, wasm_values.try_ensure_capacity(values.size()));
 
             size_t i = 0;
@@ -290,7 +285,7 @@ Wasm::HostFunction create_host_function(JS::Realm& realm, JS::FunctionObject& fu
             return Wasm::Result { move(wasm_values) };
         },
         type,
-        name,
+        ByteString::number(function_index),
     };
 }
 
@@ -312,7 +307,8 @@ JS::ThrowCompletionOr<NonnullRefPtr<Wasm::ModuleInstance>> instantiate_module(JS
         dbgln_if(LIBWEB_WASM_DEBUG, "Trying to resolve stuff because import object was specified");
 
         // 3. For each (moduleName, componentName, externtype) of module_imports(module),
-        for (Wasm::Linker::Name const& import_name : linker.unresolved_imports()) {
+        for (auto const& import : module.import_section().imports()) {
+            Wasm::Linker::Name import_name { import.module(), import.name(), import.description() };
             dbgln_if(LIBWEB_WASM_DEBUG, "Trying to resolve {}::{}", import_name.module, import_name.name);
 
             // 3.1. Let o be ? Get(importObject, moduleName).
@@ -347,13 +343,14 @@ JS::ThrowCompletionOr<NonnullRefPtr<Wasm::ModuleInstance>> instantiate_module(JS
                     }
                     // 3.4.3. Otherwise,
                     else {
-                        // 3.4.3.1. Create a host function from v and functype, and let funcaddr be the result.
                         cache->add_imported_object(function);
-                        auto host_function = create_host_function(realm, function, function_type, ByteString::formatted("func{}", resolved_imports.size()));
+
+                        // 3.4.3.1. Create a host function from v and functype, and let funcaddr be the result.
+                        // 3.4.3.2. Let index be the number of external functions in imports. This value index is known as the index of the host function funcaddr.
+                        auto host_function = create_host_function(realm, function, function_type, imported_function_count);
                         address = cache->abstract_machine().store().allocate(move(host_function));
-                        // FIXME: 3.4.3.2. Let index be the number of external functions in imports. This value index is known as the index of the host function funcaddr.
-                        //        'index' doesn't seem to be used anywhere?
                     }
+
                     dbgln_if(LIBWEB_WASM_DEBUG, "Resolved to {}", address->value());
                     // FIXME: LinkError instead.
                     VERIFY(address.has_value());
@@ -561,8 +558,7 @@ JS::ThrowCompletionOr<JS::HandledByHost> host_resize_array_buffer(JS::VM& vm, JS
     if (detach_key.is_string() && detach_key.as_string() == JS::PrimitiveString::create(vm, "WebAssembly.Memory"_utf16_fly_string)) {
         // 3. For each memaddr → mem in all Memory object caches,
         bool seen = false;
-        for (auto& cache_entry : caches()) {
-            auto& cache = cache_entry.value;
+        for (auto* cache : live_caches()) {
             auto const& map = cache->memory_instances();
 
             for (auto const& entry : map) {
@@ -618,8 +614,7 @@ JS::ThrowCompletionOr<JS::HandledByHost> host_grow_shared_array_buffer(JS::VM& v
 
         // 3. For each memaddr → mem in all Memory object caches,
         bool seen = false;
-        for (auto& cache_entry : caches()) {
-            auto& cache = cache_entry.value;
+        for (auto* cache : live_caches()) {
             auto const& map = cache->memory_instances();
 
             for (auto const& entry : map) {
@@ -750,7 +745,7 @@ Utf16FlyString name_of_webassembly_function(Wasm::Store& store, Wasm::FunctionAd
     return Utf16FlyString::from_utf16(name.utf16_view());
 }
 
-JS::NativeFunction* create_native_function(JS::Realm& realm, Wasm::FunctionAddress address, Utf16FlyString, Instance* instance)
+GC::Ptr<JS::NativeFunction> create_native_function(JS::Realm& realm, Wasm::FunctionAddress address, Utf16FlyString, GC::Ptr<Instance> instance)
 {
     auto cache = get_cache(realm);
     if (auto entry = cache->get_function_instance(address); entry.has_value())
@@ -766,7 +761,7 @@ JS::NativeFunction* create_native_function(JS::Realm& realm, Wasm::FunctionAddre
         length,
         [address, type = move(type), instance, realm = GC::Ref(realm)](JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
             (void)instance;
-            Vector<Wasm::Value> values;
+            Vector<Wasm::Value, Wasm::ArgumentsStaticSize> values;
             values.ensure_capacity(type.parameters().size());
 
             // Grab as many values as needed and convert them.
@@ -814,17 +809,11 @@ JS::NativeFunction* create_native_function(JS::Realm& realm, Wasm::FunctionAddre
 JS::ThrowCompletionOr<Wasm::Value> to_webassembly_value(JS::Realm& realm, JS::Value value, Wasm::ValueType const& type)
 {
     auto& vm = realm.vm();
-    static auto const& two_64 = *new ::Crypto::SignedBigInteger(
-        TRY_OR_THROW_OOM(vm, "1"_sbigint.shift_left(64)));
 
     switch (type.kind()) {
     case Wasm::ValueType::I64: {
         auto bigint = TRY(value.to_bigint(vm));
-        auto value = bigint->big_integer().divided_by(two_64).remainder;
-        VERIFY(value.unsigned_value().byte_length() <= sizeof(i64));
-        auto magnitude = value.unsigned_value().to_u64();
-        i64 integer = static_cast<i64>(value.is_negative() ? 0 - magnitude : magnitude);
-        return Wasm::Value { integer };
+        return Wasm::Value { bigint->big_integer().to_i64() };
     }
     case Wasm::ValueType::I32: {
         auto _i32 = TRY(value.to_i32(vm));
@@ -846,7 +835,7 @@ JS::ThrowCompletionOr<Wasm::Value> to_webassembly_value(JS::Realm& realm, JS::Va
             auto& function = value.as_function();
             auto cache = get_cache(realm);
             for (auto& entry : cache->function_instances()) {
-                if (entry.value == &function)
+                if (entry.value == GC::Ref { function })
                     return Wasm::Value { Wasm::Reference { Wasm::Reference::Func { entry.key, cache->abstract_machine().store().get_module_for(entry.key) } } };
             }
         }

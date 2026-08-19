@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/CSS/ComputedProperties.h>
+#include <LibWeb/CSS/PropertyID.h>
 #include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
 #include <LibWeb/HTML/HTMLPreElement.h>
 #include <LibWeb/HTML/Numbers.h>
@@ -32,7 +32,7 @@ void HTMLPreElement::apply_presentational_hints(Vector<CSS::StyleProperty>& prop
 {
     HTMLElement::apply_presentational_hints(properties);
 
-    for_each_attribute([&](auto const& name, auto const&) {
+    for_each_attribute([&](Utf16FlyString const& name, Utf16View) {
         if (name == HTML::AttributeNames::wrap)
             properties.append({ .property_id = CSS::PropertyID::TextWrapMode, .value = CSS::KeywordStyleValue::create(CSS::Keyword::Wrap) });
     });

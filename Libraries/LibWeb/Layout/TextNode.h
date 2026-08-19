@@ -22,8 +22,6 @@ class GeneratedTextNode;
 class TextSliceNode;
 
 class TextNode : public Node {
-    LAYOUT_NODE(TextNode, Node);
-
 public:
     TextNode(DOM::Document&, DOM::Text&);
     virtual ~TextNode() override;
@@ -42,7 +40,7 @@ public:
     void invalidate_text_for_rendering();
 
     void enroll_for_arena_text_content_sync() const;
-    void sync_text_content_to_arena() const;
+    bool sync_text_content_to_arena() const;
 
     Unicode::Segmenter& grapheme_segmenter() const;
 
@@ -51,10 +49,10 @@ public:
     bool update_produces_line_box_fragment_when_empty_flag();
 
 protected:
-    TextNode(DOM::Document&, DOM::Text&, AttachToDOMNode);
-    explicit TextNode(DOM::Document&);
+    TextNode(DOM::Document&, DOM::Text&, AttachToDOMNode, RustFFI::NodeKind = RustFFI::NodeKind::TextNode);
+    TextNode(DOM::Document&, RustFFI::NodeKind);
 
-    virtual DOM::Element const* parent_element_for_text_transform() const;
+    virtual GC::Ptr<DOM::Element const> parent_element_for_text_transform() const;
     virtual bool is_password_input() const;
 
 private:
@@ -87,8 +85,6 @@ private:
 };
 
 class GeneratedTextNode final : public TextNode {
-    LAYOUT_NODE(GeneratedTextNode, TextNode);
-
 public:
     GeneratedTextNode(DOM::Document&, Utf16String);
     virtual ~GeneratedTextNode() override;
@@ -97,15 +93,13 @@ public:
     virtual Utf16String const& text() const override { return m_text; }
 
 private:
-    virtual DOM::Element const* parent_element_for_text_transform() const override;
+    virtual GC::Ptr<DOM::Element const> parent_element_for_text_transform() const override;
     virtual bool is_password_input() const override { return false; }
 
     Utf16String m_text;
 };
 
 class TextSliceNode final : public TextNode {
-    LAYOUT_NODE(TextSliceNode, TextNode);
-
 public:
     TextSliceNode(DOM::Document&, DOM::Text&, AttachToDOMNode, size_t dom_start_offset, size_t dom_length);
     virtual ~TextSliceNode() override;

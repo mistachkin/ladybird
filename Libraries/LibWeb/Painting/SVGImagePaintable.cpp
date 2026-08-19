@@ -6,25 +6,21 @@
 
 #include <LibWeb/HTML/DecodedImageData.h>
 #include <LibWeb/Painting/DisplayListRecorder.h>
+#include <LibWeb/Painting/ImagePaint.h>
 #include <LibWeb/Painting/ReplacedElementCommon.h>
 #include <LibWeb/Painting/SVGImagePaintable.h>
 #include <LibWeb/SVG/SVGImageElement.h>
 
 namespace Web::Painting {
 
-NonnullRefPtr<SVGImagePaintable> SVGImagePaintable::create(Layout::SVGImageBox const& layout_box)
+NonnullRefPtr<SVGImagePaintable> SVGImagePaintable::create(Layout::Box const& layout_box)
 {
     return adopt_ref(*new SVGImagePaintable(layout_box));
 }
 
-SVGImagePaintable::SVGImagePaintable(Layout::SVGImageBox const& layout_box)
+SVGImagePaintable::SVGImagePaintable(Layout::Box const& layout_box)
     : SVGGraphicsPaintable(layout_box)
 {
-}
-
-Layout::SVGImageBox const& SVGImagePaintable::layout_box() const
-{
-    return static_cast<Layout::SVGImageBox const&>(layout_node());
 }
 
 void SVGImagePaintable::paint(DisplayListRecordingContext& context, PaintPhase phase) const
@@ -41,14 +37,22 @@ void SVGImagePaintable::paint(DisplayListRecordingContext& context, PaintPhase p
     if (phase != PaintPhase::Foreground)
         return;
 
-    auto decoded_image_data = layout_box().dom_node().decoded_image_data();
+    auto const& image_element = as<SVG::SVGImageElement>(*layout_box().dom_node());
+    auto decoded_image_data = image_element.decoded_image_data();
     if (!decoded_image_data)
         return;
 
-    auto image_rect = absolute_rect();
-    auto intrinsic_size = layout_box().dom_node().intrinsic_size().value_or(image_rect.size());
+    // The image rect is in the viewport's user units; a fraction of a unit can span many device
+    // pixels, so the positioning math stays in float and only the overflow clip quantizes.
+    auto device_scale = static_cast<float>(context.device_pixels_per_css_pixel());
+    auto image_rect = absolute_rect().to_type<float>().scaled(device_scale, device_scale);
+    auto natural_size = image_element.intrinsic_size().map([](auto size) { return size.template to_type<float>(); }).value_or(image_rect.size());
     // FIXME: Respect the preserveAspectRatio attribute instead of assuming its default value.
-    auto draw_rect = get_replaced_box_painting_area(*this, context, CSS::ObjectFit::Contain, intrinsic_size);
+    auto draw_rect = image_rect;
+    if (natural_size.width() > 0 && natural_size.height() > 0) {
+        auto contain_scale = min(image_rect.width() / natural_size.width(), image_rect.height() / natural_size.height());
+        draw_rect = Gfx::FloatRect { {}, natural_size.scaled(contain_scale, contain_scale) }.centered_within(image_rect);
+    }
     if (draw_rect.is_empty())
         return;
 
@@ -56,16 +60,17 @@ void SVGImagePaintable::paint(DisplayListRecordingContext& context, PaintPhase p
     // The user agent stylesheet sets the value of the overflow property on ‘image’ element to hidden. Unless
     // over-ridden by the author, images will therefore be clipped to the positioning rectangle defined by the
     // geometry properties.
-    auto positioning_rectangle = context.rounded_device_rect(image_rect).to_type<int>();
-    bool overflow_is_visible = computed_values().overflow_x() == CSS::Overflow::Visible
-        && computed_values().overflow_y() == CSS::Overflow::Visible;
-    bool draw_rect_needs_clip = !overflow_is_visible && !positioning_rectangle.contains(draw_rect);
+    bool overflow_is_visible = layout_box().overflow_x() == CSS::Overflow::Visible
+        && layout_box().overflow_y() == CSS::Overflow::Visible;
+    bool draw_rect_needs_clip = !overflow_is_visible && !image_rect.contains(draw_rect);
     if (draw_rect_needs_clip) {
         context.display_list_recorder().save();
-        context.display_list_recorder().add_clip_rect(positioning_rectangle);
+        context.display_list_recorder().add_clip_rect(image_rect);
     }
 
-    decoded_image_data->paint(context, draw_rect, computed_values().image_rendering(), computed_values().color_scheme());
+    auto request = image_paint_request_for_recording(context, layout_box().document(), draw_rect, layout_box().image_rendering(), layout_box().color_scheme());
+    if (auto image_paint = decoded_image_data->image_paint(request); image_paint.has_value())
+        record_image_paint(context, *image_paint, request.dest_rect, layout_box().image_rendering());
 
     if (draw_rect_needs_clip)
         context.display_list_recorder().restore();

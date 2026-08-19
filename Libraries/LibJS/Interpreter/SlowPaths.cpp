@@ -325,7 +325,7 @@ static bool object_property_iterator_cache_matches(Object& object, ObjectPropert
         return false;
 
     auto& shape = object.shape();
-    if (&shape != cache.shape())
+    if (&shape != cache.shape().ptr())
         return false;
 
     if (shape.is_dictionary() && shape.dictionary_generation() != cache.shape_dictionary_generation())
@@ -601,6 +601,7 @@ i64 asm_slow_path_get_callee_and_this(VM*, u32 pc, Op::GetCalleeAndThisFromEnvir
 i64 asm_slow_path_dynamic_get_callee_and_this(VM*, u32 pc, Op::DynamicGetCalleeAndThisFromEnvironment const*);
 i64 asm_slow_path_postfix_increment(VM*, u32 pc, Op::PostfixIncrement const*);
 i64 asm_slow_path_get_by_id(VM*, u32 pc, Op::GetById const*);
+i64 asm_slow_path_get_by_id_cached_accessor(VM*, u32 pc, Op::GetById const*);
 i64 asm_slow_path_get_by_id_with_this(VM*, u32 pc, Op::GetByIdWithThis const*);
 i64 asm_slow_path_put_by_id(VM*, u32 pc, Op::PutById const*);
 i64 asm_slow_path_put_by_id_with_this(VM*, u32 pc, Op::PutByIdWithThis const*);
@@ -730,6 +731,7 @@ u64 asm_helper_single_ascii_character_string(u64 encoded_value);
 u64 asm_helper_single_utf16_code_unit_string(u64 encoded_value);
 i64 asm_helper_handle_raw_native_exception(u64 encoded_exception);
 i64 asm_try_inline_call(VM*, u32 pc, Op::Call const*);
+i64 asm_try_inline_get_by_id_accessor(VM*, u32 pc, Op::GetById const*);
 i64 asm_try_put_by_id_cache(VM*, u32 pc, Op::PutById const*);
 i64 asm_try_get_by_id_cache(VM*, u32 pc, Op::GetById const*);
 
@@ -964,8 +966,22 @@ i64 asm_slow_path_get_by_id(VM* vm, u32 pc, Op::GetById const* instruction)
 {
     auto base_value = vm->get(instruction->base());
     auto& cache = vm->current_executable().property_lookup_caches[instruction->cache()];
-    auto value = ASM_TRY(*vm, pc, get_by_id<GetByIdMode::Normal>(*vm, [&] { return vm->get_identifier(instruction->base_identifier()); }, [&] -> PropertyKey const& { return vm->get_property_key(instruction->property()); }, base_value, base_value, cache));
+    auto value = ASM_TRY(*vm, pc, get_by_id<GetByIdMode::Normal>(*vm, [&] { return vm->get_identifier(instruction->base_identifier()); }, [&] -> PropertyKey const& { return vm->get_property_key(instruction->property()); }, base_value, base_value, cache, CachePropertyAbsence::Yes));
     vm->set(instruction->dst(), value);
+    return static_cast<i64>(pc + sizeof(Op::GetById));
+}
+
+i64 asm_slow_path_get_by_id_cached_accessor(VM* vm, u32 pc, Op::GetById const* instruction)
+{
+    auto& object = vm->get(instruction->base()).as_object();
+    auto& cache = vm->current_executable().property_lookup_caches[instruction->cache()];
+    auto* entry = cache.first_entry();
+    VERIFY(entry);
+
+    auto* holder = entry->prototype ? entry->prototype.ptr() : &object;
+    auto value = holder->get_direct(entry->property_offset);
+    VERIFY(value.is_accessor());
+    vm->set(instruction->dst(), ASM_TRY(*vm, pc, get_cached_property_value(*vm, value, &object)));
     return static_cast<i64>(pc + sizeof(Op::GetById));
 }
 
@@ -1122,7 +1138,7 @@ i64 asm_slow_path_get_global(VM* vm, u32 pc, Op::GetGlobal const* instruction)
     auto& shape = binding_object.shape();
     if (cache.environment_serial_number == declarative_record.environment_serial_number()) {
         auto* entry = cache.first_entry();
-        if (entry && &shape == entry->shape && (!shape.is_dictionary() || shape.dictionary_generation() == entry->shape_dictionary_generation)) {
+        if (entry && &shape == entry->shape.ptr() && (!shape.is_dictionary() || shape.dictionary_generation() == entry->shape_dictionary_generation)) {
             auto value = binding_object.get_direct(entry->property_offset);
             vm->set(instruction->dst(), ASM_TRY(*vm, pc, get_cached_property_value(*vm, value, &binding_object)));
             return static_cast<i64>(pc + sizeof(Op::GetGlobal));
@@ -1224,7 +1240,7 @@ i64 asm_slow_path_set_global(VM* vm, u32 pc, Op::SetGlobal const* instruction)
 
     if (cache.environment_serial_number == declarative_record.environment_serial_number()) {
         auto* entry = cache.first_entry();
-        if (entry && &shape == entry->shape && (!shape.is_dictionary() || shape.dictionary_generation() == entry->shape_dictionary_generation)) {
+        if (entry && &shape == entry->shape.ptr() && (!shape.is_dictionary() || shape.dictionary_generation() == entry->shape_dictionary_generation)) {
             auto value = binding_object.get_direct(entry->property_offset);
             if (value.is_accessor())
                 ASM_TRY(*vm, pc, call(*vm, value.as_accessor().setter(), &binding_object, src));
@@ -1316,7 +1332,7 @@ i64 asm_slow_path_copy_object_excluding_properties(VM* vm, u32 pc, Op::CopyObjec
 {
     auto& realm = *vm->current_realm();
     auto from_object = vm->get(instruction->from_object());
-    auto to_object = Object::create(realm, realm.intrinsics().object_prototype());
+    auto to_object = Object::create(realm, realm.intrinsics().object_prototype().ptr());
 
     GC::ConservativeHashTable<PropertyKey> excluded_names;
     auto excluded_names_operands = instruction->excluded_names();
@@ -1371,7 +1387,7 @@ i64 asm_slow_path_new_class(VM* vm, u32 pc, Op::NewClass const* instruction)
         binding_name = class_name;
     }
 
-    auto* retval = ASM_TRY(*vm, pc, construct_class(*vm, blueprint, vm->current_executable(), class_environment, outer_environment, super_class, element_keys, binding_name, class_name));
+    auto retval = ASM_TRY(*vm, pc, construct_class(*vm, blueprint, vm->current_executable(), class_environment, outer_environment, super_class, element_keys, binding_name, class_name));
     vm->set(instruction->dst(), retval);
     return static_cast<i64>(pc + instruction->length());
 }
@@ -1859,7 +1875,7 @@ i64 asm_slow_path_new_object(VM* vm, u32 pc, Op::NewObject const* instruction)
         }
     }
 
-    vm->set(instruction->dst(), Object::create(realm, realm.intrinsics().object_prototype()));
+    vm->set(instruction->dst(), Object::create(realm, realm.intrinsics().object_prototype().ptr()));
     return static_cast<i64>(pc + sizeof(Op::NewObject));
 }
 
@@ -2200,6 +2216,38 @@ i64 asm_try_inline_call(VM* vm, u32 pc, Op::Call const* instruction)
     return callee_context ? 0 : 1;
 }
 
+i64 asm_try_inline_get_by_id_accessor(VM* vm, u32 pc, Op::GetById const* instruction)
+{
+    auto& object = vm->get(instruction->base()).as_object();
+    auto& cache = vm->current_executable().property_lookup_caches[instruction->cache()];
+    auto* entry = cache.first_entry();
+    VERIFY(entry);
+
+    auto* holder = entry->prototype ? entry->prototype.ptr() : &object;
+    auto value = holder->get_direct(entry->property_offset);
+    VERIFY(value.is_accessor());
+
+    auto* getter = value.as_accessor().getter();
+    if (!getter || !is<ECMAScriptFunctionObject>(*getter)) [[unlikely]]
+        return 1;
+
+    auto& getter_function = static_cast<ECMAScriptFunctionObject&>(*getter);
+    if (!getter_function.can_inline_call()) [[unlikely]]
+        return 1;
+
+    auto* callee_context = vm->push_inline_frame(
+        getter_function,
+        getter_function.inline_call_executable(),
+        {},
+        pc + instruction->length(),
+        instruction->dst().raw(),
+        &object,
+        nullptr,
+        false);
+
+    return callee_context ? 0 : 1;
+}
+
 // Fast cache-only PutById. Tries all cache entries for ChangeOwnProperty and
 // AddOwnProperty. Returns 0 on cache hit, 1 on miss (caller should use full slow path).
 i64 asm_try_put_by_id_cache(VM* vm, u32, Op::PutById const* instruction)
@@ -2211,7 +2259,7 @@ i64 asm_try_put_by_id_cache(VM* vm, u32, Op::PutById const* instruction)
     auto value = vm->get(instruction->src());
     auto& cache = vm->current_executable().property_lookup_caches[instruction->cache()];
 
-    for (auto& entry : cache.entries()) {
+    for (auto& entry : cache.entries_for_shape(object.shape())) {
         switch (entry.type) {
         case PropertyLookupCache::Entry::Type::ChangeOwnProperty: {
             auto cached_shape = entry.shape.ptr();
@@ -2227,7 +2275,7 @@ i64 asm_try_put_by_id_cache(VM* vm, u32, Op::PutById const* instruction)
             return 0;
         }
         case PropertyLookupCache::Entry::Type::AddOwnProperty: {
-            if (entry.from_shape != &object.shape()) [[unlikely]]
+            if (entry.from_shape.ptr() != &object.shape()) [[unlikely]]
                 continue;
             if (object.requires_slow_add_own_property()) [[unlikely]]
                 continue;
@@ -2265,7 +2313,24 @@ i64 asm_try_get_by_id_cache(VM* vm, u32, Op::GetById const* instruction)
     auto& shape = object.shape();
     auto& cache = vm->current_executable().property_lookup_caches[instruction->cache()];
 
-    for (auto& entry : cache.entries()) {
+    for (auto& entry : cache.entries_for_shape(shape)) {
+        if (entry.type == PropertyLookupCache::Entry::Type::GetMissingProperty) {
+            if (!object.is_cacheable_for_property_absence()) [[unlikely]]
+                continue;
+            if (&shape != entry.shape.ptr()) [[unlikely]]
+                continue;
+            if (shape.is_dictionary()
+                && shape.dictionary_generation() != entry.shape_dictionary_generation)
+                continue;
+            if (shape.prototype()) {
+                auto* prototype_chain_validity = entry.prototype_chain_validity.ptr();
+                if (!prototype_chain_validity || !prototype_chain_validity->is_valid()) [[unlikely]]
+                    continue;
+            }
+            vm->set(instruction->dst(), js_undefined());
+            return 0;
+        }
+
         if (entry.type != PropertyLookupCache::Entry::Type::GetOwnProperty
             && entry.type != PropertyLookupCache::Entry::Type::GetPropertyInPrototypeChain) {
             continue;
@@ -2273,7 +2338,7 @@ i64 asm_try_get_by_id_cache(VM* vm, u32, Op::GetById const* instruction)
 
         auto cached_prototype = entry.prototype.ptr();
         if (cached_prototype) {
-            if (&shape != entry.shape) [[unlikely]]
+            if (&shape != entry.shape.ptr()) [[unlikely]]
                 continue;
             if (shape.is_dictionary()
                 && shape.dictionary_generation() != entry.shape_dictionary_generation)
@@ -2286,7 +2351,7 @@ i64 asm_try_get_by_id_cache(VM* vm, u32, Op::GetById const* instruction)
                 return 1;
             vm->set(instruction->dst(), value);
             return 0;
-        } else if (&shape == entry.shape) {
+        } else if (&shape == entry.shape.ptr()) {
             if (shape.is_dictionary()
                 && shape.dictionary_generation() != entry.shape_dictionary_generation)
                 continue;
@@ -2511,7 +2576,7 @@ i64 asm_slow_path_enter_object_environment(VM* vm, u32 pc, Op::EnterObjectEnviro
 {
     auto object = ASM_TRY(*vm, pc, vm->get(instruction->object()).to_object(*vm));
     auto& old_environment = vm->running_execution_context().lexical_environment;
-    auto new_environment = new_object_environment(*object, true, old_environment);
+    auto new_environment = new_object_environment(*object, true, old_environment.ptr());
     vm->set(instruction->dst(), new_environment);
     vm->running_execution_context().lexical_environment = new_environment;
     return static_cast<i64>(pc + sizeof(Op::EnterObjectEnvironment));
@@ -2651,7 +2716,7 @@ i64 asm_slow_path_create_private_environment(VM* vm, u32 pc, Op::CreatePrivateEn
 {
     auto& running_execution_context = vm->running_execution_context();
     auto outer_private_environment = running_execution_context.private_environment;
-    running_execution_context.private_environment = new_private_environment(*vm, outer_private_environment);
+    running_execution_context.private_environment = new_private_environment(*vm, outer_private_environment.ptr());
     return static_cast<i64>(pc + sizeof(Op::CreatePrivateEnvironment));
 }
 

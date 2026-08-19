@@ -17,15 +17,11 @@ class HTMLAudioElement final : public HTMLMediaElement {
 public:
     virtual ~HTMLAudioElement() override;
 
-    Layout::AudioBox* layout_node();
-    Layout::AudioBox const* layout_node() const;
-
     bool should_paint() const;
 
 private:
     HTMLAudioElement(DOM::Document&, DOM::QualifiedName);
-
-    virtual RefPtr<Layout::Node> create_layout_node(NonnullRefPtr<CSS::ComputedValues const>) override;
+    virtual RefPtr<Layout::Node> create_layout_node(CSS::LayoutStyle) override;
 };
 
 }

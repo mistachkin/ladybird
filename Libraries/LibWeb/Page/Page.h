@@ -33,6 +33,7 @@
 #include <LibRequests/CameFromCache.h>
 #include <LibRequests/NetworkError.h>
 #include <LibRequests/RequestTimingInfo.h>
+#include <LibURL/Origin.h>
 #include <LibURL/URL.h>
 #include <LibWeb/Bindings/AgentType.h>
 #include <LibWeb/Bindings/Navigation.h>
@@ -43,6 +44,7 @@
 #include <LibWeb/DOM/RequestFullscreenError.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
+#include <LibWeb/Fullscreen/FullscreenRequestType.h>
 #include <LibWeb/Geolocation/GeolocationCoordinates.h>
 #include <LibWeb/Geolocation/GeolocationPositionError.h>
 #include <LibWeb/HTML/ActivateTab.h>
@@ -123,13 +125,10 @@ public:
     void load(URL::URL const&, HTML::DocumentResource,
         Bindings::NavigationHistoryBehavior = Bindings::NavigationHistoryBehavior::Auto,
         Optional<HTML::NavigationSourceSnapshot> = {});
-
     void load_html(StringView);
     void load_html(StringView, URL::URL const&);
 
     void reload();
-
-    void traverse_the_history_by_delta(int delta);
 
     CSSPixelPoint device_to_css_point(DevicePixelPoint) const;
     DevicePixelPoint css_to_device_point(CSSPixelPoint) const;
@@ -261,6 +260,7 @@ public:
     void register_media_element(Badge<HTML::HTMLMediaElement>, UniqueNodeID media_id);
     void unregister_media_element(Badge<HTML::HTMLMediaElement>, UniqueNodeID media_id);
 
+    void sync_media_element_video_sink_ticking();
     void restore_all_media_element_video_sinks();
     void detach_all_media_element_video_sinks_after_compositor_lost();
 
@@ -294,6 +294,7 @@ public:
     void set_user_style(Utf16String source);
     void set_content_blocking_enabled(bool);
     void invalidate_user_style();
+    void invalidate_style_for_preference_change();
 
     bool pdf_viewer_supported() const { return m_pdf_viewer_supported; }
 
@@ -325,7 +326,7 @@ public:
     bool listen_for_dom_mutations() const { return m_listen_for_dom_mutations; }
     void set_listen_for_dom_mutations(bool listen_for_dom_mutations) { m_listen_for_dom_mutations = listen_for_dom_mutations; }
 
-    void enqueue_fullscreen_enter(GC::Ref<DOM::Element>, GC::Ref<DOM::Document>, DOM::RequestFullscreenError, GC::Ptr<WebIDL::Promise>);
+    void enqueue_fullscreen_enter(GC::Ref<DOM::Element>, GC::Ref<DOM::Document>, DOM::RequestFullscreenError, GC::Ptr<WebIDL::Promise>, Fullscreen::RequestType);
     void enqueue_fullscreen_exit(GC::Ref<DOM::Document> doc, bool resize, GC::Ptr<WebIDL::Promise>);
     void process_pending_fullscreen_operations();
 
@@ -433,6 +434,7 @@ private:
         GC::Ref<DOM::Document> pending_doc;
         DOM::RequestFullscreenError error;
         GC::Ptr<WebIDL::Promise> promise;
+        Fullscreen::RequestType request_type;
     };
 
     struct PendingFullscreenExit {
@@ -488,7 +490,6 @@ public:
     virtual void request_new_process_for_child_frame_navigation(HTML::CrossProcessId, URL::URL const&, HTML::DocumentResource, Bindings::NavigationHistoryBehavior, Optional<HTML::NavigationSourceSnapshot> const&) { }
     virtual void page_did_create_child_frame(HTML::CrossProcessId, HTML::CrossProcessId, HTML::ReplicatedNavigableState const&) { }
     virtual void page_did_update_child_frame_viewport(HTML::CrossProcessId, CSSPixelRect) { }
-    virtual void page_did_commit_child_frame_navigation(HTML::CrossProcessId, HTML::ReplicatedNavigableState const&) { }
     virtual void page_did_destroy_child_frame(HTML::CrossProcessId) { }
     virtual Optional<Compositor::CompositorContextId> compositor_context_id_for_remote_child_frame(HTML::CrossProcessId) const { return {}; }
     virtual String dump_site_isolation_process_tree_for_testing() { return {}; }
@@ -519,7 +520,6 @@ public:
     virtual void request_frame() = 0;
     virtual void page_did_change_title(Utf16String const&) { }
     virtual void page_did_update_editing_history_state(bool, bool) { }
-    virtual void page_did_change_url(URL::URL const&) { }
     virtual void page_did_request_refresh() { }
     virtual void page_did_request_resize_window(Gfx::IntSize) { }
     virtual void page_did_request_reposition_window(Gfx::IntPoint) { }
@@ -528,11 +528,9 @@ public:
     virtual void page_did_request_minimize_window() { }
     virtual void page_did_request_fullscreen_window() { }
     virtual void page_did_request_exit_fullscreen() { }
-    virtual void page_did_start_loading(Optional<Utf16String> const&, URL::URL const&, HTML::DocumentResource document_resource, bool is_redirect, Bindings::NavigationHistoryBehavior history_handling = Bindings::NavigationHistoryBehavior::Auto)
+    virtual void page_did_start_loading(Optional<Utf16String> const&, URL::URL const&, bool is_redirect)
     {
-        (void)document_resource;
         (void)is_redirect;
-        (void)history_handling;
     }
     virtual void page_did_cancel_loading(Optional<Utf16String> const&, URL::URL const&) { }
     virtual void page_did_create_new_document(Web::DOM::Document&) { }
@@ -567,6 +565,7 @@ public:
     virtual void page_did_request_media_context_menu(CSSPixelPoint, [[maybe_unused]] ByteString const& target, [[maybe_unused]] unsigned modifiers, Page::MediaContextMenu const&) { }
     virtual void page_did_click_link(URL::URL const&, [[maybe_unused]] ByteString const& target, [[maybe_unused]] unsigned modifiers) { }
     virtual void page_did_middle_click_link(URL::URL const&, [[maybe_unused]] ByteString const& target, [[maybe_unused]] unsigned modifiers) { }
+    virtual void page_did_request_external_url([[maybe_unused]] URL::URL const& url, [[maybe_unused]] URL::Origin const& initiator_origin, [[maybe_unused]] bool has_transient_activation) { }
     virtual void page_did_request_tooltip_override(CSSPixelPoint, ByteString const&) { }
     virtual void page_did_stop_tooltip_override() { }
     virtual void page_did_enter_tooltip_area(ByteString const&) { }
@@ -614,20 +613,14 @@ public:
     virtual void page_did_create_top_level_traversable([[maybe_unused]] HTML::CrossProcessId navigable_id, [[maybe_unused]] HTML::SessionHistoryEntryDescriptor const& initial_history_entry) { }
     virtual void page_did_update_session_history_entry_navigation_api_state([[maybe_unused]] HTML::CrossProcessId navigable_id, [[maybe_unused]] Utf16String const& navigation_api_key, [[maybe_unused]] HTML::StorageSerializationRecord const& navigation_api_state) { }
     virtual void page_did_update_session_history_entry_scroll_restoration_mode([[maybe_unused]] HTML::CrossProcessId navigable_id, [[maybe_unused]] Utf16String const& navigation_api_key, [[maybe_unused]] HTML::ScrollRestorationMode scroll_restoration_mode) { }
-    virtual void page_did_update_session_history_entry_scroll_position_data([[maybe_unused]] HTML::CrossProcessId navigable_id, [[maybe_unused]] Utf16String const& navigation_api_key, [[maybe_unused]] HTML::SessionHistoryEntryScrollPositionData const& scroll_position_data) { }
     virtual void page_did_update_session_history_entry_document_state_navigable_target_name([[maybe_unused]] HTML::CrossProcessId navigable_id, [[maybe_unused]] Utf16String const& navigation_api_key, [[maybe_unused]] Utf16String const& navigable_target_name) { }
     virtual void page_did_set_session_history_entry_document_state_reload_pending([[maybe_unused]] HTML::CrossProcessId navigable_id, [[maybe_unused]] Utf16String const& navigation_api_key, [[maybe_unused]] bool reload_pending) { }
-    virtual void page_did_append_nested_history([[maybe_unused]] HTML::CrossProcessId parent_navigable_id, [[maybe_unused]] HTML::SessionHistoryNestedHistoryDescriptor const& nested_history) { }
-    virtual void page_did_remove_nested_history([[maybe_unused]] HTML::CrossProcessId parent_navigable_id, [[maybe_unused]] HTML::CrossProcessId child_navigable_id) { }
-    virtual void page_did_request_finalize_same_document_navigation([[maybe_unused]] u64 operation_id, [[maybe_unused]] HTML::CrossProcessId navigable_id, [[maybe_unused]] HTML::SameDocumentNavigationEntry const& target_entry, [[maybe_unused]] bool replaces_current_entry, [[maybe_unused]] HTML::HistoryHandlingBehavior history_handling, [[maybe_unused]] HTML::UserNavigationInvolvement user_involvement) { }
-    virtual void page_did_finalize_cross_document_navigation([[maybe_unused]] HTML::CrossProcessId navigable_id, [[maybe_unused]] HTML::SessionHistoryEntryDescriptor const& history_entry, [[maybe_unused]] Optional<Utf16String> const& entry_to_replace_navigation_api_key) { }
-    virtual void page_did_set_current_session_history_step([[maybe_unused]] int current_session_history_step) { }
     virtual String page_did_request_ui_process_session_history_for_testing() { return "{}"_string; }
-    virtual String page_did_update_session_history_and_request_ui_process_session_history_for_testing([[maybe_unused]] Vector<HTML::SessionHistoryEntryDescriptor> const& entries, [[maybe_unused]] Vector<i32> const& used_steps, [[maybe_unused]] size_t current_used_step_index) { return "{}"_string; }
-    virtual void page_did_request_traverse_the_history_by_delta([[maybe_unused]] int delta, [[maybe_unused]] HistoryTraversalPrecheck history_traversal_precheck) { }
-    virtual void page_did_request_history_traversal_target_by_delta([[maybe_unused]] int delta, [[maybe_unused]] GC::Ref<GC::Function<void(Optional<int>)>> on_complete) { VERIFY_NOT_REACHED(); }
-    virtual void page_did_request_traverse_the_history_to_step([[maybe_unused]] int step, [[maybe_unused]] HistoryTraversalPrecheck history_traversal_precheck) { VERIFY_NOT_REACHED(); }
-    virtual void page_did_request_navigation_api_traversal_target([[maybe_unused]] HTML::CrossProcessId navigable_id, [[maybe_unused]] Utf16String const& navigation_api_key, [[maybe_unused]] GC::Ref<GC::Function<void(Optional<int>)>> on_complete) { VERIFY_NOT_REACHED(); }
+    virtual bool page_did_request_capture_session_history_snapshot_for_testing() { return false; }
+    virtual bool page_did_request_restore_session_history_snapshot_for_testing() { return false; }
+    virtual bool page_did_request_register_session_store_tab_for_testing() { return false; }
+    virtual String page_did_request_session_store_tab_state_for_testing() { return "{}"_string; }
+    virtual void page_did_request_history_operation([[maybe_unused]] u64 initiation_id, [[maybe_unused]] HistoryOperationParameters parameters) { }
     virtual void page_did_change_needs_beforeunload_check([[maybe_unused]] bool needs_beforeunload_check) { }
 
     virtual void request_file(FileRequest) = 0;
@@ -654,6 +647,7 @@ public:
     virtual void page_did_insert_clipboard_item(Clipboard::SystemClipboardItem const&, [[maybe_unused]] StringView presentation_style) { }
     virtual void page_did_request_clipboard_entries([[maybe_unused]] u64 request_id) { }
     virtual void page_did_request_primary_paste() { }
+    virtual void page_did_complete_paste_action() { }
     virtual void page_did_update_primary_selection(Utf16String const&) { }
 
     virtual void page_did_change_audio_play_state(HTML::AudioPlayState) { }

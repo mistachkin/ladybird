@@ -13,11 +13,12 @@
 #include <LibWeb/Animations/KeyframeEffect.h>
 #include <LibWeb/Animations/PseudoElementParsing.h>
 #include <LibWeb/Bindings/KeyframeEffect.h>
-#include <LibWeb/CSS/ComputedProperties.h>
+#include <LibWeb/CSS/ComputedStyleWorkingSet.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/PropertyID.h>
 #include <LibWeb/CSS/StyleComputer.h>
 #include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
+#include <LibWeb/ComputedValuesRustFFI.h>
 #include <LibWeb/DOM/AbstractElement.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
@@ -559,7 +560,7 @@ static WebIDL::ExceptionOr<Vector<BaseKeyframe>> process_a_keyframes_argument(JS
                 // Handle 'initial' here so we don't have to get the default value of the property every frame in StyleComputer
                 if (style_value->is_initial())
                     style_value = CSS::property_initial_value(*property_id);
-                parsed_properties.set(*property_id, *style_value);
+                parsed_properties.set(*property_id, CSS::RustStyleValueHandle::retained(style_value->rust_style_value_data()));
             }
         }
         keyframe.properties.set(move(parsed_properties));
@@ -607,7 +608,7 @@ void KeyframeEffect::generate_initial_and_final_frames(RefPtr<KeyFrameSet> keyfr
         initial_keyframe = keyframe_set->keyframes_by_key.find(0);
     }
 
-    auto expanded_properties = [&](HashMap<CSS::PropertyID, Variant<KeyFrameSet::UseInitial, NonnullRefPtr<CSS::StyleValue const>>>& properties) {
+    auto expanded_properties = [&](HashMap<CSS::PropertyID, Variant<KeyFrameSet::UseInitial, CSS::RustStyleValueHandle>>& properties) {
         HashTable<CSS::PropertyID> result;
 
         for (auto property : properties) {
@@ -831,7 +832,7 @@ WebIDL::ExceptionOr<GC::Ref<KeyframeEffect>> KeyframeEffect::construct_impl(GC::
     return effect;
 }
 
-void KeyframeEffect::set_target(DOM::Element* target)
+void KeyframeEffect::set_target(GC::Ptr<DOM::Element> target)
 {
     if (auto animation = this->associated_animation()) {
         if (m_target_element)
@@ -901,6 +902,15 @@ void KeyframeEffect::set_composite(Bindings::CompositeOperation value)
     invalidate_effect();
 }
 
+void KeyframeEffect::set_key_frame_set(RefPtr<KeyFrameSet const> key_frame_set)
+{
+    if (m_key_frame_set == key_frame_set)
+        return;
+
+    m_key_frame_set = move(key_frame_set);
+    invalidate_effect();
+}
+
 Bindings::CompositeOperation KeyframeEffect::composite_for_bindings() const
 {
     update_style_if_needed();
@@ -908,7 +918,7 @@ Bindings::CompositeOperation KeyframeEffect::composite_for_bindings() const
 }
 
 // https://www.w3.org/TR/web-animations-1/#dom-keyframeeffect-getkeyframes
-WebIDL::ExceptionOr<GC::RootVector<JS::Object*>> KeyframeEffect::get_keyframes(JS::Object& relevant_global_object)
+WebIDL::ExceptionOr<GC::RootVector<GC::Ref<JS::Object>>> KeyframeEffect::get_keyframes(JS::Object& relevant_global_object)
 {
     // The getKeyframes() algorithm returns a fresh sequence of fresh objects on
     // every invocation. Do not expose the previous result as a mutable cache:
@@ -939,7 +949,10 @@ WebIDL::ExceptionOr<GC::RootVector<JS::Object*>> KeyframeEffect::get_keyframes(J
 
             for (auto const& [id, value] : keyframe.parsed_properties()) {
                 auto key = CSS::camel_case_string_from_property_id(id);
-                auto value_string = JS::PrimitiveString::create(vm, value->to_utf16_string(CSS::SerializationMode::Normal));
+                // Serialization can still fall back to C++, which needs the typed facade; reflection is cold, so
+                // wrap on demand.
+                auto style_value = CSS::StyleValue::adopt_rust_style_value_data(CSS::StyleValueFFI::rust_style_value_retain(value.data()));
+                auto value_string = JS::PrimitiveString::create(vm, style_value->to_utf16_string(CSS::SerializationMode::Normal));
                 TRY(object->set(JS::PropertyKey { move(key), JS::PropertyKey::StringMayBeNumber::No }, value_string, JS::Object::ShouldThrowExceptions::Yes));
             }
 
@@ -947,7 +960,7 @@ WebIDL::ExceptionOr<GC::RootVector<JS::Object*>> KeyframeEffect::get_keyframes(J
         }
     }
 
-    GC::RootVector<JS::Object*> keyframes;
+    GC::RootVector<GC::Ref<JS::Object>> keyframes;
     for (auto const& keyframe : m_keyframe_objects_cache)
         keyframes.append(keyframe);
     return keyframes;
@@ -982,11 +995,13 @@ void KeyframeEffect::set_keyframes(Vector<BaseKeyframe> keyframes)
 
         auto key = static_cast<u64>(keyframe.computed_offset.value() * 100 * AnimationKeyFrameKeyScaleFactor);
 
-        for (auto [property_id, property_value] : keyframe.parsed_properties()) {
+        for (auto const& [property_id, property_value] : keyframe.parsed_properties()) {
             resolved_keyframe.properties.set(property_id, property_value);
-            CSS::StyleComputer::for_each_property_expanding_shorthands(property_id, property_value, [&](CSS::PropertyID longhand_id, CSS::StyleValue const&) {
-                m_target_properties.set(longhand_id);
-            });
+            auto expansion = CSS::ComputedValuesFFI::rust_expand_property_shorthands(
+                to_underlying(property_id), property_value.data());
+            for (size_t i = 0; i < expansion.count; ++i)
+                m_target_properties.set(static_cast<CSS::PropertyID>(expansion.properties[i].property_id));
+            CSS::ComputedValuesFFI::rust_shorthand_expansion_destroy(expansion.storage);
         }
 
         keyframe_set->keyframes_by_key.insert(key, resolved_keyframe);
@@ -1019,7 +1034,14 @@ void KeyframeEffect::update_computed_properties(AnimationUpdateContext& context)
     if (!target || !target->is_connected())
         return;
 
-    if (target->has_inclusive_ancestor_with_display_none_ignoring_animations()) {
+    // An effect that animates `display` can be the very thing holding its `display: none` target visible, and
+    // the update being skipped is the one that applies or removes that override, so it must always run.
+    bool affects_display = false;
+    if (auto const* key_frame_set = this->key_frame_set()) {
+        for (auto it = key_frame_set->keyframes_by_key.begin(); !affects_display && it != key_frame_set->keyframes_by_key.end(); ++it)
+            affects_display = it->properties.contains(CSS::PropertyID::Display);
+    }
+    if (!affects_display && target->has_inclusive_ancestor_with_display_none_ignoring_animations()) {
         // FIXME: Reaching this point means we failed to cancel animation for an element that started
         //        being nested in "display: none".
         //        For now this hack is needed to avoid lots of unnecessary work.
@@ -1033,7 +1055,7 @@ void KeyframeEffect::update_computed_properties_for_style(AnimationUpdateContext
 {
     auto& style_computer = abstract_element.element().document().style_computer();
     auto& element_data = context.elements.ensure(abstract_element, [&abstract_element, &style_computer] {
-        auto computed_values = abstract_element.computed_values();
+        auto computed_values = abstract_element.computed_style();
         VERIFY(computed_values);
         auto old_animated_properties = computed_values->animated_properties_snapshot();
         auto computed_properties = style_computer.reconstruct_computed_properties(*computed_values);

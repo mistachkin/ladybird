@@ -1588,7 +1588,7 @@ CSYM(js_interpreter):
     mov x20, x3              // vm = VM*
     ldr x28, [x3, #15288]
     // x28 = exec_ctx
-    ldr x9, [x3, #16696]
+    ldr x9, [x3, #16712]
     cbz x9, .Lnormal_dispatch_table
     adrp x19, asm_debug_dispatch_table
     add x19, x19, :lo12:asm_debug_dispatch_table
@@ -1619,7 +1619,7 @@ asm_debugger_trampoline:
     bl CSYM(asm_debugger_check_breakpoint)
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     ldr w9, [x28, #56]
     add x21, x26, w9, uxtw
@@ -1639,7 +1639,7 @@ asm_handler_fallback:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -1749,7 +1749,7 @@ asm_handler_Exp:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -2476,14 +2476,14 @@ asm_handler_Return:
     str x1, [x9, x3, lsl #3]
     mov x1, x20
     str x0, [x1, #15288]
-    str x28, [x1, #15384]
-    mov w10, #16664
+    str x28, [x1, #15368]
+    mov w10, #16648
     ldr w9, [x1, x10]
     add w9, w9, #1
     str w9, [x1, x10]
     mov x28, x0
     ldr x0, [x28, #80]
-    ldr x26, [x0, #104]
+    ldr x26, [x0, #80]
     add x27, x28, #120
     mov w25, w2
     add x21, x26, w25, uxtw
@@ -2508,14 +2508,14 @@ asm_handler_End:
     str x1, [x9, x3, lsl #3]
     mov x1, x20
     str x0, [x1, #15288]
-    str x28, [x1, #15384]
-    mov w10, #16664
+    str x28, [x1, #15368]
+    mov w10, #16648
     ldr w9, [x1, x10]
     add w9, w9, #1
     str w9, [x1, x10]
     mov x28, x0
     ldr x0, [x28, #80]
-    ldr x26, [x0, #104]
+    ldr x26, [x0, #80]
     add x27, x28, #120
     mov w25, w2
     add x21, x26, w25, uxtw
@@ -2579,7 +2579,7 @@ asm_handler_GetBinding_hot_end:
 .p2align 4
 asm_handler_DynamicGetBinding:
     ldr x0, [x28, #80]
-    ldr x0, [x0, #184]
+    ldr x0, [x0, #160]
     ldr w1, [x21, #12]
     add x0, x0, x1, lsl #3
     ldp w1, w2, [x0, #0]
@@ -2639,7 +2639,7 @@ asm_handler_GetInitializedBinding_hot_end:
 .p2align 4
 asm_handler_DynamicGetInitializedBinding:
     ldr x0, [x28, #80]
-    ldr x0, [x0, #184]
+    ldr x0, [x0, #160]
     ldr w1, [x21, #12]
     add x0, x0, x1, lsl #3
     ldp w1, w2, [x0, #0]
@@ -2717,7 +2717,7 @@ asm_handler_InitializeVariableBinding_hot_end:
 .p2align 4
 asm_handler_DynamicInitializeLexicalBinding:
     ldr x0, [x28, #80]
-    ldr x0, [x0, #184]
+    ldr x0, [x0, #160]
     ldr w1, [x21, #12]
     add x0, x0, x1, lsl #3
     ldp w1, w2, [x0, #0]
@@ -2753,7 +2753,7 @@ asm_handler_DynamicInitializeLexicalBinding_hot_end:
 .p2align 4
 asm_handler_DynamicInitializeVariableBinding:
     ldr x0, [x28, #80]
-    ldr x0, [x0, #184]
+    ldr x0, [x0, #160]
     ldr w1, [x21, #12]
     add x0, x0, x1, lsl #3
     ldp w1, w2, [x0, #0]
@@ -2881,7 +2881,7 @@ asm_handler_SetVariableBinding_hot_end:
 .p2align 4
 asm_handler_DynamicSetLexicalBinding:
     ldr x0, [x28, #80]
-    ldr x0, [x0, #184]
+    ldr x0, [x0, #160]
     ldr w1, [x21, #12]
     add x0, x0, x1, lsl #3
     ldp w2, w1, [x0, #0]
@@ -2942,7 +2942,7 @@ asm_handler_DynamicSetLexicalBinding_hot_end:
 .p2align 4
 asm_handler_DynamicSetVariableBinding:
     ldr x0, [x28, #80]
-    ldr x0, [x0, #184]
+    ldr x0, [x0, #160]
     ldr w1, [x21, #12]
     add x0, x0, x1, lsl #3
     ldp w2, w1, [x0, #0]
@@ -3645,7 +3645,7 @@ asm_handler_GetCalleeAndThisFromEnvironment_hot_end:
 .p2align 4
 asm_handler_DynamicGetCalleeAndThisFromEnvironment:
     ldr x0, [x28, #80]
-    ldr x0, [x0, #184]
+    ldr x0, [x0, #160]
     ldr w1, [x21, #16]
     add x0, x0, x1, lsl #3
     ldp w1, w2, [x0, #0]
@@ -3976,7 +3976,7 @@ asm_handler_PutByValue:
     cmn x2, #1
     b.eq .Lasm_PutByValue.ssa_block_3
     mov x1, x20
-    ldr x1, [x1, #16672]
+    ldr x1, [x1, #16656]
     ldr w4, [x3, #100]
     cmp x0, x4
     b.hs .Lasm_PutByValue.ssa_block_1
@@ -4180,21 +4180,24 @@ asm_handler_GetById:
     and x2, x2, #0xffffffffffff
     ldr x1, [x2, #24]
     ldr x0, [x28, #80]
-    ldr x0, [x0, #136]
+    ldr x0, [x0, #112]
     ldr w3, [x21, #20]
     ldr x0, [x0, x3, lsl #3]
     cbz x0, .Lasm_GetById.ssa_block_1
-    and x0, x0, #0xfffffffffffffffe
+    and x0, x0, #0xfffffffffffffffc
     ldp x4, x3, [x0, #24]
     cmp x4, x1
     b.ne .Lasm_GetById.ssa_block_1
-    cbz x3, .Lasm_GetById.ssa_block_5
+    ldr w4, [x0]
+    cmp w4, #6
+    b.eq .Lasm_GetById.ssa_block_1
+    cbz x3, .Lasm_GetById.ssa_block_7
     ldr x2, [x0, #40]
     cbz x2, .Lasm_GetById.ssa_block_1
     ldrb w9, [x2, #10]
     cbz w9, .Lasm_GetById.ssa_block_1
     mov x2, x3
-.Lasm_GetById.ssa_block_5:
+.Lasm_GetById.ssa_block_7:
     ldp w3, w0, [x0, #4]
     ldr w9, [x1, #92]
     cmp w9, w0
@@ -4204,11 +4207,26 @@ asm_handler_GetById:
     lsr x9, x0, #48
     mov w10, #65532
     cmp x9, x10
-    b.eq .Lasm_GetById.ssa_block_1
+    b.eq .Lasm_GetById.ssa_block_3
     ldr w9, [x21, #4]
     str x0, [x27, x9, lsl #3]
     ldrb w9, [x21, #24]
     add x21, x21, #24
+    ldr x10, [x19, x9, lsl #3]
+    br x10
+.Lasm_GetById.ssa_block_4:
+    mov x0, x20
+    sub w1, w21, w26
+    str w1, [x28, #56]
+    mov x2, x21
+    bl CSYM(asm_slow_path_get_by_id_cached_accessor)
+    tbnz x0, #63, .Lexit_veneer
+    ldr x28, [x20, #15288]
+    ldr x9, [x28, #80]
+    ldr x26, [x9, #80]
+    add x27, x28, #120
+    add x21, x26, w0, uxtw
+    ldrb w9, [x21]
     ldr x10, [x19, x9, lsl #3]
     br x10
 asm_handler_GetById_hot_end:
@@ -4224,11 +4242,11 @@ asm_handler_PutById:
     and x2, x2, #0xffffffffffff
     ldr x1, [x2, #24]
     ldr x0, [x28, #80]
-    ldr x0, [x0, #136]
+    ldr x0, [x0, #112]
     ldr w3, [x21, #20]
     ldr x0, [x0, x3, lsl #3]
     cbz x0, .Lasm_PutById.ssa_block_2
-    and x0, x0, #0xfffffffffffffffe
+    and x0, x0, #0xfffffffffffffffc
     ldp x4, x3, [x0, #24]
     cmp x4, x1
     b.ne .Lasm_PutById.ssa_block_2
@@ -4310,7 +4328,7 @@ asm_handler_GetByValue:
     cmn x2, #1
     b.eq .Lasm_GetByValue.ssa_block_2
     mov x1, x20
-    ldr x1, [x1, #16672]
+    ldr x1, [x1, #16656]
     ldr w4, [x3, #100]
     cmp x0, x4
     b.hs .Lasm_GetByValue.ssa_block_2
@@ -4454,11 +4472,11 @@ asm_handler_GetLength:
 .Lasm_GetLength.ssa_block_5:
     ldr x2, [x1, #24]
     ldr x0, [x28, #80]
-    ldr x0, [x0, #136]
+    ldr x0, [x0, #112]
     ldr w3, [x21, #16]
     ldr x0, [x0, x3, lsl #3]
     cbz x0, .Lasm_GetLength.ssa_block_1
-    and x0, x0, #0xfffffffffffffffe
+    and x0, x0, #0xfffffffffffffffc
     ldp x4, x3, [x0, #24]
     cmp x4, x2
     b.ne .Lasm_GetLength.ssa_block_1
@@ -4486,7 +4504,7 @@ asm_handler_GetGlobal:
     ldr x0, [x28, #8]
     ldp x3, x2, [x0, #24]
     ldr x0, [x28, #80]
-    ldr x1, [x0, #160]
+    ldr x1, [x0, #136]
     ldr w0, [x21, #12]
     lsl x0, x0, #6
     adds x0, x0, x1
@@ -4538,7 +4556,7 @@ asm_handler_SetGlobal:
     ldr x0, [x28, #8]
     ldp x3, x1, [x0, #24]
     ldr x0, [x28, #80]
-    ldr x2, [x0, #160]
+    ldr x2, [x0, #136]
     ldr w0, [x21, #12]
     lsl x0, x0, #6
     adds x0, x0, x2
@@ -4655,15 +4673,15 @@ asm_handler_Call:
     b.hs .Lasm_Call.ssa_block_35
     mov x3, x4
 .Lasm_Call.ssa_block_35:
-    ldr w4, [x2, #388]
-    ldr w7, [x2, #392]
+    ldr w4, [x2, #364]
+    ldr w7, [x2, #368]
     movn w0, #0
     subs x0, x0, x7
     cmp x0, x3
     b.lo .Lasm_Call.ssa_block_1
     mov x0, x20
-    ldr x8, [x0, #15392]
-    ldr x0, [x0, #15384]
+    ldr x8, [x0, #15376]
+    ldr x0, [x0, #15368]
     adds x7, x7, x3
     lsl x5, x7, #3
     add x5, x5, #120
@@ -4671,7 +4689,7 @@ asm_handler_Call:
     cmp x5, x8
     b.hi .Lasm_Call.ssa_block_1
     mov x8, x20
-    str x5, [x8, #15384]
+    str x5, [x8, #15368]
     stp w7, w3, [x0, #108]
     ldr w5, [x21, #20]
     str w5, [x0, #96]
@@ -4718,7 +4736,7 @@ asm_handler_Call:
     str x2, [x5, x1, lsl #3]
 .Lasm_Call.ssa_block_19:
     ldr x1, [x0, #80]
-    ldp x6, x7, [x1, #400]
+    ldp x6, x7, [x1, #376]
     mov x1, #0
     mov x2, x4
 .Lasm_Call.ssa_block_22:
@@ -4756,7 +4774,7 @@ asm_handler_Call:
     b .Lasm_Call.ssa_block_28
 .Lasm_Call.ssa_block_27:
     ldr x1, [x0, #80]
-    ldr x26, [x1, #104]
+    ldr x26, [x1, #80]
     mov x1, x20
     str x0, [x1, #15288]
     mov x28, x0
@@ -4770,21 +4788,21 @@ asm_handler_Call:
     tbz x0, #1, .Lasm_Call.ssa_block_1
     ldr w2, [x21, #20]
     mov x0, x20
-    ldr x4, [x0, #15392]
-    ldr x0, [x0, #15384]
+    ldr x4, [x0, #15376]
+    ldr x0, [x0, #15368]
     lsl x3, x2, #3
     add x3, x3, #120
     adds x3, x3, x0
     cmp x3, x4
     b.hi .Lasm_Call.ssa_block_1
     mov x4, x20
-    ldr x5, [x4, #15352]
+    ldr x5, [x4, #15336]
     mov x4, x5
     add x4, x4, #8, lsl #12
     cmp x4, x29
     b.hi .Lasm_Call.ssa_block_1
     mov x4, x20
-    str x3, [x4, #15384]
+    str x3, [x4, #15368]
     stp w2, w2, [x0, #108]
     str w2, [x0, #96]
     ldr x3, [x1, #24]
@@ -4831,7 +4849,12 @@ asm_handler_Call:
     str x0, [x2, #15288]
     mov x28, x0
     add x27, x28, #120
-    ldr x2, [x1, #104]
+    ldr w0, [x1, #104]
+    ldr x1, [x2, #16688]
+    lsl x0, x0, #4
+    adds x0, x0, x1
+    ldr w1, [x0, #8]
+    ldr x2, [x0]
     mov x9, x2
     mov x0, x20
     blr x9
@@ -4840,7 +4863,7 @@ asm_handler_Call:
     ldr x1, [x28, #88]
     mov x2, x20
     str x1, [x2, #15288]
-    str x28, [x2, #15384]
+    str x28, [x2, #15368]
     mov x28, x1
     add x27, x28, #120
     ldr w9, [x21, #8]
@@ -4860,7 +4883,7 @@ asm_handler_Call:
     ldr x28, [x0, #15288]
     add x27, x28, #120
     ldr x0, [x28, #80]
-    ldr x26, [x0, #104]
+    ldr x26, [x0, #80]
     mov w25, #0
     add x21, x26, w25, uxtw
     ldrb w9, [x21]
@@ -5596,7 +5619,7 @@ asm_handler_ExpRhsInt32:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -6755,7 +6778,7 @@ asm_handler_Add_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -6844,7 +6867,7 @@ asm_handler_Sub_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -6932,7 +6955,7 @@ asm_handler_Mul_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -6962,7 +6985,7 @@ asm_handler_ConcatString:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -6982,7 +7005,7 @@ asm_handler_CopyObjectExcludingProperties:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7002,7 +7025,7 @@ asm_handler_ImportCall:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7022,7 +7045,7 @@ asm_handler_NewClass:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7088,7 +7111,7 @@ asm_handler_JumpLessThan_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7139,7 +7162,7 @@ asm_handler_JumpGreaterThan_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7190,7 +7213,7 @@ asm_handler_JumpLessThanEquals_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7241,7 +7264,7 @@ asm_handler_JumpGreaterThanEquals_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7274,7 +7297,7 @@ asm_handler_JumpLooselyEquals_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7307,7 +7330,7 @@ asm_handler_JumpLooselyInequals_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7340,7 +7363,7 @@ asm_handler_JumpStrictlyEquals_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7373,7 +7396,7 @@ asm_handler_JumpStrictlyInequals_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7405,7 +7428,7 @@ asm_handler_Increment_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7437,7 +7460,7 @@ asm_handler_Decrement_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7466,7 +7489,7 @@ asm_handler_GetImportMeta:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7486,7 +7509,7 @@ asm_handler_GetNewTarget:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7506,7 +7529,7 @@ asm_handler_GetSuperConstructor:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7529,7 +7552,7 @@ asm_handler_GetBinding_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7547,7 +7570,7 @@ asm_handler_DynamicGetBinding_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7567,7 +7590,7 @@ asm_handler_DynamicGetInitializedBinding_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7589,7 +7612,7 @@ asm_handler_DynamicInitializeLexicalBinding_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7607,7 +7630,7 @@ asm_handler_DynamicInitializeVariableBinding_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7625,7 +7648,7 @@ asm_handler_SetLexicalBinding_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7643,7 +7666,7 @@ asm_handler_SetVariableBinding_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7661,7 +7684,7 @@ asm_handler_DynamicSetLexicalBinding_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7679,7 +7702,7 @@ asm_handler_DynamicSetVariableBinding_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7696,7 +7719,7 @@ asm_handler_ResolveBinding:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7716,7 +7739,7 @@ asm_handler_ResolveSuperBase:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7736,7 +7759,7 @@ asm_handler_SetResolvedBinding:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7756,7 +7779,7 @@ asm_handler_TypeofBinding:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7776,7 +7799,7 @@ asm_handler_DynamicTypeofBinding:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7796,7 +7819,7 @@ asm_handler_HasPrivateId:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7816,7 +7839,7 @@ asm_handler_SetFunctionName:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7836,7 +7859,7 @@ asm_handler_NewArrayWithLength:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7856,7 +7879,7 @@ asm_handler_ArrayAppend:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7876,7 +7899,7 @@ asm_handler_CreateVariable:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7896,7 +7919,7 @@ asm_handler_EnterObjectEnvironment:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7931,7 +7954,7 @@ asm_handler_PostfixIncrement_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -7951,7 +7974,7 @@ asm_handler_Div_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8002,7 +8025,7 @@ asm_handler_LessThan_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8050,7 +8073,7 @@ asm_handler_LessThanEquals_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8098,7 +8121,7 @@ asm_handler_GreaterThan_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8146,7 +8169,7 @@ asm_handler_GreaterThanEquals_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8195,7 +8218,7 @@ asm_handler_BitwiseXor_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8227,7 +8250,7 @@ asm_handler_UnaryPlus_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8252,7 +8275,7 @@ asm_handler_ThrowIfTDZ_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8270,7 +8293,7 @@ asm_handler_ThrowIfNotObject_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8288,7 +8311,7 @@ asm_handler_ThrowIfNullish_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8305,7 +8328,7 @@ asm_handler_ThrowConstAssignment:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8325,7 +8348,7 @@ asm_handler_Throw:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8345,7 +8368,7 @@ asm_handler_Debugger:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8365,7 +8388,7 @@ asm_handler_Await:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8385,7 +8408,7 @@ asm_handler_Yield:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8405,7 +8428,7 @@ asm_handler_YieldIteratorResult:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8425,7 +8448,7 @@ asm_handler_ToString:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8445,7 +8468,7 @@ asm_handler_ToPrimitiveWithStringHint:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8465,7 +8488,7 @@ asm_handler_ToObject:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8485,7 +8508,7 @@ asm_handler_ToLength:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8506,7 +8529,7 @@ asm_handler_BitwiseNot_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8555,7 +8578,7 @@ asm_handler_BitwiseAnd_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8615,7 +8638,7 @@ asm_handler_BitwiseOr_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8646,7 +8669,7 @@ asm_handler_LeftShift_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8666,7 +8689,7 @@ asm_handler_RightShift_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8695,7 +8718,7 @@ asm_handler_UnsignedRightShift_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8715,7 +8738,7 @@ asm_handler_Mod_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8745,7 +8768,7 @@ asm_handler_StrictlyEquals_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8775,7 +8798,7 @@ asm_handler_StrictlyInequals_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8793,7 +8816,7 @@ asm_handler_GetCalleeAndThisFromEnvironment_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8811,7 +8834,7 @@ asm_handler_DynamicGetCalleeAndThisFromEnvironment_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8842,7 +8865,7 @@ asm_handler_LooselyEquals_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8873,7 +8896,7 @@ asm_handler_LooselyInequals_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8913,7 +8936,7 @@ asm_handler_UnaryMinus_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8953,7 +8976,7 @@ asm_handler_PostfixDecrement_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -8985,7 +9008,7 @@ asm_handler_ToInt32_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9044,7 +9067,7 @@ asm_handler_PutByValue_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9082,9 +9105,25 @@ asm_handler_GetById_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
+    ldrb w9, [x21]
+    ldr x10, [x19, x9, lsl #3]
+    br x10
+.Lasm_GetById.ssa_block_3:
+    mov x0, x20
+    sub w1, w21, w26
+    mov x2, x21
+    bl CSYM(asm_try_inline_get_by_id_accessor)
+    cbnz w0, .Lasm_GetById.ssa_block_4
+    mov x0, x20
+    ldr x28, [x0, #15288]
+    add x27, x28, #120
+    ldr x0, [x28, #80]
+    ldr x26, [x0, #80]
+    mov w25, #0
+    add x21, x26, w25, uxtw
     ldrb w9, [x21]
     ldr x10, [x19, x9, lsl #3]
     br x10
@@ -9099,7 +9138,7 @@ asm_handler_GetByIdWithThis:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9130,7 +9169,7 @@ asm_handler_PutById_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9147,7 +9186,7 @@ asm_handler_PutByIdWithThis:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9187,7 +9226,7 @@ asm_handler_GetByValue_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9207,7 +9246,7 @@ asm_handler_GetByValueWithThis:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9227,7 +9266,7 @@ asm_handler_PutByValueWithThis:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9247,7 +9286,7 @@ asm_handler_PutBySpread:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9277,7 +9316,7 @@ asm_handler_GetLength_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9294,7 +9333,7 @@ asm_handler_GetLengthWithThis:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9314,7 +9353,7 @@ asm_handler_GetMethod:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9334,7 +9373,7 @@ asm_handler_GetIterator:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9355,7 +9394,7 @@ asm_handler_GetGlobal_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9393,7 +9432,7 @@ asm_handler_SetGlobal_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9409,7 +9448,7 @@ asm_handler_Call_cold:
     ldr x28, [x0, #15288]
     add x27, x28, #120
     ldr x0, [x28, #80]
-    ldr x26, [x0, #104]
+    ldr x26, [x0, #80]
     ldr w25, [x28, #56]
     add x21, x26, w25, uxtw
     ldrb w9, [x21]
@@ -9424,7 +9463,7 @@ asm_handler_Call_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9455,7 +9494,7 @@ asm_handler_CallBuiltinMathAbs_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9473,7 +9512,7 @@ asm_handler_CallBuiltinMathFloor_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9494,7 +9533,7 @@ asm_handler_CallBuiltinMathCeil_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9515,7 +9554,7 @@ asm_handler_CallBuiltinMathSqrt_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9536,7 +9575,7 @@ asm_handler_CallBuiltinMathExp_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9553,7 +9592,7 @@ asm_handler_CallBuiltinMathLog:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9573,7 +9612,7 @@ asm_handler_CallBuiltinMathPow:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9593,7 +9632,7 @@ asm_handler_CallBuiltinMathImul:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9613,7 +9652,7 @@ asm_handler_CallBuiltinMathRandom:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9633,7 +9672,7 @@ asm_handler_CallBuiltinMathRound:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9653,7 +9692,7 @@ asm_handler_CallBuiltinMathSin:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9673,7 +9712,7 @@ asm_handler_CallBuiltinMathCos:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9693,7 +9732,7 @@ asm_handler_CallBuiltinMathTan:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9713,7 +9752,7 @@ asm_handler_CallBuiltinRegExpPrototypeExec:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9733,7 +9772,7 @@ asm_handler_CallBuiltinRegExpPrototypeReplace:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9753,7 +9792,7 @@ asm_handler_CallBuiltinRegExpPrototypeSplit:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9773,7 +9812,7 @@ asm_handler_CallBuiltinOrdinaryHasInstance:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9793,7 +9832,7 @@ asm_handler_CallBuiltinArrayIteratorPrototypeNext:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9813,7 +9852,7 @@ asm_handler_CallBuiltinMapIteratorPrototypeNext:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9833,7 +9872,7 @@ asm_handler_CallBuiltinSetIteratorPrototypeNext:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9853,7 +9892,7 @@ asm_handler_CallBuiltinStringIteratorPrototypeNext:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9874,7 +9913,7 @@ asm_handler_CallBuiltinStringFromCharCode_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9900,7 +9939,7 @@ asm_handler_CallBuiltinStringPrototypeCharCodeAt_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9927,7 +9966,7 @@ asm_handler_CallBuiltinStringPrototypeCharAt_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9944,7 +9983,7 @@ asm_handler_GetObjectPropertyIterator:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9965,7 +10004,7 @@ asm_handler_ObjectPropertyIteratorNext_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -9982,7 +10021,7 @@ asm_handler_IteratorClose:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10002,7 +10041,7 @@ asm_handler_IteratorNext:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10022,7 +10061,7 @@ asm_handler_IteratorNextUnpack:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10042,7 +10081,7 @@ asm_handler_IteratorToArray:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10062,7 +10101,7 @@ asm_handler_CallConstruct:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10082,7 +10121,7 @@ asm_handler_CallDirectEval:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10102,7 +10141,7 @@ asm_handler_CallWithArgumentArray:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10122,7 +10161,7 @@ asm_handler_CallDirectEvalWithArgumentArray:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10142,7 +10181,7 @@ asm_handler_CallConstructWithArgumentArray:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10162,7 +10201,7 @@ asm_handler_SuperCallWithArgumentArray:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10182,7 +10221,7 @@ asm_handler_NewObject:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10202,7 +10241,7 @@ asm_handler_NewObjectWithNoPrototype:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10222,7 +10261,7 @@ asm_handler_CacheObjectShape:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10242,7 +10281,7 @@ asm_handler_InitObjectLiteralProperty:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10262,7 +10301,7 @@ asm_handler_NewArray:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10282,7 +10321,7 @@ asm_handler_NewPrimitiveArray:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10302,7 +10341,7 @@ asm_handler_NewRegExp:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10322,7 +10361,7 @@ asm_handler_NewReferenceError:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10342,7 +10381,7 @@ asm_handler_NewTypeError:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10362,7 +10401,7 @@ asm_handler_InstanceOf:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10382,7 +10421,7 @@ asm_handler_In:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10404,7 +10443,7 @@ asm_handler_IsConstructor:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10424,7 +10463,7 @@ asm_handler_AddPrivateName:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10444,7 +10483,7 @@ asm_handler_CreateAsyncFromSyncIterator:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10464,7 +10503,7 @@ asm_handler_CreateDataPropertyOrThrow:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10484,7 +10523,7 @@ asm_handler_CreateImmutableBinding:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10504,7 +10543,7 @@ asm_handler_CreateMutableBinding:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10524,7 +10563,7 @@ asm_handler_CreateRestParams:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10544,7 +10583,7 @@ asm_handler_CreateArguments:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10564,7 +10603,7 @@ asm_handler_CreateLexicalEnvironment:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10584,7 +10623,7 @@ asm_handler_CreatePrivateEnvironment:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10604,7 +10643,7 @@ asm_handler_CreateVariableEnvironment:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10624,7 +10663,7 @@ asm_handler_DeleteById:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10644,7 +10683,7 @@ asm_handler_DeleteByValue:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10664,7 +10703,7 @@ asm_handler_DeleteVariable:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10684,7 +10723,7 @@ asm_handler_GetCompletionFields:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10704,7 +10743,7 @@ asm_handler_SetCompletionType:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10724,7 +10763,7 @@ asm_handler_GetTemplateObject:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10744,7 +10783,7 @@ asm_handler_NewFunction:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10764,7 +10803,7 @@ asm_handler_Typeof:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10787,7 +10826,7 @@ asm_handler_ResolveThisBinding_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10804,7 +10843,7 @@ asm_handler_GetPrivateById:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10824,7 +10863,7 @@ asm_handler_PutPrivateById:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10862,7 +10901,7 @@ asm_handler_AddLhsInt32_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -10980,7 +11019,7 @@ asm_handler_AddRhsInt32_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -11054,7 +11093,7 @@ asm_handler_SubRhsInt32_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -11082,7 +11121,7 @@ asm_handler_MulRhsInt32_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -11161,7 +11200,7 @@ asm_handler_DivRhsInt32_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -11216,7 +11255,7 @@ asm_handler_BitwiseXorRhsInt32_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -11279,7 +11318,7 @@ asm_handler_BitwiseAndRhsInt32_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -11342,7 +11381,7 @@ asm_handler_BitwiseOrRhsInt32_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -11375,7 +11414,7 @@ asm_handler_LeftShiftRhsInt32_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -11397,7 +11436,7 @@ asm_handler_RightShiftRhsInt32_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -11428,7 +11467,7 @@ asm_handler_UnsignedRightShiftRhsInt32_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -11450,7 +11489,7 @@ asm_handler_ModRhsInt32_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -11475,7 +11514,7 @@ asm_handler_LessThanRhsInt32_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -11508,7 +11547,7 @@ asm_handler_LessThanEqualsRhsInt32_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -11541,7 +11580,7 @@ asm_handler_GreaterThanRhsInt32_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -11574,7 +11613,7 @@ asm_handler_GreaterThanEqualsRhsInt32_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -11610,7 +11649,7 @@ asm_handler_JumpLessThanRhsInt32_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -11646,7 +11685,7 @@ asm_handler_JumpLessThanEqualsRhsInt32_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -11682,7 +11721,7 @@ asm_handler_JumpGreaterThanRhsInt32_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -11718,7 +11757,7 @@ asm_handler_JumpGreaterThanEqualsRhsInt32_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -11757,7 +11796,7 @@ asm_handler_StrictlyEqualsRhsInt32_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -11788,7 +11827,7 @@ asm_handler_StrictlyInequalsRhsInt32_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -11819,7 +11858,7 @@ asm_handler_LooselyEqualsRhsInt32_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -11850,7 +11889,7 @@ asm_handler_LooselyInequalsRhsInt32_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -11883,7 +11922,7 @@ asm_handler_JumpStrictlyEqualsRhsInt32_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -11916,7 +11955,7 @@ asm_handler_JumpStrictlyInequalsRhsInt32_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -11949,7 +11988,7 @@ asm_handler_JumpLooselyEqualsRhsInt32_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
@@ -11982,7 +12021,7 @@ asm_handler_JumpLooselyInequalsRhsInt32_cold:
     tbnz x0, #63, .Lexit_veneer
     ldr x28, [x20, #15288]
     ldr x9, [x28, #80]
-    ldr x26, [x9, #104]
+    ldr x26, [x9, #80]
     add x27, x28, #120
     add x21, x26, w0, uxtw
     ldrb w9, [x21]

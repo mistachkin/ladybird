@@ -7,7 +7,6 @@
 #pragma once
 
 #include <LibWeb/HTML/HTMLElement.h>
-#include <LibWeb/Layout/LegendBox.h>
 
 namespace Web::HTML {
 
@@ -20,9 +19,7 @@ public:
 
     HTMLFormElement* form();
 
-    virtual RefPtr<Layout::Node> create_layout_node(NonnullRefPtr<CSS::ComputedValues const>) override;
-    Layout::LegendBox* layout_node();
-    Layout::LegendBox const* layout_node() const;
+    virtual RefPtr<Layout::Node> create_layout_node(CSS::LayoutStyle) override;
 
 private:
     HTMLLegendElement(DOM::Document&, DOM::QualifiedName);

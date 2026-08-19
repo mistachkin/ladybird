@@ -6,7 +6,7 @@
 
 #include <LibGC/Heap.h>
 #include <LibURL/URL.h>
-#include <LibWeb/Layout/SVGTextPathBox.h>
+#include <LibWeb/Layout/Box.h>
 #include <LibWeb/SVG/AttributeNames.h>
 #include <LibWeb/SVG/SVGTextPathElement.h>
 
@@ -49,9 +49,9 @@ void SVGTextPathElement::visit_edges(Cell::Visitor& visitor)
     SVGURIReferenceMixin::visit_edges(visitor);
 }
 
-RefPtr<Layout::Node> SVGTextPathElement::create_layout_node(NonnullRefPtr<CSS::ComputedValues const> style)
+RefPtr<Layout::Node> SVGTextPathElement::create_layout_node(CSS::LayoutStyle style)
 {
-    return make_ref_counted<Layout::SVGTextPathBox>(document(), *this, style);
+    return make_ref_counted<Layout::Box>(document(), *this, style, Layout::RustFFI::NodeKind::SVGTextPathBox);
 }
 
 };

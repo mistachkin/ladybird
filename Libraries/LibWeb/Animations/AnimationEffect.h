@@ -44,13 +44,13 @@ Bindings::OptionalEffectTiming to_optional_effect_timing(Bindings::EffectTiming 
 struct AnimationUpdateContext {
     struct ElementData {
         ElementData();
-        ElementData(RefPtr<CSS::AnimatedProperties const>, RefPtr<CSS::ComputedProperties>);
+        ElementData(RefPtr<CSS::AnimatedProperties const>, RefPtr<CSS::ComputedStyleWorkingSet>);
         ElementData(ElementData&&);
         ElementData& operator=(ElementData&&);
         ~ElementData();
 
         RefPtr<CSS::AnimatedProperties const> animated_properties_before_update;
-        RefPtr<CSS::ComputedProperties> target_style;
+        RefPtr<CSS::ComputedStyleWorkingSet> target_style;
         GC::ConservativeVector<GC::Ref<KeyframeEffect>> effects;
     };
 
@@ -145,7 +145,7 @@ public:
 
     HashTable<CSS::PropertyID> const& target_properties() const { return m_target_properties; }
 
-    virtual DOM::Element* target() const { return {}; }
+    virtual GC::Ptr<DOM::Element> target() const { return {}; }
     virtual bool is_keyframe_effect() const { return false; }
 
     virtual void update_computed_properties(AnimationUpdateContext&) = 0;

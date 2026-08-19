@@ -5,10 +5,9 @@
  */
 
 #include <LibGC/Heap.h>
-#include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/StyleValues/DisplayStyleValue.h>
 #include <LibWeb/DOM/ShadowRoot.h>
-#include <LibWeb/Layout/SVGGraphicsBox.h>
+#include <LibWeb/Layout/Box.h>
 #include <LibWeb/SVG/SVGSymbolElement.h>
 #include <LibWeb/SVG/SVGUseElement.h>
 
@@ -49,14 +48,14 @@ bool SVGSymbolElement::is_direct_child_of_use_shadow_tree() const
     return is<SVGUseElement>(host);
 }
 
-RefPtr<Layout::Node> SVGSymbolElement::create_layout_node(NonnullRefPtr<CSS::ComputedValues const> style)
+RefPtr<Layout::Node> SVGSymbolElement::create_layout_node(CSS::LayoutStyle style)
 {
     // https://svgwg.org/svg2-draft/render.html#TermNeverRenderedElement
     // [..] it also includes a ‘symbol’ element that is not the instance root of a use-element shadow tree.
     if (!is_direct_child_of_use_shadow_tree())
         return {};
 
-    return make_ref_counted<Layout::SVGGraphicsBox>(document(), *this, style);
+    return make_ref_counted<Layout::Box>(document(), *this, style, Layout::RustFFI::NodeKind::SVGGraphicsBox);
 }
 
 }

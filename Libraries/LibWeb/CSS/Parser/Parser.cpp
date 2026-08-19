@@ -1652,7 +1652,7 @@ CSSRule* Parser::parse_as_css_rule(bool nested)
 {
     auto nested_mode = nested ? Nested::Yes : Nested::No;
     if (auto maybe_rule = parse_a_rule(m_token_stream, nested_mode); maybe_rule.has_value())
-        return convert_to_rule<CSSNestedDeclarations>(maybe_rule.value(), nested_mode);
+        return convert_to_rule<CSSNestedDeclarations>(maybe_rule.value(), nested_mode).ptr();
     return {};
 }
 
@@ -2199,8 +2199,24 @@ Optional<StylePropertyAndName> Parser::convert_to_style_property(Declaration con
         return {};
     }
 
+    RefPtr<StyleValue const> legacy_value;
+    if (declaration.name.equals_ignoring_ascii_case("-webkit-box-orient"sv)) {
+        // INTEROP: -webkit-box-orient predates flex-direction and uses horizontal and vertical
+        //          for the values now represented by row and column, respectively.
+        auto legacy_value_token_stream = TokenStream(declaration.value);
+        legacy_value_token_stream.discard_whitespace();
+        auto const& token = legacy_value_token_stream.consume_a_token();
+        legacy_value_token_stream.discard_whitespace();
+        if (!legacy_value_token_stream.has_next_token()) {
+            if (token.is_ident("horizontal"_utf16))
+                legacy_value = KeywordStyleValue::create(Keyword::Row);
+            else if (token.is_ident("vertical"_utf16))
+                legacy_value = KeywordStyleValue::create(Keyword::Column);
+        }
+    }
+
     auto value_token_stream = TokenStream(declaration.value);
-    auto value = parse_css_value(property->id(), value_token_stream, declaration.original_value_text);
+    auto value = legacy_value ? ParseErrorOr<NonnullRefPtr<StyleValue const>> { legacy_value.release_nonnull() } : parse_css_value(property->id(), value_token_stream, declaration.original_value_text);
     if (value.is_error()) {
         if (value.error() == ParseError::SyntaxError) {
             ErrorReporter::the().report(InvalidPropertyError {
@@ -2589,14 +2605,14 @@ template Vector<Vector<ComponentValue>> Parser::parse_a_comma_separated_list_of_
 
 DOM::Document const* Parser::document() const
 {
-    return m_document;
+    return m_document.ptr();
 }
 
 HTML::Window const* Parser::window() const
 {
     if (!m_document)
         return nullptr;
-    return m_document->window();
+    return m_document->window().ptr();
 }
 
 bool Parser::in_quirks_mode() const

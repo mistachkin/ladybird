@@ -7,7 +7,6 @@
 #pragma once
 
 #include <LibGC/RootHashTable.h>
-#include <LibWeb/CSS/StyleValues/NumberStyleValue.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/Layout/Node.h>
 #include <LibWeb/SVG/AttributeParser.h>
@@ -40,22 +39,23 @@ public:
     NumberPercentage pattern_height() const;
 
     // https://w3c.github.io/svgwg/svg2-draft/pservers.html#__svg__SVGPatternElement__x
-    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(x, Horizontal, CSS::NumberStyleValue::create(0));
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(x, Horizontal, SVGLengthValue::number(0));
 
     // https://w3c.github.io/svgwg/svg2-draft/pservers.html#__svg__SVGPatternElement__y
-    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(y, Vertical, CSS::NumberStyleValue::create(0));
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(y, Vertical, SVGLengthValue::number(0));
 
     // https://w3c.github.io/svgwg/svg2-draft/pservers.html#__svg__SVGPatternElement__width
-    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(width, Horizontal, CSS::NumberStyleValue::create(0));
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(width, Horizontal, SVGLengthValue::number(0));
 
     // https://w3c.github.io/svgwg/svg2-draft/pservers.html#__svg__SVGPatternElement__height
-    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(height, Vertical, CSS::NumberStyleValue::create(0));
+    REFLECT_ANIMATED_LENGTH_ATTRIBUTE(height, Vertical, SVGLengthValue::number(0));
 
     GC::Ptr<SVGPatternElement const> pattern_content_element() const;
 
-    Optional<Painting::PaintStyle> to_gfx_paint_style(SVGPaintContext const&, DisplayListRecordingContext&, Layout::Node const& target_layout_node) const;
+    RefPtr<Painting::Paintable const> resolve_pattern_paintable(Layout::Node const& target_layout_node) const;
+    Optional<Painting::PaintStyle> record_pattern_paint_style(SVGPaintContext const&, DisplayListRecordingContext&, Painting::Paintable const& pattern_paintable, Gfx::FloatSize content_scale) const;
 
-    virtual RefPtr<Layout::Node> create_layout_node(NonnullRefPtr<CSS::ComputedValues const>) override { return nullptr; }
+    virtual RefPtr<Layout::Node> create_layout_node(CSS::LayoutStyle) override { return nullptr; }
 
 protected:
     SVGPatternElement(DOM::Document&, DOM::QualifiedName);

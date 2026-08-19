@@ -16,7 +16,7 @@ namespace Web::Painting {
 // geometry is the union of those pieces.
 class InlinePaintable final : public Paintable {
 public:
-    static NonnullRefPtr<InlinePaintable> create(Layout::NodeWithStyleAndBoxModelMetrics const&);
+    static NonnullRefPtr<InlinePaintable> create(Layout::NodeWithStyle const&);
     virtual ~InlinePaintable() override;
     virtual StringView class_name() const override { return "InlinePaintable"sv; }
 
@@ -25,6 +25,8 @@ public:
     PaintableWithLines const* inline_root() const;
 
     void set_piece_indices(Vector<u32> piece_indices) { m_piece_indices = move(piece_indices); }
+
+    InlineBoxPiece const* piece_for_line(u32 line_index) const;
 
     template<typename Callback>
     void for_each_piece(Callback callback) const
@@ -78,7 +80,7 @@ public:
     virtual void set_needs_repaint(InvalidateDisplayList = InvalidateDisplayList::Yes) override;
 
 private:
-    explicit InlinePaintable(Layout::NodeWithStyleAndBoxModelMetrics const&);
+    explicit InlinePaintable(Layout::NodeWithStyle const&);
 
     [[nodiscard]] virtual bool is_inline_paintable() const final { return true; }
 

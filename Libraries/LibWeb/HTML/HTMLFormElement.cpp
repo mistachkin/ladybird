@@ -11,6 +11,8 @@
 #include <AK/StringBuilder.h>
 #include <AK/Utf16StringBuilder.h>
 #include <LibTextCodec/Decoder.h>
+#include <LibWeb/Bindings/HTMLFormElement.h>
+#include <LibWeb/CSS/Invalidation/ElementStateInvalidator.h>
 #include <LibWeb/DOM/DOMTokenList.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Event.h>
@@ -39,6 +41,7 @@
 #include <LibWeb/Infra/SerializedURL.h>
 #include <LibWeb/Infra/Strings.h>
 #include <LibWeb/Page/Page.h>
+#include <LibWeb/WebIDL/ExceptionOrUtils.h>
 
 namespace Web::HTML {
 
@@ -59,6 +62,15 @@ void HTMLFormElement::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_planned_navigation);
     visitor.visit(m_rel_list);
     visitor.visit(m_past_names_map);
+}
+
+void HTMLFormElement::inserted()
+{
+    Base::inserted();
+
+    auto* default_button = this->default_button();
+    m_default_button_for_style_invalidation = default_button ? &default_button->form_associated_element_to_html_element() : nullptr;
+    m_default_button_for_style_invalidation_initialized = true;
 }
 
 // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#implicit-submission
@@ -147,7 +159,7 @@ WebIDL::ExceptionOr<void> HTMLFormElement::submit_form(GC::Ref<HTMLElement> subm
 
         // 5. Let submitterButton be null if submitter is form. Otherwise, let submitterButton be submitter.
         GC::Ptr<HTMLElement> submitter_button;
-        if (submitter != this)
+        if (submitter.ptr() != this)
             submitter_button = submitter;
 
         // 6. Let shouldContinue be the result of firing an event named submit at form using SubmitEvent, with the
@@ -410,7 +422,7 @@ void HTMLFormElement::remove_associated_element(Badge<FormAssociatedElement>, HT
     m_associated_elements.remove_first_matching([&](auto& entry) { return entry.ptr() == &element; });
 
     // If an element listed in a form element's past names map changes form owner, then its entries must be removed from that map.
-    m_past_names_map.remove_all_matching([&](auto&, auto const& entry) { return entry.node == &element; });
+    m_past_names_map.remove_all_matching([&](auto&, auto const& entry) { return entry.node.ptr() == &element; });
 }
 
 // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#concept-fs-action
@@ -992,13 +1004,13 @@ void HTMLFormElement::plan_to_navigate_to(URL::URL url, DocumentResource post_re
     ReferrerPolicy::ReferrerPolicy referrer_policy = ReferrerPolicy::ReferrerPolicy::EmptyString;
 
     // 2. If the form element's link types include the noreferrer keyword, then set referrerPolicy to "no-referrer".
-    if (has_link_type(get_attribute_value_view(HTML::AttributeNames::rel).value_or({}), u"noreferrer"sv))
+    if (has_link_type(attribute(HTML::AttributeNames::rel).value_or({}), u"noreferrer"sv))
         referrer_policy = ReferrerPolicy::ReferrerPolicy::NoReferrer;
 
     // 3. If the form has a non-null planned navigation, remove it from its task queue.
     if (m_planned_navigation) {
         HTML::main_thread_event_loop().task_queue().remove_tasks_matching([this](Task const& task) {
-            return &task == m_planned_navigation;
+            return &task == m_planned_navigation.ptr();
         });
     }
 
@@ -1212,6 +1224,40 @@ FormAssociatedElement* HTMLFormElement::default_button() const
     });
 
     return default_button;
+}
+
+void HTMLFormElement::default_button_state_maybe_changed()
+{
+    update_default_button_state_for_style(nullptr, false);
+}
+
+void HTMLFormElement::default_button_state_maybe_changed(DOM::Element& element, bool was_default)
+{
+    update_default_button_state_for_style(&element, was_default);
+}
+
+void HTMLFormElement::update_default_button_state_for_style(DOM::Element* element_with_known_previous_state, bool previous_state)
+{
+    auto* default_button = this->default_button();
+    auto* new_default_button = default_button ? &default_button->form_associated_element_to_html_element() : nullptr;
+
+    if (!m_default_button_for_style_invalidation_initialized) {
+        m_default_button_for_style_invalidation = new_default_button;
+        m_default_button_for_style_invalidation_initialized = true;
+        if (element_with_known_previous_state)
+            CSS::Invalidation::invalidate_style_after_default_state_change(*element_with_known_previous_state, previous_state);
+        return;
+    }
+
+    auto old_default_button = m_default_button_for_style_invalidation.ptr();
+    if (element_with_known_previous_state)
+        CSS::Invalidation::invalidate_style_after_default_state_change(*element_with_known_previous_state, previous_state);
+    if (old_default_button && old_default_button.ptr() != element_with_known_previous_state)
+        CSS::Invalidation::invalidate_style_after_default_state_change(*old_default_button, true);
+    if (new_default_button && new_default_button != old_default_button.ptr() && new_default_button != element_with_known_previous_state)
+        CSS::Invalidation::invalidate_style_after_default_state_change(*new_default_button, false);
+
+    m_default_button_for_style_invalidation = new_default_button;
 }
 
 // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#field-that-blocks-implicit-submission

@@ -19,7 +19,6 @@ struct TestWebContentClient final : public Compositor::CompositorStateWebContent
     virtual void request_rendering_update() override { }
     virtual void create_video_edge(Media::VideoSinkHandle) override { }
     virtual void release_video_edge(Media::VideoSinkHandle) override { }
-    virtual void set_video_sink_ticking(Media::VideoSinkHandle, bool) override { }
 };
 
 static NonnullRefPtr<Web::Painting::DisplayList> make_display_list(Web::Painting::AccumulatedVisualContextTree const& visual_context_tree, Optional<Gfx::Color> color, Optional<Gfx::Color> surface_clear_color = {})
@@ -88,4 +87,16 @@ TEST_CASE(rasterization_clears_damaged_pixels_to_the_canvas_color_in_presentatio
     paint_frame(make_display_list(visual_context_tree, {}));
     bitmap = context.latest_rendered_surface()->snapshot_bitmap();
     EXPECT_EQ(bitmap->get_pixel(0, 0), Gfx::Color::Transparent);
+}
+
+TEST_CASE(oversized_backing_stores_are_rejected)
+{
+    Compositor::BackingStoreManager manager;
+    auto allocation = manager.resize_backing_stores_if_needed({ 40'000, 40'000 }, Web::Compositor::WindowResizingInProgress::No);
+    VERIFY(allocation.has_value());
+
+    auto publication = manager.allocate_backing_stores(*allocation, {}, true, Compositor::BackingStoreManager::GpuSharing::Disallowed);
+
+    EXPECT(!publication.has_value());
+    EXPECT(!manager.is_valid());
 }

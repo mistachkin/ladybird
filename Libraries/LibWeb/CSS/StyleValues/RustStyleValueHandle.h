@@ -13,6 +13,8 @@
 
 namespace Web::CSS {
 
+inline thread_local bool g_style_ffi_counters_enabled { false };
+
 // Shared handle to a Rust-allocated, immutable StyleValueData. The StyleValueData layout is
 // exposed through cbindgen, so reading through the handle is an inline field access with no FFI
 // call.
@@ -24,7 +26,8 @@ public:
         : m_value(value)
     {
         VERIFY(m_value);
-        StyleValueFFI::rust_style_ffi_note_style_value_created();
+        if (g_style_ffi_counters_enabled)
+            StyleValueFFI::rust_style_ffi_note_style_value_created();
     }
 
     RustStyleValueHandle(RustStyleValueHandle const& other)
@@ -51,6 +54,12 @@ public:
         return *this;
     }
 
+    // A handle that shares ownership of a borrowed value: takes its own strong reference.
+    static RustStyleValueHandle retained(StyleValueFFI::StyleValueData const* value)
+    {
+        return RustStyleValueHandle { StyleValueFFI::rust_style_value_retain(value) };
+    }
+
     ~RustStyleValueHandle()
     {
         if (m_value)
@@ -64,7 +73,13 @@ public:
 
     StyleValueFFI::StyleValueData const* leak_data() { return exchange(m_value, nullptr); }
 
-    bool operator==(RustStyleValueHandle const&) const = default;
+    // Two handles are the same value when they name the same allocation or hold equal values. A
+    // defaulted comparison would only ever see the addresses, and a recomputed style builds a fresh
+    // allocation for a declaration that has not changed.
+    bool operator==(RustStyleValueHandle const& other) const
+    {
+        return StyleValueFFI::rust_style_value_equals(m_value, other.m_value);
+    }
 
 private:
     StyleValueFFI::StyleValueData const* m_value { nullptr };

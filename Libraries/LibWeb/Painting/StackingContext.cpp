@@ -13,10 +13,9 @@
 #include <LibCore/Environment.h>
 #include <LibGfx/Rect.h>
 #include <LibWeb/DOM/Document.h>
-#include <LibWeb/Layout/ReplacedBox.h>
+#include <LibWeb/Layout/Box.h>
 #include <LibWeb/Layout/Viewport.h>
 #include <LibWeb/Page/Page.h>
-#include <LibWeb/Painting/BackgroundPainting.h>
 #include <LibWeb/Painting/DisplayList.h>
 #include <LibWeb/Painting/DisplayListRecorder.h>
 #include <LibWeb/Painting/HitTestDisplayList.h>
@@ -105,9 +104,9 @@ static void paint_node(Paintable const& paintable, DisplayListRecordingContext& 
     // Text fragments are content of the block container (or of a self-painting inline box).
     // They need the descendants' visual context, not the element's own visual context.
     if (paintable.foreground_paints_descendant_content() && phase == PaintPhase::Foreground)
-        context.display_list_recorder().set_accumulated_visual_context(paintable.accumulated_visual_context_for_descendants_index());
+        context.display_list_recorder().set_accumulated_visual_context(context.accumulated_visual_context_for_descendants_index_of(paintable));
     else
-        context.display_list_recorder().set_accumulated_visual_context(paintable.accumulated_visual_context_index());
+        context.display_list_recorder().set_accumulated_visual_context(context.accumulated_visual_context_index_of(paintable));
 
     auto& recorder = context.display_list_recorder();
     auto const* cache_source_display_list = context.paint_command_cache_source_display_list();
@@ -248,17 +247,23 @@ static bool is_pure_inline_box(Paintable const& paintable)
         && !paintable.is_positioned();
 }
 
-static void paint_inline_level_non_positioned_descendant(DisplayListRecordingContext& context, Paintable const& paintable)
+static void paint_subtree_backgrounds_and_borders(DisplayListRecordingContext& context, Paintable const& paintable)
 {
     paint_node(paintable, context, PaintPhase::Background);
     paint_node(paintable, context, PaintPhase::Border);
-    paint_node(paintable, context, PaintPhase::TableCollapsedBorder);
     // A pure inline paintable paints its own background/border in the inline-level phase. Its block descendants, if
     // any, are painted by the earlier BackgroundAndBorders descent through pure inline boxes. In today's layout trees,
     // this subtree sweep is a no-op for InlineNodes: it can only find inline children, floats, or positioned boxes,
     // all of which are skipped by the BackgroundAndBorders phase.
     if (!is_pure_inline_box(paintable))
         StackingContext::paint_descendants(context, paintable, StackingContext::StackingContextPaintPhase::BackgroundAndBorders);
+    if (paintable.collapsed_table_borders())
+        paint_node(paintable, context, PaintPhase::TableCollapsedBorder);
+}
+
+static void paint_inline_level_non_positioned_descendant(DisplayListRecordingContext& context, Paintable const& paintable)
+{
+    paint_subtree_backgrounds_and_borders(context, paintable);
 
     // https://drafts.csswg.org/css2/#elaborate-stacking-contexts
     // "For inline-block and inline-table elements: [...] treat the element as if it created a new stacking context,
@@ -275,9 +280,7 @@ void StackingContext::paint_node_as_stacking_context(Paintable const& paintable,
         return;
     }
 
-    paint_node(paintable, context, PaintPhase::Background);
-    paint_node(paintable, context, PaintPhase::Border);
-    paint_descendants(context, paintable, StackingContextPaintPhase::BackgroundAndBorders);
+    paint_subtree_backgrounds_and_borders(context, paintable);
     paint_descendants(context, paintable, StackingContextPaintPhase::Floats);
     paint_descendants(context, paintable, StackingContextPaintPhase::BackgroundAndBordersForInlineLevelAndReplaced);
     paint_node(paintable, context, PaintPhase::Foreground);
@@ -302,7 +305,7 @@ void StackingContext::paint_descendants(DisplayListRecordingContext& context, Pa
         if (child.has_stacking_context())
             return IterationDecision::Continue;
 
-        auto const& z_index = [&] { return child.computed_values().z_index(); };
+        auto const& z_index = [&] { return child.layout_node().z_index(); };
 
         // Positioned descendants at stack level 0 are painted in a separate pass.
         // See `m_positioned_descendants_and_stacking_contexts_with_stack_level_0`.
@@ -339,24 +342,19 @@ void StackingContext::paint_descendants(DisplayListRecordingContext& context, Pa
             return IterationDecision::Continue;
         }
 
-        bool child_is_inline_or_replaced = child.is_inline() || is<Layout::ReplacedBox>(child.layout_node());
+        bool child_is_inline_or_replaced = child.is_inline() || child.layout_node().is_replaced_box();
         bool child_has_inline_level_painting_context = establishes_inline_level_painting_context(child);
         switch (phase) {
         case StackingContextPaintPhase::BackgroundAndBorders:
             if (!child_is_inline_or_replaced && !child.is_floating()) {
-                paint_node(child, context, PaintPhase::Background);
-                paint_node(child, context, PaintPhase::Border);
-                paint_descendants(context, child, phase);
-                paint_node(child, context, PaintPhase::TableCollapsedBorder);
+                paint_subtree_backgrounds_and_borders(context, child);
             } else if (is_pure_inline_box(child)) {
                 paint_descendants(context, child, phase);
             }
             break;
         case StackingContextPaintPhase::Floats:
             if (child.is_floating()) {
-                paint_node(child, context, PaintPhase::Background);
-                paint_node(child, context, PaintPhase::Border);
-                paint_descendants(context, child, StackingContextPaintPhase::BackgroundAndBorders);
+                paint_subtree_backgrounds_and_borders(context, child);
             }
             // Atomic inline-level descendants such as inline-blocks and inline tables participate in the parent's
             // inline-level painting step, so their internal floats must not be painted early during the ancestor's
@@ -429,6 +427,8 @@ void StackingContext::paint_internal(DisplayListRecordingContext& context) const
 
     // Draw the background and borders for block-level children (step 4)
     paint_descendants(context, paintable_box(), StackingContextPaintPhase::BackgroundAndBorders);
+    if (paintable_box().collapsed_table_borders())
+        paint_node(paintable_box(), context, PaintPhase::TableCollapsedBorder);
     // Draw the non-positioned floats (step 5)
     if (!m_non_positioned_floating_descendants.is_empty())
         paint_descendants(context, paintable_box(), StackingContextPaintPhase::Floats);
@@ -485,10 +485,7 @@ void StackingContext::paint(DisplayListRecordingContext& context) const
         VERIFY(context.display_list_recorder().m_save_nesting_level == 0);
     });
 
-    auto const& computed_values = paintable_box().computed_values();
-    auto const& mask_layers = computed_values.mask_layers();
-
-    auto effective_context_index = paintable_box().accumulated_visual_context_index();
+    auto effective_context_index = context.accumulated_visual_context_index_of(paintable_box());
     context.display_list_recorder().set_accumulated_visual_context(effective_context_index);
 
     // For elements with SVG filters, emit a transparent FillRect to trigger filter application.
@@ -498,36 +495,7 @@ void StackingContext::paint(DisplayListRecordingContext& context) const
         context.display_list_recorder().fill_rect_transparent(device_rect);
     }
 
-    // Collect all masks (CSS mask-image, SVG <mask>, SVG <clipPath>).
-    Vector<MaskLayerDisplayList> masks;
-
-    for (auto const& mask_layer : paintable_box().mask_layer_presence(MaskLayerSet::CssAndSvg)) {
-        switch (mask_layer.origin) {
-        case MaskLayerOrigin::CssMaskLayers: {
-            auto visual_context_tree = AccumulatedVisualContextTree::create();
-            auto mask_display_list = DisplayList::create(visual_context_tree);
-            DisplayListRecorder display_list_recorder(*mask_display_list, visual_context_tree, context.display_list_recorder().resource_storage());
-            auto mask_painting_context = context.clone(display_list_recorder);
-            auto mask_rect = CSSPixelRect { {}, mask_layer.area.size() };
-            auto resolved_mask = resolve_background_layers(mask_layers, paintable_box(), Color::Transparent, CSS::BackgroundBox::BorderBox, mask_rect, {});
-
-            // FIXME: Respect `image-rendering` here.
-            paint_background(mask_painting_context, paintable_box(), CSS::ImageRendering::Auto, resolved_mask, {});
-            masks.append({ MaskLayerOrigin::CssMaskLayers, { *mask_display_list, move(visual_context_tree) } });
-            break;
-        }
-        case MaskLayerOrigin::SvgMask:
-            if (auto mask_display_list = paintable_box().calculate_mask(context, mask_layer.area); mask_display_list.has_value())
-                masks.append({ MaskLayerOrigin::SvgMask, mask_display_list.release_value() });
-            break;
-        case MaskLayerOrigin::SvgClip:
-            if (auto clip_display_list = paintable_box().calculate_clip(context, mask_layer.area); clip_display_list.has_value())
-                masks.append({ MaskLayerOrigin::SvgClip, clip_display_list.release_value() });
-            break;
-        }
-    }
-
-    register_mask_display_lists(context, paintable_box(), masks);
+    register_mask_display_lists(context, paintable_box(), MaskLayerSet::CssAndSvg);
 
     auto context_before_children = context.display_list_recorder().accumulated_visual_context();
 

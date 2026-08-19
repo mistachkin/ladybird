@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/BinarySearch.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Position.h>
 #include <LibWeb/HTML/HTMLHtmlElement.h>
@@ -17,12 +18,12 @@
 
 namespace Web::Painting {
 
-NonnullRefPtr<InlinePaintable> InlinePaintable::create(Layout::NodeWithStyleAndBoxModelMetrics const& layout_node)
+NonnullRefPtr<InlinePaintable> InlinePaintable::create(Layout::NodeWithStyle const& layout_node)
 {
     return adopt_ref(*new InlinePaintable(layout_node));
 }
 
-InlinePaintable::InlinePaintable(Layout::NodeWithStyleAndBoxModelMetrics const& layout_node)
+InlinePaintable::InlinePaintable(Layout::NodeWithStyle const& layout_node)
     : Paintable(layout_node)
 {
 }
@@ -41,6 +42,25 @@ void InlinePaintable::reset_for_relayout()
 PaintableWithLines const* InlinePaintable::inline_root() const
 {
     return as_if<PaintableWithLines>(containing_block().ptr());
+}
+
+InlineBoxPiece const* InlinePaintable::piece_for_line(u32 line_index) const
+{
+    auto const* root = inline_root();
+    if (!root)
+        return nullptr;
+    // This box has at most one piece per line, so its piece indices are ordered by line.
+    auto const& pieces = root->inline_box_pieces();
+    auto index = lower_bound_index(m_piece_indices, line_index, [&](u32 piece_index, u32 line) {
+        if (pieces[piece_index].line_index < line)
+            return -1;
+        if (pieces[piece_index].line_index > line)
+            return 1;
+        return 0;
+    });
+    if (index < m_piece_indices.size() && pieces[m_piece_indices[index]].line_index == line_index)
+        return &pieces[m_piece_indices[index]];
+    return nullptr;
 }
 
 CSSPixelRect InlinePaintable::absolute_piece_border_box_rect(InlineBoxPiece const& piece) const
@@ -64,8 +84,7 @@ CSSPixelRect InlinePaintable::piece_content_box_rect(InlineBoxPiece const& piece
 BorderRadiiData InlinePaintable::piece_border_radii_data(InlineBoxPiece const& piece) const
 {
     using Edge = InlineBoxPiece::Edge;
-    auto const& computed_values = this->computed_values();
-    if (!computed_values.has_noninitial_border_radii())
+    if (!layout_node().has_noninitial_border_radii())
         return {};
 
     auto top_edge_is_cut = !piece.has_edge(Edge::Top);
@@ -74,10 +93,10 @@ BorderRadiiData InlinePaintable::piece_border_radii_data(InlineBoxPiece const& p
     auto right_edge_is_cut = !piece.has_edge(Edge::Right);
 
     CSSPixelRect const border_rect { 0, 0, piece.border_box_rect.width(), piece.border_box_rect.height() };
-    auto top_left = top_edge_is_cut || left_edge_is_cut ? CSS::BorderRadiusData {} : computed_values.border_top_left_radius();
-    auto top_right = top_edge_is_cut || right_edge_is_cut ? CSS::BorderRadiusData {} : computed_values.border_top_right_radius();
-    auto bottom_right = bottom_edge_is_cut || right_edge_is_cut ? CSS::BorderRadiusData {} : computed_values.border_bottom_right_radius();
-    auto bottom_left = bottom_edge_is_cut || left_edge_is_cut ? CSS::BorderRadiusData {} : computed_values.border_bottom_left_radius();
+    auto top_left = top_edge_is_cut || left_edge_is_cut ? CSS::BorderRadiusData {} : layout_node().border_top_left_radius();
+    auto top_right = top_edge_is_cut || right_edge_is_cut ? CSS::BorderRadiusData {} : layout_node().border_top_right_radius();
+    auto bottom_right = bottom_edge_is_cut || right_edge_is_cut ? CSS::BorderRadiusData {} : layout_node().border_bottom_right_radius();
+    auto bottom_left = bottom_edge_is_cut || left_edge_is_cut ? CSS::BorderRadiusData {} : layout_node().border_bottom_left_radius();
     return normalize_border_radii_data(border_rect, border_rect, top_left, top_right, bottom_right, bottom_left);
 }
 
@@ -140,16 +159,15 @@ void InlinePaintable::paint(DisplayListRecordingContext& context, PaintPhase pha
 
     if (phase == PaintPhase::Border && is_visible()) {
         using Edge = InlineBoxPiece::Edge;
-        auto const& computed_values = this->computed_values();
         auto const& border = box_model().border;
         for_each_piece([&](auto const& piece) {
             if (piece.is_geometry_only_placeholder)
                 return;
             auto borders_data = BordersData {
-                .top = border.top == 0 || !piece.has_edge(Edge::Top) ? CSS::BorderData() : computed_values.border_top(),
-                .right = border.right == 0 || !piece.has_edge(Edge::Right) ? CSS::BorderData() : computed_values.border_right(),
-                .bottom = border.bottom == 0 || !piece.has_edge(Edge::Bottom) ? CSS::BorderData() : computed_values.border_bottom(),
-                .left = border.left == 0 || !piece.has_edge(Edge::Left) ? CSS::BorderData() : computed_values.border_left(),
+                .top = border.top == 0 || !piece.has_edge(Edge::Top) ? CSS::BorderData() : layout_node().border_top(),
+                .right = border.right == 0 || !piece.has_edge(Edge::Right) ? CSS::BorderData() : layout_node().border_right(),
+                .bottom = border.bottom == 0 || !piece.has_edge(Edge::Bottom) ? CSS::BorderData() : layout_node().border_bottom(),
+                .left = border.left == 0 || !piece.has_edge(Edge::Left) ? CSS::BorderData() : layout_node().border_left(),
             };
             paint_border(context, piece.border_box_rect.translated(root_position), borders_data, piece_border_radii_data(piece));
         });
@@ -196,15 +214,15 @@ void InlinePaintable::paint_empty_editable_cursor(DisplayListRecordingContext& c
     VERIFY(cursor_position);
 
     auto const* dom_node = layout_node().dom_node();
-    if (!dom_node || cursor_position->node() != dom_node)
+    if (!dom_node || cursor_position->node() != GC::Ptr { dom_node })
         return;
 
-    auto caret_color = computed_values().caret_color();
+    auto caret_color = layout_node().caret_color();
     if (caret_color.alpha() == 0)
         return;
 
     auto position = box_type_agnostic_position();
-    CSSPixelRect cursor_rect { position.x(), position.y(), 1, computed_values().line_height() };
+    CSSPixelRect cursor_rect { position.x(), position.y(), 1, layout_node().line_height() };
     context.display_list_recorder().fill_rect(context.rounded_device_rect(cursor_rect).to_type<int>(), caret_color);
 }
 

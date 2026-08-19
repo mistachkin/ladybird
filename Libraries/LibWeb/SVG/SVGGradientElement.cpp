@@ -5,7 +5,6 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/Painting/PaintStyle.h>
 #include <LibWeb/SVG/AttributeNames.h>
@@ -69,7 +68,9 @@ SpreadMethod SVGGradientElement::spread_method_impl(GC::RootHashTable<SVGGradien
 
 Gfx::InterpolationColorSpace SVGGradientElement::color_space() const
 {
-    return CSS::to_interpolation_color_space(computed_values()->color_interpolation());
+    auto style = computed_style();
+    VERIFY(style);
+    return CSS::to_interpolation_color_space(style->color_interpolation());
 }
 
 Optional<Gfx::AffineTransform> SVGGradientElement::gradient_transform() const
@@ -140,7 +141,7 @@ GC::Ptr<SVGGradientElement const> SVGGradientElement::linked_gradient(GC::RootHa
             element = document().get_element_by_id(id_as_utf16);
         if (!element)
             return {};
-        if (element == this)
+        if (element == GC::Ref { *this })
             return {};
         if (!is<SVGGradientElement>(*element))
             return {};

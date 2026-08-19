@@ -7,7 +7,7 @@
 
 #include <LibWeb/HTML/HTMLImageElement.h>
 #include <LibWeb/HTML/HTMLInputElement.h>
-#include <LibWeb/Layout/CheckBox.h>
+#include <LibWeb/Layout/Box.h>
 #include <LibWeb/Painting/CheckBoxPaintable.h>
 #include <LibWeb/Painting/DisplayListRecorder.h>
 #include <LibWeb/Painting/InputColors.h>
@@ -34,12 +34,12 @@ static Gfx::Path check_mark_path(Gfx::IntRect checkbox_rect)
 }
 
 NonnullRefPtr<CheckBoxPaintable>
-CheckBoxPaintable::create(Layout::CheckBox const& layout_box)
+CheckBoxPaintable::create(Layout::Box const& layout_box)
 {
     return adopt_ref(*new CheckBoxPaintable(layout_box));
 }
 
-CheckBoxPaintable::CheckBoxPaintable(Layout::CheckBox const& layout_box)
+CheckBoxPaintable::CheckBoxPaintable(Layout::Box const& layout_box)
     : Paintable(layout_box)
 {
 }
@@ -64,7 +64,7 @@ void CheckBoxPaintable::paint(DisplayListRecordingContext& context, PaintPhase p
     auto checkbox_radius = checkbox_rect.width() / 5;
 
     auto shade = [&](Color color, float amount) {
-        return InputColors::get_shade(color, amount, computed_values().color_scheme());
+        return InputColors::get_shade(color, amount, layout_node().color_scheme());
     };
 
     auto modify_color = [&](Color color) {
@@ -74,7 +74,7 @@ void CheckBoxPaintable::paint(DisplayListRecordingContext& context, PaintPhase p
         return color;
     };
 
-    auto input_colors = compute_input_colors(computed_values().color_scheme(), computed_values().accent_color());
+    auto input_colors = compute_input_colors(layout_node().color_scheme(), layout_node().accent_color());
 
     auto increase_contrast = [&](Color color, Color background) {
         auto constexpr min_contrast = 2;

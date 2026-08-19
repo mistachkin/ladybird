@@ -76,6 +76,8 @@ public:
     GC::Ref<WebIDL::Promise> decode() const;
     void decode(GC::Ref<WebIDL::Promise>) const;
 
+    GC::Ptr<HTMLMapElement> associated_map_element();
+
     virtual Optional<ARIA::Role> default_role() const override;
 
     // https://html.spec.whatwg.org/multipage/images.html#img-environment-changes
@@ -135,7 +137,8 @@ private:
     // https://html.spec.whatwg.org/multipage/embedded-content.html#the-img-element:dimension-attributes
     virtual bool supports_dimension_attributes() const override { return true; }
 
-    virtual RefPtr<Layout::Node> create_layout_node(NonnullRefPtr<CSS::ComputedValues const>) override;
+    virtual RefPtr<Layout::Node> create_layout_node(CSS::LayoutStyle) override;
+
     virtual void did_set_viewport_rect(CSSPixelRect const&) override;
 
     void handle_failed_fetch();
@@ -175,6 +178,9 @@ private:
     GC::Ptr<DOM::Element const> m_dimension_attribute_source;
 
     u64 m_update_the_image_data_count { 0 };
+
+    GC::Ptr<HTMLMapElement> m_cached_associated_map_element;
+    Optional<u64> m_cached_associated_map_element_dom_tree_version;
 };
 
 }

@@ -5,7 +5,7 @@
         return new Promise(resolve => requestAnimationFrame(resolve));
     }
 
-    asyncTest(async done => {
+    promiseTest(async () => {
         const iframe = document.createElement("iframe");
         iframe.style.border = "0";
         iframe.style.width = "300px";
@@ -87,7 +87,6 @@
         const elementCount = child.document.querySelectorAll("*").length;
         println(`resized color: ${child.getComputedStyle(target).color}`);
         println(`resized nested color: ${child.getComputedStyle(nestedTarget).color}`);
-        println(`media query full invalidations: ${counters.fullStyleInvalidations}`);
         println(`media query recomputations bounded: ${counters.elementStyleRecomputations < elementCount / 2}`);
 
         child.internals.resetStyleInvalidationCounters();
@@ -100,9 +99,6 @@
         const resizedBackCounters = child.internals.getStyleInvalidationCounters();
         println(`resized back color: ${child.getComputedStyle(target).color}`);
         println(`resized back nested color: ${child.getComputedStyle(nestedTarget).color}`);
-        println(`media query full invalidations after resize back: ${resizedBackCounters.fullStyleInvalidations}`);
         println(`media query recomputations bounded after resize back: ${resizedBackCounters.elementStyleRecomputations < elementCount / 2}`);
-
-        done();
     });
 </script>

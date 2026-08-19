@@ -11,7 +11,6 @@
 #include <AK/Utf16View.h>
 #include <LibWeb/CSS/CSSStyleDeclaration.h>
 #include <LibWeb/CSS/GeneratedCSSStyleProperties.h>
-#include <LibWeb/DOM/StyleInvalidationReason.h>
 #include <LibWeb/Export.h>
 
 namespace Web::CSS {
@@ -47,6 +46,8 @@ public:
 
     Vector<StyleProperty> const& properties() const { return m_properties; }
     OrderedHashMap<Utf16FlyString, StyleProperty> const& custom_properties() const { return m_custom_properties; }
+    u64 identity() const { return m_identity; }
+    u64 revision() const { return m_revision; }
 
     virtual bool has_property(PropertyNameAndID const&) const override;
     bool has_property(PropertyID) const;
@@ -72,6 +73,7 @@ private:
     virtual size_t external_memory_size() const override;
 
     RefPtr<StyleValue const> style_value_for_computed_property(Layout::NodeWithStyle const&, PropertyID) const;
+    Optional<Utf16String> serialized_computed_value_from_stored_handle(PropertyID) const;
     Optional<StyleProperty> get_property_internal(PropertyNameAndID const&) const;
     Optional<StyleProperty> get_direct_property(PropertyNameAndID const&) const;
     WebIDL::ExceptionOr<void> set_property_internal(PropertyNameAndID const&, Utf16View css_text, Utf16View priority);
@@ -80,10 +82,12 @@ private:
     void empty_the_declarations();
     void set_the_declarations(Vector<StyleProperty> properties, OrderedHashMap<Utf16FlyString, StyleProperty> custom_properties);
 
-    void invalidate_owners(DOM::StyleInvalidationReason);
+    void invalidate_owners();
 
     Vector<StyleProperty> m_properties;
     OrderedHashMap<Utf16FlyString, StyleProperty> m_custom_properties;
+    u64 m_identity { 0 };
+    u64 m_revision { 0 };
 };
 
 #undef ENUMERATE_GENERATED_CSS_STYLE_PROPERTIES

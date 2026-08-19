@@ -18,7 +18,7 @@ SVGTitleElement::SVGTitleElement(DOM::Document& document, DOM::QualifiedName qua
 {
 }
 
-RefPtr<Layout::Node> SVGTitleElement::create_layout_node(NonnullRefPtr<CSS::ComputedValues const>)
+RefPtr<Layout::Node> SVGTitleElement::create_layout_node(CSS::LayoutStyle)
 {
     return nullptr;
 }
@@ -28,7 +28,7 @@ void SVGTitleElement::children_changed(ChildrenChangedMetadata const& metadata)
     Base::children_changed(metadata);
 
     auto& page = document().page();
-    if (document().browsing_context() != &page.top_level_browsing_context())
+    if (document().browsing_context() != GC::Ref { page.top_level_browsing_context() })
         return;
 
     auto* document_element = document().document_element();

@@ -9,9 +9,11 @@
 #include <LibCore/EventLoop.h>
 #include <LibCore/ThreadEventQueue.h>
 #include <LibWebView/Application.h>
+#include <LibWebView/SessionStore.h>
 #include <LibWebView/URL.h>
 #include <LibWebView/ViewImplementation.h>
 #include <Utilities/Conversions.h>
+#include <Utilities/ExternalURLHandler.h>
 
 #import <Application/Application.h>
 #import <Application/ApplicationDelegate.h>
@@ -128,6 +130,11 @@ void Application::open_url_in_new_window(URL::URL const& url, WebView::IsPrivate
                        isPrivate:is_private
                      activateTab:Web::HTML::ActivateTab::Yes
                      tabLocation:TabLocation::end()];
+}
+
+void Application::resolve_external_url_handler(URL::URL const& url, WebView::ExternalURLHandlerCallback callback) const
+{
+    Ladybird::resolve_external_url_handler(url, move(callback));
 }
 
 Optional<ByteString> Application::ask_user_for_download_path(ByteString const& file) const
@@ -534,6 +541,9 @@ void Application::on_devtools_disabled() const
     if (![self confirmStopActiveDownloads])
         return;
 
+    ApplicationDelegate* delegate = [NSApp delegate];
+    [delegate reconcileSessionTopology];
+    WebView::Application::session_store(WebView::IsPrivate::No).application_quitting();
     Core::EventLoop::current().quit(0);
 }
 

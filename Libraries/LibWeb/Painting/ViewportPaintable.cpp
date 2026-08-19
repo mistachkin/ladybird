@@ -11,7 +11,7 @@
 #include <LibWeb/DOM/Text.h>
 #include <LibWeb/HTML/LocalNavigable.h>
 #include <LibWeb/HTML/Window.h>
-#include <LibWeb/Layout/ReplacedBox.h>
+#include <LibWeb/Layout/Box.h>
 #include <LibWeb/Layout/TextNode.h>
 #include <LibWeb/Layout/TextOffsetMapping.h>
 #include <LibWeb/Layout/Viewport.h>
@@ -68,13 +68,13 @@ struct BlockingWheelEventRegionState {
 
 static BlockingWheelEventRegionState collect_root_blocking_wheel_event_regions(DOM::Document& document)
 {
-    DOM::EventTarget* roots[] = {
+    GC::Ptr<DOM::EventTarget> roots[] = {
         document.navigable() ? document.navigable()->active_window() : nullptr,
         &document,
         document.document_element(),
         document.body(),
     };
-    for (auto* target : roots) {
+    for (auto target : roots) {
         if (target && target->has_blocking_wheel_event_listener()) {
             return {
                 .has_blocking_wheel_event_listeners = true,
@@ -94,6 +94,7 @@ void ViewportPaintable::initialize_async_scrolling_metadata_recording(DisplayLis
         scroll_state(),
         blocking_wheel_event_region_state.has_blocking_wheel_event_listeners,
         blocking_wheel_event_region_state.has_blocking_wheel_event_region_covering_viewport);
+    context.set_should_record_wheel_hit_test_targets(m_has_non_viewport_wheel_scroll_target_candidate);
 }
 
 void ViewportPaintable::finalize_async_scrolling_metadata_recording(DisplayListRecordingContext& context, HTML::LocalNavigable& navigable, Gfx::IntRect viewport_rect)
@@ -117,6 +118,7 @@ void ViewportPaintable::reset_for_relayout()
     m_paint_command_cache_source_referenced_resources = {};
     document().clear_hit_test_item_cache_source();
     m_paintable_boxes_with_auto_content_visibility.clear();
+    m_paintables_with_mask_nodes.clear();
     m_visual_context_tree.clear();
     m_visual_context_tree_needs_compositor_update = false;
 }
@@ -144,7 +146,7 @@ void ViewportPaintable::build_stacking_context_tree()
             parent_context->m_positioned_descendants_and_stacking_contexts_with_stack_level_0.append(paintable_box);
         if (!paintable_box.is_positioned() && paintable_box.is_floating())
             parent_context->m_non_positioned_floating_descendants.append(paintable_box);
-        if (!establishes_stacking_context && (paintable_box.is_inline() || is<Layout::ReplacedBox>(paintable_box.layout_node())))
+        if (!establishes_stacking_context && (paintable_box.is_inline() || paintable_box.layout_node().is_replaced_box()))
             parent_context->m_contains_inline_or_replaced_descendants = true;
         if (!establishes_stacking_context) {
             VERIFY(!paintable_box.stacking_context());
@@ -218,12 +220,26 @@ void ViewportPaintable::clear_scroll_state()
     m_scroll_state.clear();
     m_scroll_state_snapshot = {};
     m_needs_to_refresh_scroll_state = true;
+    m_has_non_viewport_wheel_scroll_target_candidate = false;
 }
 
 void ViewportPaintable::register_scroll_node(AccumulatedVisualContextTree& visual_context_tree_being_built, VisualContextIndex node_index, Paintable const& paintable_box, VisualContextIndex parent_index)
 {
+    if (!paintable_box.is_viewport_paintable()) {
+        auto overflow_x = paintable_box.layout_node().overflow_x();
+        auto overflow_y = paintable_box.layout_node().overflow_y();
+        if (overflow_x == CSS::Overflow::Auto || overflow_x == CSS::Overflow::Scroll
+            || overflow_y == CSS::Overflow::Auto || overflow_y == CSS::Overflow::Scroll)
+            m_has_non_viewport_wheel_scroll_target_candidate = true;
+    }
+
     auto slot = m_scroll_state.register_scroll_node(node_index, paintable_box, visual_context_tree_being_built.scroll_state_slot_for_node(parent_index));
     visual_context_tree_being_built.node_at(node_index).data.get<ScrollData>().state_slot = slot;
+}
+
+void ViewportPaintable::register_paintable_with_mask_nodes(Paintable const& paintable_box)
+{
+    m_paintables_with_mask_nodes.append(paintable_box);
 }
 
 void ViewportPaintable::register_sticky_node(AccumulatedVisualContextTree& visual_context_tree_being_built, VisualContextIndex node_index, Paintable const& paintable_box, VisualContextIndex parent_index)
@@ -241,6 +257,7 @@ CSSPixelPoint ViewportPaintable::cumulative_scroll_offset_for_node(VisualContext
 void ViewportPaintable::assign_accumulated_visual_contexts()
 {
     clear_scroll_state();
+    m_paintables_with_mask_nodes.clear_with_capacity();
     auto visual_context_tree = build_accumulated_visual_context_tree(*this);
     ++m_accumulated_visual_context_tree_build_count;
     auto is_compatible = m_visual_context_tree.has_value() && visual_context_tree.is_compatible_with(*m_visual_context_tree);
@@ -446,7 +463,7 @@ void ViewportPaintable::recompute_selection_states(DOM::Range& range)
 
     DOM::Node* stop_at = end_container->child_at_index(range.end_offset());
     // Only stop at the end container if it has no children that may need to be included.
-    for (auto* node = start_at; node && (node != stop_at && !(node == end_container && !end_container->has_children())); node = node->next_in_pre_order(end_container)) {
+    for (auto* node = start_at; node && (node != stop_at && !(node == end_container.ptr() && !end_container->has_children())); node = node->next_in_pre_order(end_container.ptr())) {
         if (is_excluded_from_selection(*node))
             continue;
         set_selection_state_on_all_slices(*node, SelectionState::Full);

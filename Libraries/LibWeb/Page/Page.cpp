@@ -127,9 +127,9 @@ void Page::set_focused_navigable(HTML::LocalNavigable& navigable)
 
 void Page::navigable_document_destroyed(Badge<DOM::Document>, HTML::LocalNavigable& navigable)
 {
-    if (&navigable == m_focused_navigable.ptr())
+    if (GC::Ref { navigable } == m_focused_navigable.ptr())
         m_focused_navigable = nullptr;
-    if (&navigable == m_mouse_event_tracking_navigable.ptr())
+    if (GC::Ref { navigable } == m_mouse_event_tracking_navigable.ptr())
         m_mouse_event_tracking_navigable = nullptr;
 }
 
@@ -148,6 +148,7 @@ void Page::load(URL::URL const& url, HTML::DocumentResource document_resource,
         .history_handling = history_handling,
         .user_involvement = HTML::UserNavigationInvolvement::BrowserUI,
         .cross_process_source_snapshot = move(source_snapshot),
+        .history_handling_already_determined = true,
     });
 }
 
@@ -190,11 +191,6 @@ void Page::load_html(StringView html, URL::URL const& url)
 void Page::reload()
 {
     top_level_traversable()->reload();
-}
-
-void Page::traverse_the_history_by_delta(int delta)
-{
-    m_client->page_did_request_traverse_the_history_by_delta(delta, HistoryTraversalPrecheck::Needed);
 }
 
 Gfx::Palette Page::palette() const
@@ -441,7 +437,7 @@ void Page::update_needs_beforeunload_check()
         auto active_document = top_level_traversable->active_document();
         if (!active_document)
             return true;
-        if (active_document->navigable() != top_level_traversable.ptr())
+        if (active_document->navigable() != top_level_traversable)
             return true;
 
         for (auto const& navigable : active_document->inclusive_descendant_navigables()) {
@@ -470,7 +466,7 @@ void Page::set_top_level_traversable(GC::Ref<HTML::LocalTraversableNavigable> na
 
 bool Page::top_level_traversable_is_initialized() const
 {
-    return m_top_level_traversable;
+    return !!m_top_level_traversable;
 }
 
 HTML::BrowsingContext& Page::top_level_browsing_context()
@@ -798,6 +794,13 @@ void Page::for_each_media_element(Callback&& callback)
     }
 }
 
+void Page::sync_media_element_video_sink_ticking()
+{
+    for_each_media_element([&](auto& media_element) {
+        media_element.sync_video_sink_ticking();
+    });
+}
+
 void Page::restore_all_media_element_video_sinks()
 {
     for_each_media_element([&](auto& media_element) {
@@ -808,7 +811,7 @@ void Page::restore_all_media_element_video_sinks()
 void Page::detach_all_media_element_video_sinks_after_compositor_lost()
 {
     for_each_media_element([&](auto& media_element) {
-        media_element.detach_video_sink_after_compositor_lost();
+        media_element.detach_video_sink_edge();
     });
 }
 
@@ -958,7 +961,13 @@ GC::Ptr<HTML::HTMLMediaElement> Page::media_context_menu_element()
 
 void Page::set_user_style(Utf16String source)
 {
-    m_user_style_sheet_source = move(source);
+    // An empty user style is indistinguishable from having none, and shadow scopes only share style
+    // caches while no user style is present, so setting an empty source clears it outright. This
+    // matters across tests too: page state outlives the documents a test runner loads into it.
+    if (source.is_empty())
+        m_user_style_sheet_source = {};
+    else
+        m_user_style_sheet_source = move(source);
     invalidate_user_style();
 }
 
@@ -983,9 +992,28 @@ void Page::invalidate_user_style()
         document.invalidate_content_blocker_style_sheet();
         document.style_scope().invalidate_user_style_sheet();
         document.for_each_shadow_root([](auto& shadow_root) {
-            shadow_root.invalidate_style(DOM::StyleInvalidationReason::StyleSheetReplace);
+            shadow_root.record_style_environment_change();
         });
-        document.invalidate_style(DOM::StyleInvalidationReason::StyleSheetReplace);
+        document.record_style_environment_change();
+    };
+
+    auto& active_document = *top_level_traversable()->active_document();
+    invalidate_document(active_document);
+
+    for (auto& navigable : active_document.descendant_navigables()) {
+        if (auto document = navigable->active_document())
+            invalidate_document(*document);
+    }
+}
+
+void Page::invalidate_style_for_preference_change()
+{
+    if (!top_level_traversable_is_initialized() || !top_level_traversable()->active_document())
+        return;
+
+    auto invalidate_document = [](DOM::Document& document) {
+        document.record_style_environment_change();
+        document.set_needs_media_query_evaluation();
     };
 
     auto& active_document = *top_level_traversable()->active_document();
@@ -1051,7 +1079,7 @@ Page::FindInPageResult Page::perform_find_in_page_query(FindInPageQuery const& q
     auto should_update_match_index = false;
     for (auto const& document : documents_in_active_window()) {
         auto matches = document->find_matching_text(query.string, query.case_sensitivity);
-        if (document == top_level_traversable()->active_document()) {
+        if (GC::Ptr { document.ptr() } == top_level_traversable()->active_document()) {
             if (auto range = active_range(*document)) {
                 auto new_match_index = find_current_match_index(*range, matches);
                 should_update_match_index = true;
@@ -1167,9 +1195,9 @@ void Page::update_find_in_page_selection(Vector<GC::Root<DOM::Range>> matches, C
     }
 }
 
-void Page::enqueue_fullscreen_enter(GC::Ref<DOM::Element> element, GC::Ref<DOM::Document> pending_doc, DOM::RequestFullscreenError error, GC::Ptr<WebIDL::Promise> promise)
+void Page::enqueue_fullscreen_enter(GC::Ref<DOM::Element> element, GC::Ref<DOM::Document> pending_doc, DOM::RequestFullscreenError error, GC::Ptr<WebIDL::Promise> promise, Fullscreen::RequestType request_type)
 {
-    m_pending_fullscreen_operations.enqueue(PendingFullscreenEnter { element, pending_doc, error, promise });
+    m_pending_fullscreen_operations.enqueue(PendingFullscreenEnter { element, pending_doc, error, promise, request_type });
     // NOTE: Processing is deferred because the spec says "run the remaining steps in parallel",
     //       meaning the caller's synchronous JS should complete before we process the operation.
     Platform::EventLoopPlugin::the().deferred_invoke(GC::create_function(GC::Heap::the(), [this]() {
@@ -1225,7 +1253,7 @@ void Page::process_pending_fullscreen_operations()
                     // 9. If any of the following conditions are false, then set error to true:
                     //    * This's node document is pendingDoc.
                     //    * The fullscreen element ready check for this returns true.
-                    if (enter.element->owner_document() != enter.pending_doc.ptr())
+                    if (enter.element->owner_document() != GC::Ptr { enter.pending_doc.ptr() })
                         enter.error = DOM::RequestFullscreenError::ElementNodeDocIsNotPendingDoc;
                     else if (!enter.element->is_element_ready_for_fullscreen())
                         enter.error = DOM::RequestFullscreenError::ElementReadyCheckFailed;
@@ -1237,7 +1265,7 @@ void Page::process_pending_fullscreen_operations()
                 // 10. If error is true:
                 if (enter.error != DOM::RequestFullscreenError::False) {
                     // 1. Append (fullscreenerror, this) to pendingDoc's list of pending fullscreen events.
-                    enter.pending_doc->append_pending_fullscreen_change(DOM::PendingFullscreenEvent::Type::Error, enter.element);
+                    enter.pending_doc->append_pending_fullscreen_change(DOM::PendingFullscreenEvent::Type::Error, enter.element, enter.request_type);
 
                     // 2. Reject promise with a TypeError exception and terminate these steps.
                     if (enter.promise)
@@ -1279,10 +1307,10 @@ void Page::process_pending_fullscreen_operations()
                         as<HTML::HTMLIFrameElement>(*element).set_iframe_fullscreen_flag(true);
 
                     // 4. Fullscreen element within doc.
-                    doc.fullscreen_element_within_doc(element);
+                    doc.fullscreen_element_within_doc(element, enter.request_type);
 
                     // 5. Append (fullscreenchange, element) to doc's list of pending fullscreen events.
-                    doc.append_pending_fullscreen_change(DOM::PendingFullscreenEvent::Type::Change, element);
+                    doc.append_pending_fullscreen_change(DOM::PendingFullscreenEvent::Type::Change, element, enter.request_type);
                 }
 
                 // 14. Resolve promise with undefined
@@ -1330,9 +1358,11 @@ void Page::process_pending_fullscreen_operations()
 
                 // 14. For each exitDoc in exitDocs:
                 for (auto& exit_doc : exit_docs->elements()) {
+                    auto fullscreen_element = exit_doc->fullscreen_element();
+
                     // 1. Append (fullscreenchange, exitDoc's fullscreen element) to exitDoc's list of pending
                     //    fullscreen events.
-                    exit_doc->append_pending_fullscreen_change(DOM::PendingFullscreenEvent::Type::Change, *exit_doc->fullscreen_element());
+                    exit_doc->append_pending_fullscreen_change(DOM::PendingFullscreenEvent::Type::Change, *fullscreen_element, fullscreen_element->fullscreen_request_type());
 
                     // 2. If resize is true, unfullscreen exitDoc.
                     if (exit.resize)
@@ -1344,9 +1374,11 @@ void Page::process_pending_fullscreen_operations()
 
                 // 15. For each descendantDoc in descendantDocs:
                 for (auto& descendant_doc : descendant_docs->elements()) {
+                    auto fullscreen_element = descendant_doc->fullscreen_element();
+
                     // 1. Append (fullscreenchange, descendantDoc's fullscreen element) to descendantDoc's list of
                     //    pending fullscreen events.
-                    descendant_doc->append_pending_fullscreen_change(DOM::PendingFullscreenEvent::Type::Change, *descendant_doc->fullscreen_element());
+                    descendant_doc->append_pending_fullscreen_change(DOM::PendingFullscreenEvent::Type::Change, *fullscreen_element, fullscreen_element->fullscreen_request_type());
 
                     // 2. Unfullscreen descendantDoc.
                     descendant_doc->unfullscreen();

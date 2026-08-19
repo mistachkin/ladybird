@@ -17,7 +17,7 @@
 #include <LibMedia/VideoFrame.h>
 #include <LibURL/Parser.h>
 #include <LibWeb/Bindings/HTMLMediaElement.h>
-#include <LibWeb/CSS/ComputedProperties.h>
+#include <LibWeb/CSS/Invalidation/ElementStateInvalidator.h>
 #include <LibWeb/CSS/StyleValues/DisplayStyleValue.h>
 #include <LibWeb/Compositor/CompositorHost.h>
 #include <LibWeb/DOM/Document.h>
@@ -167,6 +167,8 @@ void HTMLMediaElement::initialize_element()
             m_remote_fetch_data->fetch_controller->stop_fetch();
             m_remote_fetch_data->fetch_controller = nullptr;
         }
+
+        detach_video_sink_edge();
     });
 
     m_document_observer->set_document_became_active([this]() {
@@ -176,10 +178,8 @@ void HTMLMediaElement::initialize_element()
             if (m_remote_fetch_data->stream->next_chunk_start() != m_remote_fetch_data->stream->expected_size())
                 load_remote_resource(UntilEnd { m_remote_fetch_data->stream->next_chunk_start() });
         }
-    });
 
-    m_document_observer->set_document_visibility_state_observer([this](VisibilityState) {
-        sync_video_update_flags();
+        add_current_video_sink();
     });
 
     document().page().register_media_element({}, unique_id());
@@ -490,7 +490,7 @@ void HTMLMediaElement::set_seeking(bool seeking)
     if (m_seeking == seeking)
         return;
     m_seeking = seeking;
-    set_needs_style_update(true);
+    CSS::Invalidation::invalidate_style_after_media_seeking_state_change(*this, seeking);
 }
 
 // https://html.spec.whatwg.org/multipage/media.html#dom-media-load
@@ -682,14 +682,14 @@ void HTMLMediaElement::set_muted(bool muted)
 
     m_muted = muted;
     volume_or_muted_attribute_changed();
-    set_needs_style_update(true);
+    CSS::Invalidation::invalidate_style_after_media_muted_state_change(*this, muted);
 }
 
 void HTMLMediaElement::toggle_fullscreen()
 {
     auto& document = this->document();
 
-    if (document.fullscreen_element() == this)
+    if (document.fullscreen_element().ptr() == this)
         document.exit_fullscreen(nullptr);
     else
         request_fullscreen(nullptr);
@@ -1182,7 +1182,7 @@ void HTMLMediaElement::select_resource()
             });
 
             // 1. ⌛ If the src attribute's value is the empty string, then end the synchronous section, and jump down to the failed with attribute step below.
-            auto source = self.get_attribute_value_view(HTML::AttributeNames::src).value_or({});
+            auto source = self.attribute(HTML::AttributeNames::src).value_or({});
             if (source.is_empty()) {
                 failed_with_attribute("The 'src' attribute is empty"_utf16);
                 return;
@@ -1312,7 +1312,7 @@ void HTMLMediaElement::load_url_resource(URL::URL const& url_record, Function<vo
 // https://html.spec.whatwg.org/multipage/media.html#attr-media-preload
 bool HTMLMediaElement::preload_attribute_is_in_none_state() const
 {
-    auto preload = get_attribute_value_view(HTML::AttributeNames::preload);
+    auto preload = attribute(HTML::AttributeNames::preload);
     return preload.has_value() && preload->equals_ignoring_ascii_case(u"none"sv);
 }
 
@@ -1793,6 +1793,7 @@ void HTMLMediaElement::attach_selected_video_track_sink(Media::Track const& trac
     if (previous_handle.has_value())
         release_active_video_sink();
     m_active_video_sink = make<ActiveVideoSink>(handle, Painting::allocate_video_sink_resource_id());
+    m_video_sink_is_ticking = true;
     add_current_video_sink(handle);
 }
 
@@ -1802,7 +1803,6 @@ void HTMLMediaElement::add_current_video_sink(Media::VideoSinkHandle handle)
     VERIFY(m_active_video_sink->handle() == handle);
     if (auto navigable = document().navigable(); navigable && navigable->has_compositor_context())
         m_active_video_sink->register_with(document().page().compositor_host());
-    sync_video_update_flags();
 }
 
 void HTMLMediaElement::add_current_video_sink()
@@ -1811,14 +1811,14 @@ void HTMLMediaElement::add_current_video_sink()
         add_current_video_sink(*handle);
 }
 
-void HTMLMediaElement::detach_video_sink_after_compositor_lost()
+void HTMLMediaElement::detach_video_sink_edge()
 {
     auto handle = video_sink_handle();
     if (!m_playback_manager || !handle.has_value())
         return;
     if (m_active_video_sink)
         m_active_video_sink->unregister();
-    m_playback_manager->detach_lost_video_sink(*handle);
+    m_playback_manager->detach_video_sink(*handle);
 }
 
 void HTMLMediaElement::release_active_video_sink()
@@ -2353,14 +2353,15 @@ void HTMLMediaElement::set_ready_state(ReadyState ready_state)
     if (m_ready_state == ready_state)
         return;
 
+    auto was_buffering = blocked();
     auto old_ready_state = m_ready_state;
     m_ready_state = ready_state;
+    CSS::Invalidation::invalidate_style_after_media_ready_state_change(*this, was_buffering);
 
     ScopeGuard guard { [&] {
         upon_has_ended_playback_possibly_changed();
         update_screen_wake_lock();
         update_natural_dimensions();
-        set_needs_style_update(true);
     } };
 
     // When the ready state of a media element whose networkState is not NETWORK_EMPTY changes, the user agent must
@@ -2559,38 +2560,42 @@ void HTMLMediaElement::update_ready_state()
     }
 }
 
-void HTMLMediaElement::sync_video_update_flags() const
+bool HTMLMediaElement::video_sink_should_tick() const
+{
+    if (m_video_frame_was_recently_captured)
+        return true;
+    if (document().visibility_state_value() != VisibilityState::Visible)
+        return false;
+    auto paintable = this->paintable();
+    return paintable && paintable->is_visible();
+}
+
+void HTMLMediaElement::sync_video_sink_ticking() const
 {
     auto handle = video_sink_handle();
     if (!handle.has_value())
         return;
-    auto navigable = document().navigable();
-    if (!navigable || !navigable->has_compositor_context())
+
+    auto should_tick = video_sink_should_tick();
+    if (m_video_sink_is_ticking == should_tick)
         return;
-    auto flags = Web::Compositor::VideoUpdateFlags::None;
-    if (document().visibility_state_value() == VisibilityState::Visible)
-        flags |= Web::Compositor::VideoUpdateFlags::Visible;
-    if (m_video_frame_was_recently_captured)
-        flags |= Web::Compositor::VideoUpdateFlags::Captured;
-    if (!m_playback_manager || !m_playback_manager->is_playing() || m_playback_rate == 0.0)
-        flags |= Web::Compositor::VideoUpdateFlags::TimeStopped;
-    navigable->compositor_context().set_video_update_flags(*handle, flags);
+    m_video_sink_is_ticking = should_tick;
+
+    Media::PlaybackManager::set_video_sink_ticking(*handle, should_tick);
+    if (auto navigable = document().navigable(); navigable && navigable->has_compositor_context())
+        navigable->compositor_context().set_video_sink_ticking(*handle, should_tick);
 }
 
 void HTMLMediaElement::note_frame_captured() const
 {
     static constexpr int capture_keepalive_timeout_ms = 5000;
-    bool was_recently_captured = m_video_frame_was_recently_captured;
     m_video_frame_was_recently_captured = true;
     if (!m_video_frame_capture_keepalive_timer) {
         m_video_frame_capture_keepalive_timer = Core::Timer::create_single_shot(capture_keepalive_timeout_ms, GC::weak_callback(*this, [](auto& self) {
             self.m_video_frame_was_recently_captured = false;
-            self.sync_video_update_flags();
         }));
     }
     m_video_frame_capture_keepalive_timer->restart();
-    if (!was_recently_captured)
-        sync_video_update_flags();
 }
 
 void HTMLMediaElement::on_playback_manager_state_change()
@@ -2605,7 +2610,6 @@ void HTMLMediaElement::on_playback_manager_state_change()
     }
 
     start_or_stop_playback_position_update_timer();
-    sync_video_update_flags();
 
     // NB: Queue the readyState update as a task so that it will never run before the durationchange and loadedmetadata
     //     events are fired. This ensures that readyState has a deterministic value in those events.
@@ -2937,7 +2941,7 @@ void HTMLMediaElement::set_paused(bool paused)
 
     update_natural_dimensions();
     set_needs_repaint();
-    set_needs_style_update(true);
+    CSS::Invalidation::invalidate_style_after_media_paused_state_change(*this, paused);
 }
 
 void HTMLMediaElement::set_ended(bool ended)
@@ -2989,8 +2993,6 @@ WebIDL::ExceptionOr<void> HTMLMediaElement::set_playback_rate(double new_value)
     //         always.
     if (m_playback_manager)
         m_playback_manager->set_playback_rate(static_cast<float>(new_value));
-
-    sync_video_update_flags();
 
     return {};
 }

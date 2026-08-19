@@ -25,10 +25,8 @@ namespace Web::Painting {
 class AccumulatedVisualContextTree;
 class DisplayList;
 class HitTestDisplayList;
-class Paintable;
 class ScrollState;
-
-using NestedMaskNodeAssignments = HashMap<Paintable const*, Vector<VisualContextIndex>>;
+struct PrerecordedNestedDisplayLists;
 
 enum class PaintCommandCacheMode : u8 {
     ReadOnly,
@@ -65,16 +63,6 @@ public:
     DevicePixelRect device_viewport_rect() const { return m_device_viewport_rect; }
     void set_device_viewport_rect(DevicePixelRect const& rect) { m_device_viewport_rect = rect; }
 
-    void set_svg_transform(Gfx::AffineTransform transform)
-    {
-        m_svg_transform = transform;
-    }
-
-    Gfx::AffineTransform const& svg_transform() const
-    {
-        return m_svg_transform;
-    }
-
     bool draw_svg_geometry_for_clip_path() const
     {
         return m_draw_svg_geometry_for_clip_path;
@@ -85,8 +73,14 @@ public:
         m_draw_svg_geometry_for_clip_path = draw_svg_geometry_for_clip_path;
     }
 
-    Optional<Painting::NestedMaskNodeAssignments> const& nested_mask_node_assignments() const { return m_nested_mask_node_assignments; }
-    void set_nested_mask_node_assignments(Painting::NestedMaskNodeAssignments assignments) { m_nested_mask_node_assignments = move(assignments); }
+    Optional<Painting::NestedVisualContextAssignments> const& nested_visual_context_assignments() const { return m_nested_visual_context_assignments; }
+    void set_nested_visual_context_assignments(Painting::NestedVisualContextAssignments assignments) { m_nested_visual_context_assignments = move(assignments); }
+
+    Painting::PrerecordedNestedDisplayLists* prerecorded_nested_display_lists() const { return m_prerecorded_nested_display_lists; }
+    void set_prerecorded_nested_display_lists(Painting::PrerecordedNestedDisplayLists* prerecorded) { m_prerecorded_nested_display_lists = prerecorded; }
+
+    Painting::VisualContextIndex accumulated_visual_context_index_of(Painting::Paintable const&) const;
+    Painting::VisualContextIndex accumulated_visual_context_for_descendants_index_of(Painting::Paintable const&) const;
 
     DevicePixels enclosing_device_pixels(CSSPixels css_pixels) const;
     DevicePixels floored_device_pixels(CSSPixels css_pixels) const;
@@ -104,6 +98,7 @@ public:
         clone.m_device_viewport_rect = m_device_viewport_rect;
         clone.m_should_show_line_box_borders = m_should_show_line_box_borders;
         clone.m_should_paint_overlay = m_should_paint_overlay;
+        clone.m_prerecorded_nested_display_lists = m_prerecorded_nested_display_lists;
         return clone;
     }
 
@@ -133,6 +128,17 @@ public:
     bool has_blocking_wheel_event_listeners() const { return m_has_blocking_wheel_event_listeners; }
     void set_has_blocking_wheel_event_listeners(bool value) { m_has_blocking_wheel_event_listeners = value; }
     bool has_blocking_wheel_event_region_covering_viewport() const { return m_has_blocking_wheel_event_region_covering_viewport; }
+    bool should_record_wheel_hit_test_targets() const { return m_should_record_wheel_hit_test_targets; }
+    void set_should_record_wheel_hit_test_targets(bool value) { m_should_record_wheel_hit_test_targets = value; }
+
+    Optional<Painting::VisualContextIndex> cached_wheel_hit_test_target_for(Painting::Paintable const& paintable) const
+    {
+        return m_wheel_hit_test_target_cache.get(&paintable);
+    }
+    void cache_wheel_hit_test_target_for(Painting::Paintable const& paintable, Painting::VisualContextIndex target)
+    {
+        m_wheel_hit_test_target_cache.set(&paintable, target);
+    }
 
 private:
     Painting::DisplayListRecorder& m_display_list_recorder;
@@ -147,14 +153,16 @@ private:
     bool m_should_show_line_box_borders { false };
     bool m_should_paint_overlay { true };
     bool m_draw_svg_geometry_for_clip_path { false };
-    Gfx::AffineTransform m_svg_transform;
-    Optional<Painting::NestedMaskNodeAssignments> m_nested_mask_node_assignments;
+    Optional<Painting::NestedVisualContextAssignments> m_nested_visual_context_assignments;
+    Painting::PrerecordedNestedDisplayLists* m_prerecorded_nested_display_lists { nullptr };
     u64 m_paint_generation_id { 0 };
     UniqueNodeID m_async_scrolling_document_id {};
     Painting::AccumulatedVisualContextTree const* m_async_scrolling_visual_context_tree { nullptr };
     Painting::ScrollState const* m_async_scrolling_scroll_state { nullptr };
     bool m_has_blocking_wheel_event_listeners { false };
     bool m_has_blocking_wheel_event_region_covering_viewport { false };
+    bool m_should_record_wheel_hit_test_targets { false };
+    HashMap<Painting::Paintable const*, Painting::VisualContextIndex> m_wheel_hit_test_target_cache;
 };
 
 }

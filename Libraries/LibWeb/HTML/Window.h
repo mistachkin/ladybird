@@ -141,8 +141,8 @@ public:
     void set_associated_document(DOM::Document&);
 
     // https://html.spec.whatwg.org/multipage/window-object.html#window-bc
-    BrowsingContext const* browsing_context() const;
-    BrowsingContext* browsing_context();
+    GC::Ptr<BrowsingContext const> browsing_context() const;
+    GC::Ptr<BrowsingContext> browsing_context();
 
     GC::Ptr<LocalNavigable> navigable() const;
 
@@ -322,6 +322,7 @@ private:
     virtual GC::Ptr<DOM::EventTarget> window_event_handlers_to_event_target() override { return *this; }
 
     void invoke_idle_callbacks();
+    void invoke_idle_callback_timeout(u32 handle);
 
     struct [[nodiscard]] NamedObjects {
         Vector<GC::Ref<LocalNavigable>> navigables;

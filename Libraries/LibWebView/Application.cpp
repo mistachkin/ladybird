@@ -41,6 +41,7 @@
 #include <LibWebView/HistoryStore.h>
 #include <LibWebView/Menu.h>
 #include <LibWebView/ProcessType.h>
+#include <LibWebView/SessionStore.h>
 #include <LibWebView/SiteIsolation.h>
 #include <LibWebView/URL.h>
 #include <LibWebView/UserAgent.h>
@@ -203,6 +204,13 @@ StorageJar& Application::storage_jar(IsPrivate is_private)
         : *the().m_storage_jar;
 }
 
+SessionStore& Application::session_store(IsPrivate is_private)
+{
+    return is_private == IsPrivate::Yes
+        ? *the().ensure_private_browsing_session().session_store
+        : *the().m_session_store;
+}
+
 Requests::RequestClient& Application::request_server_client(IsPrivate is_private)
 {
     if (is_private == IsPrivate::No)
@@ -281,7 +289,6 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     bool disable_scrollbar_painting = false;
     bool disable_async_scrolling = false;
     bool file_scheme_urls_have_tuple_origins = false;
-    Optional<u64> style_invalidation_counter_dump_interval;
 
     Core::ArgsParser args_parser;
     args_parser.set_general_help("The Ladybird web browser :^)");
@@ -391,20 +398,6 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     args_parser.add_option(validate_dnssec_locally, "Validate DNSSEC locally", "dnssec");
     args_parser.add_option(default_time_zone, "Default time zone", "default-time-zone", 0, "time-zone-id");
     args_parser.add_option(resource_substitution_map_path, "Path to JSON file mapping URLs to local files", "resource-map", 0, "path");
-    args_parser.add_option(Core::ArgsParser::Option {
-        .argument_mode = Core::ArgsParser::OptionArgumentMode::Required,
-        .help_string = "Dump style invalidation counters from WebContent after every N style invalidations",
-        .long_name = "dump-style-invalidation-counters",
-        .value_name = "N",
-        .accept_value = [&](StringView value) {
-            auto parsed_value = value.to_number<u64>();
-            if (!parsed_value.has_value() || parsed_value.value() == 0)
-                return false;
-            style_invalidation_counter_dump_interval = parsed_value.value();
-            return true;
-        },
-    });
-
     args_parser.add_option(Core::ArgsParser::Option {
         .argument_mode = Core::ArgsParser::OptionArgumentMode::Optional,
         .help_string = "Enable the Firefox DevTools server, with an optional port",
@@ -607,7 +600,6 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
         .enable_async_scrolling = disable_async_scrolling ? EnableAsyncScrolling::No : EnableAsyncScrolling::Yes,
         .file_scheme_urls_have_tuple_origins = file_scheme_urls_have_tuple_origins ? FileSchemeUrlsHaveTupleOrigins::Yes : FileSchemeUrlsHaveTupleOrigins::No,
         .default_time_zone = default_time_zone,
-        .style_invalidation_counter_dump_interval = style_invalidation_counter_dump_interval,
     };
 
     create_platform_options(m_browser_options, m_request_server_options, m_web_content_options);
@@ -685,7 +677,13 @@ void Application::open_urls_in_new_tabs(ReadonlySpan<URL::URL> urls) const
 
 void Application::open_bookmark_in_new_tab(String const& bookmark_id, Web::HTML::ActivateTab activate_tab) const
 {
-    if (auto bookmark = m_bookmark_store->find_item_by_id(bookmark_id); bookmark.has_value() && bookmark->is_bookmark())
+    auto bookmark = m_bookmark_store->find_item_by_id(bookmark_id);
+    if (!bookmark.has_value() || !bookmark->is_bookmark())
+        return;
+
+    if (auto view = active_web_view(); view.has_value())
+        view->open_url_in_new_tab(bookmark->bookmark().url, activate_tab);
+    else
         open_url_in_new_tab(bookmark->bookmark().url, activate_tab);
 }
 
@@ -711,25 +709,43 @@ void Application::open_bookmark_folder_in_new_tabs(String const& folder_id) cons
     Vector<URL::URL> urls;
     collect_bookmark_urls(folder->folder(), urls);
 
-    open_urls_in_new_tabs(urls);
+    Vector<URL::URL> internal_urls;
+    auto active_view = active_web_view();
+    for (auto const& url : urls) {
+        if (active_view.has_value() && !is_url_handled_internally(url))
+            active_view->open_url_in_new_tab(url, Web::HTML::ActivateTab::No);
+        else
+            internal_urls.append(url);
+    }
+
+    open_urls_in_new_tabs(internal_urls);
 }
 
 void Application::open_bookmark_in_new_window(String const& bookmark_id, IsPrivate is_private)
 {
-    if (auto bookmark = m_bookmark_store->find_item_by_id(bookmark_id); bookmark.has_value() && bookmark->is_bookmark())
+    auto bookmark = m_bookmark_store->find_item_by_id(bookmark_id);
+    if (!bookmark.has_value() || !bookmark->is_bookmark())
+        return;
+
+    if (auto view = active_web_view(); view.has_value())
+        view->open_url_in_new_window(bookmark->bookmark().url, is_private);
+    else
         open_url_in_new_window(bookmark->bookmark().url, is_private);
 }
 
-ErrorOr<NonnullRefPtr<WebContentClient>> Application::create_web_content_client(Optional<ViewImplementation&> view, IsPrivate is_private, u64 initial_page_id, Optional<Web::HTML::CrossProcessId> root_navigable_id)
+ErrorOr<NonnullRefPtr<WebContentClient>> Application::create_web_content_client(Optional<ViewImplementation&> view, IsPrivate is_private, u64 initial_page_id, Optional<Web::HTML::CrossProcessId> root_navigable_id, Optional<Web::HTML::CrossProcessId> initial_document_state_id)
 {
     auto request_server_handle = TRY(connect_new_request_server_client(is_private));
     auto image_decoder_handle = TRY(connect_new_image_decoder_client());
 
     auto cross_process_id_allocator = allocate_cross_process_id_allocator();
-    auto root_id = root_navigable_id.value_or(cross_process_id_allocator.allocate());
+    if (!root_navigable_id.has_value())
+        root_navigable_id = cross_process_id_allocator.allocate();
+    if (!initial_document_state_id.has_value())
+        initial_document_state_id = cross_process_id_allocator.allocate();
 
-    auto client = TRY(WebView::launch_web_content_process(is_private, initial_page_id, root_id));
-    client->async_initialize(initial_page_id, root_id, cross_process_id_allocator);
+    auto client = TRY(WebView::launch_web_content_process(is_private, initial_page_id, *root_navigable_id));
+    client->async_initialize(initial_page_id, *root_navigable_id, cross_process_id_allocator, *initial_document_state_id);
     if (view.has_value())
         client->assign_view({}, *view);
 
@@ -765,6 +781,7 @@ PrivateBrowsingSession& Application::ensure_private_browsing_session()
             .storage_jar = StorageJar::create(),
             .hsts_store = HSTSStore::create(),
             .history_store = HistoryStore::create_disabled(),
+            .session_store = SessionStore::create(),
         });
     }
 
@@ -804,6 +821,14 @@ void Application::maybe_close_private_browsing_session()
 void Application::reset_private_browsing_session()
 {
     m_file_downloader.cancel_private_downloads();
+
+    // Views pending deferred deletion may still push updates, and the replacement store reuses their ids.
+    ViewImplementation::for_each_view([](ViewImplementation& view) {
+        if (view.is_private() == IsPrivate::Yes)
+            view.clear_session_tab_id();
+        return IterationDecision::Continue;
+    });
+
     m_private_browsing_session = nullptr;
 }
 
@@ -963,10 +988,13 @@ void Application::crash_compositor_process()
     m_compositor_client->async_crash();
 }
 
-ErrorOr<NonnullRefPtr<WebContentClient>> Application::launch_web_content_process(ViewImplementation& view)
+ErrorOr<NonnullRefPtr<WebContentClient>> Application::launch_web_content_process(ViewImplementation& view, Optional<Web::HTML::CrossProcessId> root_navigable_id, Optional<Web::HTML::CrossProcessId> initial_document_state_id)
 {
     if (view.is_private() == IsPrivate::Yes)
-        return create_web_content_client(view, IsPrivate::Yes, allocate_page_id());
+        return create_web_content_client(view, IsPrivate::Yes, allocate_page_id(), root_navigable_id, initial_document_state_id);
+
+    if (root_navigable_id.has_value() || initial_document_state_id.has_value())
+        return create_web_content_client(view, IsPrivate::No, allocate_page_id(), root_navigable_id, initial_document_state_id);
 
     if (m_spare_web_content_process) {
         auto web_content_client = m_spare_web_content_process.release_nonnull();
@@ -980,10 +1008,10 @@ ErrorOr<NonnullRefPtr<WebContentClient>> Application::launch_web_content_process
     return create_web_content_client(view, IsPrivate::No, allocate_page_id());
 }
 
-ErrorOr<Application::ChildFrameWebContentProcess> Application::launch_child_frame_web_content_process(IsPrivate is_private, Web::HTML::CrossProcessId root_navigable_id)
+ErrorOr<Application::ChildFrameWebContentProcess> Application::launch_child_frame_web_content_process(IsPrivate is_private, Web::HTML::CrossProcessId root_navigable_id, Web::HTML::CrossProcessId initial_document_state_id)
 {
     auto page_id = allocate_page_id();
-    auto client = TRY(create_web_content_client({}, is_private, page_id, root_navigable_id));
+    auto client = TRY(create_web_content_client({}, is_private, page_id, root_navigable_id, initial_document_state_id));
     return ChildFrameWebContentProcess {
         .client = move(client),
         .page_id = page_id,
@@ -1109,6 +1137,20 @@ ErrorOr<void> Application::launch_services()
             history_database_directory = {};
             m_history_store = HistoryStore::create();
         }
+
+        // Fall back without modifying the existing Sessions database.
+        auto session_store = [&]() -> ErrorOr<NonnullOwnPtr<SessionStore>> {
+            m_session_database = TRY(Database::Database::create(database_path, "Sessions"sv, { .foreign_keys = Database::Database::ForeignKeys::Yes }));
+            if (TRY(SessionStore::migrate_schema(*m_session_database)) != Database::MigrationOutcome::Success)
+                return Error::from_string_literal("Sessions database was created by a newer Ladybird version");
+            return SessionStore::create(*m_session_database);
+        }();
+        if (session_store.is_error()) {
+            dbgln("Sessions will not be persisted this session: {}", session_store.error());
+            m_session_store = SessionStore::create();
+        } else {
+            m_session_store = session_store.release_value();
+        }
     } else {
         dbgln_if(WEBVIEW_HISTORY_DEBUG, "[History] SQL history is disabled, disabling browsing history");
 
@@ -1117,9 +1159,14 @@ ErrorOr<void> Application::launch_services()
         m_hsts_store = HSTSStore::create();
         m_storage_jar = StorageJar::create();
         m_download_store = DownloadStore::create_disabled();
+        m_session_store = SessionStore::create();
     }
 
     m_file_downloader.adopt_download_store({}, *m_download_store);
+
+    m_session_store->on_closed_units_changed = [this] {
+        on_recently_closed_entries_changed();
+    };
 
     VERIFY(m_event_loop);
     m_autocomplete_service = make<AutocompleteService>(*m_event_loop, move(history_database_directory));
@@ -1711,12 +1758,13 @@ NonnullRefPtr<Core::Promise<Application::BrowsingDataSizes>> Application::estima
     return promise;
 }
 
-void Application::clear_browsing_data(ClearBrowsingDataOptions const& options)
+NonnullRefPtr<Core::Promise<Empty>> Application::clear_browsing_data(ClearBrowsingDataOptions const& options)
 {
+    RefPtr<Core::Promise<Empty>> promise;
     bool did_change_history = false;
 
     if (options.delete_cached_files == ClearBrowsingDataOptions::Delete::Yes) {
-        m_request_server_client->async_remove_cache_entries_accessed_since(options.since);
+        promise = m_request_server_client->clear_cache(options.since);
 
         // FIXME: Maybe we should forward the "since" parameter to the WebContent process, but the in-memory cache is
         //        transient anyways, so just assuming they were all accessed in the last hour is fine for now.
@@ -1729,6 +1777,12 @@ void Application::clear_browsing_data(ClearBrowsingDataOptions const& options)
 
     if (options.delete_history == ClearBrowsingDataOptions::Delete::Yes) {
         m_history_store->remove_entries_accessed_since(options.since);
+        if (auto result = m_session_store->remove_entries_accessed_since(options.since); result.is_error())
+            dbgln("Unable to remove closed session entries: {}", result.error());
+        if (m_private_browsing_session) {
+            if (auto result = m_private_browsing_session->session_store->remove_entries_accessed_since(options.since); result.is_error())
+                dbgln("Unable to remove closed private session entries: {}", result.error());
+        }
         did_change_history = true;
     }
 
@@ -1749,6 +1803,16 @@ void Application::clear_browsing_data(ClearBrowsingDataOptions const& options)
 
     if (did_change_history)
         on_recently_closed_entries_changed();
+
+    if (!promise) {
+        promise = Core::Promise<Empty>::construct();
+
+        Core::deferred_invoke([promise]() {
+            promise->resolve({});
+        });
+    }
+
+    return promise.release_nonnull();
 }
 
 void Application::initialize_actions()
@@ -1812,7 +1876,7 @@ void Application::initialize_actions()
     });
     m_paste_action = Action::create("Paste"sv, ActionID::Paste, [this]() {
         if (auto view = active_web_view(); view.has_value())
-            view->paste_text_from_clipboard();
+            view->paste_from_clipboard();
     });
     m_select_all_action = Action::create("Select All"sv, ActionID::SelectAll, [this]() {
         if (auto view = active_web_view(); view.has_value())
@@ -2181,7 +2245,7 @@ void Application::create_bookmark_menu_items(Optional<MenuData> data)
             [&](BookmarkItem::Bookmark const& bookmark) {
                 auto action = Action::create(bookmark.title.value_or({}), ActionID::BookmarkItem, [this, url = bookmark.url]() {
                     if (auto view = active_web_view(); view.has_value())
-                        view->load(url);
+                        view->load_from_user_input(url);
                     else
                         open_url_in_new_tab(url, Web::HTML::ActivateTab::Yes);
                 });
@@ -2347,7 +2411,7 @@ void Application::navigate_tab(DevTools::TabDescription const& description, Stri
 void Application::traverse_the_history_by_delta(DevTools::TabDescription const& description, int delta) const
 {
     if (auto view = ViewImplementation::find_view_by_id(description.id); view.has_value())
-        (void)view->traverse_the_history_by_delta(delta);
+        view->traverse_the_history_by_delta(delta);
 }
 
 Vector<HTTP::Cookie::Cookie> Application::cookies(DevTools::TabDescription const& description) const
