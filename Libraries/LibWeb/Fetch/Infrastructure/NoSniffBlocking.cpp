@@ -45,7 +45,12 @@ RequestOrResponseBlocking should_response_to_request_be_blocked_due_to_nosniff(R
     auto const& destination = request.destination();
 
     // 4. If destination is script-like and mimeType is failure or is not a JavaScript MIME type, then return blocked.
-    if (request.destination_is_script_like() && (!mime_type.has_value() || !mime_type->is_javascript()))
+    // [Non-standard] Also allow TH8 MIME types, but only when destination is exactly "script".
+    // TH8 has no worker / shared-worker / service-worker / worklet support in this integration,
+    // and accepting TH8 essence for those destinations would let a server serve text/th8 in place
+    // of a worker script, bypassing the JavaScript-only worker contract.
+    auto th8_ok_for_destination = mime_type.has_value() && mime_type->is_th8() && destination == Request::Destination::Script;
+    if (request.destination_is_script_like() && (!mime_type.has_value() || (!mime_type->is_javascript() && !th8_ok_for_destination)))
         return RequestOrResponseBlocking::Blocked;
 
     // 5. If destination is "style" and mimeType is failure or its essence is not "text/css", then return blocked.

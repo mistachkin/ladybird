@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<!--
+    [M7c] Verifies that `document.write` of a `<script type="text/th8">`
+    block is parsed and executed during the document open.  Mirrors
+    the JS document.write pattern; TH8 must take the same parser path
+    so injected TH8 sources are not silently dropped.
+-->
+<body>
+<script src="../include.js"></script>
+<div id="result">pending</div>
+<script>
+// document.write while the page is still parsing -- inserts the
+// new TH8 script into the byte stream, which the HTML parser then
+// classifies as ScriptType::TH8 and routes through the normal
+// execute_script path.
+document.write(
+    '<script type="text/th8">' +
+    'set doc [dom::document]\n' +
+    '[$doc getElementById result] textContent th8-via-document-write\n' +
+    '<\/script>'
+);
+</script>
+<script>
+test(() => {
+    let r = document.getElementById('result').textContent;
+    if (r === 'th8-via-document-write') {
+        println("PASS: document.write of TH8 script executes");
+    } else {
+        println("FAIL: " + r);
+    }
+});
+</script>
+</body>

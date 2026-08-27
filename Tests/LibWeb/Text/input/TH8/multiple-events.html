@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<body>
+<script src="../include.js"></script>
+<button id="btn">test</button>
+<div id="log"></div>
+<div id="result">pending</div>
+<script type="text/th8">
+# Test multiple event listeners on the same element.
+set doc [dom::document]
+set log_div [$doc getElementById log]
+set ::event_log {}
+
+proc handler1 {event} {
+    lappend ::event_log h1
+}
+
+proc handler2 {event} {
+    lappend ::event_log h2
+}
+
+set btn [$doc getElementById btn]
+$btn addEventListener click handler1
+$btn addEventListener click handler2
+</script>
+<script>
+// Trigger click.
+document.getElementById('btn').click();
+</script>
+<script type="text/th8">
+# Check that both handlers fired.
+set doc [dom::document]
+set result [$doc getElementById result]
+set count [llength $::event_log]
+if {$count == 2} {
+    $result textContent "both: $::event_log"
+} else {
+    $result textContent "FAIL: expected 2 handlers, got $count"
+}
+</script>
+<script>
+test(() => {
+    let result = document.getElementById('result').textContent;
+    if (result.startsWith('both:')) {
+        println("PASS: multiple event listeners fired");
+    } else {
+        println("FAIL: " + result);
+    }
+});
+</script>
+</body>

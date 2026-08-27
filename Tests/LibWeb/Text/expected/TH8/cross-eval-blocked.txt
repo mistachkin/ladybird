@@ -1,0 +1,1 @@
+PASS: cross-eval correctly blocked without policy

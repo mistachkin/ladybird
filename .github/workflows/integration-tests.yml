@@ -1,0 +1,154 @@
+name: Integration Tests
+
+# Fork-friendly workflow for the LibWeb WebDriver-driven integration
+# tests under Tests/LibWeb/Integration/.  Self-contained so it does
+# not depend on upstream's Blacksmith / self-hosted runners, the
+# ladybird-ci container, or vcpkg cache secrets.
+#
+# Runs on:
+#   * push to master (covers fork main-line)
+#   * pull_request (covers feature branches)
+#   * workflow_dispatch (manual trigger)
+
+on:
+  push:
+    branches: [master, mistachkin_th8]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  Integration:
+    name: LibWeb Integration Tests (${{ matrix.build_preset }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Two flavors:
+        #   * Release:   fast feedback, catches functional regressions.
+        #   * Sanitizer: ASAN/UBSAN; catches the UAF / leak class of
+        #                bugs the integration harness exists for.
+        # Add a Sanitizer entry separately if/when it becomes too slow
+        # for the standard PR cycle and you want to gate it on a label.
+        build_preset: [Sanitizer]
+
+    steps:
+      - uses: actions/checkout@v6.0.3
+
+      - name: Set workspace env
+        run: |
+          echo "LADYBIRD_SOURCE_DIR=${GITHUB_WORKSPACE}" >> "$GITHUB_ENV"
+          echo "CCACHE_DIR=${GITHUB_WORKSPACE}/.ccache" >> "$GITHUB_ENV"
+          echo "VCPKG_ROOT=${GITHUB_WORKSPACE}/Build/vcpkg" >> "$GITHUB_ENV"
+
+      - name: Install Ubuntu packages
+        run: |
+          sudo apt-get update
+          # Build essentials + Ladybird's transitive C/C++ deps that
+          # vcpkg expects to find on the system.  Kept tight on
+          # purpose -- if the build complains about a missing dep
+          # add it here, don't pull a heavy dev metapackage.
+          sudo apt-get install -y \
+            build-essential \
+            ccache \
+            clang \
+            cmake \
+            git \
+            libssl-dev \
+            libtool \
+            nasm \
+            ninja-build \
+            pkg-config \
+            python3-pip \
+            python3-venv \
+            tar \
+            unzip \
+            zip
+
+      - name: Set up Python venv
+        run: |
+          python3 -m venv "${RUNNER_TEMP}/integration-py"
+          echo "${RUNNER_TEMP}/integration-py/bin" >> "$GITHUB_PATH"
+          echo "pythonLocation=${RUNNER_TEMP}/integration-py" >> "$GITHUB_ENV"
+
+      - name: Install Python build + test deps
+        run: |
+          python3 -m pip install --upgrade pip
+          # Build deps mirror .github/actions/setup/action.yml.
+          pip3 install pyyaml requests six
+          # Test runner.
+          pip3 install pytest
+
+      - name: Install wasm-tools
+        run: |
+          VERSION=1.243.0
+          NAME="wasm-tools-${VERSION}-x86_64-linux"
+          curl --fail --location \
+            -o "${NAME}.tar.gz" \
+            "https://github.com/bytecodealliance/wasm-tools/releases/download/v${VERSION}/${NAME}.tar.gz"
+          tar -xzf "${NAME}.tar.gz"
+          echo "${GITHUB_WORKSPACE}/${NAME}" >> "$GITHUB_PATH"
+
+      - name: ccache cache restore
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: integration-ccache-${{ matrix.build_preset }}-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            integration-ccache-${{ matrix.build_preset }}-${{ runner.os }}-
+
+      - name: vcpkg cache restore
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/Build/caches/vcpkg-binary-cache
+          key: integration-vcpkg-${{ matrix.build_preset }}-${{ runner.os }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          restore-keys: |
+            integration-vcpkg-${{ matrix.build_preset }}-${{ runner.os }}-
+
+      - name: Install vcpkg
+        run: ./Meta/Utils/build_vcpkg.py
+
+      - name: Configure CMake
+        run: |
+          # Pass -DENABLE_INTEGRATION_TESTS=ON so the registration in
+          # Tests/LibWeb/Integration/CMakeLists.txt fires.  Use Clang
+          # for Sanitizer (GCC + ASAN works but Clang is the upstream
+          # convention).  Skip the upstream Linux+Sanitizer Gtk
+          # requirement -- we don't build a GUI here.
+          cmake --preset ${{ matrix.build_preset }} -B Build \
+            -DENABLE_INTEGRATION_TESTS=ON \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++
+
+      - name: Build WebDriver and dependencies
+        working-directory: ${{ github.workspace }}/Build
+        run: |
+          # The CTest entry depends on WebDriver at runtime; build it
+          # explicitly since the default install set may not include it.
+          cmake --build . --target WebDriver
+
+      - name: Run integration tests
+        working-directory: ${{ github.workspace }}
+        run: |
+          ctest --preset ${{ matrix.build_preset }} \
+                -R LibWeb_Integration \
+                --output-on-failure \
+                --timeout 600
+        env:
+          # Sanitizer-preset's CTest already sets ASAN/UBSAN options;
+          # log them to files so the upload-artifact step can attach.
+          ASAN_OPTIONS: 'log_path=asan.log:strict_string_checks=1:allocator_may_return_null=1'
+          UBSAN_OPTIONS: 'log_path=ubsan.log:print_stacktrace=1'
+
+      - name: Upload sanitizer logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: integration-sanitizer-logs-${{ matrix.build_preset }}
+          path: |
+            Build/**/asan.log*
+            Build/**/ubsan.log*
+          if-no-files-found: ignore

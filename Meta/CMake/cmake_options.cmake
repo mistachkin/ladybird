@@ -22,6 +22,20 @@ else()
 endif()
 
 option(ENABLE_GUI_TARGETS "Enable building GUI targets" ON)
+
+# TH8 (Tcl-derived scripting language for web content) is built and
+# linked into LibWeb / LibDevTools / LibTest by default on POSIX
+# platforms.  Distros wanting a JS-only build can pass
+# `-DENABLE_TH8=OFF` on any platform.  The WebPlatform layer now has
+# both POSIX and Win32 arms (see Libraries/LibTH8/WebPlatform.cpp
+# build_web_content_platform_layers).
+option(ENABLE_TH8 "Enable TH8 scripting language in web content" ON)
+if (ENABLE_TH8)
+    add_compile_definitions(LADYBIRD_ENABLE_TH8=1)
+else()
+    add_compile_definitions(LADYBIRD_ENABLE_TH8=0)
+endif()
+
 option(ENABLE_INSTALL_HEADERS "Enable installing headers" ON)
 option(ENABLE_INSTALL_FREEDESKTOP_FILES "Enable installing .desktop and .service files" ${freedesktop_files_default})
 option(LADYBIRD_ENABLE_CPPTRACE "Enable use of cpptrace as the default library for stacktraces. If not available falls back to backtrace.h" ON)
@@ -46,6 +60,7 @@ set(LAGOM_USE_LINKER "" CACHE STRING "The linker to use (e.g. lld, mold) instead
 set(LAGOM_LINK_POOL_SIZE "" CACHE STRING "The maximum number of parallel jobs to use for linking")
 option(ENABLE_LTO_FOR_RELEASE "Enable link-time optimization for release builds" ${RELEASE_LTO_DEFAULT})
 option(ENABLE_LAGOM_COVERAGE_COLLECTION "Enable code coverage instrumentation for lagom binaries in clang" OFF)
+option(ENABLE_INTEGRATION_TESTS "Build and register WebDriver-driven integration tests under Tests/LibWeb/Integration/" OFF)
 
 if (ENABLE_FUZZERS_LIBFUZZER)
     # With libfuzzer, we need to avoid a duplicate main() linker error giving false negatives

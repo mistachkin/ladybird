@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<!--
+    Integration PoC -- page E.
+
+    A TH8 page that runs a short workload and sets a marker.  Used
+    by case #5 (back/forward across active TH8): driver navigates
+    E -> B -> back -> forward and verifies each transition lands
+    cleanly.  Each fresh visit to page E re-creates the per-document
+    TH8Context; ASAN catches any UAF in the BFCache / fresh-load
+    boundary.
+-->
+<meta http-equiv="TH8-Script-Policy" content="cross-eval">
+<title>page_e</title>
+<body>
+<div id="marker">init</div>
+<script type="text/th8">
+dom::eval_js {
+    document.getElementById('marker').textContent = 'th8-ran';
+    null
+}
+# Burn a short bounded workload so the script does something
+# observable but does not need the watchdog.
+set sum 0
+set i 0
+while {$i < 10000} {
+    set sum [expr {$sum + $i}]
+    incr i
+}
+</script>
+</body>

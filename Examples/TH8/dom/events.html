@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="TH8-Script-Policy" content="no-javascript">
+  <title>TH8 DOM example: event listeners</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; }
+    button { font-size: 1rem; padding: 0.4rem 0.8rem; }
+    #status { margin-top: 1rem; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <h1>Event handling</h1>
+
+  <button id="go" data-label="Go">Activate</button>
+  <button id="reset" data-label="Reset">Reset</button>
+
+  <div id="status">(waiting for a click)</div>
+
+  <!--
+    Event listeners: a TH8 procedure is subscribed with
+    `$elem addEventListener type procName`.  When the event fires the
+    bridge invokes the proc with ONE argument: a dictionary describing
+    the event.  The keys are exactly type / bubbles / cancelable /
+    eventPhase / target / currentTarget / timeStamp (subtype
+    properties such as MouseEvent.clientX are not surfaced).
+  -->
+  <script type="text/th8">
+    proc on_activate {event} {
+      set doc [dom::document]
+
+      set type [dict get $event type]
+      set target [dict get $event target]
+      set label [$target getAttribute data-label]
+
+      [$doc getElementById status] textContent "$type on \"$label\""
+      dom::console log "handled $type on $label"
+    }
+
+    set doc [dom::document]
+
+    [$doc getElementById go] addEventListener click on_activate
+    [$doc getElementById reset] addEventListener click on_activate
+  </script>
+</body>
+</html>

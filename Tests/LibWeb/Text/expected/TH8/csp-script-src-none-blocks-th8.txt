@@ -1,0 +1,1 @@
+PASS: CSP script-src 'none' blocked TH8 script

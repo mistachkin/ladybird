@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<!--
+    Verifies the TH8 `no-javascript` policy blocks JavaScript (both an
+    explicit text/javascript block and a default-type <script>) while still
+    allowing <script type="text/th8"> to run.
+
+    Test-harness note: no-javascript blocks every ordinary <script> once the
+    policy is active, so (as with the CSP tests) the harness + verification
+    are declared BEFORE the <meta> policy tag -- a meta policy only governs
+    content that follows it, and listeners registered beforehand still run.
+
+    NOTE: the policy is `no-javascript` alone.  An earlier draft also set
+    `signed-only`, which would have rejected this (unsigned) TH8 block and
+    contradicted the "TH8 executes normally" assertion below; that is a
+    separate concern covered by the signed-only tests.
+-->
+<script src="../include.js"></script>
+<script>
+test(() => {
+    let heading = document.getElementById("heading").textContent;
+    let status = document.getElementById("status").textContent;
+    if (heading === "PASS: TH8 executed" && status === "th8-active") {
+        println("PASS: no-javascript blocks JS while TH8 still runs");
+    } else {
+        println("FAIL: heading='" + heading + "' status='" + status + "'");
+    }
+});
+</script>
+<meta http-equiv="TH8-Script-Policy" content="no-javascript">
+<title>TH8 No-JavaScript Policy Test</title>
+<body>
+    <h1 id="heading">Initial</h1>
+    <p id="status">pending</p>
+
+    <!-- This JavaScript should be blocked by the no-javascript policy. -->
+    <script type="text/javascript">
+        document.getElementById("heading").textContent = "FAIL: JavaScript executed";
+    </script>
+
+    <!-- This TH8 script should execute normally. -->
+    <script type="text/th8">
+        set doc [dom::document]
+        [$doc querySelector #heading] textContent "PASS: TH8 executed"
+        [$doc querySelector #status] textContent th8-active
+    </script>
+
+    <!-- This JavaScript should also be blocked. -->
+    <script>
+        document.getElementById("status").textContent = "FAIL: default JS executed";
+    </script>
+</body>

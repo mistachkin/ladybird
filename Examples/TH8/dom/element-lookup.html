@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <!--
+    The TH8-Script-Policy blocks JavaScript on this page; all logic is
+    TH8.  A production page would also declare "signed-only" and serve
+    the script as type="text/th8+signed" with a .b64sig signature.
+  -->
+  <meta http-equiv="TH8-Script-Policy" content="no-javascript">
+  <title>TH8 DOM example: element lookup</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; }
+    pre { background: #f4f4f4; padding: 1rem; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1 id="page-title">Welcome</h1>
+
+  <ul id="menu">
+    <li class="item">One</li>
+    <li class="item">Two</li>
+    <li class="item">Three</li>
+  </ul>
+
+  <a id="cta" href="/start">Get started</a>
+
+  <pre id="output">(script did not run)</pre>
+
+  <!--
+    Element lookup: resolve elements by id and by CSS selector, then
+    read their text content and attributes.  getElementById is a
+    document-scoped command; a captured document handle resolves it
+    too (`set doc [dom::document]` then `$doc getElementById ...`).
+  -->
+  <script type="text/th8">
+    set doc [dom::document]
+
+    set title [[$doc getElementById page-title] textContent]
+    set firstItem [[$doc querySelector .item] textContent]
+    set href [[$doc getElementById cta] getAttribute href]
+
+    set out [$doc getElementById output]
+    $out textContent "title=$title  firstItem=$firstItem  cta.href=$href"
+
+    dom::console log "lookup: $title / $firstItem / $href"
+  </script>
+</body>
+</html>

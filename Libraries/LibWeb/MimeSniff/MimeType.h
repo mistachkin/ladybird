@@ -16,6 +16,7 @@
 namespace Web::MimeSniff {
 
 bool is_javascript_mime_type_essence_match(Utf16View);
+bool is_th8_mime_type_essence_match(StringView);
 
 // https://mimesniff.spec.whatwg.org/#javascript-mime-type
 // A JavaScript MIME type is any MIME type whose essence is one of the following:
@@ -36,6 +37,13 @@ static constexpr Array s_javascript_mime_type_essence_strings = {
     "text/livescript"sv,
     "text/x-ecmascript"sv,
     "text/x-javascript"sv
+};
+
+// [Non-standard] TH8 scripting language MIME types.
+static constexpr Array s_th8_mime_type_essence_strings = {
+    "text/th8"sv,
+    "text/th8+signed"sv,
+    "text/tcl"sv,
 };
 
 // https://mimesniff.spec.whatwg.org/#mime-type
@@ -66,6 +74,7 @@ public:
     bool is_html() const;
     bool is_scriptable() const;
     bool is_javascript() const;
+    bool is_th8() const;
     bool is_json() const;
 
     void set_parameter(String name, String value);

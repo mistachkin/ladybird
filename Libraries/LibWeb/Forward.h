@@ -899,6 +899,8 @@ class TextTrackCue;
 class TextTrackCueList;
 class TextTrackList;
 class TextTrackObserver;
+class TH8Context;
+class TH8Script;
 class Timer;
 class TimeRanges;
 class ToggleEvent;

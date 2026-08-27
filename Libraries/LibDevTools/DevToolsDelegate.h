@@ -170,6 +170,9 @@ public:
     using OnScriptEvaluationComplete = Function<void(ErrorOr<JsonValue>)>;
     virtual void evaluate_javascript(TabDescription const&, String const&, OnScriptEvaluationComplete) const { }
 
+    // [Non-standard] TH8 scripting language support.
+    virtual void evaluate_th8(TabDescription const&, String const&, OnScriptEvaluationComplete) const { }
+
     using OnConsoleMessage = Function<void(WebView::ConsoleOutput)>;
     virtual void listen_for_console_messages(TabDescription const&, OnConsoleMessage) const { }
     virtual void stop_listening_for_console_messages(TabDescription const&) const { }

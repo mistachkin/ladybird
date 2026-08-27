@@ -3114,6 +3114,14 @@ GC::Ptr<DOM::Document> LocalNavigable::evaluate_javascript_url(URL::URL const& u
     VERIFY(active_window());
     auto& realm = active_window()->principal_realm();
 
+    // [Non-standard, B3] If JavaScript execution is disabled on the active
+    // document by a TH8 policy (today: <meta http-equiv="TH8-Script-Policy"
+    // content="no-javascript">), reject the javascript: URL entirely so it
+    // does not subvert the no-javascript policy that the <script> element
+    // gate already enforces.
+    if (auto document = active_document(); document && document->is_javascript_execution_disabled())
+        return nullptr;
+
     // 1. Let urlString be the result of running the URL serializer on url.
     auto url_string = url.serialize();
 

@@ -1,0 +1,1 @@
+PASS: TH8 basic evaluation works

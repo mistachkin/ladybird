@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<!--
+    [M8] Verifies that an unbounded recursion is caught.  Defines a proc
+    that calls itself with no base case and expects [catch] to catch the
+    interpreter's stack-overflow / recursion-limit error.
+-->
+<body>
+<script src="../include.js"></script>
+<div id="result">pending</div>
+<script type="text/th8">
+set doc [dom::document]
+proc bomb {} { bomb }
+if {[catch {bomb} err]} {
+    [$doc getElementById result] textContent "limited"
+} else {
+    [$doc getElementById result] textContent "FAIL"
+}
+</script>
+<script>
+test(() => {
+    let r = document.getElementById('result').textContent;
+    if (r === 'limited') {
+        println("PASS: TH8 recursion limit halts unbounded self-call");
+    } else {
+        println("FAIL: " + r);
+    }
+});
+</script>
+</body>

@@ -19,7 +19,8 @@ namespace Web::HTML {
     __ENUMERATE_HTML_META_HTTP_EQUIV_ATTRIBUTE(u"refresh", Refresh)                  \
     __ENUMERATE_HTML_META_HTTP_EQUIV_ATTRIBUTE(u"set-cookie", SetCookie)             \
     __ENUMERATE_HTML_META_HTTP_EQUIV_ATTRIBUTE(u"x-ua-compatible", XUACompatible)    \
-    __ENUMERATE_HTML_META_HTTP_EQUIV_ATTRIBUTE(u"content-security-policy", ContentSecurityPolicy)
+    __ENUMERATE_HTML_META_HTTP_EQUIV_ATTRIBUTE(u"content-security-policy", ContentSecurityPolicy) \
+    __ENUMERATE_HTML_META_HTTP_EQUIV_ATTRIBUTE(u"th8-script-policy", TH8ScriptPolicy)
 
 class HTMLMetaElement final : public HTMLElement {
     WEB_WRAPPABLE(HTMLMetaElement, HTMLElement);

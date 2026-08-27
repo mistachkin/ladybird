@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<body>
+<script src="../include.js"></script>
+<div id="target">original</div>
+<div id="result">pending</div>
+<script type="text/th8">
+# Test that querying the same element twice returns the same handle.
+set doc [dom::document]
+set elem1 [$doc getElementById target]
+set elem2 [$doc getElementById target]
+
+set result [$doc getElementById result]
+
+if {$elem1 eq $elem2} {
+    $result textContent "dedup: same"
+} else {
+    $result textContent "dedup: different ($elem1 vs $elem2)"
+}
+</script>
+<script>
+test(() => {
+    let result = document.getElementById('result').textContent;
+    if (result === 'dedup: same') {
+        println("PASS: handle deduplication works");
+    } else {
+        println("FAIL: " + result);
+    }
+});
+</script>
+</body>

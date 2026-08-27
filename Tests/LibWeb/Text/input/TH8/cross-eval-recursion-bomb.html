@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<!--
+    [M7] Cross-eval recursion bomb.  TH8 calls JS which calls TH8 which
+    calls JS ... -- the TH8Context's m_evaluate_depth reentrancy guard
+    (H3) must reject the inner recursive evaluate() and the bomb must
+    not crash or hang the renderer.
+-->
+<meta http-equiv="TH8-Script-Policy" content="cross-eval">
+<body>
+<script src="../include.js"></script>
+<div id="result">pending</div>
+<script type="text/th8">
+set doc [dom::document]
+# Recursive ping-pong.  dom::eval_js starts a JS frame; the JS body
+# below calls back into TH8 via document.appendChild + a TH8 script
+# tag, then JS asks TH8 to do it again.  The TH8Context reentrancy
+# guard should reject any nested top-level evaluate(), so this
+# completes with an error instead of looping until stack-overflow.
+if {[catch {
+    dom::eval_js {
+        // From JS we try to schedule another TH8 evaluation -- the
+        // outer TH8 frame is still on the stack so the reentrancy
+        // guard inside TH8Context::evaluate must say no.
+        let s = document.createElement('script');
+        s.type = 'text/th8';
+        s.textContent = 'dom::eval_js { 1 }';
+        document.head.appendChild(s);
+        "js-frame-ok"
+    }
+} err]} {
+    [$doc getElementById result] textContent "bounded:$err"
+} else {
+    [$doc getElementById result] textContent "bounded:ok"
+}
+</script>
+<script>
+test(() => {
+    let r = document.getElementById('result').textContent;
+    // Either "bounded:ok" (the inner attempt was rejected and didn't
+    // propagate an error to the outer scope) or "bounded:<error>" (an
+    // error did propagate).  Both indicate the bomb was bounded.  The
+    // FAIL signal is anything else, including a hang or crash.
+    if (r.startsWith('bounded:')) {
+        println("PASS: cross-eval recursion is bounded by reentrancy guard");
+    } else {
+        println("FAIL: " + r);
+    }
+});
+</script>
+</body>

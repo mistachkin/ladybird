@@ -703,6 +703,76 @@ public:
     void set_current_script(Badge<HTML::HTMLScriptElement>, GC::Ptr<HTML::HTMLScriptElement> script) { m_current_script = move(script); }
     static constexpr size_t current_script_offset() { return offsetof(Document, m_current_script); }
 
+    // [Non-standard] TH8 scripting language support.
+#if LADYBIRD_ENABLE_TH8
+    HTML::TH8Context& ensure_th8_context();
+    GC::Ptr<HTML::TH8Context> th8_context() const { return m_th8_context; }
+#endif
+
+    // [Non-standard, M15-followup] Per-document runtime TH8 kill switch.
+    // When set, every <script type="text/th8"> (including text/th8+signed,
+    // text/tcl, th8) is refused at execute_script time and
+    // window.th8.eval throws.  Independent of ENABLE_TH8 (which is a
+    // build-time gate) -- embedders can disable TH8 for a specific
+    // document at runtime without rebuilding.  Default: false.
+    bool th8_disabled() const { return m_th8_disabled; }
+    void set_th8_disabled(bool value) { m_th8_disabled = value; }
+
+    // [Non-standard] TH8 signed-only policy.
+    // When set, only TH8 scripts whose signature verifies against the
+    // build-time embedded keyring (see Th8_GetEmbeddedKeyring in th8.h)
+    // may execute; unsigned text/th8 is rejected and only text/th8+signed
+    // is accepted.  Opt-in via:
+    //   <meta http-equiv="TH8-Script-Policy" content="signed-only">
+    // or via HTTP header (planned):
+    //   TH8-Script-Policy: signed-only
+    bool th8_signed_only_policy() const { return m_th8_signed_only; }
+    void set_th8_signed_only_policy(bool value) { m_th8_signed_only = value; }
+
+    // [Non-standard] TH8 no-JavaScript policy.
+    // When set, JavaScript (Classic and Module scripts) is blocked.
+    // Opt-in via:
+    //   <meta http-equiv="TH8-Script-Policy" content="no-javascript">
+    // or via HTTP header (planned):
+    //   TH8-Script-Policy: no-javascript
+    bool th8_no_javascript_policy() const { return m_th8_no_javascript; }
+    void set_th8_no_javascript_policy(bool value) { m_th8_no_javascript = value; }
+
+    // [Non-standard] Centralized accessor: returns true when JavaScript
+    // execution is disabled for this document by any policy source.
+    // Today this is the TH8 no-javascript policy; future sources (HTTP
+    // header form, sandbox attribute interactions, embedder overrides)
+    // should plug in here so every JS entry point gates on a single
+    // call.  Entry points that must consult this:
+    //   - HTMLScriptElement::execute_script (classic + module)
+    //   - EventTarget::get_current_value_of_event_handler (inline handlers)
+    //   - Navigable::evaluate_javascript_url (javascript: URLs)
+    //   - WindowOrWorkerGlobalScopeMixin string-handler timer entry points
+    //   - JS::VM compile-string host hooks (eval, new Function, ...)
+    bool is_javascript_execution_disabled() const { return m_th8_no_javascript; }
+
+    // [Non-standard, B3.f] Apply the `TH8-Script-Policy` HTTP response
+    // header to this document.  Tokens (`signed-only`, `no-javascript`,
+    // `cross-eval`) parse the same way as the `<meta http-equiv>` form
+    // in HTMLMetaElement.cpp.  Applying at the navigation-response level
+    // means the flags are set BEFORE HTML parsing begins, so any inline
+    // <script> that appears before a `<meta http-equiv>` tag is also
+    // subject to the policy.  Header form value:
+    //   TH8-Script-Policy: signed-only; no-javascript
+    void apply_th8_script_policy_from_response_headers(::HTTP::HeaderList const&);
+
+    // [Non-standard] TH8 cross-eval policy.
+    // When set, both directions of script-to-script evaluation are
+    // permitted:
+    //   * TH8 -> JS via the `dom::eval_js` command (DOMBridge.cpp)
+    //   * JS  -> TH8 via `window.th8.eval(scriptText)`
+    //     (LibWeb/TH8/WindowTH8Namespace.cpp; wired in
+    //     Window::initialize_web_interfaces)
+    // Mutually exclusive with no-javascript.  Opt-in via:
+    //   <meta http-equiv="TH8-Script-Policy" content="cross-eval">
+    bool th8_cross_eval_policy() const { return m_th8_cross_eval; }
+    void set_th8_cross_eval_policy(bool value) { m_th8_cross_eval = value; }
+
     u32 ignore_destructive_writes_counter() const { return m_ignore_destructive_writes_counter; }
     void increment_ignore_destructive_writes_counter() { m_ignore_destructive_writes_counter++; }
     void decrement_ignore_destructive_writes_counter() { m_ignore_destructive_writes_counter--; }
@@ -1614,6 +1684,14 @@ private:
 
     GC::Ptr<DOMImplementation> m_implementation;
     GC::Ptr<HTML::HTMLScriptElement> m_current_script;
+
+    // [Non-standard] TH8 scripting language context.
+    GC::Ptr<HTML::TH8Context> m_th8_context;
+    bool m_th8_signed_only { false };
+    bool m_th8_no_javascript { false };
+    bool m_th8_cross_eval { false };
+    // [M15-followup] Per-document runtime kill switch.  See th8_disabled().
+    bool m_th8_disabled { false };
 
     u32 m_ignore_destructive_writes_counter { 0 };
 

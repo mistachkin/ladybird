@@ -43,6 +43,16 @@ bool is_javascript_mime_type_essence_match(Utf16View string)
     return false;
 }
 
+// [Non-standard] TH8 MIME type essence match.
+bool is_th8_mime_type_essence_match(StringView string)
+{
+    for (auto const& th8_essence : s_th8_mime_type_essence_strings) {
+        if (string.equals_ignoring_ascii_case(th8_essence))
+            return true;
+    }
+    return false;
+}
+
 static bool contains_only_http_quoted_string_token_code_points(StringView string)
 {
     // https://mimesniff.spec.whatwg.org/#http-quoted-string-token-code-point
@@ -585,6 +595,12 @@ bool MimeType::is_javascript() const
     return s_javascript_mime_type_essence_strings.contains_slow(essence());
 }
 
+// [Non-standard] TH8 MIME type check.
+bool MimeType::is_th8() const
+{
+    return s_th8_mime_type_essence_strings.contains_slow(essence());
+}
+
 // https://mimesniff.spec.whatwg.org/#json-mime-type
 bool MimeType::is_json() const
 {
@@ -598,6 +614,15 @@ String minimise_a_supported_mime_type(MimeType const& mime_type)
     // 1. If mimeType is a JavaScript MIME type, then return "text/javascript".
     if (mime_type.is_javascript())
         return "text/javascript"_string;
+
+    // [Non-standard, audit M6] If mimeType is a TH8 MIME type, then
+    // return "text/th8".  Without this, blob-URL TH8 scripts would
+    // round-trip through the spec'd default and lose their classification
+    // when later re-extracted -- callers checking against `text/th8`
+    // (HTMLScriptElement::prepare_script, signed-only enforcement)
+    // would silently miss the script.
+    if (mime_type.is_th8())
+        return "text/th8"_string;
 
     // 2. If mimeType is a JSON MIME type, then return "application/json".
     if (mime_type.is_json())

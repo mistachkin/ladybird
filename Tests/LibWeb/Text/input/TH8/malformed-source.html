@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<!--
+    [M7] Malformed-source coverage.  Verifies that:
+        a) deeply nested braces don't blow the parser stack
+        b) an unterminated brace produces a clean error rather than a hang
+        c) a NUL byte in the source is handled (TH8 strings are 8-bit clean
+           but external embedding contracts treat source as text)
+    Three inline scripts each set a div; the page asserts all three
+    produced a non-FAIL outcome.
+-->
+<body>
+<script src="../include.js"></script>
+<div id="nested">pending</div>
+<div id="unterm">pending</div>
+<div id="nul">pending</div>
+<script type="text/th8">
+set doc [dom::document]
+# 200 levels of nesting; well below any reasonable parser-stack cap
+# but high enough to catch an O(n^2) blowup or an unguarded recursion.
+set src ""
+set close ""
+set i 0
+while {$i < 200} {
+    append src "if {1} {"
+    append close "}"
+    incr i
+}
+append src "set ok 1"
+append src $close
+if {[catch {eval $src} err]} {
+    [$doc getElementById nested] textContent "err:$err"
+} else {
+    [$doc getElementById nested] textContent "ok"
+}
+</script>
+<script type="text/th8">
+set doc [dom::document]
+# Unterminated brace.  Must produce an error, not a hang.
+if {[catch {eval "if {1} \{ set x 1"} err]} {
+    [$doc getElementById unterm] textContent "err"
+} else {
+    [$doc getElementById unterm] textContent "FAIL"
+}
+</script>
+<script type="text/th8">
+set doc [dom::document]
+# NUL byte inside a string literal.  Use [format "%c"] to embed it.
+set s [format "%c" 0]
+[$doc getElementById nul] textContent "len:[string length $s]"
+</script>
+<script>
+test(() => {
+    let n = document.getElementById('nested').textContent;
+    let u = document.getElementById('unterm').textContent;
+    let z = document.getElementById('nul').textContent;
+    let bad = [];
+    if (n === 'pending' || n === 'FAIL') bad.push('nested=' + n);
+    if (u === 'pending' || u === 'FAIL') bad.push('unterm=' + u);
+    if (z !== 'len:1') bad.push('nul=' + z);
+    if (bad.length === 0) {
+        println("PASS: TH8 handles malformed sources without crashing or hanging");
+    } else {
+        println("FAIL: " + bad.join(' '));
+    }
+});
+</script>
+</body>

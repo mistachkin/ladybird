@@ -1252,10 +1252,24 @@ set(GENERATED_SOURCES
     WebGL/WebGLContextProxy.cpp
 )
 
+if (ENABLE_TH8)
+    list(APPEND SOURCES
+        HTML/Scripting/TH8Context.cpp
+        HTML/Scripting/TH8Script.cpp
+        TH8/DOMBridge.cpp
+        TH8/HandleTable.cpp
+        TH8/TypeConversion.cpp
+        TH8/WindowTH8Namespace.cpp
+    )
+endif()
+
 ladybird_lib(LibWeb web EXPLICIT_SYMBOL_EXPORT)
 add_dependencies(LibWeb generate_GLFunctions.cpp)
 
 target_link_libraries(LibWeb PRIVATE LibCore LibCompress LibCrypto LibJS LibHTTP LibGfx LibIPC LibRegex LibSyntax LibTextCodec LibUnicode LibMedia LibWasm LibXML LibURL LibTLS LibRequests LibGC LibSync LibThreading skia SDL3::SDL3 LibXml2::LibXml2)
+if (ENABLE_TH8)
+    target_link_libraries(LibWeb PRIVATE LibTH8)
+endif()
 
 # LibWeb still includes ANGLE's GLES headers for WebGL constants and types, but
 # the actual GL entry points live in the Compositor. Copy only ANGLE's compile

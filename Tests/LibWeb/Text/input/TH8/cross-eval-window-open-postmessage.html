@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<!--
+    [M7f] Under cross-eval, TH8 reaches window.open / postMessage via
+    dom::eval_js (TH8 -> JS).  This pins the path that:
+        a) the TH8 cross-eval JS shim can invoke window.open (and not
+           crash if the browser blocks popups or returns null)
+        b) JS-side postMessage is callable from the cross-eval payload
+    Either method may be subject to user-gesture popups blocker policy
+    (returning null); both paths must not crash and must not bypass
+    cross-eval gating when the policy is missing.
+
+    Two halves of the test run:
+        1. cross-eval present -> the TH8 source uses dom::eval_js to
+           call window.open / postMessage; we assert it didn't throw.
+        2. (Implicit in other tests) cross-eval absent -> dom::eval_js
+           throws, already covered in cross-eval-blocked.html.
+-->
+<meta http-equiv="TH8-Script-Policy" content="cross-eval">
+<body>
+<script src="../include.js"></script>
+<div id="open_ok">pending</div>
+<div id="post_ok">pending</div>
+<script>
+window.addEventListener('message', () => { /* sink */ });
+</script>
+<script type="text/th8">
+set doc [dom::document]
+
+# 1. window.open via cross-eval.  Popups may be blocked; the return
+#    value can be null or a WindowProxy.  Either is fine -- we are
+#    pinning "no crash" + "dom::eval_js dispatched the call".
+if {[catch {
+    dom::eval_js {
+        let w = window.open('', '_blank', 'noopener');
+        try { if (w) w.close(); } catch (e) {}
+        "open-dispatched"
+    }
+} err]} {
+    [$doc getElementById open_ok] textContent "err:$err"
+} else {
+    [$doc getElementById open_ok] textContent "ok"
+}
+
+# 2. postMessage to self via cross-eval.  We pinned a same-window
+#    'message' listener above so the call doesn't error from a missing
+#    receiver.  postMessage to a same-origin window is always allowed.
+if {[catch {
+    dom::eval_js {
+        window.postMessage('from-th8', '*');
+        "post-dispatched"
+    }
+} err]} {
+    [$doc getElementById post_ok] textContent "err:$err"
+} else {
+    [$doc getElementById post_ok] textContent "ok"
+}
+</script>
+<script>
+test(() => {
+    let o = document.getElementById('open_ok').textContent;
+    let p = document.getElementById('post_ok').textContent;
+    if (o === 'ok' && p === 'ok') {
+        println("PASS: TH8 cross-eval reaches window.open + postMessage");
+    } else {
+        println("FAIL: open=" + o + " post=" + p);
+    }
+});
+</script>
+</body>

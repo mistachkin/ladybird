@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta http-equiv="TH8-Script-Policy" content="cross-eval">
+    <title>TH8 Cross-Eval Test</title>
+</head>
+<body>
+<script src="../include.js"></script>
+<div id="result">pending</div>
+<script type="text/th8">
+# Evaluate JavaScript from TH8 via the cross-eval bridge.
+set js_result [dom::eval_js "2 + 2"]
+set doc [dom::document]
+set div [$doc getElementById result]
+$div textContent "js_result: $js_result"
+</script>
+<script>
+test(() => {
+    // Verify the cross-eval result.
+    let result = document.getElementById('result').textContent;
+    if (result === 'js_result: 4') {
+        println("PASS: TH8 cross-eval returned JS result");
+    } else {
+        println("FAIL: expected 'js_result: 4', got '" + result + "'");
+    }
+});
+</script>
+</body>
+</html>

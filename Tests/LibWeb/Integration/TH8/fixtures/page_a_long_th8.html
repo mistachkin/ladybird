@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<!--
+    Integration PoC -- page A.
+
+    Flips `window.__th8_ready__ = true` via cross-eval BEFORE
+    entering the infinite TH8 loop, so the test driver can detect
+    "TH8 is now executing the loop" without a setTimeout race.
+
+    The watchdog (M2; default 250 ms in
+    Libraries/LibTH8/WebPlatform.h::default_wall_clock_limit_ms)
+    must cancel the loop quickly enough that the test driver's
+    follow-up navigate() to page B completes inside the assertion
+    budget.
+-->
+<meta http-equiv="TH8-Script-Policy" content="cross-eval">
+<title>page_a</title>
+<body>
+<div id="status">starting</div>
+<script type="text/th8">
+# Cross-eval to JS to set a JS-visible "ready" flag.  This must
+# happen BEFORE the loop, otherwise the driver would have to guess
+# when to navigate.
+dom::eval_js {
+    window.__th8_ready__ = true;
+    document.getElementById('status').textContent = 'looping';
+    null
+}
+
+# Tight loop of cheap instructions.  Without the M2 wall-clock
+# watchdog this runs until either (a) the 10M-step limit fires
+# (could be seconds on a slow runner) or (b) the renderer is
+# killed.  WITH the watchdog, it gets Th8_CancelEval'd at ~250 ms
+# and the main thread is free to process the test driver's
+# follow-up navigate() command.
+set i 0
+while {1} {
+    incr i
+}
+</script>
+</body>

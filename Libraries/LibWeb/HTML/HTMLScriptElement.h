@@ -41,6 +41,12 @@ public:
     void execute_script();
     void stop_delaying_document_load_event(Badge<DOM::Document>) { m_document_load_event_delayer.clear(); }
 
+    // [Non-standard] True iff this element's `type` attribute was
+    // recognized as the TH8 signed MIME (`text/th8+signed`).  Used
+    // by the TH8 script fetch path to decide whether to ALSO fetch
+    // the `<src>.b64sig` signature sidecar.
+    bool th8_declared_signed() const { return m_th8_declared_signed; }
+
     bool is_parser_inserted() const { return !!m_parser_document; }
 
     virtual void children_changed(ChildrenChangedMetadata const&) override;
@@ -49,7 +55,7 @@ public:
     // https://html.spec.whatwg.org/multipage/scripting.html#dom-script-supports
     static bool supports(Utf16String const& type)
     {
-        return type.is_one_of("classic"sv, "module"sv, "importmap"sv);
+        return type.is_one_of("classic"sv, "module"sv, "importmap"sv, "th8"sv, "th8+signed"sv);
     }
 
     void set_source_line_number(Badge<HTMLParser>, size_t source_line_number) { m_source_line_number = source_line_number; }
@@ -140,10 +146,18 @@ private:
         Classic,
         Module,
         ImportMap,
+        TH8,
     };
 
     // https://html.spec.whatwg.org/multipage/scripting.html#concept-script-type
     ScriptType m_script_type { ScriptType::Null };
+
+    // [Non-standard] True when m_script_type == ScriptType::TH8 and the
+    // script's declared MIME (type attribute) was specifically
+    // `text/th8+signed`.  Bare `text/th8` / `text/tcl` / `th8` leave
+    // this false.  Used to enforce the signed-only document policy:
+    // under that policy, only +signed TH8 scripts are allowed.
+    bool m_th8_declared_signed { false };
 
     // https://html.spec.whatwg.org/multipage/scripting.html#steps-to-run-when-the-result-is-ready
     Function<void()> m_steps_to_run_when_the_result_is_ready;

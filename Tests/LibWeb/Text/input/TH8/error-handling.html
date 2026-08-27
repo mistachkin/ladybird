@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<body>
+<div id="result">not modified</div>
+<script src="../include.js"></script>
+<script type="text/th8">
+# This script has an error: calling a nonexistent command.
+# The error should be reported but should not crash the browser.
+# Subsequent scripts should still execute.
+nonexistent_command arg1 arg2
+</script>
+<script>
+// This JS should still run even after TH8 error above
+test(() => {
+    document.getElementById('result').textContent = 'JS ran after TH8 error';
+    println("PASS: Browser continues after TH8 error");
+});
+</script>
+</body>

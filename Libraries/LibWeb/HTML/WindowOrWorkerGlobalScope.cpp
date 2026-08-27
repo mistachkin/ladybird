@@ -24,6 +24,7 @@
 #include <LibWeb/Bindings/WrapperWorld.h>
 #include <LibWeb/ContentSecurityPolicy/BlockingAlgorithms.h>
 #include <LibWeb/Crypto/Crypto.h>
+#include <LibWeb/DOM/Document.h>
 #include <LibWeb/Fetch/BindingsGlue.h>
 #include <LibWeb/Fetch/FetchMethod.h>
 #include <LibWeb/HTML/CanvasRenderingContext2D.h>
@@ -629,6 +630,17 @@ i32 WindowOrWorkerGlobalScopeMixin::run_timer_initialization_steps(TimerHandler 
             },
             // 6. Otherwise:
             [&](Utf16String const& source) {
+                // [Non-standard, B3] If JavaScript execution is disabled by a
+                // TH8 policy on the active document (the only TH8-aware case
+                // -- workers have no TH8 policy in this integration), refuse
+                // to compile/run the string handler.  Without this gate, a
+                // page could call setTimeout("alert(1)", 0) and bypass the
+                // no-javascript policy that <script> already enforces.
+                if (auto* window = as_if<Window>(this_impl())) {
+                    if (window->associated_document().is_javascript_execution_disabled())
+                        return false;
+                }
+
                 // 1. If previousId was not given:
                 if (!previous_id.has_value()) {
                     // 1. Let globalName be "Window" if global is a Window object; "WorkerGlobalScope" otherwise.

@@ -1,0 +1,1 @@
+PASS: TH8 runs in iframe srcdoc

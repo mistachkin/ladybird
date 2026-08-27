@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<body>
+<script src="../include.js"></script>
+<!-- No cross-eval policy meta tag: dom::eval_js should fail. -->
+<div id="result">pending</div>
+<script type="text/th8">
+set doc [dom::document]
+set div [$doc getElementById result]
+
+# Without the cross-eval policy, this should return an error.
+if {[catch {dom::eval_js "1 + 1"} err]} {
+    $div textContent "blocked: $err"
+} else {
+    $div textContent "FAIL: cross-eval was not blocked"
+}
+</script>
+<script>
+test(() => {
+    let result = document.getElementById('result').textContent;
+    if (result.startsWith('blocked:')) {
+        println("PASS: cross-eval correctly blocked without policy");
+    } else {
+        println("FAIL: expected 'blocked:...', got '" + result + "'");
+    }
+});
+</script>
+</body>

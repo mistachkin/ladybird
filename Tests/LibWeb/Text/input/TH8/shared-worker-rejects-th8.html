@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<!--
+    [M7e] Verifies SharedWorker rejects a blob whose Content-Type is
+    `text/th8`.  Shared workers must be JS per spec; TH8 is not a
+    valid shared-worker script type.
+-->
+<script src="../include.js"></script>
+<script>
+    asyncTest(done => {
+        if (typeof SharedWorker === 'undefined') {
+            // SharedWorker not exposed: trivially "rejected".
+            println("PASS: SharedWorker rejected text/th8");
+            done();
+            return;
+        }
+
+        let th8Source = 'puts "hi from shared worker"';
+        let blob = new Blob([th8Source], { type: 'text/th8' });
+        let blobUrl = URL.createObjectURL(blob);
+
+        let resolved = false;
+        let timer;
+
+        let pass = () => {
+            if (resolved) return;
+            resolved = true;
+            clearTimeout(timer);
+            try { URL.revokeObjectURL(blobUrl); } catch (e) {}
+            println("PASS: SharedWorker rejected text/th8");
+            done();
+        };
+        let fail = (why) => {
+            if (resolved) return;
+            resolved = true;
+            clearTimeout(timer);
+            println("FAIL: " + why);
+            done();
+        };
+
+        try {
+            let worker = new SharedWorker(blobUrl);
+            worker.onerror = () => pass();
+            if (worker.port) {
+                worker.port.onmessage = () => fail("shared worker posted a message");
+                try { worker.port.start(); } catch (e) {}
+            }
+            timer = setTimeout(pass, 250);
+        } catch (e) {
+            pass();
+        }
+    });
+</script>

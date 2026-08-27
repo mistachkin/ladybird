@@ -1,0 +1,1 @@
+PASS: SharedWorker rejected text/th8

@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<!--
+    [M8] Verifies that the per-interpreter memory cap (64 MB by default,
+    Th8_SetAllocLimit -> xPanic when exceeded) terminates a runaway
+    allocation.  Concatenates large strings into a single variable until
+    something gives.  The exact failure mode depends on which guard fires
+    first (alloc panic, step-limit, or wall-clock); any of them indicates
+    the resource-limit machinery is active.
+-->
+<body>
+<script src="../include.js"></script>
+<div id="result">pending</div>
+<script type="text/th8">
+set doc [dom::document]
+if {[catch {
+    set buf ""
+    set chunk [string repeat "x" 65536]
+    # 64 MB / 64 KB = 1024 iterations would exhaust the budget exactly;
+    # we ask for 4096 to make absolutely sure SOMETHING fires.
+    set i 0
+    while {$i < 4096} {
+        append buf $chunk
+        incr i
+    }
+} err]} {
+    [$doc getElementById result] textContent "limited"
+} else {
+    [$doc getElementById result] textContent "FAIL"
+}
+</script>
+<script>
+test(() => {
+    let r = document.getElementById('result').textContent;
+    if (r === 'limited') {
+        println("PASS: TH8 memory limit halts runaway allocation");
+    } else {
+        println("FAIL: " + r);
+    }
+});
+</script>
+</body>

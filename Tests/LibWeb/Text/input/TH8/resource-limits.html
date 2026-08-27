@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<body>
+<script src="../include.js"></script>
+<div id="result">pending</div>
+<script type="text/th8">
+# Test that resource limits prevent runaway scripts.
+# The TH8 interpreter has step and memory limits set by TH8Context.
+# An infinite loop should be terminated by the step limit.
+set doc [dom::document]
+set div [$doc getElementById result]
+
+if {[catch {
+    # This loop should hit the step limit and be cancelled.
+    while {1} {
+        set x 1
+    }
+} err]} {
+    $div textContent "limited: $err"
+} else {
+    $div textContent "FAIL: infinite loop was not stopped"
+}
+</script>
+<script>
+test(() => {
+    let result = document.getElementById('result').textContent;
+    if (result.startsWith('limited:')) {
+        println("PASS: step limit stopped infinite loop");
+    } else {
+        println("FAIL: expected 'limited:...', got '" + result + "'");
+    }
+});
+</script>
+</body>

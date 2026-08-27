@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<body>
+<script src="../include.js"></script>
+<div id="anchor">anchor</div>
+<div id="result">pending</div>
+<script type="text/th8">
+# Regression test for the document-handle dispatch.  A captured
+# document handle (`set doc [dom::document]`) must resolve the
+# document-scoped subcommands -- getElementById, createElement,
+# createTextNode, body, head, title -- and not only the node methods.
+# These ops live on the fixed `dom::document` command; the handle
+# resolves them because DOMBridge.cpp object_ensemble_command delegates
+# to document_subcommand when the handle is the Document.  Without that
+# delegation each call below would error with
+# "unknown subcommand ... for handle".
+set doc [dom::document]
+
+# getElementById via the captured handle.
+set anchor [$doc getElementById anchor]
+set gebi [expr {$anchor ne "" ? 1 : 0}]
+
+# createElement + createTextNode via the captured handle.
+set p [$doc createElement p]
+set t [$doc createTextNode "hi"]
+$p appendChild $t
+set create [expr {[$p textContent] eq "hi" ? 1 : 0}]
+
+# body / head via the captured handle.
+set head [$doc head]
+set body [$doc body]
+
+# title getter/setter via the captured handle.
+$doc title "Set By TH8"
+
+[$doc getElementById result] textContent \
+    "gebi=$gebi create=$create body=[$body tagName] head=[$head tagName] title=[$doc title]"
+</script>
+<script>
+test(() => {
+    let result = document.getElementById('result').textContent;
+    if (result === 'gebi=1 create=1 body=BODY head=HEAD title=Set By TH8') {
+        println("PASS: document handle resolves document-scoped subcommands");
+    } else {
+        println("FAIL: " + result);
+    }
+});
+</script>
+</body>

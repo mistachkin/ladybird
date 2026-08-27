@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<body>
+<script src="../include.js"></script>
+<div id="target">hello</div>
+<div id="result">pending</div>
+<script type="text/th8">
+# Test that releasing a handle makes it invalid.
+set doc [dom::document]
+set elem [$doc getElementById target]
+
+# The handle should work before release.
+set before [$elem textContent]
+
+# Release the handle.
+dom::release $elem
+
+# After release, using the handle should fail.
+set result_div [$doc getElementById result]
+if {[catch {$elem textContent} err]} {
+    $result_div textContent "released: before=$before"
+} else {
+    $result_div textContent "FAIL: handle still valid after release"
+}
+</script>
+<script>
+test(() => {
+    let result = document.getElementById('result').textContent;
+    if (result === 'released: before=hello') {
+        println("PASS: handle release works");
+    } else {
+        println("FAIL: " + result);
+    }
+});
+</script>
+</body>

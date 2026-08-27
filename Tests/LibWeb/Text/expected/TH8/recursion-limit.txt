@@ -1,0 +1,1 @@
+PASS: TH8 recursion limit halts unbounded self-call

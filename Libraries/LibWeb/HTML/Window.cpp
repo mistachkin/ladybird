@@ -30,6 +30,9 @@
 #include <LibWeb/Bindings/WindowGlobalMixin.h>
 #include <LibWeb/Bindings/Wrappable.h>
 #include <LibWeb/Bindings/WrapperWorld.h>
+#if LADYBIRD_ENABLE_TH8
+#    include <LibWeb/TH8/WindowTH8Namespace.h>
+#endif
 #include <LibWeb/CSS/CSSStyleProperties.h>
 #include <LibWeb/CSS/MediaQueryList.h>
 #include <LibWeb/CSS/Parser/Parser.h>
@@ -151,6 +154,21 @@ WebIDL::ExceptionOr<void> initialize_window_web_interfaces(HTML::Window& window,
 
     if (window.is_internals_object_exposed())
         Bindings::define_internals_property(realm, window, global_object);
+
+#if LADYBIRD_ENABLE_TH8
+    // [H10-followup] Expose `window.th8` for JS->TH8 cross-eval.  The
+    // property is always present; the eval() method itself throws when
+    // the document has not opted into `cross-eval` via the
+    // TH8-Script-Policy meta / header.  (Relocated here from the removed
+    // Window::initialize_web_interfaces during the wrapper-architecture
+    // refactor; this free function is a friend of Window.)
+    if (window.m_associated_document) {
+        global_object.define_direct_property(
+            "th8"_utf16_fly_string,
+            Web::TH8::create_window_th8_namespace(realm, *window.m_associated_document),
+            JS::default_attributes);
+    }
+#endif
 
     return {};
 }

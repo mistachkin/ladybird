@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <!--
+      TH8-Script-Policy: no-javascript
+
+      This page uses TH8 as its ONLY scripting language.  JavaScript
+      is completely disabled by the no-javascript policy directive.
+      No JavaScript code will execute on this page — not from inline
+      scripts, not from external scripts, not from event attributes,
+      not from eval(), not from any source.
+
+      In production, the policy would also include "signed-only" to
+      require cryptographic verification of every TH8 script:
+
+        <meta http-equiv="TH8-Script-Policy"
+              content="signed-only; no-javascript">
+
+      Combined with LadyBird's per-process site isolation, this
+      creates a security model no other browser can match:
+
+        1. Process isolation    - the page runs in its own process
+        2. No JavaScript        - the entire JS attack surface is gone
+        3. Signed-only scripts  - only author-approved code executes
+        4. NullIO platform      - no file/network access from scripts
+        5. Resource limits      - step/memory limits prevent abuse
+        6. Compile-time removal - unused features not even in binary
+    -->
+    <meta http-equiv="TH8-Script-Policy" content="no-javascript">
+    <title>SecureBank - Fund Transfer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, system-ui, sans-serif;
+            background: #f0f2f5;
+            color: #1a1a2e;
+            line-height: 1.6;
+        }
+        .header {
+            background: #16213e;
+            color: white;
+            padding: 16px 24px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .header h1 { font-size: 20px; font-weight: 600; }
+        .shield {
+            width: 32px; height: 32px;
+            background: #0f3460;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+        }
+        .security-banner {
+            background: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+            padding: 10px 24px;
+            font-size: 13px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .container {
+            max-width: 520px;
+            margin: 32px auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+            overflow: hidden;
+        }
+        .form-header {
+            padding: 24px 24px 0;
+        }
+        .form-header h2 {
+            font-size: 18px;
+            color: #16213e;
+        }
+        .form-header p {
+            font-size: 13px;
+            color: #666;
+            margin-top: 4px;
+        }
+        .form-body { padding: 20px 24px 24px; }
+        .field {
+            margin-bottom: 16px;
+        }
+        .field label {
+            display: block;
+            font-size: 13px;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 4px;
+        }
+        .field input {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 15px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        .field input:focus { border-color: #0f3460; }
+        .field input.valid { border-color: #28a745; }
+        .field input.invalid { border-color: #dc3545; }
+        .field .error {
+            font-size: 12px;
+            color: #dc3545;
+            margin-top: 4px;
+            min-height: 16px;
+        }
+        .field .hint {
+            font-size: 11px;
+            color: #999;
+            margin-top: 2px;
+        }
+        .submit-btn {
+            width: 100%;
+            padding: 12px;
+            background: #16213e;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 15px;
+            font-weight: 600;
+            cursor: pointer;
+            margin-top: 8px;
+        }
+        .submit-btn:disabled {
+            background: #aaa;
+            cursor: not-allowed;
+        }
+        #status {
+            margin-top: 16px;
+            padding: 12px;
+            border-radius: 6px;
+            font-size: 14px;
+            display: none;
+        }
+        #status.success {
+            display: block;
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        #status.error {
+            display: block;
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .footer {
+            padding: 16px 24px;
+            border-top: 1px solid #eee;
+            font-size: 11px;
+            color: #999;
+            text-align: center;
+        }
+        .powered-by {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            color: #16213e;
+            font-weight: 600;
+        }
+    </style>
+</head>
+<body>
+
+<div class="header">
+    <div class="shield">&#x1f512;</div>
+    <h1>SecureBank Online</h1>
+</div>
+
+<div class="security-banner">
+    &#x2714; This page runs zero JavaScript.
+    All form logic is powered by TH8 signed scripts.
+</div>
+
+<div class="container">
+    <div class="form-header">
+        <h2>Fund Transfer</h2>
+        <p>Transfer funds to another account securely.</p>
+    </div>
+
+    <div class="form-body">
+        <div class="field">
+            <label for="recipient">Recipient Name</label>
+            <input type="text" id="recipient" placeholder="John Doe"
+                   autocomplete="off">
+            <div class="error" id="recipient-error"></div>
+        </div>
+
+        <div class="field">
+            <label for="account">Account Number</label>
+            <input type="text" id="account" placeholder="1234567890"
+                   maxlength="10" autocomplete="off">
+            <div class="error" id="account-error"></div>
+            <div class="hint">10-digit account number</div>
+        </div>
+
+        <div class="field">
+            <label for="routing">Routing Number</label>
+            <input type="text" id="routing" placeholder="021000021"
+                   maxlength="9" autocomplete="off">
+            <div class="error" id="routing-error"></div>
+            <div class="hint">9-digit ABA routing number</div>
+        </div>
+
+        <div class="field">
+            <label for="amount">Transfer Amount (USD)</label>
+            <input type="text" id="amount" placeholder="0.00"
+                   autocomplete="off">
+            <div class="error" id="amount-error"></div>
+            <div class="hint">Maximum $10,000.00 per transfer</div>
+        </div>
+
+        <div class="field">
+            <label for="memo">Memo (optional)</label>
+            <input type="text" id="memo" placeholder="Payment for..."
+                   maxlength="50" autocomplete="off">
+        </div>
+
+        <button type="button" id="submit-btn" class="submit-btn">
+            Transfer Funds
+        </button>
+
+        <div id="status"></div>
+    </div>
+
+    <div class="footer">
+        Secured by <span class="powered-by">TH8</span>
+        &mdash; zero JavaScript, cryptographically signed scripts only.
+    </div>
+</div>
+
+<!-- ============================================================
+     TH8 Form Validation Script
+     ============================================================
+     This script handles all form validation and submission.
+     No JavaScript executes on this page.
+
+     In production, this would be a signed script:
+       <script type="text/th8+signed" data-signature="...">
+
+     The signing key is registered with the browser via
+     Th8_PolicyPreloadKey, and the signature is verified
+     before the script is allowed to execute.
+     ============================================================ -->
+<script type="text/th8">
+#
+# SecureBank Fund Transfer -- TH8 form validation.
+#
+# This script demonstrates TH8 as a secure alternative to
+# JavaScript for sensitive financial forms.  All validation
+# runs locally in the browser with no network access (NullIO
+# platform) and under strict resource limits.
+#
+
+set doc [dom::document]
+
+# ---- Validation helpers ----
+
+proc isDigits {s} {
+    # Return 1 if string contains only ASCII digits.
+    if {[string length $s] == 0} { return 0 }
+    foreach ch [split $s ""] {
+        if {![string is digit -strict $ch]} { return 0 }
+    }
+    return 1
+}
+
+proc isValidAmount {s} {
+    # Accept formats: "123", "123.45", ".45"
+    # Must be positive and <= 10000.00
+    if {[string length $s] == 0} { return 0 }
+
+    # Check for valid characters (digits and at most one dot).
+    set dotCount 0
+    foreach ch [split $s ""] {
+        if {$ch eq "."} {
+            incr dotCount
+            if {$dotCount > 1} { return 0 }
+        } elseif {![string is digit -strict $ch]} {
+            return 0
+        }
+    }
+
+    # Strip leading zeros for comparison (but keep "0.xx").
+    set stripped [string trimleft $s "0"]
+    if {$stripped eq "" || [string index $stripped 0] eq "."} {
+        set stripped "0$stripped"
+    }
+
+    # Parse as a number and check range.
+    if {[catch {expr {double($stripped)}} val]} { return 0 }
+    if {$val <= 0.0 || $val > 10000.0} { return 0 }
+
+    # Check at most 2 decimal places.
+    set dotIdx [string first . $s]
+    if {$dotIdx >= 0} {
+        set decimals [string range $s [expr {$dotIdx + 1}] end]
+        if {[string length $decimals] > 2} { return 0 }
+    }
+
+    return 1
+}
+
+# ---- Field validation state ----
+
+set ::valid(recipient) 0
+set ::valid(account)   0
+set ::valid(routing)   0
+set ::valid(amount)    0
+
+# ---- Validation procs (called on input events) ----
+
+proc validateRecipient {event} {
+    set doc [dom::document]
+    set input [$doc getElementById recipient]
+    set errDiv [$doc getElementById recipient-error]
+    set val [$input getAttribute value]
+
+    if {$val eq ""} {
+        set ::valid(recipient) 0
+        $errDiv textContent ""
+        $input removeAttribute class
+        return
+    }
+
+    if {[string length $val] < 2} {
+        set ::valid(recipient) 0
+        $errDiv textContent "Name must be at least 2 characters."
+        $input setAttribute class invalid
+    } else {
+        set ::valid(recipient) 1
+        $errDiv textContent ""
+        $input setAttribute class valid
+    }
+}
+
+proc validateAccount {event} {
+    set doc [dom::document]
+    set input [$doc getElementById account]
+    set errDiv [$doc getElementById account-error]
+    set val [$input getAttribute value]
+
+    if {$val eq ""} {
+        set ::valid(account) 0
+        $errDiv textContent ""
+        $input removeAttribute class
+        return
+    }
+
+    if {![isDigits $val]} {
+        set ::valid(account) 0
+        $errDiv textContent "Account number must contain only digits."
+        $input setAttribute class invalid
+    } elseif {[string length $val] != 10} {
+        set ::valid(account) 0
+        $errDiv textContent "Account number must be exactly 10 digits."
+        $input setAttribute class invalid
+    } else {
+        set ::valid(account) 1
+        $errDiv textContent ""
+        $input setAttribute class valid
+    }
+}
+
+proc validateRouting {event} {
+    set doc [dom::document]
+    set input [$doc getElementById routing]
+    set errDiv [$doc getElementById routing-error]
+    set val [$input getAttribute value]
+
+    if {$val eq ""} {
+        set ::valid(routing) 0
+        $errDiv textContent ""
+        $input removeAttribute class
+        return
+    }
+
+    if {![isDigits $val]} {
+        set ::valid(routing) 0
+        $errDiv textContent "Routing number must contain only digits."
+        $input setAttribute class invalid
+    } elseif {[string length $val] != 9} {
+        set ::valid(routing) 0
+        $errDiv textContent "Routing number must be exactly 9 digits."
+        $input setAttribute class invalid
+    } else {
+        set ::valid(routing) 1
+        $errDiv textContent ""
+        $input setAttribute class valid
+    }
+}
+
+proc validateAmount {event} {
+    set doc [dom::document]
+    set input [$doc getElementById amount]
+    set errDiv [$doc getElementById amount-error]
+    set val [$input getAttribute value]
+
+    if {$val eq ""} {
+        set ::valid(amount) 0
+        $errDiv textContent ""
+        $input removeAttribute class
+        return
+    }
+
+    if {![isValidAmount $val]} {
+        set ::valid(amount) 0
+        # Provide specific feedback.
+        if {[catch {expr {double($val)}} num]} {
+            $errDiv textContent "Please enter a valid dollar amount."
+        } elseif {$num <= 0} {
+            $errDiv textContent "Amount must be greater than zero."
+        } elseif {$num > 10000} {
+            $errDiv textContent "Maximum transfer amount is \$10,000.00."
+        } else {
+            $errDiv textContent "Invalid amount format (max 2 decimal places)."
+        }
+        $input setAttribute class invalid
+    } else {
+        set ::valid(amount) 1
+        $errDiv textContent ""
+        $input setAttribute class valid
+    }
+}
+
+# ---- Submit handler ----
+
+proc handleSubmit {event} {
+    set doc [dom::document]
+    set status [$doc getElementById status]
+
+    # Check all fields are valid.
+    set allValid 1
+    foreach field {recipient account routing amount} {
+        if {!$::valid($field)} {
+            set allValid 0
+            break
+        }
+    }
+
+    if {!$allValid} {
+        $status setAttribute class error
+        $status setAttribute style "display: block"
+        $status textContent "Please correct the errors above before submitting."
+        return
+    }
+
+    # All valid -- show success.
+    set recipient [[$doc getElementById recipient] getAttribute value]
+    set amount [[$doc getElementById amount] getAttribute value]
+
+    $status setAttribute class success
+    $status setAttribute style "display: block"
+    $status textContent "Transfer of \$$amount to $recipient initiated successfully."
+}
+
+# ---- Wire up event listeners ----
+
+set recipientInput [$doc getElementById recipient]
+set accountInput   [$doc getElementById account]
+set routingInput   [$doc getElementById routing]
+set amountInput    [$doc getElementById amount]
+set submitBtn      [$doc getElementById submit-btn]
+
+$recipientInput addEventListener input validateRecipient
+$accountInput   addEventListener input validateAccount
+$routingInput   addEventListener input validateRouting
+$amountInput    addEventListener input validateAmount
+$submitBtn      addEventListener click handleSubmit
+
+dom::console log "SecureBank form initialized (TH8, zero JavaScript)"
+</script>
+
+<!-- This JavaScript block will NOT execute due to no-javascript policy. -->
+<script>
+    // If you see this in the console, the policy failed.
+    console.error("SECURITY VIOLATION: JavaScript executed on secure page!");
+    document.body.innerHTML = "<h1>SECURITY ERROR</h1>";
+</script>
+
+</body>
+</html>

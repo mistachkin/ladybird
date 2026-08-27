@@ -1,0 +1,1 @@
+PASS: sandbox allow-scripts permits TH8

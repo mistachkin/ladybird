@@ -42,6 +42,12 @@ set(TEST_SOURCES
     TestWrapperWorld.cpp
 )
 
+# [B4] Tests that reach into LibTH8 / LibWeb TH8 code are gated on
+# ENABLE_TH8 so the LibWeb non-TH8 build keeps compiling.
+if (ENABLE_TH8)
+    list(APPEND TEST_SOURCES TestTH8HandleTable.cpp)
+endif()
+
 if (NOT WIN32)
     list(APPEND TEST_SOURCES
         TestStyleValueEquality.cpp
@@ -99,3 +105,4 @@ if (NOT WIN32)
 endif()
 
 add_subdirectory("test-web")
+add_subdirectory("Integration")

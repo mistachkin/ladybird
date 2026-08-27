@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<body>
+<script src="../include.js"></script>
+<button id="btn">test</button>
+<div id="result">pending</div>
+<script type="text/th8">
+# Test that errors in event handlers don't crash the browser.
+proc badHandler {event} {
+    error "intentional error in handler"
+}
+
+set doc [dom::document]
+set btn [$doc getElementById btn]
+$btn addEventListener click badHandler
+</script>
+<script>
+test(() => {
+    // The TH8 handler raises an error on purpose; TH8Context surfaces it
+    // through the standard window error-reporting path ([M9]).  Disable the
+    // include.js uncaught-error trap so that intentional error does not fail
+    // the test -- we are asserting the browser SURVIVES it, not that no error
+    // is ever reported.
+    removeTestErrorHandler();
+    // Trigger click -- the TH8 handler will error, but the browser
+    // should continue normally.
+    document.getElementById('btn').click();
+    document.getElementById('result').textContent = 'survived';
+    println("PASS: browser survives TH8 event handler error");
+});
+</script>
+</body>

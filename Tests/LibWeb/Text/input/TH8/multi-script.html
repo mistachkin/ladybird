@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<body>
+<script src="../include.js"></script>
+<script type="text/th8">
+# First script block: define a variable
+set ::shared_value "defined in block 1"
+</script>
+<script type="text/th8">
+# Second script block: access variable from first block
+# This works because both blocks share the same per-document interpreter.
+set doc [dom::document]
+set div [$doc createElement div]
+$div setAttribute id shared-test
+$div textContent $::shared_value
+[$doc querySelector body] appendChild $div
+</script>
+<script>
+test(() => {
+    let div = document.getElementById('shared-test');
+    if (div && div.textContent === 'defined in block 1') {
+        println("PASS: Multiple TH8 script blocks share state");
+    } else {
+        println("FAIL: expected shared state between TH8 blocks");
+    }
+});
+</script>
+</body>

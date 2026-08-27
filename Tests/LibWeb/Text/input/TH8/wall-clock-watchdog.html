@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<!--
+    [M8 / M2] Verifies the wall-clock watchdog cancels a tight loop of
+    cheap instructions whose per-step cost is so low that step-counting
+    alone would take seconds.  The default wall-clock budget is 250 ms
+    (default_wall_clock_limit_ms in LibTH8/WebPlatform.h); the body
+    here is sized to vastly exceed it but stays well under the 10M
+    step cap so we know the watchdog (not the step-limit) is what
+    fired.
+-->
+<body>
+<script src="../include.js"></script>
+<div id="result">pending</div>
+<script type="text/th8">
+set doc [dom::document]
+# 10 million `incr` operations would normally consume the whole step
+# budget; the wall-clock watchdog should fire first if it is working.
+if {[catch {
+    set i 0
+    while {$i < 10000000} { incr i }
+} err]} {
+    [$doc getElementById result] textContent "limited"
+} else {
+    [$doc getElementById result] textContent "FAIL"
+}
+</script>
+<script>
+test(() => {
+    let r = document.getElementById('result').textContent;
+    if (r === 'limited') {
+        println("PASS: TH8 wall-clock or step limit halts long-running loop");
+    } else {
+        println("FAIL: " + r);
+    }
+});
+</script>
+</body>

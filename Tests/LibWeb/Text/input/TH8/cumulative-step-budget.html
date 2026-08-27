@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<!--
+    [M1] Verifies that the per-document TH8 interpreter shares a single
+    cumulative step budget across multiple <script type="text/th8"> blocks.
+    Three blocks each burn a chunk of the step budget; the third block is
+    expected to fire the step limit (or wall-clock watchdog, whichever
+    arrives first) and report an error.  The test passes regardless of
+    which limiter triggers -- both are valid signals that the shared
+    budget is being enforced.
+-->
+<body>
+<script src="../include.js"></script>
+<div id="step1">pending</div>
+<div id="step2">pending</div>
+<div id="step3">pending</div>
+<script type="text/th8">
+# Block 1: burn a small, bounded chunk of steps and complete.  Sized
+# well under BOTH the cumulative step budget and the 250 ms per-evaluate
+# wall-clock watchdog so it reliably finishes and sets its marker (an
+# earlier 30000-iteration version sat right at the wall-clock boundary
+# and flakily got cancelled before this line ran).
+set doc [dom::document]
+set i 0
+while {$i < 2000} { incr i }
+[$doc getElementById step1] textContent "ok"
+</script>
+<script type="text/th8">
+# Block 2: another bounded chunk on the SAME per-document interpreter.
+# It runs against the shared budget left by block 1 and completes.
+set doc [dom::document]
+set i 0
+while {$i < 2000} { incr i }
+[$doc getElementById step2] textContent "ok"
+</script>
+<script type="text/th8">
+# Block 3: try to burn another 10 million.  At this point the cumulative
+# step count from blocks 1+2 has already consumed most of the budget; this
+# block must fail.  If only wall-clock fires that is also acceptable --
+# either triggers means the shared limiter caught us.
+set doc [dom::document]
+if {[catch {
+    set i 0
+    while {$i < 10000000} { incr i }
+} err]} {
+    [$doc getElementById step3] textContent "limited"
+} else {
+    [$doc getElementById step3] textContent "FAIL"
+}
+</script>
+<script>
+test(() => {
+    let s1 = document.getElementById('step1').textContent;
+    let s2 = document.getElementById('step2').textContent;
+    let s3 = document.getElementById('step3').textContent;
+    if (s1 === 'ok' && s2 === 'ok' && s3 === 'limited') {
+        println("PASS: TH8 step budget is cumulative across script blocks");
+    } else {
+        println("FAIL: s1='" + s1 + "' s2='" + s2 + "' s3='" + s3 + "'");
+    }
+});
+</script>
+</body>

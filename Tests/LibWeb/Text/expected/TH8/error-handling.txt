@@ -1,0 +1,1 @@
+PASS: Browser continues after TH8 error

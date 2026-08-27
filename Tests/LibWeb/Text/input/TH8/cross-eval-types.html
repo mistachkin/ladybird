@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta http-equiv="TH8-Script-Policy" content="cross-eval">
+</head>
+<body>
+<script src="../include.js"></script>
+<div id="result">pending</div>
+<script type="text/th8">
+# Test cross-eval with various JS return types.
+set doc [dom::document]
+set results {}
+
+# Number
+set n [dom::eval_js 42]
+lappend results num=$n
+
+# String
+set s [dom::eval_js 'hello']
+lappend results str=$s
+
+# Boolean
+set b [dom::eval_js true]
+lappend results bool=$b
+
+# Null
+set nl [dom::eval_js null]
+lappend results null=[string length $nl]
+
+# Expression
+set e [dom::eval_js "3 * 7 + 1"]
+lappend results expr=$e
+
+set div [$doc getElementById result]
+$div textContent [join $results " "]
+</script>
+<script>
+test(() => {
+    let result = document.getElementById('result').textContent;
+    // TH8 is a Tcl-like language: booleans canonicalize to 1/0, so the
+    // cross-eval bridge maps JS `true` -> "1" (see eval_js_command /
+    // set_result_bool).  This is intentional for `if`/`expr` interop.
+    let expected = 'num=42 str=hello bool=1 null=0 expr=22';
+    if (result === expected) {
+        println("PASS: cross-eval type conversion works");
+    } else {
+        println("FAIL: expected '" + expected + "', got '" + result + "'");
+    }
+});
+</script>
+</body>
+</html>

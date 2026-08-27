@@ -23,6 +23,7 @@
 #include <LibJS/SourceCode.h>
 #include <LibRequests/RequestClient.h>
 #include <LibTextCodec/Decoder.h>
+#include <LibURL/Parser.h>
 #include <LibThreading/ThreadPool.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
 #include <LibWeb/Bindings/PrincipalHostDefined.h>
@@ -42,6 +43,9 @@
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Scripting/Fetching.h>
 #include <LibWeb/HTML/Scripting/ModuleScript.h>
+#if LADYBIRD_ENABLE_TH8
+#    include <LibWeb/HTML/Scripting/TH8Script.h>
+#endif
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/Infra/SerializedURL.h>
@@ -842,6 +846,103 @@ void fetch_classic_script(GC::Ref<HTMLScriptElement> element, URL::URL const& ur
 
     Fetch::Fetching::fetch(HTML::relevant_realm(*element), request, Fetch::Infrastructure::FetchAlgorithms::create(move(fetch_algorithms_input)));
 }
+
+#if LADYBIRD_ENABLE_TH8
+// [Non-standard] Fetch a TH8 script.
+// Structurally identical to fetch_classic_script but creates a TH8Script from the fetched source text
+// instead of a ClassicScript. No off-thread parsing is needed since TH8 evaluates at run-time.
+//
+// [Non-standard] When the script's element declared `text/th8+signed`, this also
+// issues a second fetch for `<src>.b64sig` and attaches the sidecar bytes to the
+// returned TH8Script (Design (a) from the B2.e audit response).  TH8Script::run
+// passes the bytes to the TH8Context's WebPlatform; the signed-only policy
+// chain then receives them via xGetData when verifying the signature.
+//
+// Failure of the sidecar fetch (404, network error, etc.) yields a TH8Script
+// with no attached sidecar -- verification will fail-closed inside the TH8
+// policy chain.
+void fetch_th8_script(GC::Ref<HTMLScriptElement> element, URL::URL const& url, EnvironmentSettingsObject& settings_object, ScriptFetchOptions options, CORSSettingAttribute cors_setting, Utf16String character_encoding, OnFetchScriptComplete on_complete)
+{
+    auto& realm = element->realm();
+    auto& vm = realm.vm();
+
+    auto request = create_potential_CORS_request(vm, url, Fetch::Infrastructure::Request::Destination::Script, cors_setting);
+    request->set_client(&settings_object);
+    request->set_initiator_type(Fetch::Infrastructure::Request::InitiatorType::Script);
+    set_up_classic_script_request(*request, options);
+
+    Fetch::Infrastructure::FetchAlgorithms::Input fetch_algorithms_input {};
+    fetch_algorithms_input.process_response_consume_body = [element, &settings_object, options, cors_setting, character_encoding = move(character_encoding), on_complete = move(on_complete)](auto response, auto body_bytes) {
+        response = response->unsafe_response();
+
+        if (body_bytes.template has<Empty>() || body_bytes.template has<Fetch::Infrastructure::FetchAlgorithms::ConsumeBodyFailureTag>() || !Fetch::Infrastructure::is_ok_status(response->status())) {
+            on_complete->function()(nullptr);
+            return;
+        }
+
+        auto potential_mime_type_for_encoding = Fetch::Infrastructure::extract_mime_type(response->header_list());
+        auto fallback_character_encoding = TextCodec::get_standardized_encoding(character_encoding);
+        VERIFY(fallback_character_encoding.has_value());
+        auto extracted_character_encoding = Fetch::Infrastructure::legacy_extract_an_encoding(potential_mime_type_for_encoding, *fallback_character_encoding);
+
+        auto fallback_decoder = TextCodec::decoder_for(extracted_character_encoding);
+        VERIFY(fallback_decoder.has_value());
+        auto source_text = TextCodec::convert_input_to_utf8_using_given_decoder_unless_there_is_a_byte_order_mark(*fallback_decoder, body_bytes_view(body_bytes)).release_value_but_fixme_should_propagate_errors();
+
+        auto response_url = response->url().value_or({});
+        auto script = TH8Script::create(response_url.to_byte_string(), source_text, settings_object, response_url);
+
+        // Not declared `text/th8+signed`?  Done -- this is an unsigned TH8
+        // script, which the signed-only policy enforcement at execute_script
+        // time will reject if the document opted in.
+        if (!element->th8_declared_signed()) {
+            on_complete->function()(script);
+            return;
+        }
+
+        // Build the sidecar URL by appending ".b64sig" to the script URL's
+        // serialized form and re-parsing.  This matches how the TH8 policy
+        // chain expects to look up signatures on the host filesystem.
+        auto sidecar_url_string = MUST(String::formatted("{}.b64sig", response_url.serialize()));
+        auto sidecar_url = URL::Parser::basic_parse(sidecar_url_string);
+        if (!sidecar_url.has_value()) {
+            // Could not build a sidecar URL -- forward the script without
+            // a sidecar; TH8 verification will fail-closed.
+            on_complete->function()(script);
+            return;
+        }
+
+        auto& sidecar_realm = element->realm();
+        auto& sidecar_vm = sidecar_realm.vm();
+        auto sidecar_request = create_potential_CORS_request(sidecar_vm, sidecar_url.value(), Fetch::Infrastructure::Request::Destination::Script, cors_setting);
+        sidecar_request->set_client(&settings_object);
+        sidecar_request->set_initiator_type(Fetch::Infrastructure::Request::InitiatorType::Script);
+        set_up_classic_script_request(*sidecar_request, options);
+
+        Fetch::Infrastructure::FetchAlgorithms::Input sidecar_algorithms_input {};
+        sidecar_algorithms_input.process_response_consume_body = [script, on_complete](auto sidecar_response, auto sidecar_bytes) {
+            sidecar_response = sidecar_response->unsafe_response();
+
+            // Attach the sidecar bytes only on a clean 2xx + non-empty body.
+            // Any failure mode leaves the script without a sidecar; TH8's
+            // policy chain then rejects the signature lookup (fail-closed).
+            bool sidecar_ok = !sidecar_bytes.template has<Empty>()
+                && !sidecar_bytes.template has<Fetch::Infrastructure::FetchAlgorithms::ConsumeBodyFailureTag>()
+                && Fetch::Infrastructure::is_ok_status(sidecar_response->status());
+            if (sidecar_ok) {
+                auto bytes = take_body_bytes_as_byte_buffer(sidecar_bytes);
+                if (!bytes.is_empty())
+                    script->set_signature_sidecar(move(bytes));
+            }
+            on_complete->function()(script);
+        };
+
+        Fetch::Fetching::fetch(element->realm(), sidecar_request, Fetch::Infrastructure::FetchAlgorithms::create(sidecar_vm, move(sidecar_algorithms_input)));
+    };
+
+    Fetch::Fetching::fetch(element->realm(), request, Fetch::Infrastructure::FetchAlgorithms::create(vm, move(fetch_algorithms_input)));
+}
+#endif
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#fetch-a-classic-worker-script
 WebIDL::ExceptionOr<void> fetch_classic_worker_script(URL::URL const& url, EnvironmentSettingsObject& fetch_client, Fetch::Infrastructure::Request::Destination destination, EnvironmentSettingsObject& settings_object, PerformTheFetchHook perform_fetch, OnFetchScriptComplete on_complete)

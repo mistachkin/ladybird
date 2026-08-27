@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<!--
+    [M7a] Verifies a sandboxed iframe WITH `allow-scripts` allows TH8
+    to run, matching how it allows JS.
+-->
+<body>
+<script src="../include.js"></script>
+<iframe sandbox="allow-scripts allow-same-origin" srcdoc="
+    <body>
+    <div id='inner'>pending</div>
+    <script type='text/th8'>
+    set doc [dom::document]
+    [$doc getElementById inner] textContent th8-ran-sandboxed
+    </script>
+    </body>
+"></iframe>
+<script>
+asyncTest(done => {
+    let f = document.querySelector('iframe');
+    f.addEventListener('load', () => {
+        let inner = f.contentDocument.getElementById('inner').textContent;
+        if (inner === 'th8-ran-sandboxed') {
+            println("PASS: sandbox allow-scripts permits TH8");
+        } else {
+            println("FAIL: inner='" + inner + "'");
+        }
+        done();
+    });
+});
+</script>
+</body>

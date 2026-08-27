@@ -155,6 +155,19 @@ void initialize_main_thread_vm(HTML::AgentType type)
 
     // 8.1.6.2 HostEnsureCanCompileStrings(realm, parameterStrings, bodyString, codeString, compilationType, parameterArgs, bodyArg), https://html.spec.whatwg.org/multipage/webappapis.html#hostensurecancompilestrings(realm,-parameterstrings,-bodystring,-codestring,-compilationtype,-parameterargs,-bodyarg)
     main_thread_vm_ptr()->host_ensure_can_compile_strings = [](JS::Realm& realm, ReadonlySpan<Utf16String> parameter_strings, Utf16View body_string, Utf16View code_string, JS::CompilationType compilation_type, ReadonlySpan<JS::Value> parameter_args, JS::Value body_arg) -> JS::ThrowCompletionOr<void> {
+        // [Non-standard, B3] Reject eval / new Function / similar string
+        // compilation when the realm's associated document has JavaScript
+        // disabled by a TH8 policy.  Without this gate, an attacker who can
+        // execute even one JS expression (e.g., via a CSP-allowed inline
+        // script that ran before the no-javascript meta was parsed) could
+        // use eval() / Function() to bypass the policy on subsequent calls.
+        if (auto* window = as_if<HTML::Window>(realm.global_object())) {
+            if (window->associated_document().is_javascript_execution_disabled()) {
+                return realm.vm().throw_completion<JS::EvalError>(
+                    "JavaScript string compilation (eval/Function) is disabled by the TH8-Script-Policy"_utf16);
+            }
+        }
+
         // 1. Perform ? EnsureCSPDoesNotBlockStringCompilation(realm, parameterStrings, bodyString, codeString, compilationType, parameterArgs, bodyArg). [CSP]
         return ContentSecurityPolicy::ensure_csp_does_not_block_string_compilation(realm, parameter_strings, body_string, code_string, compilation_type, parameter_args, body_arg);
     };
